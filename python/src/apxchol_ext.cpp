@@ -52,7 +52,8 @@ const char* const kValidKeys[] = {
     "backend", "num_threads", "seed", "partitioner", "keep_factor", "factor_storage_dtype",
     "degree_quantile", "degree_multiplier", "degree_tiebreak",
     "exact_clique_max_degree",
-    "residual_peel", "stagnation_window",
+    "residual_peel", "stagnation_window", "cpu_schedule", "drop_tolerance",
+    "regularization", "lump_max_mass", "verbose",
 };
 
 std::string join(const char* const* items, std::size_t count) {
@@ -103,6 +104,12 @@ apxchol::solve_options parse_options(const py::dict& d) {
             so.factor_opts.residual_peel = parse_peel(v.cast<std::string>());
         else if (key == "factor_storage_dtype")
             so.factor_opts.factor_storage = apxchol::detail::parse_factor_storage(v.cast<std::string>());
+        else if (key == "cpu_schedule")
+            so.factor_opts.cpu_schedule = apxchol::detail::parse_cpu_schedule(v.cast<std::string>());
+        else if (key == "drop_tolerance")     so.factor_opts.drop_tolerance = v.cast<double>();
+        else if (key == "regularization")     so.factor_opts.regularization = v.cast<double>();
+        else if (key == "lump_max_mass")       so.factor_opts.lump_max_mass = v.cast<double>();
+        else if (key == "verbose")             so.factor_opts.verbose = v.cast<bool>();
         else
             throw std::invalid_argument(
                 "unknown option '" + key + "'; valid keys: " +
@@ -157,7 +164,7 @@ public:
 
     py::dict solve(Array b, double tol, int maxiter,
                    py::object x0, py::object out_arr) const {
-        if (tol < 0.0) tol = apxchol::default_tol;
+        apxchol::detail::validate_solve_parameters(tol, maxiter);
         b = checked_rhs(b);
         auto output = output_array(b, out_arr);
         auto copy_alias = [&](Array input) {
@@ -187,7 +194,7 @@ public:
                                        x0.is_none() ? nullptr : &x0v);
             out["iters"] = static_cast<int>(res.iterations);
             out["residual"] = res.residual;
-            out["converged"] = res.residual < tol;
+            out["converged"] = res.converged;
         } else {
             apxchol::batch_solve_result res;
             auto x = mutable_matrix(output);
@@ -205,7 +212,7 @@ public:
                 const auto& column = res.columns[static_cast<std::size_t>(j)];
                 iters.mutable_data()[j] = static_cast<int>(column.iterations);
                 residual.mutable_data()[j] = column.residual;
-                converged.mutable_data()[j] = column.residual < tol;
+                converged.mutable_data()[j] = column.converged;
             }
             out["iters"] = iters;
             out["residual"] = residual;
@@ -316,6 +323,8 @@ PYBIND11_MODULE(_apxchol, m) {
     }
 #endif
     m.doc() = "apxchol approximate-Cholesky preconditioner (pybind11 binding)";
+    m.attr("DEFAULT_TOL") = apxchol::default_tol;
+    m.attr("DEFAULT_MAXITER") = apxchol::default_max_iter;
     py::class_<Solver>(m, "Solver")
         .def(py::init<py::array, py::array, py::array, const py::dict&>(),
              py::arg("indptr"), py::arg("indices"), py::arg("data"),

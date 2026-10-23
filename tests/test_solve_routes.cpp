@@ -119,7 +119,6 @@ TEST(SolveRoutes, AutomaticSelectionRespectsConfigurationAndAvailability) {
 }
 
 TEST(SolveRoutes, ScalarAutomaticUsesCpuWithoutPrewarming) {
-    scoped_env storage("APXCHOL_FACTOR_STORAGE", "auto");
 #if defined(APXCHOL_USE_CUDA)
     const bool started = apxchol::cuda_ctx::detail::state().started;
 #endif
@@ -146,7 +145,6 @@ TEST(SolveRoutes, ScalarAutomaticUsesCpuWithoutPrewarming) {
 
 #if defined(APXCHOL_USE_METAL) || defined(APXCHOL_USE_CUDA)
 TEST(SolveRoutes, AutomaticCpuGuardBoundary) {
-    scoped_env storage("APXCHOL_FACTOR_STORAGE", "auto");
     const apxchol::solve_options options;
     const auto at_boundary = operator_matrix(cpu_guard_rows);
     EXPECT_EQ(apxchol::detail::select_solve_backend(options, &at_boundary),
@@ -225,11 +223,10 @@ TEST(SolveRoutes, CpuFactorReuseAndExportRemainAvailable) {
     }
 }
 
-TEST(SolveRoutes, FactorStorageOverridesEnvironmentForNewAndAdoptedFactors) {
+TEST(SolveRoutes, FactorStorageAppliesToNewAndAdoptedFactors) {
     const auto matrix = operator_matrix();
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     for (bool fp16 : {false, true}) {
-        scoped_env env("APXCHOL_FACTOR_STORAGE", fp16 ? "float32" : "float16");
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::cpu;
         options.keep_factor_values = true;

@@ -17,7 +17,6 @@
 // elsewhere).
 #include <gtest/gtest.h>
 #include "grid_laplacian.h"
-#include "scoped_env.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -123,15 +122,15 @@ TEST(SpTRSVSetupMemory, TransientsAreReleasedAtLastUse) {
     apxchol::factor_options fopts; fopts.seed = 7;
     const auto F = apxchol::factorize(L, fopts);
     const node_index m = F.L.rows() - 1;                       // Laplacian path
-    scoped_env drop("APXCHOL_FACTOR_DROP", "0.5");             // force a real drop
+    const apxchol::factor_options options{.drop_tolerance = 0.5};             // force a real drop
 
-    { apxchol::omp_sptrsv warm; warm.setup(F.L, m); }          // OMP team + arenas exist
+    { apxchol::omp_sptrsv warm; warm.setup(F.L, m, options); }          // OMP team + arenas exist
     if (!reset_peak_rss()) GTEST_SKIP() << "/proc/self/clear_refs not writable";
     const long rss0_kb = proc_status_kb("VmRSS:");
     ASSERT_GT(rss0_kb, 0);
 
     apxchol::omp_sptrsv trsv;
-    trsv.setup(F.L, m);
+    trsv.setup(F.L, m, options);
 
     const long hwm_kb  = proc_status_kb("VmHWM:");
     const long rss1_kb = proc_status_kb("VmRSS:");
@@ -145,7 +144,7 @@ TEST(SpTRSVSetupMemory, TransientsAreReleasedAtLastUse) {
 
     // FB: the factor's value width (the L11 copy and the compacted copy are at
     // factor precision); VB: the SpTRSV's storage width (CSR / bucket) -- equal
-    // to it at the default fp32 storage, 2 under APXCHOL_FACTOR_STORAGE=float16.
+    // to it at the default fp32 storage, 2 with explicit FP16 storage.
     constexpr std::size_t FB = sizeof(factor_value_t), VB = sizeof(sptrsv_value_t);
     constexpr std::size_t NB = sizeof(node_index), EB = sizeof(edge_index);
     const std::size_t slack = 6 * MB;   // page rounding + per-thread RSS batching + level-vector heap

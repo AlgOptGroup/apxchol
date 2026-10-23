@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -430,8 +431,49 @@ TEST(OperatorContract, RefusesPastTheLumpMassCeiling) {
         EXPECT_NE(msg.find("Condition FAILED: non-positive off-diagonals"),
                   std::string::npos) << msg;
         EXPECT_NE(msg.find("of the off-diagonal mass"), std::string::npos) << msg;
-        EXPECT_NE(msg.find("APXCHOL_LUMP_MAX"), std::string::npos) << msg;
+        EXPECT_NE(msg.find("lump_max_mass"), std::string::npos) << msg;
     }
+}
+
+TEST(OperatorContract, LumpingCeilingIsExplicitPerCall) {
+    const auto A = nearly_sddm(6, 6, 1);
+    EXPECT_THROW(operator_view(A, 0), std::invalid_argument);
+    EXPECT_EQ(operator_view(A).lumped(), 2);
+    EXPECT_THROW(operator_view(A, 0), std::invalid_argument);
+
+    apxchol::factor_options options;
+    options.lump_max_mass = 0;
+    EXPECT_THROW(apxchol::factorize(A, options), std::invalid_argument);
+    options.lump_max_mass = 0.25;
+    EXPECT_EQ(apxchol::factorize(A, options).lumped_offdiag, 2);
+}
+
+TEST(OperatorContract, RegularizationIsExplicitPerFactorization) {
+    const auto A = grid_laplacian(6, 6);
+    apxchol::factor_options options;
+    EXPECT_FALSE(apxchol::factorize(A, options).sddm);
+    options.regularization = 1e-8;
+    EXPECT_THROW(apxchol::factorize(apxchol::make_graph(A), options), std::invalid_argument);
+    EXPECT_TRUE(apxchol::factorize(A, options).sddm);
+    EXPECT_TRUE(apxchol::factorize(A, apxchol::block_greedy_partitioner{}, options).sddm);
+    options.regularization = 0;
+    EXPECT_FALSE(apxchol::factorize(A, options).sddm);
+}
+
+TEST(OperatorContract, NumericalOptionsRejectInvalidValues) {
+    const Sparse empty;
+    for (double value : {-1.0, std::numeric_limits<double>::infinity(),
+                         std::numeric_limits<double>::quiet_NaN()}) {
+        SCOPED_TRACE(value);
+        apxchol::factor_options options;
+        options.regularization = value;
+        EXPECT_THROW(apxchol::factorize(empty, options), std::invalid_argument);
+        options = {};
+        options.lump_max_mass = value;
+        EXPECT_THROW(apxchol::factorize(empty, options), std::invalid_argument);
+        EXPECT_THROW(operator_view(empty, value), std::invalid_argument);
+    }
+    EXPECT_THROW(operator_view(empty, 1.01), std::invalid_argument);
 }
 
 TEST(OperatorContract, MassNotCountIsWhatTheCeilingMeasures) {

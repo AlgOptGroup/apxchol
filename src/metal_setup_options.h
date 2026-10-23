@@ -1,5 +1,4 @@
 #pragma once
-#include "apxchol/env_knobs.h"
 #include <limits>
 #include "apxchol/solver/factor_options.h"
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
@@ -8,15 +7,15 @@
 namespace apxchol::detail {
 
 inline constexpr auto metal_regularization_error =
-    "Metal setup requires APXCHOL_REG_EPS in [2^-100, 2^100] and positive normal FP32 diagonal products";
+    "Metal setup requires regularization in [2^-100, 2^100] and positive normal FP32 diagonal products";
 
-inline bool metal_setup_regularization_supported(const env_knobs& environment = env_knobs::get(),
+inline bool metal_setup_regularization_supported(double regularization,
                                                  const Eigen::SparseMatrix<double>* A = nullptr) {
-    if (environment.ground != grounding_kind::reg) return true;
-    if (!(environment.reg_eps > 0) || !metal_schedule::in_range(environment.reg_eps)) return false;
+    if (regularization == 0) return true;
+    if (!(regularization > 0) || !metal_schedule::in_range(regularization)) return false;
     if (A) {
         if (A->rows() != A->cols()) return false;
-        const double epsilon = float(environment.reg_eps);
+        const double epsilon = float(regularization);
         for (Eigen::Index row = 0; row < A->rows(); ++row) {
             const double ground = A->coeff(row, row) * epsilon;
             if (!(ground >= std::numeric_limits<float>::min() &&
@@ -36,7 +35,9 @@ inline bool metal_setup_options_supported(const factor_options &options) {
     return false;
 #else
     const double quantile = metal_degree_quantile(options.partition.degree_quantile);
-    return sizeof(node_index) == sizeof(std::uint32_t) && options.is_select == "block_greedy" &&
+    return sizeof(node_index) == sizeof(std::uint32_t) &&
+           options.cpu_schedule == cpu_sptrsv_schedule::automatic &&
+           options.is_select == "block_greedy" &&
            options.sampler == clique_sampler::gks && options.exact_clique_max_degree == 0 &&
            exact_core_or_off(options.exact_core_max_h) == 0 && options.double_cycle_min_h == 0 &&
            options.partition.degree_tiebreak &&

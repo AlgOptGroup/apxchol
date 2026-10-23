@@ -4,7 +4,7 @@
 // into the dataflow kernels' int32 arrays, the compacting factor drop (the shared
 // factor_drop.h implementation, the same one omp_sptrsv::setup runs), the
 // fp16 per-column-scaled narrowing of the runtime fp16
-// storage (APXCHOL_FACTOR_STORAGE=float16), the CSR transpose (the shared
+// storage (factor_options.factor_storage), the CSR transpose (the shared
 // transpose.h implementation, the one omp_sptrsv::setup runs), the dataflow
 // schedules and the dataflow batch tables. Deliberately CUDA-FREE: host FP16
 // values use _Float16 and share lowprec.h's narrowing helper with CPU storage.
@@ -128,7 +128,7 @@ inline csr_int<Val> build_L11_csc_int(const sparse_csc& L, std::int64_t m) {
 
 /// THE GPU backend's compacting-drop predicate (omp_sptrsv::keep_offdiag
 /// restated for its two storage formats): the off-diagonal v of a column with
-/// scale s survives APXCHOL_FACTOR_DROP=rel iff |v| >= rel * s and the storage
+/// scale s survives drop_tolerance=rel iff |v| >= rel * s and the storage
 /// format does not map it to zero -- an exact zero under fp32 / fp64 storage;
 /// under the fp16 storage (`fp16_storage`) also everything fp16 flushes at
 /// |v / s| (fp16_flushes). The diagonal is never passed through this.

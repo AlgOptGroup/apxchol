@@ -55,8 +55,7 @@ inline int pcg_blocks(std::int64_t units) {
     return static_cast<int>(b < 1 ? 1 : b > kMaxBlocks ? kMaxBlocks : b);
 }
 
-// Nearest power of two to average nnz/row, capped at one warp. The measured
-// mapping and APXCHOL_GPU_SPMV_LANES experiment override are retained.
+// Nearest power of two to average nnz/row, capped at one warp.
 inline int spmv_lanes_for(double avg_nnz_per_row) {
     const double target = avg_nnz_per_row / 1.4142135623730951;
     int L = 1;

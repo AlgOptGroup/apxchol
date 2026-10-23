@@ -15,9 +15,9 @@ installed triangular-solve arrays, and the outer iteration. A build with
 | Metal triangular solves | FP32 storage by default; optional scaled FP16 | Shared CUDA/Metal dataflow worker; FP32 arithmetic |
 | Metal PCG | Mixed FP32 and double-float; host FP64 exit residual | Metal has no native FP64 arithmetic; see below |
 
-`factor_options::factor_storage` selects triangular-solve storage per solver (`automatic`, `fp16`, or `fp32`). Python exposes this as `factor_storage_dtype=None`, `np.float16`, or `np.float32`. Explicit choices override the environment; C++ owns parsing and default selection.
+`factor_options::factor_storage` selects triangular-solve storage per solver (`automatic`, `fp16`, or `fp32`). Python exposes this as `factor_storage_dtype=None`, `np.float16`, or `np.float32`. The default is CPU/Metal FP32 and CUDA FP16; C++ owns parsing and default selection.
 
-The environment setting is `APXCHOL_FACTOR_STORAGE=auto|float16|float32`; `auto` uses the backend default (CPU/Metal FP32, CUDA FP16). Unset or empty selects `auto`. Invalid values raise an error. Construction precision is independent of triangular-solve storage; Python factor exports preserve the C++ factor's FP32 dtype, while CPU solve inputs and results use FP64 arithmetic.
+Construction precision is independent of triangular-solve storage; Python factor exports preserve the C++ factor's FP32 dtype, while CPU solve inputs and results use FP64 arithmetic.
 
 CPU FP16 is available on x86 CPUs with AVX/F16C and on Apple ARM64, including portable wheels. Unsupported explicit requests fail at setup.
 On x86, fat levels use the AVX2/F16C/FMA kernel where available, with scalar F16C conversion otherwise; Apple ARM64 uses native conversions.
@@ -26,13 +26,11 @@ setup releases the input before transposing; non-consuming FP16 setup retains
 that input and the stored CSC alongside the parallel transpose's scratch.
 The GPU operator may use FP32 storage when the original values are exactly
 representable; this is separate from narrowing a preconditioner.
-An explicit `APXCHOL_GPU_FP32_OPERATOR=1` request fails if narrowing would change
-the canonical lower-triangle or diagonal coefficients.
 CUDA rescales extreme RHS and warm-start vectors by a common power of two and
 restores the solution scale on return. Intermediate triangular-solve values
 must still fit FP32.
 
-Both GPU backends recompute the returned solution's relative residual in FP64:
+All backends recompute the returned solution's relative residual in FP64. The GPU checks run:
 CUDA on the device, Metal on the host. This uses the full symmetric operator
 (canonical lower-triangle coefficients), before any preconditioner lumping,
 and the unmodified RHS. The reported residual can exceed tolerance after the
@@ -83,24 +81,7 @@ host thread counts, devices, OS/compiler versions or independent factorizations.
 Runtime compilation uses safe math and disables contraction where supported;
 `metal_solver::available()` checks rounding, intermediate precision and FMA.
 Nonzero operator values and unscaled factor diagonals need magnitudes in [2^-100, 2^100];
-factor off-diagonals must be finite. Factor and operator offsets must fit signed 32-bit integers; operator inputs must have fewer than 2^30 stored entries. Unsupported ranges are rejected. Device setup with regularization additionally requires `APXCHOL_REG_EPS` in [2^-100, 2^100] and normal positive FP32 products with the operator diagonal.
-
-## C API exit residual
-
-The C ABI reports `||b - A x|| / ||b||` of the x it returns, recomputed in FP64
-from the caller's operator on both backends; `converged` and NOT_CONVERGED
-follow it. Metal's solve already ends with this check. On the CPU route
-`cpu_solver::relative_residual` evaluates it after the PCG against the operator
-the PCG applies, which is the caller's matrix exactly unless
-`APXCHOL_FP32_OPERATOR` forces a lossy FP32 copy, with power-of-two scaled norms
-that neither underflow nor overflow. It costs one SpMV and a few vector passes
-inside `solve_seconds` and never adds iterations or retries. It can differ from
-the PCG recursion's residual in the last digits, so a solve whose recursion
-stopped just below tol may report NOT_CONVERGED. C++ `solver` and Python keep
-the recursion's residual.
-
-The C API uses the core solver's power-of-two rescaling for extreme RHS and
-warm-start magnitudes.
+factor off-diagonals must be finite. Factor and operator offsets must fit signed 32-bit integers; operator inputs must have fewer than 2^30 stored entries. Unsupported ranges are rejected. Device setup with regularization additionally requires `factor_options::regularization` in [2^-100, 2^100] and normal positive FP32 products with the operator diagonal.
 
 ## Accuracy and configuration choice
 

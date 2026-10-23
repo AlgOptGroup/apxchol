@@ -3,9 +3,7 @@
 #include <gtest/gtest.h>
 
 #include "apxchol/c_api.h"
-#include "apxchol/env_knobs.h"
 #include "apxchol/solver/solve.h"
-#include "scoped_env.h"
 #if defined(APXCHOL_USE_METAL)
 #include "apxchol/solver/metal_solver.h"
 #endif
@@ -28,7 +26,7 @@
 #endif
 
 #ifdef _OPENMP
-#include <omp.h>
+#include "scoped_omp_threads.h"
 #endif
 
 namespace {
@@ -115,6 +113,14 @@ apxchol_options defaults() {
     apxchol_options o;
     EXPECT_EQ(apxchol_options_default(&o, sizeof o), APXCHOL_STATUS_SUCCESS);
     return o;
+}
+
+std::vector<apxchol_backend> available_backends() {
+    std::vector<apxchol_backend> backends{APXCHOL_BACKEND_CPU};
+#if defined(APXCHOL_USE_METAL)
+    if (apxchol::metal_solver::available()) backends.push_back(APXCHOL_BACKEND_METAL);
+#endif
+    return backends;
 }
 
 struct handle {
@@ -223,6 +229,15 @@ exported export_of(const apxchol_factor* f) {
     return export_with(f, stats_of(f), apxchol_factor_export);
 }
 
+exported export_of(const apxchol::factorization& f) {
+    exported e;
+    for (auto p : f.L.outer_) e.colptr.push_back(static_cast<std::int64_t>(p));
+    for (auto r : f.L.inner_) e.rowval.push_back(static_cast<std::int64_t>(r));
+    for (auto v : f.L.vals_) e.nzval.push_back(static_cast<float>(v));
+    for (auto v : f.perm) e.perm.push_back(static_cast<std::int64_t>(v));
+    return e;
+}
+
 /// A copy of A with every off-diagonal weight scaled by a factor in
 /// [0.6, 1.8] and edges (v, v + stride) of weight w added, the diagonal kept
 /// at the new weighted degree plus A's excess: the same class, another
@@ -257,6 +272,46 @@ Sparse nearby_operator(const Sparse& A, int stride, double w) {
 
 double true_residual(const Sparse& A, const Eigen::VectorXd& b, const Eigen::VectorXd& x) {
     return (b - A * x).norm() / b.norm();
+}
+
+void expect_block_matches_scalar(apxchol_solver* solver, std::int64_t n) {
+    constexpr std::int64_t k = 3;
+    Eigen::MatrixXd B(n, k), X(n, k);
+    B.col(0) = compatible_rhs(n, 1);
+    B.col(1).setZero();
+    B.col(2) = compatible_rhs(n, 5);
+    std::array<std::int64_t, k> iters{};
+    std::array<double, k> res{};
+    std::array<std::int32_t, k> conv{};
+    ASSERT_EQ(apxchol_solver_solve_block(solver, k, B.data(), nullptr, X.data(), -1.0, -1,
+                                         iters.data(), res.data(), conv.data(), nullptr, 0),
+              APXCHOL_STATUS_SUCCESS);
+    for (std::int64_t col = 0; col < k; ++col) {
+        Eigen::VectorXd x(n);
+        const Eigen::VectorXd b = B.col(col);
+        auto info = info_struct();
+        ASSERT_EQ(apxchol_solver_solve(solver, b.data(), nullptr, x.data(), -1.0, -1, &info,
+                                       nullptr, 0),
+                  APXCHOL_STATUS_SUCCESS);
+        EXPECT_TRUE(same_bytes(x.data(), X.col(col).data(), x.size())) << col;
+        EXPECT_EQ(iters[col], info.iterations);
+        EXPECT_EQ(res[col], info.relative_residual);
+        EXPECT_EQ(conv[col], 1);
+    }
+    EXPECT_EQ(iters[1], 0);
+    EXPECT_EQ(X.col(1).norm(), 0.0);
+
+    Eigen::MatrixXd BX = B;
+    ASSERT_EQ(apxchol_solver_solve_block(solver, k, BX.data(), nullptr, BX.data(), -1.0, -1,
+                                         nullptr, nullptr, nullptr, nullptr, 0),
+              APXCHOL_STATUS_SUCCESS);
+    EXPECT_TRUE(same_bytes(BX.data(), X.data(), static_cast<std::size_t>(X.size())));
+    EXPECT_EQ(apxchol_solver_solve_block(solver, 0, nullptr, nullptr, nullptr, -1.0, -1, nullptr,
+                                         nullptr, nullptr, nullptr, 0),
+              APXCHOL_STATUS_SUCCESS);
+    EXPECT_EQ(apxchol_solver_solve_block(solver, -1, B.data(), nullptr, X.data(), -1.0, -1,
+                                         nullptr, nullptr, nullptr, nullptr, 0),
+              APXCHOL_STATUS_INVALID_ARGUMENT);
 }
 
 }  // namespace
@@ -402,7 +457,8 @@ TEST(CApi, TinyErrorBufferAndZeroedInfoOnError) {
 TEST(CApi, RejectsNonFiniteOrZeroTolerance) {
     const csc64 c = to_csc64(grid_laplacian(4, 4));
     for (const double tol : {std::numeric_limits<double>::quiet_NaN(),
-                             std::numeric_limits<double>::infinity(), 0.0, -1.0}) {
+                             std::numeric_limits<double>::infinity(),
+                             -std::numeric_limits<double>::infinity(), 0.0, -1.0}) {
         auto o = defaults();
         o.tol = tol;
         handle h;
@@ -413,10 +469,34 @@ TEST(CApi, RejectsNonFiniteOrZeroTolerance) {
     const Eigen::VectorXd b = compatible_rhs(c.n);
     Eigen::VectorXd x(c.n);
     for (const double tol : {std::numeric_limits<double>::quiet_NaN(),
-                             std::numeric_limits<double>::infinity(), 0.0})
+                             std::numeric_limits<double>::infinity(),
+                             -std::numeric_limits<double>::infinity(), 0.0}) {
         EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), tol, -1, nullptr, nullptr, 0),
                   APXCHOL_STATUS_INVALID_ARGUMENT)
             << tol;
+        EXPECT_EQ(apxchol_solver_solve_block(h.s, 1, b.data(), nullptr, x.data(), tol, -1,
+                                             nullptr, nullptr, nullptr, nullptr, 0),
+                  APXCHOL_STATUS_INVALID_ARGUMENT)
+            << tol;
+    }
+    Eigen::VectorXd reference(c.n);
+    auto expected = info_struct();
+    ASSERT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, reference.data(), -1.0, -1,
+                                   &expected, nullptr, 0),
+              APXCHOL_STATUS_SUCCESS);
+    for (const double tol : {-0.5, -1.0, -2.0}) {
+        SCOPED_TRACE(::testing::Message() << "default tolerance override=" << tol);
+        auto info = info_struct();
+        ASSERT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), tol, -1, &info, nullptr, 0),
+                  APXCHOL_STATUS_SUCCESS);
+        EXPECT_TRUE(same_bytes(x.data(), reference.data(), x.size()));
+        EXPECT_EQ(info.iterations, expected.iterations);
+        EXPECT_EQ(info.relative_residual, expected.relative_residual);
+        EXPECT_EQ(apxchol_solver_solve_block(h.s, 1, b.data(), nullptr, x.data(), tol, -1,
+                                             nullptr, nullptr, nullptr, nullptr, 0),
+                  APXCHOL_STATUS_SUCCESS);
+        EXPECT_TRUE(same_bytes(x.data(), reference.data(), x.size()));
+    }
 }
 
 TEST(CApi, NonFiniteMatrixIsAnOperatorErrorNonFiniteRhsAnArgumentError) {
@@ -500,11 +580,7 @@ TEST(CApi, StructSizeIsValidatedAndNothingPastTheStructIsWritten) {
 TEST(CApi, FactorStorageReportsResolvedSolverStorageAndNativeFactorExport) {
     const Sparse A = grid_laplacian(12, 11, 0.25);
     const csc64 c = to_csc64(A);
-    std::vector<apxchol_backend> backends{APXCHOL_BACKEND_CPU};
-#if defined(APXCHOL_USE_METAL)
-    if (apxchol::metal_solver::available()) backends.push_back(APXCHOL_BACKEND_METAL);
-#endif
-    for (const auto backend : backends) {
+    for (const auto backend : available_backends()) {
         auto o = defaults();
         o.backend = backend;
         o.threads = 1;
@@ -521,9 +597,6 @@ TEST(CApi, FactorStorageReportsResolvedSolverStorageAndNativeFactorExport) {
                 !apxchol::omp_sptrsv::fp16_supported())
                 continue;
             SCOPED_TRACE(::testing::Message() << "backend=" << backend << " storage=" << storage);
-            const bool half = storage == APXCHOL_FACTOR_STORAGE_FLOAT16;
-            // An explicit per-solver option wins over a conflicting environment.
-            scoped_env conflicting("APXCHOL_FACTOR_STORAGE", half ? "float32" : "float16");
             o.factor_storage = storage;
             handle explicit_storage;
             ASSERT_EQ(create(c, &o, explicit_storage), APXCHOL_STATUS_SUCCESS);
@@ -538,49 +611,22 @@ TEST(CApi, FactorStorageReportsResolvedSolverStorageAndNativeFactorExport) {
             EXPECT_EQ(stats_of(copy.f).factor_storage, APXCHOL_FACTOR_STORAGE_FLOAT32);
             EXPECT_TRUE(export_of(copy.f) == built);
 
-            scoped_env selected("APXCHOL_FACTOR_STORAGE", half ? "float16" : "float32");
-            o.factor_storage = APXCHOL_FACTOR_STORAGE_AUTO;
-            handle automatic;
-            ASSERT_EQ(adopt(c, factor.f, &o, automatic), APXCHOL_STATUS_SUCCESS);
-            EXPECT_EQ(stats_of(automatic.s).factor_storage, storage);
-            EXPECT_TRUE(export_of(automatic.s) == native);
+            handle adopted;
+            ASSERT_EQ(adopt(c, factor.f, &o, adopted), APXCHOL_STATUS_SUCCESS);
+            EXPECT_EQ(stats_of(adopted.s).factor_storage, storage);
+            EXPECT_TRUE(export_of(adopted.s) == native);
             Eigen::VectorXd x(c.n);
             auto info = info_struct();
-            ASSERT_EQ(apxchol_solver_solve(automatic.s, b.data(), nullptr, x.data(), -1.0, -1,
+            ASSERT_EQ(apxchol_solver_solve(adopted.s, b.data(), nullptr, x.data(), -1.0, -1,
                                            &info, nullptr, 0),
                       APXCHOL_STATUS_SUCCESS);
             EXPECT_LT(true_residual(A, b, x), o.tol);
         }
-    }
-}
-
-TEST(CApi, UnreadableStorageEnvironmentIsAnArgumentErrorBeforeSetup) {
-    const csc64 c = to_csc64(grid_laplacian(8, 7));
-    std::vector<apxchol_backend> backends{APXCHOL_BACKEND_CPU, APXCHOL_BACKEND_AUTO};
-#if defined(APXCHOL_USE_METAL)
-    if (apxchol::metal_solver::available()) backends.push_back(APXCHOL_BACKEND_METAL);
-#endif
-    {
-        // factor_storage AUTO reads the environment; an unreadable value is the
-        // caller's argument error on every route, before the factorization.
-        const scoped_env bad("APXCHOL_FACTOR_STORAGE", "half");
-        auto o = defaults();
-        factor_handle f;
-        ASSERT_EQ(create_factor(c, &o, f), APXCHOL_STATUS_SUCCESS);  // not read here
-        for (const auto backend : backends) {
-            SCOPED_TRACE(::testing::Message() << "backend=" << backend);
-            o.backend = backend;
-            handle created, adopted;
-            std::string message;
-            EXPECT_EQ(create(c, &o, created, 0, &message), APXCHOL_STATUS_INVALID_ARGUMENT);
-            EXPECT_NE(message.find("APXCHOL_FACTOR_STORAGE"), std::string::npos) << message;
-            EXPECT_EQ(adopt(c, f.f, &o, adopted), APXCHOL_STATUS_INVALID_ARGUMENT);
-        }
-        // An explicit request does not read the environment.
-        o.backend = APXCHOL_BACKEND_CPU;
-        o.factor_storage = APXCHOL_FACTOR_STORAGE_FLOAT32;
-        handle h;
-        EXPECT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
+        o.factor_storage = APXCHOL_FACTOR_STORAGE_AUTO;
+        handle automatic;
+        ASSERT_EQ(adopt(c, factor.f, &o, automatic), APXCHOL_STATUS_SUCCESS);
+        EXPECT_EQ(stats_of(automatic.s).factor_storage, APXCHOL_FACTOR_STORAGE_FLOAT32);
+        EXPECT_TRUE(export_of(automatic.s) == native);
     }
 }
 
@@ -611,32 +657,12 @@ TEST(CApi, SingleThreadFactorAndSolutionAreByteEqualToCppSolver) {
     so.keep_factor_values = true;
     so.factor_opts.seed = 7;
 #ifdef _OPENMP
-    const int prior = omp_get_max_threads();
-    omp_set_num_threads(1);
+    const scoped_omp_threads threads(1);
 #endif
     const apxchol::cpu_solver ref(A, so);
     const Eigen::VectorXd b = compatible_rhs(c.n);
     const apxchol::solve_result r = ref.solve(b);
-    const double certified = ref.relative_residual(b, r.x);
-#ifdef _OPENMP
-    omp_set_num_threads(prior);
-#endif
-
-    const apxchol::factorization& F = ref.preconditioner().factor();
-    const auto nnz = static_cast<std::size_t>(F.L.nonZeros());
-    std::vector<std::int64_t> colptr(c.n + 1), rowval(nnz), perm(c.n);
-    std::vector<float> nzval(nnz);
-    ASSERT_EQ(apxchol_solver_export_factor(h.s, 0, colptr.data(), rowval.data(), nzval.data(),
-                                           perm.data(), nullptr, 0),
-              APXCHOL_STATUS_SUCCESS);
-    for (std::size_t j = 0; j < colptr.size(); ++j)
-        ASSERT_EQ(colptr[j], static_cast<std::int64_t>(F.L.outer_[j]));
-    for (std::size_t p = 0; p < nnz; ++p) {
-        ASSERT_EQ(rowval[p], static_cast<std::int64_t>(F.L.inner_[p]));
-        ASSERT_EQ(nzval[p], static_cast<float>(F.L.vals_[p]));
-    }
-    for (std::size_t v = 0; v < perm.size(); ++v)
-        ASSERT_EQ(perm[v], static_cast<std::int64_t>(F.perm[v]));
+    EXPECT_TRUE(export_of(h.s) == export_of(ref.preconditioner().factor()));
 
     Eigen::VectorXd x(c.n);
     auto info = info_struct();
@@ -644,9 +670,7 @@ TEST(CApi, SingleThreadFactorAndSolutionAreByteEqualToCppSolver) {
               APXCHOL_STATUS_SUCCESS);
     EXPECT_TRUE(same_bytes(x.data(), r.x.data(), x.size()));
     EXPECT_EQ(info.iterations, r.iterations);
-    // The C ABI reports the original system's residual of x, not the PCG
-    // recursion's (r.residual), which drifts from it in the last digits.
-    EXPECT_EQ(info.relative_residual, certified);
+    EXPECT_EQ(info.relative_residual, r.residual);
     EXPECT_LT(info.relative_residual, o.tol);
 }
 
@@ -719,36 +743,7 @@ TEST(CApi, BlockSolveEqualsColumnSolvesBitwise) {
     const csc64 c = to_csc64(grid_laplacian(12, 12));
     handle h;
     ASSERT_EQ(create(c, nullptr, h), APXCHOL_STATUS_SUCCESS);
-    const std::int64_t k = 3;
-    Eigen::MatrixXd B(c.n, k), X(c.n, k);
-    B.col(0) = compatible_rhs(c.n, 1);
-    B.col(1).setZero();
-    B.col(2) = compatible_rhs(c.n, 5);
-    std::array<std::int64_t, 3> iters{};
-    std::array<double, 3> res{};
-    std::array<std::int32_t, 3> conv{};
-    ASSERT_EQ(apxchol_solver_solve_block(h.s, k, B.data(), nullptr, X.data(), -1.0, -1, iters.data(),
-                                         res.data(), conv.data(), nullptr, 0),
-              APXCHOL_STATUS_SUCCESS);
-    for (std::int64_t col = 0; col < k; ++col) {
-        Eigen::VectorXd x(c.n);
-        const Eigen::VectorXd b = B.col(col);
-        auto info = info_struct();
-        ASSERT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, -1, &info, nullptr, 0),
-                  APXCHOL_STATUS_SUCCESS);
-        EXPECT_TRUE(same_bytes(x.data(), X.col(col).data(), x.size())) << col;
-        EXPECT_EQ(iters[col], info.iterations);
-        EXPECT_EQ(res[col], info.relative_residual);
-        EXPECT_EQ(conv[col], 1);
-    }
-    EXPECT_EQ(iters[1], 0);
-    EXPECT_EQ(X.col(1).norm(), 0.0);
-    EXPECT_EQ(apxchol_solver_solve_block(h.s, 0, nullptr, nullptr, nullptr, -1.0, -1, nullptr,
-                                         nullptr, nullptr, nullptr, 0),
-              APXCHOL_STATUS_SUCCESS);
-    EXPECT_EQ(apxchol_solver_solve_block(h.s, -1, B.data(), nullptr, X.data(), -1.0, -1, nullptr,
-                                         nullptr, nullptr, nullptr, 0),
-              APXCHOL_STATUS_INVALID_ARGUMENT);
+    expect_block_matches_scalar(h.s, c.n);
 }
 
 TEST(CApi, StatsAreZeroedOnLaterErrorsAndUntouchedOnStructSizeMismatch) {
@@ -786,34 +781,30 @@ TEST(CApi, StatsAreZeroedOnLaterErrorsAndUntouchedOnStructSizeMismatch) {
     }
 }
 
-TEST(CApi, ApplyIsAFixedMapForSddmAndFollowsTheCenterKScheduleForLaplacians) {
-    const auto& knobs = apxchol::detail::env_knobs::get();
-    if (knobs.ground != apxchol::detail::grounding_kind::center_k || knobs.center_k < 2)
-        GTEST_SKIP() << "needs the default APXCHOL_GROUND=center-k with APXCHOL_CENTER_K >= 2";
-    const int k = knobs.center_k;
-    auto applications = [&](const csc64& c, const Eigen::VectorXd& r) {
-        handle h;
-        EXPECT_EQ(create(c, nullptr, h), APXCHOL_STATUS_SUCCESS);
-        std::vector<Eigen::VectorXd> z(static_cast<std::size_t>(k), Eigen::VectorXd(c.n));
-        for (Eigen::VectorXd& zi : z)
-            EXPECT_EQ(apxchol_solver_apply(h.s, r.data(), zi.data(), nullptr, 0),
+TEST(CApi, ApplyIsStatelessAndCentresEveryLaplacianApplication) {
+    for (const auto backend : available_backends()) {
+        for (const double shift : {0.0, 0.1}) {
+            SCOPED_TRACE(::testing::Message() << "backend=" << backend << " shift=" << shift);
+            const csc64 c = to_csc64(grid_laplacian(12, 12, shift));
+            auto o = defaults();
+            o.backend = backend;
+            handle h;
+            ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
+            const Eigen::VectorXd r = compatible_rhs(c.n, 3).array() + 0.25;
+            Eigen::VectorXd z0(c.n), z(c.n);
+            ASSERT_EQ(apxchol_solver_apply(h.s, r.data(), z0.data(), nullptr, 0),
                       APXCHOL_STATUS_SUCCESS);
-        return z;
-    };
-    const csc64 sddm = to_csc64(grid_laplacian(12, 12, 0.1)), lap = to_csc64(grid_laplacian(12, 12));
-    const Eigen::VectorXd r = compatible_rhs(lap.n, 3);  // mean zero
-    const std::vector<Eigen::VectorXd> fixed = applications(sddm, r);
-    for (const Eigen::VectorXd& z : fixed)
-        EXPECT_TRUE(same_bytes(z.data(), fixed[0].data(), z.size()));
-    // Laplacian: applications 1..K-1 skip both centring passes; the K-th
-    // centres, which moves z by a constant vector only.
-    const std::vector<Eigen::VectorXd> z = applications(lap, r);
-    for (int i = 1; i + 1 < k; ++i)
-        EXPECT_TRUE(same_bytes(z[i].data(), z[0].data(), z[0].size())) << i;
-    const Eigen::VectorXd d = z[k - 1] - z[0];
-    EXPECT_GT(d.norm(), 0.0);
-    EXPECT_LE((d.array() - d.mean()).matrix().norm(), 1e-10 * z[0].norm());
-    EXPECT_LE(std::fabs(z[k - 1].mean()), 1e-12 * z[k - 1].norm());
+            if (shift == 0.0) {
+                const double rounding = backend == APXCHOL_BACKEND_CPU ? 1e-12 : 1e-5;
+                EXPECT_LE(std::fabs(z0.mean()), rounding * z0.cwiseAbs().maxCoeff());
+            }
+            for (int i = 0; i < 12; ++i) {
+                ASSERT_EQ(apxchol_solver_apply(h.s, r.data(), z.data(), nullptr, 0),
+                          APXCHOL_STATUS_SUCCESS);
+                EXPECT_TRUE(same_bytes(z.data(), z0.data(), z.size())) << i;
+            }
+        }
+    }
 }
 
 TEST(CApi, ApplyMatchesCppApply) {
@@ -824,15 +815,11 @@ TEST(CApi, ApplyMatchesCppApply) {
     handle h;
     ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
 #ifdef _OPENMP
-    const int prior = omp_get_max_threads();
-    omp_set_num_threads(1);
+    const scoped_omp_threads threads(1);
 #endif
     const apxchol::cpu_solver ref(A, apxchol::solve_options{});
     const Eigen::VectorXd r = compatible_rhs(c.n, 3);
     const Eigen::VectorXd z_ref = ref.apply(r);
-#ifdef _OPENMP
-    omp_set_num_threads(prior);
-#endif
     Eigen::VectorXd z(c.n);
     ASSERT_EQ(apxchol_solver_apply(h.s, r.data(), z.data(), nullptr, 0), APXCHOL_STATUS_SUCCESS);
     EXPECT_TRUE(same_bytes(z.data(), z_ref.data(), z.size()));
@@ -842,12 +829,8 @@ TEST(CApi, ApplyInPlaceEqualsOutOfPlaceAndPartialOverlapIsRejected) {
     // An SDDM factor's application is a fixed map, so in-place and
     // out-of-place applications must agree bitwise on every route.
     const csc64 c = to_csc64(grid_laplacian(11, 9, 0.1));
-    std::vector<apxchol_backend> backends{APXCHOL_BACKEND_CPU};
-#if defined(APXCHOL_USE_METAL)
-    if (apxchol::metal_solver::available()) backends.push_back(APXCHOL_BACKEND_METAL);
-#endif
     const Eigen::VectorXd r = compatible_rhs(c.n, 6);
-    for (const auto backend : backends) {
+    for (const auto backend : available_backends()) {
         SCOPED_TRACE(::testing::Message() << "backend=" << backend);
         auto o = defaults();
         o.backend = backend;
@@ -947,7 +930,9 @@ TEST(CApi, ExtremeScaleRightHandSidesAreSolvedAsTheirScaledProblem) {
                       APXCHOL_STATUS_SUCCESS);
             EXPECT_TRUE(same_bytes(x.data(), xs.data(), x.size()));
             EXPECT_EQ(info.iterations, ref.iterations);
-            EXPECT_EQ(info.relative_residual, ref.relative_residual);
+            // Extreme scales use stable norms for the certified residual,
+            // whose reduction can round differently from the ordinary path.
+            EXPECT_DOUBLE_EQ(info.relative_residual, ref.relative_residual);
             // No iterations: the residual of x = 0 is exactly 1 at any scale.
             info = info_struct();
             EXPECT_EQ(apxchol_solver_solve(h.s, bs.data(), nullptr, x.data(), -1.0, 0, &info,
@@ -1067,7 +1052,7 @@ TEST(CApi, StatsReportLumpingSddmAndFactorSize) {
     ASSERT_EQ(apxchol_solver_stats(h.s, &stats), APXCHOL_STATUS_SUCCESS);
     EXPECT_EQ(stats.backend, APXCHOL_BACKEND_CPU);
     EXPECT_EQ(stats.n, c.n);
-    EXPECT_EQ(stats.lumped_offdiag, apxchol::detail::env_knobs::get().lump ? 2 : 0);
+    EXPECT_EQ(stats.lumped_offdiag, 2);
     EXPECT_EQ(stats.sddm, 1);
     EXPECT_GE(stats.rounds, 1);
     EXPECT_GE(stats.setup_seconds, 0.0);
@@ -1197,7 +1182,10 @@ TEST(CApi, BackendAndEnumValidation) {
     check([](apxchol_options& o) { o.keep_factor_values = 2; });
     check([](apxchol_options& o) { o.max_iter = -1; });
     check([](apxchol_options& o) { o.threads = -1; });
-    check([](apxchol_options& o) { o.degree_quantile = 1.5; });
+    for (const double quantile : {1.0, 1.5, -0.5, -2.0}) {
+        SCOPED_TRACE(::testing::Message() << "degree_quantile=" << quantile);
+        check([=](apxchol_options& o) { o.degree_quantile = quantile; });
+    }
 
     for (const apxchol_partitioner partitioner :
          {APXCHOL_PARTITIONER_BLOCK_GREEDY, APXCHOL_PARTITIONER_PRIORITY_GREEDY,
@@ -1327,40 +1315,45 @@ TEST(CApi, SolverFromFactorIsBitIdenticalOnItsOwnMatrix) {
 }
 
 TEST(CApi, SolverFromFactorPreconditionsANearbyOperator) {
-    for (const double shift : {0.0, 0.05}) {
-        const Sparse A = grid_laplacian(26, 20, shift);
-        const Sparse B = nearby_operator(A, 7, 0.5);
-        ASSERT_GT(B.nonZeros(), A.nonZeros());
-        auto o = defaults();
-        o.tol = 1e-10;
-        o.max_iter = 1000;
-        factor_handle f;
-        ASSERT_EQ(create_factor(to_csc64(A), &o, f), APXCHOL_STATUS_SUCCESS);
-        const csc64 cb = to_csc64(B, 1);
-        handle stale;
-        std::string message;
-        ASSERT_EQ(adopt(cb, f.f, &o, stale, 1, &message), APXCHOL_STATUS_SUCCESS) << message;
-        expect_same_factor_stats(stats_of(stale.s), stats_of(f.f));
+    for (const auto backend : available_backends()) {
+        for (const double shift : {0.0, 0.05}) {
+            SCOPED_TRACE(::testing::Message() << "backend=" << backend << " shift=" << shift);
+            const Sparse A = grid_laplacian(26, 20, shift);
+            const Sparse B = nearby_operator(A, 7, 0.5);
+            ASSERT_GT(B.nonZeros(), A.nonZeros());
+            auto o = defaults();
+            o.tol = 1e-10;
+            o.max_iter = 1000;
+            factor_handle f;
+            ASSERT_EQ(create_factor(to_csc64(A), &o, f), APXCHOL_STATUS_SUCCESS);
+            o.backend = backend;
+            const csc64 cb = to_csc64(B, 1);
+            handle stale;
+            std::string message;
+            ASSERT_EQ(adopt(cb, f.f, &o, stale, 1, &message), APXCHOL_STATUS_SUCCESS) << message;
+            expect_same_factor_stats(stats_of(stale.s), stats_of(f.f));
 
-        const Eigen::VectorXd b = compatible_rhs(cb.n, 4);
-        Eigen::VectorXd x(cb.n);
-        auto info = info_struct();
-        ASSERT_EQ(apxchol_solver_solve(stale.s, b.data(), nullptr, x.data(), -1.0, -1, &info,
-                                       nullptr, 0),
-                  APXCHOL_STATUS_SUCCESS);
-        EXPECT_EQ(info.converged, 1);
-        const double res = true_residual(B, b, x);
-        EXPECT_LT(res, o.tol) << shift;
-        if (shift == 0.0) { EXPECT_LE(std::fabs(x.mean()), 1e-12 * x.norm()); }  // min-norm
+            const Eigen::VectorXd b = compatible_rhs(cb.n, 4);
+            Eigen::VectorXd x(cb.n);
+            auto info = info_struct();
+            ASSERT_EQ(apxchol_solver_solve(stale.s, b.data(), nullptr, x.data(), -1.0, -1,
+                                           &info, nullptr, 0),
+                      APXCHOL_STATUS_SUCCESS);
+            EXPECT_EQ(info.converged, 1);
+            const double res = true_residual(B, b, x);
+            EXPECT_LT(res, o.tol);
+            EXPECT_NEAR(info.relative_residual, res, 1e-3 * res);
+            if (shift == 0.0) EXPECT_LE(std::fabs(x.mean()), 1e-12 * x.norm());
 
-        // The same solution as a solver that factorized B itself.
-        handle fresh;
-        ASSERT_EQ(create(cb, &o, fresh, 1), APXCHOL_STATUS_SUCCESS);
-        Eigen::VectorXd y(cb.n);
-        ASSERT_EQ(apxchol_solver_solve(fresh.s, b.data(), nullptr, y.data(), -1.0, -1, nullptr,
-                                       nullptr, 0),
-                  APXCHOL_STATUS_SUCCESS);
-        EXPECT_LT((x - y).norm(), 1e-6 * y.norm()) << shift;
+            // The same solution as a solver that factorized B itself.
+            handle fresh;
+            ASSERT_EQ(create(cb, &o, fresh, 1), APXCHOL_STATUS_SUCCESS);
+            Eigen::VectorXd y(cb.n);
+            ASSERT_EQ(apxchol_solver_solve(fresh.s, b.data(), nullptr, y.data(), -1.0, -1,
+                                           nullptr, nullptr, 0),
+                      APXCHOL_STATUS_SUCCESS);
+            EXPECT_LT((x - y).norm(), 1e-6 * y.norm());
+        }
     }
 }
 
@@ -1603,31 +1596,21 @@ TEST(CApi, OmpThresholdReachesTheFactorization) {
         apxchol::factor_options fo;
         fo.omp_threshold = threshold;
 #ifdef _OPENMP
-        const int prior = omp_get_max_threads();
-        omp_set_num_threads(1);
+        const scoped_omp_threads threads(1);
 #endif
-        const apxchol::factorization F =
-            apxchol::factorize(A, fo);
-#ifdef _OPENMP
-        omp_set_num_threads(prior);
-#endif
-        exported e;
-        for (auto p : F.L.outer_) e.colptr.push_back(static_cast<std::int64_t>(p));
-        for (auto r : F.L.inner_) e.rowval.push_back(static_cast<std::int64_t>(r));
-        for (auto v : F.L.vals_) e.nzval.push_back(static_cast<float>(v));
-        for (auto v : F.perm) e.perm.push_back(static_cast<std::int64_t>(v));
-        return e;
+        return export_of(apxchol::factorize(A, fo));
     };
     const std::uint64_t threshold = 1;
     const exported nondefault = exported_cpp(threshold);
-    ASSERT_FALSE(nondefault == exported_cpp(apxchol::factor_options{}.omp_threshold))
+    const exported default_factor = exported_cpp(apxchol::factor_options{}.omp_threshold);
+    ASSERT_FALSE(nondefault == default_factor)
         << "the threshold does not change this factor; pick another matrix";
 
     auto o = defaults();
     o.threads = 1;
     factor_handle by_default;
     ASSERT_EQ(create_factor(c, &o, by_default), APXCHOL_STATUS_SUCCESS);
-    EXPECT_TRUE(export_of(by_default.f) == exported_cpp(apxchol::factor_options{}.omp_threshold));
+    EXPECT_TRUE(export_of(by_default.f) == default_factor);
     o.omp_threshold = threshold;
     factor_handle f;
     ASSERT_EQ(create_factor(c, &o, f), APXCHOL_STATUS_SUCCESS);
@@ -1673,37 +1656,7 @@ TEST(CApi, MetalBackendRoundTrip) {
     EXPECT_NEAR(info.relative_residual, res, 1e-3 * res);
     EXPECT_LE(std::fabs(x.mean()), 1e-12 * x.norm());
 
-    // Sequential block: every column equals its single solve, bit for bit.
-    const std::int64_t k = 3;
-    Eigen::MatrixXd B(c.n, k), X(c.n, k);
-    B.col(0) = compatible_rhs(c.n, 1);
-    B.col(1).setZero();
-    B.col(2) = compatible_rhs(c.n, 5);
-    std::array<std::int64_t, 3> iters{};
-    std::array<double, 3> resid{};
-    std::array<std::int32_t, 3> conv{};
-    ASSERT_EQ(apxchol_solver_solve_block(h.s, k, B.data(), nullptr, X.data(), -1.0, -1, iters.data(),
-                                         resid.data(), conv.data(), nullptr, 0),
-              APXCHOL_STATUS_SUCCESS);
-    for (std::int64_t col = 0; col < k; ++col) {
-        Eigen::VectorXd xc(c.n);
-        const Eigen::VectorXd bc = B.col(col);
-        auto ic = info_struct();
-        ASSERT_EQ(apxchol_solver_solve(h.s, bc.data(), nullptr, xc.data(), -1.0, -1, &ic, nullptr, 0),
-                  APXCHOL_STATUS_SUCCESS);
-        EXPECT_TRUE(same_bytes(xc.data(), X.col(col).data(), xc.size())) << col;
-        EXPECT_EQ(iters[col], ic.iterations);
-        EXPECT_EQ(resid[col], ic.relative_residual);
-        EXPECT_EQ(conv[col], 1);
-    }
-    EXPECT_EQ(iters[1], 0);
-    EXPECT_EQ(X.col(1).norm(), 0.0);
-    // In place: x aliases b.
-    Eigen::MatrixXd BX = B;
-    ASSERT_EQ(apxchol_solver_solve_block(h.s, k, BX.data(), nullptr, BX.data(), -1.0, -1, nullptr,
-                                         nullptr, nullptr, nullptr, 0),
-              APXCHOL_STATUS_SUCCESS);
-    EXPECT_TRUE(same_bytes(BX.data(), X.data(), static_cast<std::size_t>(X.size())));
+    expect_block_matches_scalar(h.s, c.n);
     // Exhaustion is NOT_CONVERGED with the truthful residual of x = 0.
     auto none = info_struct();
     EXPECT_EQ(apxchol_solver_solve(h.s, b.data(), nullptr, x.data(), -1.0, 0, &none, nullptr, 0),
@@ -1818,24 +1771,6 @@ TEST(CApi, MetalAutoBackendChoosesTheDeviceAboveTheCpuLimit) {
               APXCHOL_STATUS_SUCCESS);
 }
 
-TEST(CApi, MetalLaplacianApplyCentresEveryApplication) {
-    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
-    const csc64 c = to_csc64(grid_laplacian(12, 12));
-    auto o = defaults();
-    o.backend = APXCHOL_BACKEND_METAL;
-    handle h;
-    ASSERT_EQ(create(c, &o, h), APXCHOL_STATUS_SUCCESS);
-    const Eigen::VectorXd r = compatible_rhs(c.n, 3).array() + 0.25;  // mean not zero
-    Eigen::VectorXd z0(c.n), z(c.n);
-    ASSERT_EQ(apxchol_solver_apply(h.s, r.data(), z0.data(), nullptr, 0), APXCHOL_STATUS_SUCCESS);
-    EXPECT_LE(std::fabs(z0.mean()), 1e-5 * z0.cwiseAbs().maxCoeff());
-    for (int i = 0; i < 12; ++i) {
-        ASSERT_EQ(apxchol_solver_apply(h.s, r.data(), z.data(), nullptr, 0),
-                  APXCHOL_STATUS_SUCCESS);
-        EXPECT_TRUE(same_bytes(z.data(), z0.data(), z.size())) << i;
-    }
-}
-
 TEST(CApi, MetalExtremeScaleRightHandSidesConverge) {
     if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
     // Metal scales its own vectors; the C ABI leaves them to it.
@@ -1903,34 +1838,6 @@ TEST(CApi, MetalAdoptionsOfTheSameFactorAreBitIdentical) {
         ASSERT_EQ(apxchol_solver_apply(adopted.s, r.data(), z2.data(), nullptr, 0),
                   APXCHOL_STATUS_SUCCESS);
         EXPECT_TRUE(same_bytes(z1.data(), z2.data(), z1.size()));
-    }
-}
-
-TEST(CApi, MetalSolverFromFactorPreconditionsANearbyOperator) {
-    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
-    for (const double shift : {0.0, 0.05}) {
-        const Sparse A = grid_laplacian(26, 20, shift);
-        const Sparse Bop = nearby_operator(A, 7, 0.5);
-        auto o = defaults();
-        o.tol = 1e-10;
-        o.max_iter = 1000;
-        factor_handle f;
-        ASSERT_EQ(create_factor(to_csc64(A), &o, f), APXCHOL_STATUS_SUCCESS);
-        o.backend = APXCHOL_BACKEND_METAL;
-        const csc64 cb = to_csc64(Bop);
-        handle stale;
-        std::string message;
-        ASSERT_EQ(adopt(cb, f.f, &o, stale, 0, &message), APXCHOL_STATUS_SUCCESS) << message;
-        const Eigen::VectorXd b = compatible_rhs(cb.n, 4);
-        Eigen::VectorXd x(cb.n);
-        auto info = info_struct();
-        ASSERT_EQ(apxchol_solver_solve(stale.s, b.data(), nullptr, x.data(), -1.0, -1, &info,
-                                       nullptr, 0),
-                  APXCHOL_STATUS_SUCCESS);
-        const double res = true_residual(Bop, b, x);
-        EXPECT_LT(res, o.tol) << shift;
-        EXPECT_NEAR(info.relative_residual, res, 1e-3 * res);
-        if (shift == 0.0) { EXPECT_LE(std::fabs(x.mean()), 1e-12 * x.norm()); }
     }
 }
 

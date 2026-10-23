@@ -5,12 +5,14 @@
 ///   make_graph(L) — Eigen Laplacian → graph
 
 #include "apxchol/csc_work.h"
-#include "apxchol/env_knobs.h"
+#include "apxchol/detail/operator_options.h"
 #include "apxchol/graph/graph.h"
 #include <Eigen/Sparse>
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <ranges>
+#include <stdexcept>
 #include <vector>
 
 #include <omp.h>
@@ -50,7 +52,8 @@ namespace detail {
 /// IPM operators. Pass false whenever that proof is not at hand; the result is
 /// identical either way, only the work differs.
 inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
-                           bool triangles_bit_identical) {
+                           bool triangles_bit_identical, double regularization = 0) {
+    validate_regularization(regularization);
     const auto n = static_cast<node_index>(L.rows());
     const auto outer = static_cast<node_index>(L.outerSize());
     graph g(n);
@@ -255,19 +258,12 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
     // The relative 1e-12 tolerance absorbs fp accumulation-order ulps
     // (column-sum order vs. the ingestion order that built diag[]).
     //
-    // APXCHOL_GROUND=reg (see env_knobs.h): ground the
-    // matrix here instead of by mean-centring in the preconditioner -- every
-    // vertex gets excess[v] = max(exact_excess, reg_eps * diag[v]), i.e. an
-    // explicit self-loop to ground of relative size reg_eps. Any positive
-    // excess makes factorize_impl's sddm_scan classify the matrix as SDDM,
-    // so the factor is full-rank n and _solve_impl takes the no-centring
-    // path. reg_eps == 0.0 (mode != reg) is a no-op.
-    const double reg_eps =
-        detail::env_knobs::get().ground == detail::grounding_kind::reg
-            ? detail::env_knobs::get().reg_eps : 0.0;
+    // Optional diagonal regularization makes the preconditioner full-rank;
+    // the solve still applies the caller's original operator.
     // Each column's sum stays serial, so the work-balanced split cannot
     // change the result.
-    #pragma omp parallel if(n > 16384)
+    bool invalid_excess = false;
+    #pragma omp parallel if(n > 16384) reduction(||:invalid_excess)
     {
         const auto [col_lo, col_hi] =
             detail::work_balanced_range(L.outerIndexPtr(), outer);
@@ -278,10 +274,15 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
                     wdeg -= it.value();
             double excess = diag[k] - wdeg;
             excess = excess > diag[k] * 1e-12 ? excess : 0.0;
-            if (reg_eps > 0.0) excess = std::max(excess, reg_eps * diag[k]);
+            if (regularization > 0.0)
+                excess = std::max(excess, regularization * diag[k]);
+            invalid_excess |= !std::isfinite(excess) ||
+                (regularization > 0.0 && diag[k] > 0.0 && excess == 0.0);
             g.excess(k) = excess;
         }
     }
+    if (invalid_excess)
+        throw std::range_error("regularization produces an unrepresentable diagonal excess");
     return g;
 }
 

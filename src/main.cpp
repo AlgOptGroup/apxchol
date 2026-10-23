@@ -5,6 +5,7 @@
 #include <spdlog/spdlog.h>
 #include <cstdlib>
 #include <fstream>
+#include <stdexcept>
 
 using namespace apxchol;
 
@@ -77,30 +78,17 @@ int main(int argc, char* argv[]) try {
     if (cfg.output_path) {
         std::ofstream f(*cfg.output_path, std::ios_base::binary);
         fast_matrix_market::write_matrix_market_eigen_dense(f, res.x);
+        f.close();
+        if (!f)
+            throw std::runtime_error("cannot write solution to " + *cfg.output_path);
         spdlog::info("solution written to {}", *cfg.output_path);
     }
 
-    const bool converged = res.residual < cfg.solve_opts.tol;
-    if (!converged) {
-        // iterations == 0 without convergence means PCG stopped before its
-        // first update, i.e. p·Ap <= 0: the operator is not positive
-        // semidefinite and NOTHING was solved. That is the symptom a
-        // misinterpreted input produces, so name the interpretation.
-        const std::string why = diagnose_failure(kind, scan);
-        if (res.iterations == 0)
-            spdlog::error("PCG broke down before its first update (p·Ap <= 0): the "
-                          "operator is not positive semidefinite, so x = 0 was "
-                          "returned and the reported residual {} is meaningless.{} "
-                          "The input was read as {}.",
-                          res.residual, why,
-                          kind == input_kind::adjacency
-                              ? "an adjacency graph (L = D - A)"
-                              : "an assembled Laplacian/SDDM operator");
-        else
-            spdlog::error("did not reach tol {} in {} iterations (residual {}).{}",
-                          cfg.solve_opts.tol, res.iterations, res.residual, why);
-    }
-    return converged ? 0 : 1;
+    if (!res.converged)
+        spdlog::error("did not reach tol {} in {} iterations (residual {}).{}",
+                      cfg.solve_opts.tol, res.iterations, res.residual,
+                      diagnose_failure(kind, scan));
+    return res.converged ? 0 : 1;
 } catch (const std::exception& e) {
     spdlog::error("{}", e.what());
     return 2;

@@ -17,7 +17,6 @@
 // paths, long thin runs) and a round-structured all-fat factor through
 // set_round_bounds (round-as-level path).
 #include <gtest/gtest.h>
-#include "scoped_env.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -308,9 +307,8 @@ TEST(SpTRSVRoundRanges, PreserveOldLevelSlotsAndRowOrderAtEmptyBoundaries) {
 }
 
 TEST(SpTRSVRoundRanges, ImplicitPeelIsByteEquivalentToMaterializedFallback) {
-    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
-    scoped_env mode("APXCHOL_CPU_SPTRSV", "levels");
-    scoped_env rounds_on("APXCHOL_ROUND_LEVELS", "1");
+    apxchol::factor_options options{.drop_tolerance = 0};
+    options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
     set_threads(4);
 
     std::vector<node_index> logical_bounds;
@@ -327,16 +325,17 @@ TEST(SpTRSVRoundRanges, ImplicitPeelIsByteEquivalentToMaterializedFallback) {
     for (const char* storage : {"float32", "float16"}) {
         if (std::string_view(storage) == "float16" && !apxchol::omp_sptrsv::fp16_supported())
             continue;
-        SCOPED_TRACE(std::string("APXCHOL_FACTOR_STORAGE=") + storage);
-        scoped_env storage_mode("APXCHOL_FACTOR_STORAGE", storage);
+        SCOPED_TRACE(std::string("factor_storage=") + storage);
+        options.factor_storage = std::string_view(storage) == "float16"
+            ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32;
 
         apxchol::omp_sptrsv implicit;
         implicit.set_round_bounds(bounds);
-        implicit.setup(L, L.rows());
+        implicit.setup(L, L.rows(), options);
 
         // No round metadata takes the retained materialized topological path.
         apxchol::omp_sptrsv materialized;
-        materialized.setup(L, L.rows());
+        materialized.setup(L, L.rows(), options);
 
         std::vector<int> sizes;
         std::vector<long long> work;
@@ -360,10 +359,9 @@ TEST(SpTRSVRoundRanges, ImplicitPeelIsByteEquivalentToMaterializedFallback) {
 }
 
 TEST(SpTRSVRoundRanges, PostSetupBoundsMutationDoesNotChangeActiveSchedule) {
-    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
-    scoped_env mode("APXCHOL_CPU_SPTRSV", "levels");
-    scoped_env rounds_on("APXCHOL_ROUND_LEVELS", "1");
+    apxchol::factor_options options{.drop_tolerance = 0};
+    options.factor_storage = apxchol::factor_storage_type::fp32;
+    options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
     set_threads(4);
 
     std::vector<node_index> bounds;
@@ -371,7 +369,7 @@ TEST(SpTRSVRoundRanges, PostSetupBoundsMutationDoesNotChangeActiveSchedule) {
     const auto x = random_x(L.rows(), 8804);
     apxchol::omp_sptrsv trsv;
     trsv.set_round_bounds(bounds);
-    trsv.setup(L, L.rows());
+    trsv.setup(L, L.rows(), options);
     const pair_out reference = solve_pair(trsv, x);
     std::vector<int> before_sizes, after_sizes;
     std::vector<long long> before_work, after_work;
@@ -388,9 +386,8 @@ TEST(SpTRSVRoundRanges, PostSetupBoundsMutationDoesNotChangeActiveSchedule) {
 }
 
 TEST(SpTRSVRoundRanges, EmptyFirstTailRangePreservesHybridBoundary) {
-    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
-    scoped_env rounds_on("APXCHOL_ROUND_LEVELS", "1");
+    apxchol::factor_options options{.drop_tolerance = 0};
+    options.factor_storage = apxchol::factor_storage_type::fp32;
     set_threads(4);
 
     std::vector<node_index> bounds;
@@ -402,17 +399,17 @@ TEST(SpTRSVRoundRanges, EmptyFirstTailRangePreservesHybridBoundary) {
 
     apxchol::omp_sptrsv level_reference;
     {
-        scoped_env mode("APXCHOL_CPU_SPTRSV", "levels");
+        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
         level_reference.set_round_bounds(bounds);
-        level_reference.setup(L, L.rows());
+        level_reference.setup(L, L.rows(), options);
     }
     const pair_out reference = solve_pair(level_reference, x);
 
     apxchol::omp_sptrsv hybrid;
     {
-        scoped_env mode("APXCHOL_CPU_SPTRSV", "auto");
+        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
         hybrid.set_round_bounds(bounds);
-        hybrid.setup(L, L.rows());
+        hybrid.setup(L, L.rows(), options);
     }
     ASSERT_TRUE(hybrid.uses_hybrid_schedule());
     expect_same_bytes(reference, solve_pair(hybrid, x),
@@ -426,11 +423,9 @@ TEST(SpTRSVRoundRanges, EmptyFirstTailRangePreservesHybridBoundary) {
 // The same bytes at every thread count, both shapes, both directions, in and
 // out of place; anchored to a correct solve at T=1.
 TEST(SpTRSVLevelset, SameBytesAcrossThreadCounts) {
-    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
-    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
+    apxchol::factor_options options{.drop_tolerance = 0};
+    options.factor_storage = apxchol::factor_storage_type::fp32;
 
-    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");   // state the storage contract on the un-dropped factor
     const std::vector<int> T = thread_counts();
     const int t_max = T.back();
 
@@ -439,7 +434,7 @@ TEST(SpTRSVLevelset, SameBytesAcrossThreadCounts) {
         const sparse_csc L = make_mixed(60000, 60, 400, 12345);
         const node_index m = L.rows();
         apxchol::omp_sptrsv trsv;
-        trsv.setup(L, m);
+        trsv.setup(L, m, options);
         for (bool fwd : {true, false}) {
             const level_shape s = shape(trsv, fwd);
             ASSERT_GT(s.fat, 3u) << "fwd=" << fwd;                 // both kernel paths run
@@ -463,7 +458,7 @@ TEST(SpTRSVLevelset, SameBytesAcrossThreadCounts) {
         const node_index m = L.rows();
         apxchol::omp_sptrsv trsv;
         trsv.set_round_bounds(bounds);
-        trsv.setup(L, m);
+        trsv.setup(L, m, options);
         for (bool fwd : {true, false}) {
             const level_shape s = shape(trsv, fwd);
             ASSERT_EQ(s.levels, 8u); ASSERT_EQ(s.thin, 0u);
@@ -482,8 +477,8 @@ TEST(SpTRSVLevelset, SameBytesAcrossThreadCounts) {
 }
 
 TEST(CriticalSchedule, HybridRunsFatPrefixAndCriticalThinTailByteIdentically) {
-    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
+    apxchol::factor_options options{.drop_tolerance = 0};
+    options.factor_storage = apxchol::factor_storage_type::fp32;
     std::vector<node_index> bounds;
     const sparse_csc L = make_fat_prefix_thin_tail(
         4, 32768, 130, 8, 551, bounds);
@@ -492,15 +487,15 @@ TEST(CriticalSchedule, HybridRunsFatPrefixAndCriticalThinTailByteIdentically) {
 
     apxchol::omp_sptrsv levels;
     {
-        scoped_env mode("APXCHOL_CPU_SPTRSV", "levels");
+        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
         levels.set_round_bounds(bounds);
-        levels.setup(L, L.rows());
+        levels.setup(L, L.rows(), options);
     }
     apxchol::omp_sptrsv hybrid;
     {
-        scoped_env mode("APXCHOL_CPU_SPTRSV", "auto");
+        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
         hybrid.set_round_bounds(bounds);
-        hybrid.setup(L, L.rows());
+        hybrid.setup(L, L.rows(), options);
     }
     ASSERT_TRUE(hybrid.uses_hybrid_schedule());
     const node_index first_tail_row = bounds[4];
@@ -530,9 +525,9 @@ TEST(CriticalSchedule, HybridRunsFatPrefixAndCriticalThinTailByteIdentically) {
 }
 
 TEST(CriticalSchedule, HybridPreservesFp16Arithmetic) {
+    apxchol::factor_options options{.drop_tolerance = 0};
     if (!apxchol::omp_sptrsv::fp16_supported()) GTEST_SKIP() << "CPU lacks F16C";
-    scoped_env fp16_storage("APXCHOL_FACTOR_STORAGE", "float16");
-    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
+    options.factor_storage = apxchol::factor_storage_type::fp16;
     std::vector<node_index> bounds;
     const sparse_csc L = make_fat_prefix_thin_tail(
         4, 32768, 24, 8, 557, bounds);
@@ -541,15 +536,15 @@ TEST(CriticalSchedule, HybridPreservesFp16Arithmetic) {
 
     apxchol::omp_sptrsv levels;
     {
-        scoped_env mode("APXCHOL_CPU_SPTRSV", "levels");
+        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
         levels.set_round_bounds(bounds);
-        levels.setup(L, L.rows());
+        levels.setup(L, L.rows(), options);
     }
     apxchol::omp_sptrsv hybrid;
     {
-        scoped_env mode("APXCHOL_CPU_SPTRSV", "auto");
+        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
         hybrid.set_round_bounds(bounds);
-        hybrid.setup(L, L.rows());
+        hybrid.setup(L, L.rows(), options);
     }
     ASSERT_TRUE(hybrid.uses_hybrid_schedule());
     const pair_out reference = solve_pair(levels, x);
@@ -564,8 +559,8 @@ TEST(CriticalSchedule, HybridPreservesFp16Arithmetic) {
 }
 
 TEST(CriticalSchedule, HybridLimitsArePureLevelsAndPureCritical) {
-    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
+    apxchol::factor_options options{.drop_tolerance = 0};
+    options.factor_storage = apxchol::factor_storage_type::fp32;
     set_threads(4);
 
     {
@@ -576,15 +571,15 @@ TEST(CriticalSchedule, HybridLimitsArePureLevelsAndPureCritical) {
         const auto x = random_x(L.rows(), 554);
         apxchol::omp_sptrsv levels;
         {
-            scoped_env mode("APXCHOL_CPU_SPTRSV", "levels");
+            options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
             levels.set_round_bounds(bounds);
-            levels.setup(L, L.rows());
+            levels.setup(L, L.rows(), options);
         }
         apxchol::omp_sptrsv hybrid;
         {
-            scoped_env mode("APXCHOL_CPU_SPTRSV", "auto");
+            options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
             hybrid.set_round_bounds(bounds);
-            hybrid.setup(L, L.rows());
+            hybrid.setup(L, L.rows(), options);
         }
         EXPECT_FALSE(hybrid.uses_hybrid_schedule());
         EXPECT_EQ(hybrid.num_barriers(true), levels.num_barriers(true));
@@ -598,15 +593,15 @@ TEST(CriticalSchedule, HybridLimitsArePureLevelsAndPureCritical) {
         const auto x = random_x(L.rows(), 556);
         apxchol::omp_sptrsv levels;
         {
-            scoped_env mode("APXCHOL_CPU_SPTRSV", "levels");
+            options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
             levels.set_round_bounds(bounds);
-            levels.setup(L, L.rows());
+            levels.setup(L, L.rows(), options);
         }
         apxchol::omp_sptrsv hybrid;
         {
-            scoped_env mode("APXCHOL_CPU_SPTRSV", "auto");
+            options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
             hybrid.set_round_bounds(bounds);
-            hybrid.setup(L, L.rows());
+            hybrid.setup(L, L.rows(), options);
         }
         ASSERT_TRUE(hybrid.uses_hybrid_schedule());
         EXPECT_EQ(levels.num_barriers(true), 1u);
@@ -619,9 +614,9 @@ TEST(CriticalSchedule, HybridLimitsArePureLevelsAndPureCritical) {
 }
 
 TEST(CriticalSchedule, AutoUsesThinSuffixAboveSerialThreshold) {
-    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
-    scoped_env mode("APXCHOL_CPU_SPTRSV", "auto");
+    apxchol::factor_options options{.drop_tolerance = 0};
+    options.factor_storage = apxchol::factor_storage_type::fp32;
+    options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
     std::vector<node_index> bounds;
     const sparse_csc L = make_round(130, 1024, 111, bounds);
     ASSERT_GT(L.rows(), apxchol::kSpTRSVOMPThreshold);
@@ -629,36 +624,37 @@ TEST(CriticalSchedule, AutoUsesThinSuffixAboveSerialThreshold) {
     set_threads(4);
     apxchol::omp_sptrsv parallel;
     parallel.set_round_bounds(bounds);
-    parallel.setup(L, L.rows());
+    parallel.setup(L, L.rows(), options);
     EXPECT_TRUE(parallel.uses_hybrid_schedule());
 
     apxchol::omp_sptrsv without_rounds;
-    without_rounds.setup(L, L.rows());
+    without_rounds.setup(L, L.rows(), options);
     EXPECT_FALSE(without_rounds.uses_hybrid_schedule());
 
     set_threads(1);
     apxchol::omp_sptrsv serial;
     serial.set_round_bounds(bounds);
-    serial.setup(L, L.rows());
+    serial.setup(L, L.rows(), options);
     EXPECT_FALSE(serial.uses_hybrid_schedule());
     set_threads(4);
 }
 
 TEST(SpTRSVLevelset, SmallFactorsSkipParallelScheduling) {
-    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
-    scoped_env mode("APXCHOL_CPU_SPTRSV", "auto");
+    apxchol::factor_options options{.drop_tolerance = 0};
+    options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
     set_threads(4);
     for (const char* storage : {"float32", "float16"}) {
         if (std::string_view(storage) == "float16" && !apxchol::omp_sptrsv::fp16_supported())
             continue;
-        scoped_env storage_mode("APXCHOL_FACTOR_STORAGE", storage);
+        options.factor_storage = std::string_view(storage) == "float16"
+            ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32;
         for (node_index n : {64u, 1024u, 2048u, unsigned(apxchol::detail::cpu_solve_grain)}) {
             SCOPED_TRACE(std::string(storage) + " n=" + std::to_string(n));
             std::vector<node_index> bounds;
             const sparse_csc L = make_round(n / 8, 8, 112, bounds);
             apxchol::omp_sptrsv trsv;
             trsv.set_round_bounds(bounds);
-            trsv.setup(L, n);
+            trsv.setup(L, n, options);
             EXPECT_FALSE(trsv.uses_hybrid_schedule());
             EXPECT_EQ(trsv.num_barriers(true), 0u);
             EXPECT_EQ(trsv.num_barriers(false), 0u);
@@ -673,10 +669,10 @@ TEST(SpTRSVLevelset, SmallFactorsSkipParallelScheduling) {
 
 #if defined(_OPENMP) && !defined(__APPLE__)
 TEST(SpTRSVLevelset, GroundingPreservesOuterTeamAndHonorsChangedLimit) {
-    scoped_env storage("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
-    scoped_env mode("APXCHOL_CPU_SPTRSV", "auto");
-    scoped_env verbose("APXCHOL_VERBOSE", "1");
+    apxchol::factor_options options{.drop_tolerance = 0};
+    options.factor_storage = apxchol::factor_storage_type::fp32;
+    options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
+    options.verbose = true;
     std::vector<node_index> bounds;
     const sparse_csc L11 = make_round(1024, 8, 114, bounds);
     auto L = L11;
@@ -689,7 +685,7 @@ TEST(SpTRSVLevelset, GroundingPreservesOuterTeamAndHonorsChangedLimit) {
     apxchol::omp_sptrsv trsv;
     trsv.set_round_bounds(bounds);
     testing::internal::CaptureStderr();
-    trsv.setup(L, L11.rows());
+    trsv.setup(L, L11.rows(), options);
     const auto setup_log = testing::internal::GetCapturedStderr();
     EXPECT_NE(setup_log.find("processors=" + std::to_string(workers) + ")"), std::string::npos);
     ASSERT_TRUE(trsv.uses_hybrid_schedule());
@@ -708,8 +704,8 @@ TEST(SpTRSVLevelset, GroundingPreservesOuterTeamAndHonorsChangedLimit) {
 #endif
 
 TEST(CriticalSchedule, HybridGroupsInteriorThinRounds) {
-    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop_off("APXCHOL_FACTOR_DROP", "0");
+    apxchol::factor_options options{.drop_tolerance = 0};
+    options.factor_storage = apxchol::factor_storage_type::fp32;
     const std::vector<node_index> widths = {65536, 8, 8, 8, 65536, 8, 8, 8};
     std::vector<node_index> bounds{0};
     for (const auto width : widths) bounds.push_back(bounds.back() + width);
@@ -724,14 +720,14 @@ TEST(CriticalSchedule, HybridGroupsInteriorThinRounds) {
     set_threads(4);
     apxchol::omp_sptrsv levels, hybrid;
     {
-        scoped_env mode("APXCHOL_CPU_SPTRSV", "levels");
+        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
         levels.set_round_bounds(bounds);
-        levels.setup(L, L.rows());
+        levels.setup(L, L.rows(), options);
     }
     {
-        scoped_env mode("APXCHOL_CPU_SPTRSV", "auto");
+        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
         hybrid.set_round_bounds(bounds);
-        hybrid.setup(L, L.rows());
+        hybrid.setup(L, L.rows(), options);
     }
     ASSERT_TRUE(hybrid.uses_hybrid_schedule());
     const auto assignment = apxchol::detail::assign_critical_schedule(

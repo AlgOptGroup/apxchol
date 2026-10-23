@@ -19,7 +19,6 @@
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <chrono>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -30,6 +29,7 @@
 #include <stdexcept>
 #include <string>
 #include <typeinfo>
+#include <utility>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -163,18 +163,12 @@ apxchol::solve_options to_solve_options(const apxchol_options& o) {
     require(o.backend == APXCHOL_BACKEND_CPU || o.backend == APXCHOL_BACKEND_METAL ||
                 o.backend == APXCHOL_BACKEND_AUTO,
             "options.backend must be APXCHOL_BACKEND_CPU, METAL or AUTO");
-    require(std::isfinite(o.tol) && o.tol > 0.0, "options.tol must be finite and positive");
-    require(o.max_iter >= 0, "options.max_iter must be non-negative");
-    require(o.stagnation_window >= 0, "options.stagnation_window must be non-negative");
-    require(o.threads >= 0, "options.threads must be non-negative");
     require(o.sampler == APXCHOL_SAMPLER_GKS || o.sampler == APXCHOL_SAMPLER_TRACE_CYCLE,
             "options.sampler must be APXCHOL_SAMPLER_GKS or APXCHOL_SAMPLER_TRACE_CYCLE");
     require(o.partitioner >= 0 && o.partitioner < 3,
             "options.partitioner is not an apxchol_partitioner value");
     require(o.keep_factor_values == 0 || o.keep_factor_values == 1,
             "options.keep_factor_values must be 0 or 1");
-    require(std::isfinite(o.degree_quantile) && o.degree_quantile <= 1.0,
-            "options.degree_quantile must be finite and at most 1");
     if constexpr (sizeof(std::size_t) < sizeof(std::uint64_t)) {
         require(o.exact_clique_max_degree <= std::numeric_limits<std::size_t>::max(),
                 "options.exact_clique_max_degree exceeds size_t");
@@ -197,6 +191,7 @@ apxchol::solve_options to_solve_options(const apxchol_options& o) {
     so.tol = o.tol;
     so.max_iter = o.max_iter;
     so.stagnation_window = o.stagnation_window;
+    so.num_threads = o.threads;
     so.keep_factor_values = o.keep_factor_values != 0;
     so.factor_opts.seed = o.seed;
     so.factor_opts.is_select = kPartitionerNames[o.partitioner];
@@ -206,6 +201,11 @@ apxchol::solve_options to_solve_options(const apxchol_options& o) {
     so.factor_opts.exact_clique_max_degree =
         static_cast<std::size_t>(o.exact_clique_max_degree);
     so.factor_opts.omp_threshold = static_cast<std::size_t>(o.omp_threshold);
+    try {
+        apxchol::detail::validate_solve_options(so);
+    } catch (const std::invalid_argument& error) {
+        fail(APXCHOL_STATUS_INVALID_ARGUMENT, error.what());
+    }
     return so;
 }
 
@@ -248,17 +248,9 @@ apxchol::solve_backend resolve_route(apxchol_backend backend,
                                           : apxchol::solve_backend::cpu;
 }
 
-/// Classifies the triangular-solve storage request before any setup work. An
-/// unreadable APXCHOL_FACTOR_STORAGE (read when factor_storage is AUTO) is
-/// INVALID_ARGUMENT and FP16 on a CPU route without FP16 support UNSUPPORTED;
-/// both would otherwise surface after the factorization, as other statuses.
+/// Reject unsupported CPU FP16 storage before factorization, with its C status.
 void require_storage(const apxchol::solve_options& so, apxchol::solve_backend route) {
-    bool fp16 = false;
-    try {
-        fp16 = apxchol::detail::resolve_fp16_storage(so.factor_opts.factor_storage, false);
-    } catch (const std::invalid_argument& e) {
-        fail(APXCHOL_STATUS_INVALID_ARGUMENT, std::string("APXCHOL_FACTOR_STORAGE: ") + e.what());
-    }
+    const bool fp16 = apxchol::detail::resolve_fp16_storage(so.factor_opts.factor_storage, false);
     if (route == apxchol::solve_backend::cpu && fp16 && !apxchol::omp_sptrsv::fp16_supported())
         fail(APXCHOL_STATUS_UNSUPPORTED,
              "FP16 factor storage on the CPU route requires AVX/F16C or Apple ARM64");
@@ -394,47 +386,34 @@ struct apxchol_factor {
 };
 
 struct apxchol_solver {
-    apxchol_options options{};
-    std::unique_ptr<apxchol::solver> owner;
-    const apxchol::cpu_solver* cpu = nullptr;  // owner's CPU route, if it is one
+    apxchol::solver owner;
     Eigen::VectorXd b_buffer, x0_buffer;
     double setup_seconds = 0.0;
     std::int32_t setup_max_threads = 1;
 
-    const apxchol::factorization& factor() const { return owner->factor(); }
-    Eigen::Index n() const { return owner->rows(); }
-    double tol_for(double tol) const { return tol < 0.0 ? options.tol : tol; }
-    int max_iter_for(std::int32_t max_iter) const {
-        return max_iter < 0 ? options.max_iter : max_iter;
-    }
+    explicit apxchol_solver(apxchol::solver value) : owner(std::move(value)) {}
 
-    // Retain b for aliased output and the CPU original-system exit check.
+    const apxchol::factorization& factor() const { return owner.factor(); }
+    Eigen::Index n() const { return owner.rows(); }
+
+    // Retain the inputs so exact aliasing with the output is safe.
     apxchol::solve_result solve_one(const double* b, const double* x0, double* x,
                                     double tol, int max_iter) {
         load_vector(b, n(), b_buffer, "b");
         if (x0 != nullptr) load_vector(x0, n(), x0_buffer, "x0");
         Eigen::Map<Eigen::VectorXd> out(x, n());
         const Eigen::VectorXd* guess = x0 != nullptr ? &x0_buffer : nullptr;
-        apxchol::solve_result r;
         try {
-            r = owner->solve(b_buffer, out, tol, max_iter, guess);
+            return owner.solve(b_buffer, out, tol, max_iter, guess);
         } catch (const std::overflow_error& e) {
             fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
         } catch (const std::underflow_error& e) {
             fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
         }
-        if (cpu != nullptr) r.residual = cpu->relative_residual(b_buffer, out);
-        return r;
     }
 };
 
 namespace {
-
-void check_call_tolerances(double tol, std::int32_t max_iter) {
-    (void)max_iter;  // negative selects the handle's value; every other value is valid
-    require(!std::isnan(tol) && tol != 0.0 && !(tol > 0.0 && !std::isfinite(tol)),
-            "tol must be finite and positive (or negative for the handle's value)");
-}
 
 /// apxchol_solver_create (factor NULL: factorize A) and
 /// apxchol_solver_create_from_factor (adopt a copy of *factor).
@@ -455,19 +434,18 @@ apxchol_status create_solver(int64_t n, const int64_t* colptr, const int64_t* ro
             require(static_cast<std::size_t>(A.rows()) == factor->F.perm.size(),
                     "the factor's dimension differs from the operator's");
 
-        auto solver = std::make_unique<apxchol_solver>();
-        solver->options = opt;
         const apxchol::detail::thread_budget scope(opt.threads);
-        solver->setup_max_threads = max_threads();
+        const auto setup_max_threads = max_threads();
         const auto start = clock_type::now();
         // Resolved once here; the owner then runs exactly this route.
         so.backend = resolve_route(opt.backend, so, A, adopt);
         const bool gpu = so.backend == apxchol::solve_backend::gpu;
         require_storage(so, so.backend);
         if (adopt) check_adoptable(factor->F, A);
+        std::unique_ptr<apxchol_solver> solver;
         try {
-            solver->owner = adopt ? std::make_unique<apxchol::solver>(A, factor->F, so)
-                                  : std::make_unique<apxchol::solver>(A, so);
+            solver = std::make_unique<apxchol_solver>(adopt ? apxchol::solver(A, factor->F, so)
+                                                           : apxchol::solver(A, so));
         } catch (const std::domain_error& e) {
             if (gpu) fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
             throw;
@@ -475,7 +453,7 @@ apxchol_status create_solver(int64_t n, const int64_t* colptr, const int64_t* ro
             if (gpu) fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
             throw;
         }
-        solver->cpu = solver->owner->cpu();
+        solver->setup_max_threads = setup_max_threads;
         solver->setup_seconds = seconds_since(start);
         *out_solver = solver.release();
         return APXCHOL_STATUS_SUCCESS;
@@ -556,20 +534,15 @@ apxchol_status apxchol_solver_solve(apxchol_solver* solver, const double* b, con
     }
     return guarded(error_message, error_capacity, false, [&]() -> apxchol_status {
         require(solver != nullptr && b != nullptr && x != nullptr, "solver, b or x is NULL");
-        check_call_tolerances(tol, max_iter);
-        const double t = solver->tol_for(tol);
-        const apxchol::detail::thread_budget scope(solver->options.threads);
         const auto start = clock_type::now();
-        const apxchol::solve_result r =
-            solver->solve_one(b, x0, x, t, solver->max_iter_for(max_iter));
-        const bool converged = r.residual < t;
+        const apxchol::solve_result r = solver->solve_one(b, x0, x, tol, max_iter);
         if (info != nullptr) {
-            info->converged = converged ? 1 : 0;
+            info->converged = r.converged ? 1 : 0;
             info->iterations = static_cast<int64_t>(r.iterations);
             info->relative_residual = r.residual;
             info->solve_seconds = seconds_since(start);
         }
-        if (converged) return APXCHOL_STATUS_SUCCESS;
+        if (r.converged) return APXCHOL_STATUS_SUCCESS;
         write_message(error_message, error_capacity,
                       "did not converge: the relative residual is not below tol");
         return APXCHOL_STATUS_NOT_CONVERGED;
@@ -590,23 +563,18 @@ apxchol_status apxchol_solver_solve_block(apxchol_solver* solver, int64_t k, con
         require(k <= std::numeric_limits<std::ptrdiff_t>::max() /
                          static_cast<int64_t>(sizeof(double)) / n,
                 "n * k * sizeof(double) overflows");
-        check_call_tolerances(tol, max_iter);
         // Every column is validated before the first is solved.
         require_finite(b, n * k, "b");
         if (x0 != nullptr) require_finite(x0, n * k, "x0");
-        const double t = solver->tol_for(tol);
-        const int mi = solver->max_iter_for(max_iter);
-        const apxchol::detail::thread_budget scope(solver->options.threads);
         bool all = true;
         for (int64_t c = 0; c < k; ++c) {
             const int64_t off = c * n;
             const apxchol::solve_result r = solver->solve_one(
-                b + off, x0 != nullptr ? x0 + off : nullptr, x + off, t, mi);
-            const bool ok = r.residual < t;
-            all = all && ok;
+                b + off, x0 != nullptr ? x0 + off : nullptr, x + off, tol, max_iter);
+            all = all && r.converged;
             if (iterations != nullptr) iterations[c] = static_cast<int64_t>(r.iterations);
             if (relative_residuals != nullptr) relative_residuals[c] = r.residual;
-            if (converged != nullptr) converged[c] = ok ? 1 : 0;
+            if (converged != nullptr) converged[c] = r.converged ? 1 : 0;
         }
         if (all) return APXCHOL_STATUS_SUCCESS;
         write_message(error_message, error_capacity,
@@ -619,16 +587,14 @@ apxchol_status apxchol_solver_apply(apxchol_solver* solver, const double* r, dou
                                     char* error_message, size_t error_capacity) {
     return guarded(error_message, error_capacity, false, [&]() -> apxchol_status {
         require(solver != nullptr && r != nullptr && z != nullptr, "solver, r or z is NULL");
-        const apxchol::detail::thread_budget scope(solver->options.threads);
         const Eigen::Index n = solver->n();
-        Eigen::Map<Eigen::VectorXd> out(z, n);
-        if (solver->cpu != nullptr && r != z) {
-            // Straight from the caller's r into z: no copy, no allocation.
+        Eigen::Map<Eigen::MatrixXd> out(z, n, 1);
+        if (r != z) {
             require_finite(r, n, "r");
-            solver->cpu->apply(Eigen::Map<const Eigen::VectorXd>(r, n), out);
+            solver->owner.apply(Eigen::Map<const Eigen::MatrixXd>(r, n, 1), out);
         } else {
             load_vector(r, n, solver->b_buffer, "r");
-            out = solver->owner->apply(solver->b_buffer);
+            solver->owner.apply(solver->b_buffer, out);
         }
         return APXCHOL_STATUS_SUCCESS;
     });
@@ -639,10 +605,10 @@ apxchol_status apxchol_solver_stats(const apxchol_solver* solver, apxchol_stats*
     if (s != APXCHOL_STATUS_SUCCESS) return s;
     if (solver == nullptr) return APXCHOL_STATUS_INVALID_ARGUMENT;
     write_stats(solver->factor(),
-                solver->owner->backend() == apxchol::solve_backend::cpu ? APXCHOL_BACKEND_CPU
+                solver->owner.backend() == apxchol::solve_backend::cpu ? APXCHOL_BACKEND_CPU
                                                                          : APXCHOL_BACKEND_METAL,
                 solver->n(), solver->setup_seconds, solver->setup_max_threads, stats);
-    stats->factor_storage = solver->owner->factor_storage() == apxchol::factor_storage_type::fp16
+    stats->factor_storage = solver->owner.factor_storage() == apxchol::factor_storage_type::fp16
         ? APXCHOL_FACTOR_STORAGE_FLOAT16 : APXCHOL_FACTOR_STORAGE_FLOAT32;
     return APXCHOL_STATUS_SUCCESS;
 }

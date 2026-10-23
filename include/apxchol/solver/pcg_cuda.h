@@ -42,7 +42,7 @@ public:
     /// permuted output. Running PCG entirely in permuted space lets us avoid
     /// per-iter permute/unpermute on device.
     void setup(const Eigen::SparseMatrix<double>& L,
-               const std::vector<node_index>& perm)
+               const std::vector<node_index>& perm, bool verbose = false)
     {
         destroy();
         n_ = static_cast<int64_t>(L.rows());
@@ -57,28 +57,16 @@ public:
             perm.size() < static_cast<std::size_t>(n_))
             throw std::invalid_argument("GPU PCG requires a compressed square int32-sized operator and a complete permutation");
 
-        int precision = -1;
-        if (const char* e = std::getenv("APXCHOL_GPU_FP32_OPERATOR")) {
-            if (std::string(e) == "0") precision = 0;
-            else if (*e) precision = 1;
-        }
         // Allocate the permutation before accepting device ownership. The
         // factor supplied this validated bijection; the builder checks the CSC.
         h_perm_.assign(perm.begin(), perm.begin() + n_);
         if (!pcg_cuda::try_build_permuted_operator_csr(
                 static_cast<int>(n_), static_cast<int>(L.nonZeros()),
                 L.outerIndexPtr(), L.innerIndexPtr(), L.valuePtr(),
-                reinterpret_cast<const std::uint32_t*>(perm.data()), precision, matrix_))
+                reinterpret_cast<const std::uint32_t*>(perm.data()), -1, matrix_))
             throw std::invalid_argument("GPU PCG requires sorted, unique, fully paired CSC storage; request CPU explicitly");
 
-        // SpMV row mapping: threads per row from the average nnz/row
-        // (pcg_cuda::spmv_lanes_for), env APXCHOL_GPU_SPMV_LANES overrides.
         spmv_lanes_ = pcg_cuda::spmv_lanes_for(n_ > 0 ? static_cast<double>(matrix_.nnz) / static_cast<double>(n_) : 1.0);
-        if (const char* e = std::getenv("APXCHOL_GPU_SPMV_LANES")) {
-            const int v = std::atoi(e);
-            if (v == 1 || v == 2 || v == 4 || v == 8 || v == 16 || v == 32) spmv_lanes_ = v;
-            else if (*e) std::fprintf(stderr, "[apxchol] APXCHOL_GPU_SPMV_LANES=%s ignored (expected 1|2|4|8|16|32); using %d\n", e, spmv_lanes_);
-        }
         // Scalar-only sessions retain one column of storage. The first panel
         // grows this same workspace transactionally, then reuses it.
         reserve_columns(1);
@@ -86,7 +74,7 @@ public:
         // Complete owned setup before returning, including direct cuda_pcg
         // callers. The input CSC storage may end immediately after this call.
         APXCHOL_PCG_CUDA_CHECK(cudaDeviceSynchronize());
-        if (detail::gpu_setup_diagnostics())
+        if (verbose)
             std::fprintf(stderr, "[gpu-operator-builder] route=device completion_wait=1\n");
         ready_ = true;
     }
@@ -132,7 +120,7 @@ public:
     int64_t nnz() const { return matrix_.nnz; }
     /// Operator storage precision resolved at setup (FP32 only when exact).
     bool fp32_operator() const { return matrix_.fp32; }
-    /// Threads per row of the SpMV resolved at setup (spmv_lanes_for / env).
+    /// Threads per row of the SpMV resolved from the average row length.
     int spmv_lanes() const { return spmv_lanes_; }
 
 private:

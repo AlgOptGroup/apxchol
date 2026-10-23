@@ -11,7 +11,6 @@
 #include "apxchol/solver/factorize_workspace.h"
 #include "apxchol/graph/graph.h"
 #include "apxchol/checkpoint.h"
-#include "apxchol/env_knobs.h"
 #include "apxchol/solver/detail/residual_policy.h"
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/gpu_block_frontend.h"
@@ -604,7 +603,7 @@ void eliminate_partition(const Eliminator& elim,
     }
     eliminate_partition_singleton(elim, G, part, factor_cols, ws, opts, cp,
                                   work_hint, live_degrees);
-    if (live_degrees && std::getenv("APXCHOL_INCREMENTAL_DEGREE_TRACE")) {
+    if (live_degrees && opts.verbose) {
         const std::size_t raw = ws.degree_decrements.size();
         std::size_t unique = 0;
         double maximum_ms = 0.0;
@@ -717,6 +716,14 @@ void eliminate_remaining(const Eliminator& elim,
     active.clear();
 }
 
+// Internal reference controls for testing the adaptive production policy.
+struct factorization_controls {
+    enum class degree_cache { automatic, disabled, forced };
+    degree_cache incremental_degrees = degree_cache::automatic;
+    double prune_skip_factor = 4.0;
+    bool residual_sparsify = true;
+};
+
 } // namespace detail
 
 // Takes the graph BY VALUE (a sink). Elimination mutates the working graph, so
@@ -732,7 +739,9 @@ factorization factorize_impl(const Eliminator& elim,
                              checkpoint* cp,
                              const Eigen::SparseMatrix<double>* initial_csc = nullptr,
                              detail::setup_route route = detail::setup_route::cpu,
-                             [[maybe_unused]] bool keep_factor = false) {
+                             [[maybe_unused]] bool keep_factor = false,
+                             const detail::factorization_controls& controls = {}) {
+    detail::validate_factor_options(opts_in);
     const node_index n = initial_csc ? static_cast<node_index>(initial_csc->rows()) : G.n();
     if (n == 0)
         return {};
@@ -761,7 +770,7 @@ factorization factorize_impl(const Eliminator& elim,
     if (cp) (*cp)("graph_copy");
     auto gpu_round_shadow =
         detail::make_gpu_round_shadow_session<Eliminator>(elim,
-            route);
+            route, opts.verbose);
 
     // Detect SDDM: any vertex with positive excess means the matrix
     // is positive definite (not just semidefinite like a Laplacian).
@@ -795,11 +804,6 @@ factorization factorize_impl(const Eliminator& elim,
     // with its default Xcode 16.4 toolchain, whose libc++ lacks it.
     std::iota(active.begin(), active.end(), node_index{0});
     std::vector<node_index> active_scratch;
-    // APXCHOL_RESIDUAL_SPARSIFY=0 disables the one-shot residual sparsification.
-    const bool residual_sparsify_enabled = [] {
-        const char* value = std::getenv("APXCHOL_RESIDUAL_SPARSIFY");
-        return !value || !*value || std::strcmp(value, "0") != 0;
-    }();
 
 #if defined(APXCHOL_USE_CUDA)
     if (gpu_owned_setup_route) {
@@ -813,7 +817,8 @@ factorization factorize_impl(const Eliminator& elim,
                 throw std::invalid_argument("GPU setup requires a supported CSC operator");
             std::unique_ptr<detail::gpu_block_frontend> gpu_frontend;
             result.sddm = gpu_round_shadow.initialize_owned_csc(
-                detail::gpu_owned_csc_host_buffers(*initial_csc), gpu_frontend);
+                detail::gpu_owned_csc_host_buffers(*initial_csc), gpu_frontend,
+                opts.regularization);
             if (cp) (*cp)("gpu_csc_initialize");
             std::size_t previous_nnz = 0;
             bool sparsification_attempted = false;
@@ -827,7 +832,7 @@ factorization factorize_impl(const Eliminator& elim,
                     throw std::runtime_error("GPU-owned factorization selection made no progress");
                 const double min_yield = detail::adaptive_is_yield_fraction(
                     opts.min_is_fraction, active.size(), prep.average_degree, residual_thresh);
-                if (residual_sparsify_enabled && !sparsification_attempted &&
+                if (controls.residual_sparsify && !sparsification_attempted &&
                     detail::selection_should_handoff(part.num_regions(),
                         prep.candidate_count, active.size(), min_yield, residual_thresh,
                         opts.omp_threshold)) {
@@ -843,14 +848,14 @@ factorization factorize_impl(const Eliminator& elim,
                         worthwhile = detail::residual_sparsify_worthwhile(active.size(),
                             residual_thresh, handoff, distinct_degree);
                     }
-                    if (detail::gpu_setup_diagnostics())
+                    if (opts.verbose)
                         std::fprintf(stderr, "[gpu-owned-sparsify-gate] round=%zu active=%zu "
                             "handoff=%zu avg_distinct_degree=%.17g attempted=1 worthwhile=%d\n",
                             ws.round_index, active.size(), handoff, distinct_degree, int(worthwhile));
                     if (worthwhile) {
                         const auto sparse_seed = opts.seed ^ ws.round_index;
                         const auto stats = gpu_round_shadow.sparsify_owned_residual(*gpu_frontend, sparse_seed);
-                        if (detail::gpu_setup_diagnostics())
+                        if (opts.verbose)
                             std::fprintf(stderr, "[gpu-owned-sparsify] implementation=device round=%zu "
                                 "seed=%llu physical_before=%zu distinct_before=%zu kept=%zu backbone=%zu "
                                 "expected=%.17g min_p=%.17g max_inv_p=%.17g "
@@ -916,25 +921,13 @@ factorization factorize_impl(const Eliminator& elim,
     std::vector<std::array<size_t, 256>> pre_histograms;
     std::vector<size_t> pre_filter_offsets;
     std::vector<node_index> live_degrees;   // vertex-indexed, for ctx.degrees
-    // Exact incremental degrees for block-greedy on the directed AoS pool.
-    // The first prepass establishes the cache. AUTO either classifies the run
-    // as a permanent no-op or maintains the cache through sparse-reduced
-    // decrements and the existing fill-edge histogram. `=0` is the rollback;
-    // `=1` forces maintenance for diagnostics.
-    const char* incremental_degree_value =
-        std::getenv("APXCHOL_INCREMENTAL_DEGREE_SPARSE");
-    const bool incremental_degree_disabled = incremental_degree_value &&
-        *incremental_degree_value == '0';
-    const bool incremental_degree_forced = incremental_degree_value &&
-        *incremental_degree_value && !incremental_degree_disabled &&
-        std::strcmp(incremental_degree_value, "auto") != 0;
+    // Keep exact degrees when their sparse updates cost less than a full walk.
     const bool incremental_degree_capable =
         std::is_same_v<Partitioner, block_greedy_partitioner> &&
-        !incremental_degree_disabled;
+        controls.incremental_degrees != detail::factorization_controls::degree_cache::disabled;
     const bool incremental_degree_auto = incremental_degree_capable &&
-        !incremental_degree_forced;
-    bool incremental_degree_active =
-        incremental_degree_capable && !incremental_degree_auto;
+        controls.incremental_degrees == detail::factorization_controls::degree_cache::automatic;
+    bool incremental_degree_active = incremental_degree_capable && !incremental_degree_auto;
     bool incremental_degree_ready = false;
     bool incremental_degree_auto_decided = !incremental_degree_auto;
     std::size_t incremental_live_incidence = 0;
@@ -949,8 +942,8 @@ factorization factorize_impl(const Eliminator& elim,
     // count exceeds prune_skip_factor x the previous round's eligibility
     // threshold is reported at that count instead of being walked
     // (prune_and_degrees). Never while the cache is active or undecided (its
-    // sample and its seed are these walks), and never under
-    // APXCHOL_INCREMENTAL_DEGREE_SPARSE=0|1, which stay exact references.
+    // sample and its seed are these walks), and never under the forced exact
+    // reference policies.
     //
     // A raw count only grows until the vertex is walked, so a hub whose
     // neighbours die hides behind it and is eliminated late. Full
@@ -958,13 +951,7 @@ factorization factorize_impl(const Eliminator& elim,
     // they replace: the number of eligible vertices it would have hidden. A
     // clean audit doubles the skipping rounds before the next one (1..8), a
     // hidden vertex resets them to 1.
-    // APXCHOL_PRUNE_SKIP=<factor> overrides the factor, 0 disables the rule;
-    // APXCHOL_PRUNE_SKIP_TRACE=1 prints every audit.
-    double prune_skip_factor = 4.0;
-    if (const char* e = std::getenv("APXCHOL_PRUNE_SKIP"); e && *e)
-        prune_skip_factor = std::atof(e);
-    const bool prune_skip_trace =
-        std::getenv("APXCHOL_PRUNE_SKIP_TRACE") != nullptr;
+    const double prune_skip_factor = controls.prune_skip_factor;
     unsigned prune_skip_gap = 1, prune_skip_streak = 0;
     double previous_degree_threshold = 0.0;   // 0 = no previous round yet
 
@@ -1015,7 +1002,7 @@ factorization factorize_impl(const Eliminator& elim,
                 avg_deg = total_degree / static_cast<double>(act.size());
             } else {
                 if (refresh_incremental &&
-                    std::getenv("APXCHOL_INCREMENTAL_DEGREE_TRACE"))
+                    opts.verbose)
                     std::fprintf(stderr,
                         "[incremental-refresh] round=%llu dead=%zu live=%zu "
                         "ratio=%.6f threshold=%.6f\n",
@@ -1056,7 +1043,7 @@ factorization factorize_impl(const Eliminator& elim,
                     prune_skip_gap = hidden == 0
                         ? std::min(2u * prune_skip_gap, 8u) : 1u;
                     prune_skip_streak = 0;
-                    if (prune_skip_trace)
+                    if (opts.verbose)
                         std::fprintf(stderr,
                             "[prune-skip] round=%llu active=%zu hidden=%zu next_gap=%u\n",
                             static_cast<unsigned long long>(ws.round_index),
@@ -1185,7 +1172,7 @@ factorization factorize_impl(const Eliminator& elim,
                     last_candidate_count, active.size(), min_yield,
                     residual_thresh, opts.omp_threshold)) {
                 handoff_vertices = part.num_regions();
-                if (std::getenv("APXCHOL_VERBOSE"))
+                if (opts.verbose)
                     std::fprintf(stderr,
                         "[apxchol] selector handoff: active=%zu candidates=%zu "
                         "selected=%zu yield=%.6f base=%.6f effective=%.6f "
@@ -1265,7 +1252,7 @@ factorization factorize_impl(const Eliminator& elim,
             }
         }
         if (incremental_degree_capable &&
-            std::getenv("APXCHOL_INCREMENTAL_DEGREE_TRACE")) {
+            opts.verbose) {
             std::fprintf(stderr,
                 "[incremental-gate] round=%llu active=%zu candidates=%zu "
                 "selected=%zu avg_degree=%.6f selected_work=%zu "
@@ -1299,23 +1286,22 @@ factorization factorize_impl(const Eliminator& elim,
         }
         finish_round(cols_before);
 
-        // vec_pool: pool defrag happens inside vec_pool's bulk_reserve_parallel
-        // (built in, always on). Here we only sample the worst fragmentation
-        // seen, for the APXCHOL_MEM_DUMP diagnostic.
+        // Pool defragmentation happens inside bulk_reserve_parallel.
+        // Record the live fraction after each round.
         work.adj_note_live_fraction();
     }
 
     // Before the BK residual loop, sparsify once only when the observed
     // handoff yield predicts enough future edge traffic to repay the rebuild.
     {
-        if (residual_sparsify_enabled && active.size() > residual_thresh &&
+        if (controls.residual_sparsify && active.size() > residual_thresh &&
             handoff_vertices != 0) {
             const auto sample =
                 detail::residual_coalescer::sample(work, active);
             const bool worthwhile = detail::residual_sparsify_worthwhile(
                 active.size(), residual_thresh, handoff_vertices,
                 sample.avg_distinct_degree);
-            if (std::getenv("APXCHOL_VERBOSE"))
+            if (opts.verbose)
                 std::fprintf(stderr,
                     "[apxchol] residual sparsify gate: active=%zu "
                     "handoff_vertices=%zu avg_distinct_degree=%.6f "
@@ -1331,7 +1317,7 @@ factorization factorize_impl(const Eliminator& elim,
                         work, active,
                         detail::kResidualSparsifyKeepProbability,
                         opts.seed ^ ws.round_index);
-                if (std::getenv("APXCHOL_VERBOSE"))
+                if (opts.verbose)
                     std::fprintf(stderr,
                         "[apxchol] residual sparsify: active=%zu p=%.2f "
                         "edges=%zu/%zu->%zu expected=%.1f backbone=%zu "
@@ -1426,7 +1412,7 @@ factorization factorize_impl(const Eliminator& elim,
     // live_frac well below 1 => abandoned slabs dominate -> compaction would help.
     // Read off the working graph HERE, before it is freed below (nnz(L) is the
     // off-diagonal count + one diagonal per column -- what assemble_csc builds).
-    if (const char* e = std::getenv("APXCHOL_MEM_DUMP"); e && *e) {
+    if (opts.verbose) {
         const double MB = 1.0 / (1024.0 * 1024.0);
         size_t nnz = gpu_owned_setup_route ? result.L.nonZeros() : factor_cols.size();
         for (const auto& c : factor_cols) nnz += c.entry_count;
@@ -1481,9 +1467,9 @@ factorization factorize_impl(const Eliminator& elim,
 #if defined(APXCHOL_USE_CUDA)
     if (gpu_owned_setup_route) {
         result.research_device_factor = gpu_round_shadow.finalize_device_factor(
-            result.perm, result.sddm ? n : n - 1, opts.factor_storage);
+            result.perm, result.sddm ? n : n - 1, opts.factor_storage, opts.drop_tolerance);
         if (cp) (*cp)("gpu_factor_finalize");
-        if (detail::gpu_setup_diagnostics()) {
+        if (opts.verbose) {
             const std::size_t omitted_payload_bytes =
                 (static_cast<std::size_t>(result.L.nonZeros()) - n) * sizeof(detail::factor_entry);
             std::fprintf(stderr,
@@ -1546,6 +1532,7 @@ template<typename Partitioner>
 factorization factorize(graph G,
                         const factor_options& opts,
                         checkpoint* cp) {
+    detail::validate_graph_options(opts);
     return factorize_impl<Partitioner>(make_tree_elim(opts), std::move(G), opts, cp);
 }
 
@@ -1553,6 +1540,7 @@ template<typename Partitioner, eliminator E>
 factorization factorize(graph G, const E& elim,
                         const factor_options& opts,
                         checkpoint* cp) {
+    detail::validate_graph_options(opts);
     return factorize_impl<Partitioner>(elim, std::move(G), opts, cp);
 }
 
@@ -1560,6 +1548,7 @@ template<partitioner P>
 factorization factorize(graph G, P part,
                         const factor_options& opts,
                         checkpoint* cp) {
+    detail::validate_graph_options(opts);
     return factorize_impl(make_tree_elim(opts), part, std::move(G), opts, cp);
 }
 
@@ -1567,6 +1556,7 @@ template<partitioner P, eliminator E>
 factorization factorize(graph G, P part, const E& elim,
                         const factor_options& opts,
                         checkpoint* cp) {
+    detail::validate_graph_options(opts);
     return factorize_impl(elim, part, std::move(G), opts, cp);
 }
 

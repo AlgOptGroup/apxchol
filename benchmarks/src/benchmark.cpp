@@ -28,6 +28,11 @@
 //   --seed <int>       RNG seed                             (default: 42)
 //   --repeat <int>     repetitions per solver (median taken)  (default: 1)
 //   --v1-backend <b>   auto | cpu | gpu, complete setup/solve route (default: auto)
+//   --factor-storage <s> auto | float16 | float32; apxchol v1 only
+//   --cpu-schedule <s> auto | levels; apxchol v1 only
+//   --factor-drop <x>, --regularization <x>, --lump-max-mass <x>,
+//   --degree-quantile <q> explicit apxchol v1 factor options
+//   --profile, --report-fill print apxchol v1 timing / factor details
 
 #include <iostream>
 #include <iomanip>
@@ -660,68 +665,21 @@ static BenchResult run_apxchol_v1(
     const Eigen::VectorXd& b,
     const std::string& graph_name,
     const std::string& combo_name,
-    std::string is,
-    double tol, int maxiter,
-    bool dump_profile = false,
-    size_t exact_clique_max_degree = 0,
-    double degree_multiplier_override = 0.0,
-    apxchol::clique_sampler sampler = apxchol::clique_sampler::gks,
-    size_t exact_core_max_h = apxchol::exact_core_by_route,
-    size_t double_cycle_min_h = 0,
-    apxchol::solve_backend backend = apxchol::solve_backend::automatic)
+    apxchol::solve_options opts, bool dump_profile, bool report_fill)
 {
     BenchResult r;
-    if (std::getenv("APXCHOL_PROFILE")) dump_profile = true;  // checkpoint breakdown
     r.solver_name = combo_name;
     r.graph_name = graph_name;
     r.n = static_cast<int>(L.rows());
     r.nnz = static_cast<int>(L.nonZeros());
 
-    apxchol::factor_options fopts{.seed = 42, .is_select = is};
-    fopts.sampler = sampler;
-    fopts.exact_core_max_h = exact_core_max_h;
-    fopts.double_cycle_min_h = double_cycle_min_h;
-    if (exact_clique_max_degree > 0)
-        fopts.exact_clique_max_degree = exact_clique_max_degree;
-    if (degree_multiplier_override > 0.0)
-        fopts.partition.degree_multiplier = degree_multiplier_override;
-    // Experiment knobs to mimic AC's adaptive min-degree elimination: set
-    // min_is_fraction=1 so a large residual's IS bails immediately and the
-    // whole factor is peeled sequentially in residual_peel order
-    // min_degree uses a lazy degree heap; do not equate it with AC's :deg.
-    if (const char* e = std::getenv("APXCHOL_MIN_IS_FRACTION"))
-        fopts.min_is_fraction = std::atof(e);
-    if (const char* e = std::getenv("APXCHOL_RESIDUAL_PEEL")) {
-        const std::string s = e;
-        fopts.residual_peel = (s == "min_degree") ? apxchol::residual_peel_strategy::min_degree
-                            : (s == "bk_serial")  ? apxchol::residual_peel_strategy::bk_serial
-                            :                        apxchol::residual_peel_strategy::natural;
-    }
-    // Exact Schur clique up to a degree cap (zero sampling variance).
-    if (const char* e = std::getenv("APXCHOL_EXACT_CLIQUE"))
-        fopts.exact_clique_max_degree = static_cast<size_t>(std::atol(e));
-    // Trace-cycle heavy-core rules (see factor_options): exact small cores,
-    // doubled cycle on large cores.
-    if (const char* e = std::getenv("APXCHOL_EXACT_CORE_MAX_H"))
-        fopts.exact_core_max_h = static_cast<size_t>(std::atol(e));
-    if (const char* e = std::getenv("APXCHOL_DOUBLE_CYCLE_MIN_H"))
-        fopts.double_cycle_min_h = static_cast<size_t>(std::atol(e));
-    if (const char* e = std::getenv("APXCHOL_DEGREE_MULT"))
-        fopts.partition.degree_multiplier = std::atof(e);
-    if (const char* e = std::getenv("APXCHOL_DEGREE_QUANTILE"))
-        fopts.partition.degree_quantile = std::atof(e);
-    if (const char* e = std::getenv("APXCHOL_DEGREE_TIEBREAK"))
-        fopts.partition.degree_tiebreak = std::atoi(e) != 0;
-
-    apxchol::solve_options opts{.tol = tol, .max_iter = maxiter,
-        .factor_opts = fopts};
-    opts.backend = backend;
+    const double tol = opts.tol;
+    const int maxiter = opts.max_iter;
 #if defined(APXCHOL_USE_CUDA)
     // Warm the compatible runtime outside timing; input eligibility is setup work.
     if (apxchol::detail::select_solve_backend(opts) == apxchol::solve_backend::gpu)
         warm_up_cuda_once();
 #endif
-    const bool report_fill = std::getenv("APXCHOL_REPORT_FILL") != nullptr;
     long long factor_nnz = 0, factor_rows = 0;
     std::uint64_t stored_nnz = 0, l11_nnz = 0, dropped = 0;
     double drop_rel = 0;
@@ -741,11 +699,11 @@ static BenchResult run_apxchol_v1(
 
     const auto t_wall_start = std::chrono::high_resolution_clock::now();
     apxchol::solve_result res;
-    auto* cp = std::getenv("APXCHOL_NO_CHECKPOINT") ? nullptr : &res.timings;
-    if (cp) { cp->descend("setup"); cp->tick(); }
+    auto* cp = &res.timings;
+    cp->descend("setup"); cp->tick();
     const auto route = apxchol::detail::select_solve_backend(opts, &L);
     opts.backend = route; // resolve once; retries reuse the same concrete owner
-    if (cp) { (*cp)("backend_selection"); cp->ascend(); }
+    (*cp)("backend_selection"); cp->ascend();
     r.execution_route = route == apxchol::solve_backend::gpu ? "gpu" : "cpu";
 #if defined(APXCHOL_USE_CUDA)
     if (route == apxchol::solve_backend::gpu) {
@@ -796,9 +754,7 @@ static BenchResult run_apxchol_v1(
                                          // PCG frees all device state before returning);
                                          // -1 on CPU builds / host-PCG paths.
     r.iterations = static_cast<int>(res.iterations);
-    // Grade every solver against the same original operator and RHS. CPU reports
-    // its recursive residual; GPU reports a recomputed final residual. The harness
-    // independently checks the returned solution in both cases.
+    // Independently grade the returned solution against the original operator and RHS.
     {
         Eigen::VectorXd xg = res.x;
         center_if_laplacian(xg);
@@ -1046,7 +1002,11 @@ struct Args {
     // If non-empty, only configs whose label is in this set are run.
     // Labels include the storage tag to preserve historical result identities.
     std::set<std::string> v1_configs;
-    std::string v1_backend = "auto";
+#ifdef HAVE_APXCHOL_V1
+    apxchol::solve_options v1_options;
+    bool profile = false;
+    bool report_fill = false;
+#endif
     // De-singularization is two orthogonal axes (see resolve_desing). decompose:
     // auto|whole|split (auto = split iff disconnected). ground: auto|pin|coarse|native
     // (auto = pin for AMG solvers / native for apxchol). The grounding WORK is timed
@@ -1109,11 +1069,25 @@ static Args parse_args(int argc, char** argv) {
             std::string tok;
             while (std::getline(ss, tok, ',')) a.solvers.insert(tok);
         }
+#ifdef HAVE_APXCHOL_V1
+        else if (arg == "--profile") a.profile = true;
+        else if (arg == "--report-fill") a.report_fill = true;
+        else if (arg == "--factor-storage")
+            a.v1_options.factor_opts.factor_storage = apxchol::detail::parse_factor_storage(next());
+        else if (arg == "--cpu-schedule")
+            a.v1_options.factor_opts.cpu_schedule = apxchol::detail::parse_cpu_schedule(next());
+        else if (arg == "--factor-drop") a.v1_options.factor_opts.drop_tolerance = std::stod(next());
+        else if (arg == "--regularization") a.v1_options.factor_opts.regularization = std::stod(next());
+        else if (arg == "--lump-max-mass") a.v1_options.factor_opts.lump_max_mass = std::stod(next());
+        else if (arg == "--degree-quantile") a.v1_options.factor_opts.partition.degree_quantile = std::stod(next());
         else if (arg == "--v1-backend") {
-            a.v1_backend = next();
-            if (a.v1_backend != "auto" && a.v1_backend != "cpu" && a.v1_backend != "gpu")
-                throw std::runtime_error("--v1-backend must be auto|cpu|gpu");
+            const auto backend = next();
+            if (backend == "cpu") a.v1_options.backend = apxchol::solve_backend::cpu;
+            else if (backend == "gpu") a.v1_options.backend = apxchol::solve_backend::gpu;
+            else if (backend == "auto") a.v1_options.backend = apxchol::solve_backend::automatic;
+            else throw std::runtime_error("--v1-backend must be auto|cpu|gpu");
         }
+#endif
         else if (arg == "--v1-configs") {
             std::string s = next();
             std::istringstream ss(s);
@@ -1199,6 +1173,9 @@ static Args parse_args(int argc, char** argv) {
     }
     if (a.solvers.empty() || a.solvers.count("all"))
         a.solvers = default_solvers;
+#ifdef HAVE_APXCHOL_V1
+    apxchol::detail::validate_factor_options(a.v1_options.factor_opts);
+#endif
     return a;
 }
 
@@ -2513,7 +2490,7 @@ static BenchResult run_hypre_boomeramg_gpu(
 #endif
 
 // ──────────────────── main ────────────────────
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
     // First, before anything can fail or hang: a cell recorded as `timeout` or
     // `failed` still carries the toolchain that produced it, because the runner
     // lifts this line out of whatever stderr it managed to capture.
@@ -2727,7 +2704,13 @@ int main(int argc, char** argv) {
         // adjacency signature) with counts, so a file mis-declared `operator`
         // dies here with a diagnosis instead of quietly producing nonsense.
         try {
-            op_scan = apxchol::require_operator(L);
+            op_scan = apxchol::require_operator(L,
+#ifdef HAVE_APXCHOL_V1
+                args.v1_options.factor_opts.lump_max_mass
+#else
+                apxchol::kDefaultLumpMassCeiling
+#endif
+            );
         } catch (const std::exception& e) {
             std::cerr << "--kind operator rejected " << args.mtx_path << ":\n  "
                       << e.what() << "\n";
@@ -2841,7 +2824,7 @@ int main(int argc, char** argv) {
                 std::cerr << "; " << op_scan.offdiag_pos
                           << " positive off-diagonal entries carrying "
                           << 100.0 * op_scan.positive_mass_fraction()
-                          << "% of the off-diagonal mass (apxchol's lumping ceiling is "
+                          << "% of the off-diagonal mass (apxchol's default lumping ceiling is "
                           << 100.0 * apxchol::kDefaultLumpMassCeiling
                           << "%; each solver handles them on its own terms — the "
                              "operator handed to all of them is the published one)";
@@ -3087,15 +3070,21 @@ int main(int argc, char** argv) {
             // centering -- handles disconnection intrinsically); --decompose split
             // factorizes each component independently. The single-component callable
             // ignores `ground` (apxchol has only its native grounding).
-            const auto backend = args.v1_backend == "cpu" ? apxchol::solve_backend::cpu
-                : args.v1_backend == "gpu" ? apxchol::solve_backend::gpu
-                                           : apxchol::solve_backend::automatic;
-            auto apx_single = [&combo, label, backend](const Eigen::SparseMatrix<double>& L_,
+            auto opts = args.v1_options;
+            opts.factor_opts.is_select = combo.is;
+            opts.factor_opts.sampler = combo.sampler;
+            opts.factor_opts.exact_clique_max_degree = combo.exact_clique_max_degree;
+            opts.factor_opts.exact_core_max_h = combo.exact_core_max_h;
+            opts.factor_opts.double_cycle_min_h = combo.double_cycle_min_h;
+            if (combo.degree_mult > 0)
+                opts.factor_opts.partition.degree_multiplier = combo.degree_mult;
+            auto apx_single = [&, label, opts](const Eigen::SparseMatrix<double>& L_,
                                               const Eigen::VectorXd& b_, const std::string& nm,
                                               double tl, int mi, ground_mode) {
-                return run_apxchol_v1(L_, b_, nm, label, combo.is, tl, mi,
-                                      false, combo.exact_clique_max_degree, combo.degree_mult,
-                                      combo.sampler, combo.exact_core_max_h, combo.double_cycle_min_h, backend);
+                auto request = opts;
+                request.tol = tl;
+                request.max_iter = mi;
+                return run_apxchol_v1(L_, b_, nm, label, request, args.profile, args.report_fill);
             };
             print(median_run([&]() {
                 return run_desing("apxchol", label, apx_single);
@@ -3185,4 +3174,7 @@ int main(int argc, char** argv) {
     if (hypre_initialized) HYPRE_Finalize();
 #endif
     return 0;
+} catch (const std::exception& error) {
+    std::cerr << error.what() << '\n';
+    return 2;
 }

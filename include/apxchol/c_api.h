@@ -59,8 +59,7 @@ typedef int32_t apxchol_status;
 enum {
     APXCHOL_STATUS_SUCCESS = 0,
     APXCHOL_STATUS_NOT_CONVERGED = 1,
-    APXCHOL_STATUS_INVALID_ARGUMENT = 2, /* pointers, sizes, CSC, option values (and an
-                                            unreadable APXCHOL_FACTOR_STORAGE) */
+    APXCHOL_STATUS_INVALID_ARGUMENT = 2, /* pointers, sizes, CSC, option values */
     APXCHOL_STATUS_INVALID_OPERATOR = 3, /* the operator contract rejected A */
     APXCHOL_STATUS_NO_FACTOR_VALUES = 4, /* factor export without keep_factor_values */
     APXCHOL_STATUS_UNSUPPORTED = 5,      /* backend not built/available; newer struct; an
@@ -108,16 +107,14 @@ typedef struct apxchol_options {
     apxchol_sampler sampler;
     apxchol_partitioner partitioner;
     int32_t keep_factor_values;       /* 0/1; factor value export requires 1 */
-    double degree_quantile;           /* < 0: chosen by route (factor_options.h) */
+    double degree_quantile;           /* -1: chosen by route; otherwise [0, 1) */
     uint64_t exact_clique_max_degree;
     uint64_t omp_threshold;           /* min active vertices before the factorization
                                          engages OpenMP, and the selection size kept
                                          whatever its yield (factor_options.h); 0:
-                                         OpenMP at every size, that safeguard off.
-                                         A set APXCHOL_OMP_THRESHOLD overrides it,
-                                         as for every apxchol entry point */
-    apxchol_factor_storage factor_storage; /* triangular-solve storage; AUTO reads
-                                              APXCHOL_FACTOR_STORAGE, then the backend default */
+                                         OpenMP at every size, that safeguard off */
+    apxchol_factor_storage factor_storage; /* triangular-solve storage;
+                                              AUTO uses the backend default */
 } apxchol_options;
 
 /* 32 bytes; the caller sets struct_size. */
@@ -170,7 +167,7 @@ APXCHOL_C_API apxchol_status apxchol_solver_create(
     apxchol_solver** out_solver, char* error_message, size_t error_capacity);
 APXCHOL_C_API void apxchol_solver_destroy(apxchol_solver* solver); /* NULL is a no-op */
 
-/* One right-hand side. tol < 0 / max_iter < 0 select the handle's options;
+/* One right-hand side. Finite tol < 0 / max_iter < 0 select the handle's options;
  * x0 NULL starts from zero. info is nullable. The backend rescales extreme
  * inputs internally; CPU inputs that cannot share a usable scale are
  * INVALID_ARGUMENT. A solution outside the representable range is UNSUPPORTED;
@@ -191,13 +188,9 @@ APXCHOL_C_API apxchol_status apxchol_solver_solve_block(
     double tol, int32_t max_iter, int64_t* iterations, double* relative_residuals,
     int32_t* converged, char* error_message, size_t error_capacity);
 
-/* One preconditioner application z = M^{-1} r. With an SDDM factor
- * (stats.sddm = 1) it is a fixed linear map. With a Laplacian factor z is
- * defined up to a constant vector: METAL centres input and output on every
- * application, so the same r gives the same z; CPU centres them only on
- * every K-th application of the solver's count (APXCHOL_GROUND=center-k,
- * K = APXCHOL_CENTER_K, default 10; every solve restarts the count), so for
- * a mean-zero r repeated applications agree up to a constant vector. */
+/* One preconditioner application z = M^{-1} r. It is a fixed linear map;
+ * with a Laplacian factor both backends centre input and output on every
+ * application, so the same r gives the same z independently of earlier calls. */
 APXCHOL_C_API apxchol_status apxchol_solver_apply(
     apxchol_solver* solver, const double* r, double* z,
     char* error_message, size_t error_capacity);

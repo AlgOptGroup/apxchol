@@ -7,9 +7,7 @@ namespace apxchol {
 
 using sptrsv_gpu_value_t = float;
 inline constexpr int kDataflowBlock = 256;
-template<unsigned Columns, unsigned RhsLanes>
-int dataflow_grid_size(bool fp16);
-inline int dataflow_grid_size(bool fp16) { return dataflow_grid_size<1, 1>(fp16); }
+int dataflow_grid_size();
 
 // Each sweep initializes atomic FP32 words and solves dependency-free rows,
 // then resident warps consume topologically ordered batches. A word contains

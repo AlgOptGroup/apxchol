@@ -258,6 +258,49 @@ struct allocation_tracker {
 
 template<class T> using device_buffer = cuda_buffer<T, cuda_check, allocation_tracker>;
 
+// Free device memory is read once. Each stage then requires the allocations
+// whose sizes are known at that boundary on top of the tracked resident bytes,
+// keeping a 10% device margin. Replacements count at their new size without
+// crediting released capacity, so the largest stage total (planned) bounds the
+// tracked peak.
+class staged_preflight {
+public:
+    staged_preflight(const allocation_tracker& tracker, const char* owner)
+        : tracker_(tracker), owner_(owner) {
+        cuda_check(cudaMemGetInfo(&free_, &total_), "query free device memory");
+        margin_ = total_ / 10;
+        available_ = gpu_round_shadow_checked_add(tracker.current, free_,
+                                                  "resident plus free device memory");
+        planned_ = tracker.current;
+    }
+
+    bool fits(std::size_t additional) const {
+        const std::size_t required = gpu_round_shadow_checked_add(
+            tracker_.current, additional, "staged device plan");
+        return available_ > margin_ && required <= available_ - margin_;
+    }
+
+    void require(std::size_t additional, const char* stage) {
+        const std::size_t required = gpu_round_shadow_checked_add(
+            tracker_.current, additional, "staged device plan");
+        planned_ = std::max(planned_, required);
+        if (!fits(additional))
+            throw std::runtime_error(
+                owner_ + stage + " does not fit in free device memory with "
+                "the 10% safety margin (required=" + std::to_string(required) +
+                ", resident=" + std::to_string(tracker_.current) +
+                ", free=" + std::to_string(free_) + ", margin=" +
+                std::to_string(margin_) + ")");
+    }
+
+    std::size_t planned() const noexcept { return planned_; }
+
+private:
+    const allocation_tracker& tracker_;
+    std::string owner_;
+    std::size_t free_ = 0, total_ = 0, margin_ = 0, available_ = 0, planned_ = 0;
+};
+
 class cuda_event {
 public:
     explicit cuda_event(const char* what, bool enabled) {
@@ -279,8 +322,8 @@ private:
 
 class event_timer {
 public:
-    event_timer()
-        : enabled_(gpu_setup_diagnostics()),
+    explicit event_timer(bool enabled)
+        : enabled_(enabled),
           begin_("create start event", enabled_), end_("create end event", enabled_) {}
 
     event_timer(const event_timer&) = delete;
@@ -1283,146 +1326,10 @@ T* fake_pointer(std::uintptr_t offset) {
     return reinterpret_cast<T*>(std::uintptr_t{0x100000} + offset);
 }
 
-std::size_t query_cub_bytes(std::size_t vertex_count,
-                            std::size_t incidence_count,
-                            std::size_t pivot_count,
-                            const gpu_round_shadow_report& shape) {
-    std::size_t maximum = 1;
-    std::size_t bytes = 0;
-    auto query_select = [&]<class T = work_record>(std::size_t count) {
-        if (!count) return;
-        bytes = 0;
-        cuda_check(cub::DeviceSelect::Flagged(
-            nullptr, bytes,
-            fake_pointer<T>(0x100),
-            fake_pointer<std::uint8_t>(0x200),
-            fake_pointer<T>(0x300),
-            fake_pointer<int>(0x400), cub_count(count, "selection query")),
-            "query selection temporary bytes");
-        maximum = std::max(maximum, bytes);
-    };
-    auto query_sort = [&]<class T = work_record>(std::size_t count, int end_bit = 64) {
-        if (!count) return;
-        bytes = 0;
-        cuda_check(cub::DeviceRadixSort::SortPairs(
-            nullptr, bytes,
-            fake_pointer<std::uint64_t>(0x900),
-            fake_pointer<std::uint64_t>(0xa00),
-            fake_pointer<T>(0xb00),
-            fake_pointer<T>(0xc00),
-            cub_count(count, "sort query"), 0, end_bit),
-            "query stable radix-sort temporary bytes");
-        maximum = std::max(maximum, bytes);
-    };
-
-    query_select(incidence_count);
-    query_select(shape.gathered_incidences);
-    query_select(shape.unique_neighbors);
-    query_select(shape.excess_updates);
-    query_sort(shape.gathered_incidences);
-    query_sort(shape.unique_neighbors);
-    query_sort(shape.excess_updates);
-    query_sort.operator()<gpu_round_shadow_incidence>(
-        shape.live_incidences, owner_sort_end_bit(vertex_count));
-    query_sort.operator()<gpu_round_shadow_incidence>(gpu_round_shadow_checked_mul(
-        static_cast<std::size_t>(shape.raw_fill_edges), 2, "fill-only sort query"),
-        owner_sort_end_bit(vertex_count));
-    query_select.operator()<gpu_round_shadow_incidence>(incidence_count);
-    if (pivot_count) {
-        bytes = 0;
-        cuda_check(cub::DeviceScan::ExclusiveSum(
-            nullptr, bytes,
-            fake_pointer<std::uint32_t>(0xd00),
-            fake_pointer<std::uint32_t>(0xe00),
-            cub_count(pivot_count, "scan query")),
-            "query pivot-offset scan temporary bytes");
-        maximum = std::max(maximum, bytes);
-    }
-    if (vertex_count) {
-        bytes = 0;
-        cuda_check(cub::DeviceScan::ExclusiveSum(
-            nullptr, bytes,
-            fake_pointer<std::uint32_t>(0x1700),
-            fake_pointer<std::uint32_t>(0x1900),
-            cub_count(vertex_count, "owner-offset scan query")),
-            "query owner-offset scan temporary bytes");
-        maximum = std::max(maximum, bytes);
-        bytes = 0;
-        cuda_check(cub::DeviceScan::InclusiveScan(
-            nullptr, bytes, fake_pointer<std::uint32_t>(0x1700),
-            fake_pointer<std::uint32_t>(0x1700), owner_offset_max{},
-            cub_count(vertex_count, "owner-offset maximum query")),
-            "query owner-offset maximum temporary bytes");
-        maximum = std::max(maximum, bytes);
-    }
-    return maximum;
-}
-
 std::size_t add_bytes(std::size_t total, std::size_t count,
                       std::size_t element, const char* what) {
     return gpu_round_shadow_checked_add(
         total, gpu_round_shadow_checked_mul(count, element, what), what);
-}
-
-std::size_t planned_peak_bytes(std::size_t n, std::size_t r, std::size_t p,
-                               const gpu_round_shadow_report& shape,
-                               std::size_t cub_bytes) {
-    const std::size_t g = static_cast<std::size_t>(shape.gathered_incidences);
-    const std::size_t u = static_cast<std::size_t>(shape.unique_neighbors);
-    const std::size_t f = static_cast<std::size_t>(shape.raw_fill_edges);
-    const std::size_t s =
-        static_cast<std::size_t>(shape.surviving_input_incidences);
-    const std::size_t l = static_cast<std::size_t>(shape.live_incidences);
-
-    std::size_t common = cub_bytes;
-    // A zero-result DeviceSelect still receives a valid one-element output
-    // sentinel.  Keep a small explicit allowance for those phase-local
-    // sentinels so the preflight remains a strict upper bound.
-    common = add_bytes(common, 4096, 1, "zero-count sentinels");
-    common = add_bytes(common, r, sizeof(gpu_round_shadow_incidence), "input");
-    common = add_bytes(common, n, sizeof(std::uint8_t), "active");
-    common = add_bytes(common, n, sizeof(double), "excess");
-    common = add_bytes(common, n, sizeof(std::uint64_t), "selected epochs");
-    common = add_bytes(common, p, sizeof(device_pivot), "pivots");
-    common = add_bytes(common, p, sizeof(std::uint32_t), "pivot counts");
-    common = add_bytes(common, p + 1, sizeof(std::uint32_t), "pivot offsets");
-    common = add_bytes(common, p, sizeof(double), "total degree");
-    common = add_bytes(common, 1, sizeof(int), "selected count");
-    common = add_bytes(common, 1, sizeof(std::uint32_t),
-                       "device-selection validation status");
-    common = add_bytes(common, 1, sizeof(selection_validation_digest_state),
-                       "device-selection validation digest");
-    common = add_bytes(common, 1, sizeof(device_semantics), "semantics");
-    common = add_bytes(common, p, sizeof(std::uint32_t), "oversized unique starts");
-    common = add_bytes(common, 1, sizeof(gpu_round_shadow_normal_batch_counts), "normal-batch counts");
-
-    auto phase = [&](std::initializer_list<std::pair<std::size_t,
-                                                      std::size_t>> arrays) {
-        std::size_t bytes = common;
-        for (const auto& [count, size] : arrays)
-            bytes = add_bytes(bytes, count, size, "phase allocation");
-        return bytes;
-    };
-
-    std::size_t peak = common;
-    peak = std::max(peak, phase({
-        {r, sizeof(work_record)}, {r, sizeof(std::uint8_t)},
-        {g, sizeof(work_record)}}));
-    peak = std::max(peak, phase({
-        {g, sizeof(work_record)}, {g, sizeof(work_record)},
-        {g, sizeof(work_record)},
-        {2 * g, sizeof(std::uint64_t)}, {g, sizeof(std::uint8_t)},
-        {u, sizeof(work_record)}}));
-    peak = std::max(peak, phase({
-        {2 * u, sizeof(work_record)}, {2 * u, sizeof(std::uint64_t)},
-        {u, sizeof(double)}, {u, sizeof(work_record)},
-        {u, sizeof(std::uint8_t)}, {f, sizeof(work_record)}}));
-    peak = std::max(peak, phase({
-        {f, sizeof(work_record)}, {r, sizeof(std::uint8_t)},
-        {l, sizeof(gpu_round_shadow_incidence)},
-        {n, sizeof(unsigned long long)}}));
-    (void)s;
-    return peak;
 }
 
 __global__ void csc_initial_counts_excess(
@@ -1517,9 +1424,12 @@ void copy_to_host(T* destination, const T* source, std::size_t count,
 
 class cub_workspace {
 public:
+    // Without a preflight, storage has fixed capacity. Otherwise, it grows
+    // to each call's exact query after checking available memory.
     cub_workspace(device_buffer<std::byte>& storage,
-                  device_buffer<int>& count)
-        : storage_(storage), count_(count) {}
+                  device_buffer<int>& count,
+                  staged_preflight* preflight = nullptr)
+        : storage_(storage), count_(count), preflight_(preflight) {}
 
     template<class Input, class T>
     int select(Input input, const std::uint8_t* flags, T* output,
@@ -1568,14 +1478,20 @@ private:
         const int n = cub_count(count, what);
         std::size_t bytes = 0;
         cuda_check(operation(nullptr, bytes, n), what);
-        if (bytes > storage_.count())
-            throw std::logic_error(
-                "GPU round shadow: preflight underestimated CUB workspace");
+        if (bytes > storage_.count()) {
+            if (!preflight_)
+                throw std::logic_error(
+                    "GPU round shadow: preflight underestimated CUB workspace");
+            preflight_->require(bytes, "CUB workspace growth");
+            storage_.reset("replace CUB workspace");
+            storage_.allocate(bytes, "grow CUB workspace");
+        }
         cuda_check(operation(storage_.get(), bytes, n), what);
     }
 
     device_buffer<std::byte>& storage_;
     device_buffer<int>& count_;
+    staged_preflight* preflight_;
 };
 
 #include "cuda_owned_sparsify.cuh"
@@ -1734,26 +1650,6 @@ struct round_common_scratch {
         buffer.allocate(count, what);
     }
 
-    // planned_peak_bytes already includes each current requested common
-    // buffer in every phase. Add only previously retained capacity in excess
-    // of that request, without double-counting the fresh allocation allowance.
-    std::size_t retained_excess(std::size_t cub_bytes, std::size_t p) const {
-        std::size_t extra = 0;
-        auto add = [&](const auto& buffer, std::size_t required) {
-            if (buffer.count() > required)
-                extra = gpu_round_shadow_checked_add(extra,
-                    gpu_round_shadow_checked_mul(buffer.count() - required,
-                        sizeof(*buffer.get()), "retained round scratch"),
-                    "retained round scratch sum");
-        };
-        add(cub_temp, cub_bytes); add(selected_count, 1); add(pivots, p);
-        add(pivot_counts, p); add(pivot_offsets, p + 1);
-        add(total_degree, p); add(semantics, 1);
-        add(oversized_starts, p); add(batch_counts, 1);
-        add(batch_descriptors, p);
-        return extra;
-    }
-
     void release() {
         cub_temp.reset("retire common CUB workspace");
         selected_count.reset("retire common selected count");
@@ -1770,6 +1666,8 @@ struct round_common_scratch {
 };
 
 struct gpu_round_shadow_device_state::impl {
+    bool verbose = false;
+    bool audit_selection_independence = false;
     clique_sampler sampler = clique_sampler::gks;
     allocation_tracker tracker;
     round_common_scratch owned_common_scratch;
@@ -1812,6 +1710,8 @@ struct gpu_round_shadow_device_state::impl {
     bool generation_has_device_selection = false;
     bool owned_prefix_materialized = false;
     bool csc_initial_round_pending = false;
+    // The consuming finalizer released the factor log after emission.
+    bool factor_log_consumed = false;
     // Only successful owned-round publication establishes this invariant.
     // Initial input conservatively uses the filtered count; raw test fixtures
     // may contain inactive incidence slots.
@@ -1841,8 +1741,8 @@ struct gpu_round_shadow_device_state::impl {
     bool fail_after_cuda_operation_for_test = false;
 #endif
 
-    explicit impl(clique_sampler kind = clique_sampler::gks)
-        : sampler(kind), owned_common_scratch(tracker), cycle_workspace(tracker),
+    explicit impl(clique_sampler kind, bool diagnostics)
+        : verbose(diagnostics), sampler(kind), owned_common_scratch(tracker), cycle_workspace(tracker),
           cycle_plan_cut(tracker), cycle_plan_state(tracker),
           cycle_status(tracker), residual_0(tracker), residual_1(tracker),
           owner_offsets_0(tracker), owner_offsets_1(tracker),
@@ -1962,7 +1862,6 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     const bool count_owned_spans = resident_rows_all_live;
     const std::size_t input_count = resident_count;
     const std::size_t next_slot = 1 - current_slot;
-    const bool audit_selection_independence = gpu_round_selection_audit_requested();
 
     cuda_check(cudaFree(nullptr), "initialize CUDA context");
 #if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
@@ -1987,140 +1886,52 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     gpu_round_shadow_validate_capacity_counts(
         static_cast<node_index>(n), r, p, capacity_shape);
 
-    const std::size_t cub_bytes = query_cub_bytes(n, r, p, capacity_shape);
-    std::size_t planned =
-        planned_peak_bytes(n, r, p, capacity_shape, cub_bytes);
     const std::size_t sampler_components =
         sampler == clique_sampler::trace_cycle ? 1 : 0;
-    if (sampler_components) {
-        const auto required = gpu_round_shadow_checked_mul(
-            capacity_shape.unique_neighbors, sampler_components, "cycle sampler moments");
-        // Retained capacity overlaps every round phase, including growth.
-        planned = add_bytes(planned, cycle_workspace.count(), sizeof(double),
-                            "retained cycle sampler moments");
-        if (required > cycle_workspace.count())
-            planned = add_bytes(planned, required, sizeof(double), "grown cycle sampler moments");
-        planned = add_bytes(planned, 2, sizeof(std::uint32_t), "cycle sampler status");
-        // Both plan buffers are retained across rounds, so an earlier round with
-        // more pivots leaves them larger than this round asks for. Budget the
-        // retained capacity, and the growth allocation on top when this round is
-        // the one that grows them, exactly as the moments buffer above does.
-        const std::size_t plan_rows = p ? p : 1;
-        planned = add_bytes(planned, cycle_plan_cut.count(), sizeof(std::uint32_t),
-                            "retained trace plan cutoffs");
-        if (plan_rows > cycle_plan_cut.count())
-            planned = add_bytes(planned, plan_rows, sizeof(std::uint32_t), "grown trace plan cutoffs");
-        planned = add_bytes(planned, cycle_plan_state.count(), sizeof(unsigned long long),
-                            "retained trace plan streams");
-        if (plan_rows > cycle_plan_state.count())
-            planned = add_bytes(planned, plan_rows, sizeof(unsigned long long), "grown trace plan streams");
-    }
-    // Oversized uniques remain live beside the common canonical stream through
-    // factor/sample. Retain a conservative full-g allowance in every phase.
-    planned = add_bytes(planned, capacity_shape.gathered_incidences,
-                        sizeof(work_record), "oversized unique overlap");
-    planned = add_bytes(planned, p, sizeof(normal_batch_descriptor),
-                        "normal-batch descriptors");
     const int normal_blocks = p
         ? static_cast<int>((p + 32 * kNormalWarps - 1) / (32 * kNormalWarps)) : 0;
     const int oversized_blocks = blocks_for(
         gpu_round_shadow_checked_mul(p, 32, "oversized row launch"));
-    planned = gpu_round_shadow_checked_add(planned,
-        owned_common_scratch.retained_excess(cub_bytes, p),
-        "retained common round scratch capacity");
-    // Flags previously existed only in some phases, with smaller g/u requests.
-    // Retaining input-sized flags overlaps every phase: conservatively add the
-    // full capacity, leaving the old phase-local allowances in place. Growth
-    // releases scratch first, so old/new capacities do not overlap.
-    planned = add_bytes(planned,
-        std::max(owned_common_scratch.flags.count(), input_count),
-        sizeof(std::uint8_t), "retained owned round flags");
-    // R1b's plan already covers one input and one phase-local residual.  R2a
-    // keeps a second residual slot resident, adds two owner-offset tables, and
-    // stably owner-sorts the materialized output before publishing it.
-    const std::size_t current_target = std::max(
-        residual(current_slot).bytes(),
-        gpu_round_shadow_checked_mul(
-            std::max<std::size_t>(input_count, 1),
-            sizeof(gpu_round_shadow_incidence), "resident input target"));
-    const std::size_t next_target = std::max(
-        residual(next_slot).bytes(),
-        gpu_round_shadow_checked_mul(
-            std::max<std::size_t>(
-                static_cast<std::size_t>(capacity_shape.live_incidences), 1),
-            sizeof(gpu_round_shadow_incidence), "resident output target"));
-    const std::size_t planned_input_bytes =
-        gpu_round_shadow_checked_mul(r, sizeof(gpu_round_shadow_incidence),
-                                     "planned input bytes");
-    if (current_target > planned_input_bytes)
-        planned = gpu_round_shadow_checked_add(
-            planned, current_target - planned_input_bytes,
-            "resident input capacity");
-    planned = gpu_round_shadow_checked_add(
-        planned, next_target, "resident spare output");
-    planned = add_bytes(planned, 2 * (n + 1), sizeof(std::uint32_t),
-                        "resident owner offsets");
-    // The phase-local plan includes dedup/sample keys only in their own
-    // phases. Retained keys overlap every phase, so add their entire maximum
-    // capacity here (conservatively leaving the old phase allowance in place).
-    // Growth releases obsolete scratch first; no old/new overlap is needed.
-    const std::size_t sort_key_capacity = std::max({
-        sort_keys_a.count(), sort_keys_b.count(),
-        static_cast<std::size_t>(capacity_shape.gathered_incidences),
-        static_cast<std::size_t>(capacity_shape.unique_neighbors),
-        static_cast<std::size_t>(capacity_shape.live_incidences)});
-    planned = add_bytes(planned, sort_key_capacity,
-                        2 * sizeof(std::uint64_t), "retained radix-sort keys");
-    // Retained degrees overlap the early phases and the inter-round state.
-    // Keep the old mutation allowance as a conservative overestimate.
-    planned = add_bytes(planned,
-                        std::max(owned_degrees.count(), n),
-                        sizeof(std::uint32_t), "retained owned degrees");
-    const std::size_t factor_column_required = factor_column_count + p;
-    const std::size_t factor_entry_required_upper =
-        gpu_round_shadow_checked_add(
-            factor_entry_count,
-            static_cast<std::size_t>(capacity_shape.unique_neighbors),
-            "factor append upper bound");
-    const std::size_t factor_column_target = factor_columns.count() <
-            factor_column_required
-        ? std::max<std::size_t>(n, factor_column_required)
-        : factor_columns.count();
-    const std::size_t factor_entry_target = std::max(
-        factor_entries.count(), geometric_capacity(factor_entry_required_upper));
-    // Account for overlap while growing the preserved factor log.
-    planned = add_bytes(planned, factor_columns.count(),
-                        sizeof(gpu_round_shadow_factor_column),
-                        "existing factor columns");
-    if (factor_column_target > factor_columns.count())
-        planned = add_bytes(planned, factor_column_target,
-                            sizeof(gpu_round_shadow_factor_column),
-                            "grown factor columns");
-    planned = add_bytes(planned, factor_entries.count(),
-                        sizeof(gpu_round_shadow_factor_entry),
-                        "existing factor entries");
-    if (factor_entry_target > factor_entries.count())
-        planned = add_bytes(planned, factor_entry_target,
-                            sizeof(gpu_round_shadow_factor_entry),
-                            "grown factor entries");
 
-    std::size_t free_bytes = 0;
-    std::size_t total_bytes = 0;
-    cuda_check(cudaMemGetInfo(&free_bytes, &total_bytes),
-               "query free device memory");
-    const std::size_t margin = total_bytes / 10;
-    const std::size_t available_with_resident =
-        gpu_round_shadow_checked_add(tracker.current, free_bytes,
-                                     "resident plus free device memory");
-    if (available_with_resident <= margin ||
-        planned > available_with_resident - margin)
-        throw std::runtime_error(
-            "GPU round shadow: forced round does not fit in free device "
-            "memory with the 10% safety margin (required=" +
-            std::to_string(planned) + ", resident=" +
-            std::to_string(tracker.current) + ", free=" +
-            std::to_string(free_bytes) + ", margin=" +
-            std::to_string(margin) + ")");
+    // Staged preflight; a preserved growth keeps its old capacity resident.
+    staged_preflight preflight(tracker, "GPU round shadow: ");
+    // Bytes that ensure_state_buffer/prepare allocate for count elements.
+    const auto growth = [](const auto& buffer, std::size_t count) {
+        return buffer.count() < count
+            ? gpu_round_shadow_checked_mul(count, sizeof(*buffer.get()),
+                                           "round buffer growth")
+            : std::size_t{0};
+    };
+    const auto bytes_of = [](std::size_t count, std::size_t width) {
+        return gpu_round_shadow_checked_mul(count, width, "round stage bytes");
+    };
+    const auto sum = [](std::initializer_list<std::size_t> parts) {
+        std::size_t total = 0;
+        for (const std::size_t part : parts)
+            total = gpu_round_shadow_checked_add(total, part, "round stage sum");
+        return total;
+    };
+
+    auto& common = owned_common_scratch;
+    const std::size_t factor_column_required = factor_column_count + p;
+    preflight.require(sum({
+        factor_columns.count() < factor_column_required
+            ? bytes_of(std::max<std::size_t>(n, factor_column_required),
+                       sizeof(gpu_round_shadow_factor_column))
+            : std::size_t{0},
+        growth(residual(current_slot), std::max<std::size_t>(input_count, 1)),
+        growth(active, n), growth(excess, n),
+        growth(owner_offsets(current_slot), n + 1),
+        growth(owner_offsets(next_slot), n + 1),
+        growth(selected_epoch_by_vertex, n),
+        growth(selection_validation_status, 1),
+        growth(selection_validation_digest, 1),
+        growth(common.selected_count, 1), growth(common.pivots, p),
+        growth(common.pivot_counts, p), growth(common.pivot_offsets, p + 1),
+        growth(common.total_degree, p), growth(common.semantics, 1),
+        growth(common.flags, input_count), growth(common.oversized_starts, p),
+        growth(common.batch_counts, 1), growth(common.batch_descriptors, p)}),
+        "forced round");
 
     tracker.begin_round();
     if (factor_columns.count() < factor_column_required) {
@@ -2167,7 +1978,6 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     auto& input_owner_offsets = owner_offsets(current_slot);
     auto& next_owner_offsets = owner_offsets(next_slot);
 
-    auto& common = owned_common_scratch;
     auto& cub_temp = common.cub_temp;
     auto& selected_count = common.selected_count;
     auto& pivots = common.pivots;
@@ -2176,7 +1986,6 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     auto& total_degree = common.total_degree;
     auto& semantics = common.semantics;
 
-    common.prepare(cub_temp, cub_bytes, "allocate CUB temporary storage");
     common.prepare(selected_count, 1, "allocate CUB selected count");
     common.prepare(pivots, p, "allocate pivots");
     common.prepare(pivot_counts, p, "allocate pivot counts");
@@ -2184,17 +1993,19 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     common.prepare(total_degree, p, "allocate total degrees");
     common.prepare(semantics, 1, "allocate semantic report");
 
-    if (tracker.peak > planned)
+    if (tracker.peak > preflight.planned())
         throw std::logic_error(
             "GPU round shadow: common allocations exceeded the preflight plan");
 
-    cub_workspace cub(cub_temp, selected_count);
-    event_timer timer;
-    const bool total_diagnostics = gpu_setup_diagnostics();
+    // CUB scratch grows to each call's exact query; the capacity is retained.
+    cub_workspace cub(cub_temp, selected_count, &preflight);
+    event_timer timer(verbose);
+    const bool total_diagnostics = verbose;
     cuda_event total_begin("create total start event", total_diagnostics);
     cuda_event total_end("create total end event", total_diagnostics);
 
     gpu_round_shadow_report report;
+    report.timings.enabled = verbose;
     report.input_incidences = r;
     report.resident_input_incidences = input_count;
     report.input_generation = generation;
@@ -2321,6 +2132,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         // The existing D2H completes all descriptor writes. Every batch
         // consumes at least one normal pivot, so B<=p (already CUB-bounded).
         normal_batch_count = static_cast<std::size_t>(report.normal_batch.batches);
+        preflight.require(bytes_of(sort_g, sizeof(work_record)), "oversized gather");
         second.allocate(sort_g, "allocate oversized gathered records");
         if (sort_g) {
             gather_oversized_raw<<<oversized_blocks, kBlock>>>(
@@ -2335,13 +2147,14 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     auto& keys_b = sort_keys_b;
     // Keep the original g capacity bound: excess reduction still needs keys for
     // the full canonical stream, even if no oversized row exists this round.
+    preflight.require(sum({growth(keys_a, g), growth(keys_b, g),
+                     bytes_of(sort_g, 3 * sizeof(work_record))}),
+                "neighbor deduplication");
     ensure_state_buffer(keys_a, g, "allocate radix keys A", "grow radix keys A");
     ensure_state_buffer(keys_b, g, "allocate radix keys B", "grow radix keys B");
     first.allocate(sort_g, "allocate sorted gathered records");
-    device_buffer<work_record> unique(tracker);
-    device_buffer<work_record> scratch(tracker);
-    flags.allocate(sort_g, "allocate dedup flags");
-    scratch.allocate(sort_g, "allocate dedup candidates");
+    device_buffer<work_record> candidates(tracker);
+    candidates.allocate(sort_g, "allocate dedup candidates");
     oversized_unique.allocate(sort_g, "allocate oversized unique neighbors");
 
     report.timings.dedup_ms = timer.measure_ms([&] {
@@ -2351,10 +2164,10 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
             cub.sort_pairs(keys_a.get(), keys_b.get(), second.get(), first.get(),
                            sort_g, "stable sort gathered neighbors");
             reduce_equal_pairs<<<blocks_for(sort_g), kBlock>>>(
-                first.get(), sort_g, scratch.get(), flags.get());
+                first.get(), sort_g, candidates.get(), flags.get());
             cuda_check(cudaGetLastError(), "launch deterministic neighbor dedup");
         }
-        const int unique_count = cub.select(scratch.get(), flags.get(), oversized_unique.get(),
+        const int unique_count = cub.select(candidates.get(), flags.get(), oversized_unique.get(),
                                             sort_g, "select unique neighbors");
         oversized_u = static_cast<std::size_t>(unique_count);
         u = gpu_round_shadow_checked_add(oversized_u,
@@ -2372,18 +2185,16 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     });
     second.reset("release gathered records");
     first.reset("release sorted gathered records");
-    scratch.reset("release dedup candidates");
-    unique.allocate(std::max<std::size_t>(u, 1), "allocate combined canonical neighbors");
-    if (oversized_u) {
-        scatter_oversized_unique<<<blocks_for(oversized_u), kBlock>>>(
-            oversized_unique.get(), oversized_u, oversized_starts.get(), pivot_offsets.get(), unique.get());
-        cuda_check(cudaGetLastError(), "scatter neighbor-ordered oversized rows");
-    }
-
+    candidates.reset("release dedup candidates");
     const std::size_t factor_column_base = factor_column_count;
     const std::size_t factor_entry_base = factor_entry_count;
     const std::size_t factor_entry_required = gpu_round_shadow_checked_add(
         factor_entry_base, u, "factor append entries");
+    preflight.require(factor_entries.count() < factor_entry_required
+                    ? bytes_of(geometric_capacity(factor_entry_required),
+                               sizeof(gpu_round_shadow_factor_entry))
+                    : std::size_t{0},
+                "factor append");
     if (factor_entries.count() < factor_entry_required) {
         const bool growth = factor_entries.count() != 0;
         factor_entries.grow_preserve(
@@ -2393,14 +2204,49 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         ++factor_log_allocations;
         if (growth) ++factor_log_growths;
     }
-    if (tracker.peak > planned)
+    if (tracker.peak > preflight.planned())
         throw std::logic_error(
             "GPU round shadow: factor-log growth exceeded the preflight plan");
+
+    // Canonical neighbors and their sampling scratch share one lifetime and
+    // one allocation, carved at 256-byte boundaries; compact raw fill outlives
+    // them through mutation and keeps its own buffer.
+    const auto aligned = [](std::size_t bytes) {
+        return gpu_round_shadow_checked_add(bytes, 255, "canonical block alignment") & ~std::size_t{255};
+    };
+    const std::size_t unique_bytes = aligned(bytes_of(std::max<std::size_t>(u, 1), sizeof(work_record)));
+    const std::size_t record_bytes = aligned(bytes_of(u, sizeof(work_record)));
+    const std::size_t canonical_bytes = sum({unique_bytes, record_bytes, record_bytes,
+                                            bytes_of(u, sizeof(double))});
+    {
+        std::size_t sample_bytes = sum({canonical_bytes,
+            bytes_of(std::max<std::size_t>(u, 1), sizeof(work_record))});
+        if (sampler_components)
+            sample_bytes = sum({sample_bytes,
+                growth(cycle_workspace, gpu_round_shadow_checked_mul(
+                    u, sampler_components, "cycle sampler workspace")),
+                growth(cycle_plan_cut, p ? p : 1), growth(cycle_plan_state, p ? p : 1),
+                growth(cycle_status, 2)});
+        preflight.require(sample_bytes, "fill sampling");
+    }
+    device_buffer<std::byte> canonical(tracker);
+    canonical.allocate(canonical_bytes, "allocate canonical neighbors and sampling scratch");
+    auto* const unique = reinterpret_cast<work_record*>(canonical.get());
+    auto* const scratch = reinterpret_cast<work_record*>(canonical.get() + unique_bytes);
+    auto* const fill_candidates = reinterpret_cast<work_record*>(
+        canonical.get() + unique_bytes + record_bytes);
+    auto* const prefix = reinterpret_cast<double*>(
+        canonical.get() + unique_bytes + 2 * record_bytes);
+    if (oversized_u) {
+        scatter_oversized_unique<<<blocks_for(oversized_u), kBlock>>>(
+            oversized_unique.get(), oversized_u, oversized_starts.get(), pivot_offsets.get(), unique);
+        cuda_check(cudaGetLastError(), "scatter neighbor-ordered oversized rows");
+    }
 
     report.timings.factor_ms = timer.measure_ms([&] {
         if (p) {
             prepare_factor<<<blocks_for(p), kBlock>>>(
-                unique.get(), pivot_offsets.get(), device_input.get(),
+                unique, pivot_offsets.get(), device_input.get(),
                 active.get(), pivots.get(), p,
                 excess.get(), total_degree.get(),
                 factor_columns.get(), factor_column_base,
@@ -2410,15 +2256,9 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         }
     });
 
-    scratch.allocate(u, "allocate canonical-neighbor scratch");
     // unique <= gathered, so the existing key capacity already covers this
     // stage and its excess-update sorts without another allocation.
-    device_buffer<double> prefix(tracker);
-    device_buffer<work_record> fill_candidates(tracker);
     device_buffer<work_record> fills(tracker);
-    prefix.allocate(u, "allocate GKS prefix sums");
-    fill_candidates.allocate(u, "allocate raw fill candidates");
-    flags.allocate(u, "allocate sample flags");
     if (sampler_components) {
         ensure_state_buffer(cycle_workspace, gpu_round_shadow_checked_mul(u, sampler_components,
             "cycle sampler workspace"), "allocate cycle sampler moments", "grow cycle sampler moments");
@@ -2441,17 +2281,17 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                     sort_input, canonical_sort_count, keys_a.get());
                 cuda_check(cudaGetLastError(), "launch weight-key construction");
                 cub.sort_pairs(keys_a.get(), keys_b.get(), sort_input,
-                               scratch.get(), canonical_sort_count,
+                               scratch, canonical_sort_count,
                                "stable sort unique neighbors by weight");
                 build_first_keys<<<blocks_for(canonical_sort_count), kBlock>>>(
-                    scratch.get(), canonical_sort_count, keys_a.get());
+                    scratch, canonical_sort_count, keys_a.get());
                 cuda_check(cudaGetLastError(), "launch pivot-key construction");
-                cub.sort_pairs(keys_a.get(), keys_b.get(), scratch.get(),
+                cub.sort_pairs(keys_a.get(), keys_b.get(), scratch,
                                sort_input, canonical_sort_count,
                                "stable regroup canonical neighbors by pivot");
                 scatter_oversized_unique<<<blocks_for(oversized_u), kBlock>>>(
                     oversized_unique.get(), oversized_u, oversized_starts.get(),
-                    pivot_offsets.get(), unique.get());
+                    pivot_offsets.get(), unique);
                 cuda_check(cudaGetLastError(), "scatter canonical oversized rows");
             }
             cuda_check(cudaMemset(flags.get(), 0, u), "clear fill candidate flags");
@@ -2467,23 +2307,23 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                         pivot_counts.get(), pivot_offsets.get(), nullptr,
                         excess.get(), total_degree.get(), factor_columns.get(),
                         factor_column_base, factor_entries.get(), factor_entry_base,
-                        unique.get(), fill_candidates.get(), flags.get());
+                        unique, fill_candidates, flags.get());
                     cuda_check(cudaGetLastError(), "emit normal cycle-sampler factor batches");
                 }
 
                 // Serial plan per pivot, then one thread per neighbour slot.
                 prepare_trace_plan<<<blocks_for(p), kBlock>>>(
-                    unique.get(), pivot_offsets.get(), pivots.get(), p,
-                    total_degree.get(), prefix.get(), cycle_workspace.get(),
-                    fill_candidates.get(), flags.get(),
+                    unique, pivot_offsets.get(), pivots.get(), p,
+                    total_degree.get(), prefix, cycle_workspace.get(),
+                    fill_candidates, flags.get(),
                     cycle_plan_cut.get(), cycle_plan_state.get(), cycle_status.get());
                 cuda_check(cudaGetLastError(), "plan cycle-core rows on device");
                 if (u)
                     sample_trace_items<<<blocks_for(u), kBlock>>>(
-                        unique.get(), u, pivot_offsets.get(),
-                        total_degree.get(), prefix.get(), cycle_workspace.get(),
+                        unique, u, pivot_offsets.get(),
+                        total_degree.get(), prefix, cycle_workspace.get(),
                         cycle_plan_cut.get(), cycle_plan_state.get(),
-                        fill_candidates.get(), flags.get(), cycle_status.get());
+                        fill_candidates, flags.get(), cycle_status.get());
                 cuda_check(cudaGetLastError(), "sample cycle-core items on device");
 
                 if (report.normal_batch.oversized_pivots) {
@@ -2495,9 +2335,9 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                     const auto trace_blocks = blocks_for(gpu_round_shadow_checked_mul(
                         p, 32, "cooperative trace row launch"), trace_block);
                     sample_large_trace_rows<<<trace_blocks, trace_block>>>(
-                        unique.get(), pivot_offsets.get(), pivots.get(), p,
-                        total_degree.get(), prefix.get(), cycle_workspace.get(),
-                        fill_candidates.get(), flags.get(), cycle_status.get());
+                        unique, pivot_offsets.get(), pivots.get(), p,
+                        total_degree.get(), prefix, cycle_workspace.get(),
+                        fill_candidates, flags.get(), cycle_status.get());
                     cuda_check(cudaGetLastError(), "sample large trace rows cooperatively");
                 }
                 std::uint32_t status[2]{};
@@ -2505,7 +2345,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                 if (status[0])
                     throw std::domain_error("GPU cycle sampler: invalid plan or edge outside normal pool range");
                 report.sampler_numerical_fallbacks = status[1];
-                if (gpu_setup_diagnostics()) std::fprintf(stderr,
+                if (verbose) std::fprintf(stderr,
                     "[gpu-clique-sampler] sampler=trace_cycle pivots=%zu normal_pivots=%llu "
                     "oversized_pivots=%llu numerical_gks_fallbacks=%u device_sampling=1\n",
                     p,
@@ -2521,23 +2361,23 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                         pivot_counts.get(), pivot_offsets.get(), nullptr,
                         excess.get(), total_degree.get(), factor_columns.get(),
                         factor_column_base, factor_entries.get(), factor_entry_base,
-                        unique.get(), fill_candidates.get(), flags.get());
+                        unique, fill_candidates, flags.get());
                     cuda_check(cudaGetLastError(), "emit normal factor/fill batches");
                 }
                 if (oversized_u) {
                     prepare_gks_prefix<<<blocks_for(p), kBlock>>>(
-                        unique.get(), pivot_offsets.get(), p, prefix.get(), pivots.get());
+                        unique, pivot_offsets.get(), p, prefix, pivots.get());
                     cuda_check(cudaGetLastError(), "launch oversized ordered prefixes");
                     sample_gks_items<<<blocks_for(u), kBlock>>>(
-                        unique.get(), u, pivot_offsets.get(), pivots.get(),
-                        total_degree.get(), prefix.get(), fill_candidates.get(), flags.get());
+                        unique, u, pivot_offsets.get(), pivots.get(),
+                        total_degree.get(), prefix, fill_candidates, flags.get());
                     cuda_check(cudaGetLastError(), "launch oversized GKS emission");
                 }
             }
         }
         oversized_unique.reset("release oversized canonical neighbors");
         const int raw_fill = cub.select(
-            fill_candidates.get(), flags.get(), fills.get(), u,
+            fill_candidates, flags.get(), fills.get(), u,
             "compact raw GKS fill");
         if (raw_fill < 0) throw std::runtime_error("GPU round returned a negative sampling count");
         f = static_cast<std::size_t>(raw_fill);
@@ -2548,55 +2388,52 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         // atomics, so colliding updates are repeatable.
         if (u) {
             make_excess_updates<<<blocks_for(u), kBlock>>>(
-                unique.get(), u, pivots.get(), total_degree.get(), excess.get(),
-                scratch.get(), flags.get());
+                unique, u, pivots.get(), total_degree.get(), excess.get(),
+                scratch, flags.get());
             cuda_check(cudaGetLastError(), "launch excess-update construction");
         }
         // Raw fill was already compacted into the separate fills buffer.
         // Its candidate storage fits e<=u excess updates.
         const int excess_count = cub.select(
-            scratch.get(), flags.get(), fill_candidates.get(), u,
+            scratch, flags.get(), fill_candidates, u,
             "compact excess updates");
         if (excess_count < 0) throw std::runtime_error("GPU round returned a negative excess update construction count");
         e = static_cast<std::size_t>(excess_count);
         report.excess_updates = e;
         if (e) {
             build_first_keys<<<blocks_for(e), kBlock>>>(
-                fill_candidates.get(), e, keys_a.get());
+                fill_candidates, e, keys_a.get());
             cuda_check(cudaGetLastError(), "launch excess target keys");
-            cub.sort_pairs(keys_a.get(), keys_b.get(), fill_candidates.get(),
-                           unique.get(), e, "stable sort excess updates");
+            cub.sort_pairs(keys_a.get(), keys_b.get(), fill_candidates,
+                           unique, e, "stable sort excess updates");
             reduce_equal_pairs<<<blocks_for(e), kBlock>>>(
-                unique.get(), e, scratch.get(), flags.get());
+                unique, e, scratch, flags.get());
             cuda_check(cudaGetLastError(), "launch deterministic excess reduce");
         }
         // The sorted input now lives in unique, and its reduction in scratch.
         // The same dead candidate storage fits q<=e<=u without in/out aliasing.
         const int reduced_count = cub.select(
-            scratch.get(), flags.get(), fill_candidates.get(), e,
+            scratch, flags.get(), fill_candidates, e,
             "compact reduced excess updates");
         if (reduced_count < 0) throw std::runtime_error("GPU round returned a negative excess reduction count");
         q = static_cast<std::size_t>(reduced_count);
         report.excess_targets = q;
         if (q) {
             apply_excess_updates<<<blocks_for(q), kBlock>>>(
-                fill_candidates.get(), q, excess.get());
+                fill_candidates, q, excess.get());
             cuda_check(cudaGetLastError(), "launch reduced excess apply");
         }
     });
-    prefix.reset("release GKS prefix sums");
-    fill_candidates.reset("release raw fill candidates");
-    unique.reset("release canonical neighbors");
-    scratch.reset("release canonical scratch");
+    canonical.reset("release canonical neighbors and sampling scratch");
 
     device_buffer<gpu_round_shadow_incidence> residual(tracker);
     auto& degrees = owned_degrees;
-    flags.allocate(input_count, "allocate surviving-incidence flags");
-    const std::size_t residual_capacity = gpu_round_shadow_checked_add(
-              input_count,
-              gpu_round_shadow_checked_mul(f, 2, "discovered fill output"),
-              "discovered residual output");
-    residual.allocate(std::max<std::size_t>(residual_capacity, 1),
+    // Survivors and directed fill share the input bound: s + 2f <= input is
+    // checked below before any fill is appended.
+    preflight.require(sum({bytes_of(std::max<std::size_t>(input_count, 1),
+                              sizeof(gpu_round_shadow_incidence)),
+                     growth(degrees, n)}), "residual mutation");
+    residual.allocate(std::max<std::size_t>(input_count, 1),
                       "allocate materialized shadow residual");
     ensure_state_buffer(degrees, n, "allocate owned live degrees",
                         "grow owned live degrees");
@@ -2643,14 +2480,17 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     gpu_round_shadow_validate_capacity_counts(
         static_cast<node_index>(n), r, p, report);
 
+    const std::size_t directed_fill = gpu_round_shadow_checked_mul(
+        f, 2, "directed fill owner sort");
+    preflight.require(sum({growth(this->residual(next_slot), std::max<std::size_t>(l, 1)),
+                     growth(keys_a, directed_fill), growth(keys_b, directed_fill)}),
+                "residual publication");
     ensure_state_buffer(
         this->residual(next_slot), std::max<std::size_t>(l, 1),
         "allocate resident residual output",
         "grow resident residual output");
     auto& next_residual = this->residual(next_slot);
 
-    const std::size_t directed_fill = gpu_round_shadow_checked_mul(
-        f, 2, "directed fill owner sort");
     ensure_state_buffer(keys_a, directed_fill, "allocate radix keys A", "grow radix keys A");
     ensure_state_buffer(keys_b, directed_fill, "allocate radix keys B", "grow radix keys B");
 
@@ -2726,22 +2566,45 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     report.state_buffer_growths = state_buffer_growths;
     report.factor_log_columns = factor_column_count + p;
     report.factor_log_entries = factor_entry_count + u;
-    report.factor_log_allocations = factor_log_allocations;
     report.factor_log_growths = factor_log_growths;
-    report.peak_device_bytes = tracker.peak;
     report.gpu_executed = true;
-    if (report.peak_device_bytes > planned)
+    if (tracker.peak > preflight.planned())
         throw std::logic_error(
             "GPU round shadow: actual peak exceeded the preflight plan");
 
-    // The synchronous semantic download completed every degree consumer.
-    // Retire scratch on the last round before factor installation; no selector
-    // borrows degrees. A failed release is still covered by the generation
-    // guard and the existing device-aware state teardown.
+    // The semantic download completed every scratch consumer. On the last
+    // round, release scratch and compact the factor log before finalization,
+    // retaining the active/excess/offset view for the empty published residual.
     if (report.active_count == 0 && l == 0) {
         owned_degrees.reset("release completed owned degrees");
         owned_common_scratch.release();
+        residual_0.reset("release completed residual slot 0");
+        residual_1.reset("release completed residual slot 1");
+        owner_offsets(1 - next_slot).reset("release completed input owner offsets");
+        sort_keys_a.reset("release completed radix keys A");
+        sort_keys_b.reset("release completed radix keys B");
+        selected_epoch_by_vertex.reset("release completed selected epochs");
+        cycle_workspace.reset("release completed cycle sampler moments");
+        cycle_plan_cut.reset("release completed trace plan cutoffs");
+        cycle_plan_state.reset("release completed trace plan streams");
+        cycle_status.reset("release completed cycle sampler status");
+        // The exact copy is optional: keep the grown log if it does not fit.
+        const std::size_t exact_entries = factor_entry_count + u;
+        const std::size_t exact_bytes = bytes_of(
+            exact_entries, sizeof(gpu_round_shadow_factor_entry));
+        if (exact_entries < factor_entries.count() && preflight.fits(exact_bytes)) {
+            preflight.require(exact_bytes, "final factor-log compaction");
+            factor_entries.shrink_preserve(exact_entries,
+                "allocate final factor-entry log", "copy final factor-entry log",
+                "release grown factor-entry log");
+            if (exact_entries) ++factor_log_allocations;
+        }
     }
+    report.factor_log_allocations = factor_log_allocations;
+    report.peak_device_bytes = tracker.peak;
+    if (report.peak_device_bytes > preflight.planned())
+        throw std::logic_error(
+            "GPU round shadow: final log compaction exceeded the preflight plan");
 
     factor_column_count += p;
     factor_entry_count += u;
@@ -2781,6 +2644,8 @@ gpu_round_shadow_device_state::impl::download_factor_log() {
     if (poisoned)
         throw std::logic_error(
             "GPU round shadow: device state is poisoned by a failed generation");
+    if (factor_log_consumed)
+        throw std::logic_error("GPU round shadow: the factor log was consumed by finalization");
     failed_generation_guard generation_guard{*this};
     require_current_device("factor-log download");
     gpu_round_shadow_factor_log result;
@@ -2809,8 +2674,8 @@ void gpu_round_shadow_device_state::impl::reject_device_generation(
     poison_failed_generation();
 }
 
-gpu_round_shadow_device_state::gpu_round_shadow_device_state(clique_sampler sampler)
-    : impl_(std::make_unique<impl>(sampler)) {
+gpu_round_shadow_device_state::gpu_round_shadow_device_state(clique_sampler sampler, bool verbose)
+    : impl_(std::make_unique<impl>(sampler, verbose)) {
     if (sampler != clique_sampler::gks && sampler != clique_sampler::trace_cycle)
         throw std::invalid_argument("unsupported GPU clique sampler");
 }
@@ -2836,6 +2701,10 @@ gpu_round_shadow_device_state& gpu_round_shadow_device_state::operator=(
 }
 
 #if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
+void gpu_round_shadow_device_state::set_selection_audit_for_test(bool enabled) {
+    impl_->audit_selection_independence = enabled;
+}
+
 void gpu_round_shadow_device_state::
 inject_failure_after_cuda_operation_for_test() {
     if (impl_->poisoned)
@@ -2860,7 +2729,7 @@ std::unique_ptr<gpu_block_frontend> gpu_round_shadow_device_state::initialize_ow
     impl::failed_generation_guard guard{*impl_};
     if (impl_->has_state || impl_->poisoned || impl_->factor_column_count)
         throw std::logic_error("GPU direct CSC initialization requires a fresh numerical owner");
-    const auto start = gpu_setup_diagnostic_clock::now();
+    const auto start = gpu_setup_diagnostic_clock::now(impl_->verbose);
     const std::size_t n = static_cast<std::size_t>(input.vertex_count);
     const std::size_t nnz = input.nonzeros;
     cuda_check(cudaGetDevice(&impl_->cuda_device), "bind CSC initialization device");
@@ -2897,7 +2766,7 @@ std::unique_ptr<gpu_block_frontend> gpu_round_shadow_device_state::initialize_ow
         "allocate initial CSC offsets", "grow initial CSC offsets");
     impl_->ensure_state_buffer(impl_->active, n, "allocate initial CSC active", "grow initial CSC active");
     impl_->ensure_state_buffer(impl_->excess, n, "allocate initial CSC excess", "grow initial CSC excess");
-    event_timer timer;
+    event_timer timer(impl_->verbose);
     const float upload_ms = timer.measure_ms([&] {
         copy_to_device(ptr.get(), input.offsets, n + 1, "upload CSC pointers");
         copy_to_device(idx.get(), input.rows, nnz, "upload CSC rows");
@@ -2959,17 +2828,17 @@ std::unique_ptr<gpu_block_frontend> gpu_round_shadow_device_state::initialize_ow
     impl_->fingerprint.active = content.active.host();
     impl_->fingerprint.active_count = n; impl_->fingerprint.live_incidences = directed;
     impl_->owned_residual_epoch = std::make_shared<const int>(0);
-    const auto selector_start = gpu_setup_diagnostic_clock::now();
+    const auto selector_start = gpu_setup_diagnostic_clock::now(impl_->verbose);
     auto frontend = std::unique_ptr<gpu_block_frontend>(new gpu_block_frontend(
-        static_cast<node_index>(n), directed / 2, gpu_block_frontend::owned_initialization_tag{}));
+        static_cast<node_index>(n), directed / 2, gpu_block_frontend::owned_initialization_tag{}, impl_->verbose));
     frontend->bind_owned_residual(impl_->residual_0.get(), impl_->owner_offsets_0.get(),
         impl_->active.get(), directed, impl_->resident_selection_content, impl_->owned_residual_epoch);
     const double selector_ms = 1e3 * std::chrono::duration<double>(
-        gpu_setup_diagnostic_clock::now() - selector_start).count();
+        gpu_setup_diagnostic_clock::now(impl_->verbose) - selector_start).count();
     const double total_ms = 1e3 * std::chrono::duration<double>(
-        gpu_setup_diagnostic_clock::now() - start).count();
+        gpu_setup_diagnostic_clock::now(impl_->verbose) - start).count();
     sddm = host_status[1] != 0;
-    if (gpu_setup_diagnostics()) std::fprintf(stderr, "[gpu-owned-csc] n=%zu directed=%u input_nnz=%zu sddm=%d "
+    if (impl_->verbose) std::fprintf(stderr, "[gpu-owned-csc] n=%zu directed=%u input_nnz=%zu sddm=%d "
         "host_graph_bytes=0 host_snapshot_bytes=0 selector_edge_upload_bytes=0 "
         "csc_upload_bytes=%zu scalar_download_bytes=%zu owner_tracked_peak_bytes=%zu "
         "planned_total_peak_bytes=%zu upload_ms=%.6f count_excess_ms=%.6f "
@@ -3029,7 +2898,7 @@ gpu_round_shadow_device_state::initialize_owned_raw_for_test(
     impl_->owned_residual_epoch = std::make_shared<const int>(0);
     auto frontend = std::unique_ptr<gpu_block_frontend>(new gpu_block_frontend(
         input.vertex_count, fingerprint.live_incidences / 2,
-        gpu_block_frontend::owned_initialization_tag{}));
+        gpu_block_frontend::owned_initialization_tag{}, impl_->verbose));
     frontend->bind_owned_residual(impl_->residual_0.get(), impl_->owner_offsets_0.get(),
         impl_->active.get(), count, impl_->resident_selection_content, impl_->owned_residual_epoch);
     guard.commit();
@@ -3214,7 +3083,7 @@ double gpu_round_shadow_device_state::probe_owned_distinct_degree(
     }
     std::size_t sum = 0;
     for (auto degree : distinct) sum += degree;
-    if (gpu_setup_diagnostics())
+    if (impl_->verbose)
         std::fprintf(stderr, "[gpu-owned-sparsify-probe] samples=%zu physical_incidences=%zu "
             "scalar_upload_bytes=%zu scalar_download_bytes=%zu peak_device_bytes=%zu\n",
             samples, count, samples * (sizeof(node_index) + sizeof(owned_probe_range)),
@@ -3325,13 +3194,14 @@ void gpu_round_shadow_device_state::reject_device_generation(
 std::shared_ptr<cuda_sptrsv_device_factor>
 gpu_round_shadow_device_state::finalize_device_factor(
         std::span<const node_index> permutation, node_index factor_dim,
-        factor_storage_type storage) {
+        factor_storage_type storage, double drop_rel, bool consume_factor_log) {
+    if (!std::isfinite(drop_rel) || drop_rel < 0.0)
+        throw std::invalid_argument("factor drop tolerance must be finite and nonnegative");
     impl_->require_current_device("factor finalization");
     if (impl_->poisoned || !impl_->has_state || !impl_->generation_accepted ||
-        !impl_->owned_prefix_materialized)
+        !impl_->owned_prefix_materialized || impl_->factor_log_consumed)
         throw std::logic_error("GPU finalizer requires an accepted generation and published owned output");
     const bool fp16 = cuda_sptrsv::fp16_resolved(storage);
-    const double drop_rel = factor_drop_rel_from_env();
     const std::size_t n = permutation.size(), m = factor_dim;
     if (m == 0 || m > n || n >= std::size_t(INT_MAX) ||
         impl_->factor_column_count != n || impl_->vertex_count != n ||
@@ -3342,7 +3212,15 @@ gpu_round_shadow_device_state::finalize_device_factor(
         if (p >= n || seen[p]) throw std::invalid_argument("GPU finalizer requires a permutation");
         seen[p] = true;
     }
-    allocation_tracker tracker;
+    // Finalizer storage joins the owner's tracker: the preflight and the
+    // reported peak include the retained owner state (the factor log).
+    auto& tracker = impl_->tracker;
+    tracker.begin_round();
+    const std::size_t resident_bytes = tracker.current;
+    staged_preflight preflight(tracker, "GPU finalizer: ");
+    const auto bytes_of = [](std::size_t count, std::size_t width) {
+        return gpu_round_shadow_checked_mul(count, width, "finalizer stage bytes");
+    };
     device_buffer<node_index> perm(tracker);
     device_buffer<int> status(tracker), lp(tracker), ltp(tracker);
     device_buffer<int> li(tracker), lti(tracker);
@@ -3355,6 +3233,15 @@ gpu_round_shadow_device_state::finalize_device_factor(
     device_buffer<unsigned long long> storage_counts(tracker);
     device_buffer<std::uint64_t> keys(tracker), sorted_keys(tracker);
     device_buffer<unsigned char> temporary(tracker);
+    // Scratch needs no preserved prefix: release before replacing it.
+    const auto ensure_temporary = [&](std::size_t bytes, const char* stage) {
+        if (bytes <= temporary.count()) return;
+        preflight.require(bytes, stage);
+        temporary.reset("finalizer replace scratch");
+        temporary.allocate(bytes, stage);
+    };
+    preflight.require(bytes_of(n, sizeof(node_index)) + bytes_of(2, sizeof(int)) +
+                      bytes_of(m + 1, 2 * sizeof(int)), "column counts");
     perm.allocate(n, "finalizer permutation");
     copy_to_device(perm.get(), permutation.data(), n, "finalizer permutation upload");
     status.allocate(2, "finalizer status");
@@ -3372,26 +3259,34 @@ gpu_round_shadow_device_state::finalize_device_factor(
     if (host_status[0]) throw std::invalid_argument("GPU finalizer malformed factor log, code " + std::to_string(host_status[0]));
     std::size_t scan_bytes = 0;
     cuda_check(cub::DeviceScan::InclusiveSum(nullptr, scan_bytes, ltp.get(), ltp.get(), int(m + 1)), "finalizer scan size");
-    temporary.allocate(scan_bytes, "finalizer scan scratch");
+    ensure_temporary(scan_bytes, "finalizer scan scratch");
     cuda_check(cub::DeviceScan::InclusiveSum(temporary.get(), scan_bytes, ltp.get(), ltp.get(), int(m + 1)), "finalizer count scan");
     int nnz = 0;
     copy_to_host(&nnz, ltp.get() + m, 1, "finalizer nnz");
     if (nnz < int(m) || nnz > host_status[1]) throw std::logic_error("GPU finalizer invalid output count");
+    const std::size_t raw = static_cast<std::size_t>(nnz);
+    preflight.require(bytes_of(raw, sizeof(std::uint64_t) + sizeof(float)), "COO emission");
     keys.allocate(nnz, "finalizer COO keys");
-    sorted_keys.allocate(nnz, "finalizer sorted keys");
     input_values.allocate(nnz, "finalizer COO values");
-    ltv.allocate(nnz, "finalizer raw LT values");
     finalizer_emit<<<blocks_for(m), kBlock>>>(m,
         impl_->factor_columns.get(), impl_->factor_entries.get(),
         perm.get(), ltp.get(), keys.get(), input_values.get());
     cuda_check(cudaGetLastError(), "finalizer emit launch");
+    if (consume_factor_log) {
+        // The unique consuming owner reads the log only through emission.
+        impl_->factor_log_consumed = true;
+        impl_->factor_entries.reset("release consumed factor-entry log");
+        impl_->factor_columns.reset("release consumed factor-column log");
+    }
     std::size_t sort_bytes = 0;
     cuda_check(cub::DeviceRadixSort::SortPairs(nullptr, sort_bytes, keys.get(), sorted_keys.get(), input_values.get(), ltv.get(), nnz), "finalizer sort size");
-    if (sort_bytes > scan_bytes) {
-        temporary.reset("finalizer replace scratch");
-        temporary.allocate(sort_bytes, "finalizer sort scratch");
-    }
+    preflight.require(bytes_of(raw, sizeof(std::uint64_t) + sizeof(float)) +
+                      (sort_bytes > temporary.count() ? sort_bytes : 0), "LT sort");
+    sorted_keys.allocate(nnz, "finalizer sorted keys");
+    ltv.allocate(nnz, "finalizer raw LT values");
+    ensure_temporary(sort_bytes, "finalizer sort scratch");
     cuda_check(cub::DeviceRadixSort::SortPairs(temporary.get(), sort_bytes, keys.get(), sorted_keys.get(), input_values.get(), ltv.get(), nnz), "finalizer sort LT");
+    input_values.reset("finalizer release COO values");
     const int raw_nnz = nnz;
     int* column_ptr = ltp.get();
     std::uint64_t* column_keys = sorted_keys.get();
@@ -3399,6 +3294,8 @@ gpu_round_shadow_device_state::finalize_device_factor(
     unsigned long long counts[3] = {};
     std::size_t extra_download = 0;
     if (fp16 || drop_rel > 0.0) {
+        preflight.require(bytes_of(m, sizeof(float)) + bytes_of(m + 1, sizeof(int)) +
+                          bytes_of(3, sizeof(unsigned long long)), "storage planning");
         col_scale.allocate(m, "finalizer column scales");
         dropped_ptr.allocate(m + 1, "finalizer drop column pointers");
         storage_counts.allocate(3, "finalizer storage counts");
@@ -3415,6 +3312,8 @@ gpu_round_shadow_device_state::finalize_device_factor(
         if (nnz < int(m) || nnz > raw_nnz)
             throw std::logic_error("GPU finalizer invalid compacted count");
         if (nnz != raw_nnz) {
+            preflight.require(bytes_of(std::size_t(nnz), sizeof(std::uint64_t) + sizeof(float)),
+                              "compensated drop");
             dropped_keys.allocate(nnz, "finalizer compacted keys");
             dropped_values.allocate(nnz, "finalizer compacted values");
             finalizer_compact_columns<<<blocks_for(m), kBlock>>>(
@@ -3424,13 +3323,20 @@ gpu_round_shadow_device_state::finalize_device_factor(
             column_ptr = dropped_ptr.get();
             column_keys = dropped_keys.get();
             column_values = dropped_values.get();
+            ltv.reset("finalizer release raw LT values");
         }
     }
+    const std::size_t stored = static_cast<std::size_t>(nnz);
+    preflight.require(bytes_of(stored, 2 * sizeof(int)), "triangle indices");
     li.allocate(nnz, "finalizer L indices"); lti.allocate(nnz, "finalizer LT indices");
     finalizer_unpack<<<blocks_for(nnz), kBlock>>>(nnz, column_keys, lti.get(), status.get(), keys.get(), lp.get());
     cuda_check(cudaGetLastError(), "finalizer LT unpack");
+    // Compacted LT keys are dead after unpacking; sorted_keys is reused below.
+    dropped_keys.reset("finalizer release compacted keys");
     cuda_check(cub::DeviceScan::InclusiveSum(temporary.get(), scan_bytes, lp.get(), lp.get(), int(m + 1)), "finalizer L pointer scan");
     if (fp16) {
+        preflight.require(bytes_of(stored, 2 * sizeof(__half)) + bytes_of(m, sizeof(float) + sizeof(double)),
+                          "fp16 narrowing");
         lh.allocate(nnz, "finalizer L half values");
         lth.allocate(nnz, "finalizer LT half values");
         diag.allocate(m, "finalizer scaled diagonal");
@@ -3439,16 +3345,18 @@ gpu_round_shadow_device_state::finalize_device_factor(
             m, column_ptr, column_values, col_scale.get(), lth.get(), diag.get(),
             inv_scale2.get(), storage_counts.get() + 2, status.get());
         cuda_check(cudaGetLastError(), "finalizer compensated fp16 narrowing");
+        // The narrowed LT values replace the fp32 column values.
+        ltv.reset("finalizer release raw LT values");
+        dropped_values.reset("finalizer release compacted values");
+        column_values = nullptr;
         std::size_t half_sort_bytes = 0;
         cuda_check(cub::DeviceRadixSort::SortPairs(nullptr, half_sort_bytes,
             keys.get(), sorted_keys.get(), lth.get(), lh.get(), nnz), "finalizer half sort size");
-        if (half_sort_bytes > std::max(sort_bytes, scan_bytes)) {
-            temporary.reset("finalizer replace half scratch");
-            temporary.allocate(half_sort_bytes, "finalizer half sort scratch");
-        }
+        ensure_temporary(half_sort_bytes, "finalizer half sort scratch");
         cuda_check(cub::DeviceRadixSort::SortPairs(temporary.get(), half_sort_bytes,
             keys.get(), sorted_keys.get(), lth.get(), lh.get(), nnz), "finalizer sort half L");
     } else {
+        preflight.require(bytes_of(stored, sizeof(float)), "fp32 L values");
         lv.allocate(nnz, "finalizer L values");
         cuda_check(cub::DeviceRadixSort::SortPairs(temporary.get(), sort_bytes,
             keys.get(), sorted_keys.get(), column_values, lv.get(), nnz), "finalizer sort L");
@@ -3461,6 +3369,8 @@ gpu_round_shadow_device_state::finalize_device_factor(
         copy_to_host(counts, storage_counts.get(), 3, "finalizer storage counts");
         extra_download += sizeof(counts);
     }
+    if (tracker.peak > preflight.planned())
+        throw std::logic_error("GPU finalizer: actual peak exceeded the preflight plan");
     factor_drop_stats stats;
     stats.rel = drop_rel; stats.nnz_factor = raw_nnz; stats.nnz_stored = nnz;
     stats.dropped = raw_nnz - nnz;
@@ -3485,8 +3395,9 @@ gpu_round_shadow_device_state::finalize_device_factor(
     lp.release(); li.release(); lti.release();
     if (column_ptr == ltp.get()) ltp.release(); else dropped_ptr.release();
     const std::size_t upload = n * sizeof(node_index);
-    if (gpu_setup_diagnostics()) std::fprintf(stderr, "[gpu-factor-finalize] device_columns=%zu device_entries=%zu m=%zu nnz=%d host_upload_bytes=%zu scalar_download_bytes=%zu prefix_download_bytes=0 scratch_and_output_peak_bytes=%zu storage=%s factor_drop_rel=%.17g dropped_threshold=%llu dropped_flush=%llu fp16_flushed=%llu\n",
-        n, impl_->factor_entry_count, m, nnz, upload, 4 * sizeof(int) + extra_download, tracker.peak,
+    if (impl_->verbose) std::fprintf(stderr, "[gpu-factor-finalize] device_columns=%zu device_entries=%zu m=%zu nnz=%d host_upload_bytes=%zu scalar_download_bytes=%zu prefix_download_bytes=0 owner_resident_bytes=%zu owner_peak_bytes=%zu planned_peak_bytes=%zu factor_log_consumed=%d storage=%s factor_drop_rel=%.17g dropped_threshold=%llu dropped_flush=%llu fp16_flushed=%llu\n",
+        n, impl_->factor_entry_count, m, nnz, upload, 4 * sizeof(int) + extra_download,
+        resident_bytes, tracker.peak, preflight.planned(), consume_factor_log ? 1 : 0,
         fp16 ? "fp16" : "fp32", drop_rel,
         static_cast<unsigned long long>(stats.dropped_threshold),
         static_cast<unsigned long long>(stats.dropped_flush), counts[2]);

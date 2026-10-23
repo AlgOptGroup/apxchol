@@ -30,12 +30,22 @@ struct solve_options {
     /// override the calling OpenMP task's setting; 0 inherits it.
     /// Small workloads may use fewer threads.
     int num_threads = 0;
+    bool collect_timings = true;
 };
+
+namespace detail {
+void validate_solve_parameters(double tol, int max_iter);
+void validate_solve_options(const solve_options& opts);
+void resolve_solve_parameters(double& tol, int& max_iter, double default_tolerance,
+                              int default_iterations);
+}
 
 struct solve_result {
     Eigen::VectorXd x;
     Eigen::Index iterations = 0;
+    /// Recomputed relative residual of the returned solution against the original operator/RHS.
     double residual      = 0.0;
+    bool converged = false; // residual < the effective tolerance, including zero-iteration exits.
     // Positive off-diagonal entries the M-matrix lumping moved onto the
     // diagonal while building the PRECONDITIONER (0 = the operator was already
     // an M-matrix). The operator this residual is measured against is the one
@@ -52,6 +62,11 @@ using matrix_view = Eigen::Ref<Eigen::MatrixXd, 0,
     Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>>;
 using const_matrix_view = Eigen::Ref<const Eigen::MatrixXd, 0,
     Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>>;
+
+namespace detail {
+void check_matrix_views(const_matrix_view B, matrix_view X, Eigen::Index rows,
+                        const const_matrix_view* X0 = nullptr);
+}
 
 struct batch_solve_result {
     // Solutions are written to caller storage; each column's x remains empty.
@@ -85,12 +100,14 @@ public:
     /// Adopt an externally computed factorization (e.g. from a factorize()
     /// call with a custom eliminator or partitioner) instead of factorizing
     /// internally.  L is still required — it is the PCG operator.
+    /// Construction options (including regularization/lumping) are not reapplied;
+    /// factor storage, dropping, scheduling and solve options still apply.
     cpu_solver(const Eigen::SparseMatrix<double>& L,
                factorization F,
                const solve_options& opts = {},
                checkpoint* cp = nullptr);
 
-    /// PCG against the held factor. tol < 0 / max_iter < 0 = use opts values.
+    /// PCG against the held factor. Finite tol < 0 / max_iter < 0 = use opts values.
     /// `x0` (optional) is the initial guess; nullptr = start from zero; a
     /// wrong-length x0 throws std::invalid_argument.
     /// For a pure Laplacian (rank n-1) the returned x is the min-norm
@@ -117,14 +134,6 @@ public:
 
     /// One preconditioner application: z = M^{-1} r (forward+back SpTRSV).
     Eigen::VectorXd apply(const Eigen::VectorXd& r) const;
-    /// ||b - A x|| / ||b|| in fp64 against the operator this solver's PCG
-    /// applies (the caller's matrix; fp32 only when lossless unless
-    /// APXCHOL_FP32_OPERATOR forces it), with power-of-two scaled norms that
-    /// neither underflow nor overflow. 0 when b - A x = 0; infinity for a
-    /// non-finite input or residual, or a nonzero residual of b = 0. Uses the
-    /// PCG workspace, so like solve it is not safe concurrently.
-    double relative_residual(Eigen::Ref<const Eigen::VectorXd> b,
-                             Eigen::Ref<const Eigen::VectorXd> x) const;
 
     const apx_cholesky& preconditioner() const { return precond_; }
     /// Independent RHS columns, with bounded panel workspace. Output must not
@@ -163,6 +172,9 @@ private:
     template<int Columns>
     void solve_panel(const double* b, double* x, solve_result* results, checkpoint& timings,
                      double tol, int max_iter, const double* x0) const;
+    template<int Columns>
+    void check_solution(const_matrix_view B, const double* x, solve_result* results,
+                        checkpoint& timings, double tol) const;
 
     solve_options opts_;
     apx_cholesky precond_;
@@ -188,6 +200,7 @@ class solver {
 public:
     explicit solver(const Eigen::SparseMatrix<double>& A,
                     const solve_options& opts = {}, checkpoint* cp = nullptr);
+    /// Adopt F without reapplying factor-construction options, as cpu_solver does.
     solver(const Eigen::SparseMatrix<double>& A, factorization F,
            const solve_options& opts = {}, checkpoint* cp = nullptr);
     ~solver();
@@ -227,8 +240,6 @@ public:
     Eigen::Index rows() const;
     solve_backend backend() const;
     factor_storage_type factor_storage() const;
-    /// The CPU owner, or nullptr on a GPU route, for the original-system residual.
-    const cpu_solver* cpu() const noexcept;
 
 private:
     batch_solve_result solve_batch(const_matrix_view B, matrix_view X, double tol,
@@ -239,8 +250,8 @@ private:
 
 /// One-shot solve: factorize L, then solve Lx = b via PCG.
 /// Automatic selects GPU when the compiled backend is available and compatible,
-/// otherwise CPU. Explicit GPU selects CUDA's device-owned
-/// route or Metal's host-factor/GPU-solve route, according to the build.
+/// otherwise CPU. Explicit GPU selects device-owned CUDA or Metal setup and solve,
+/// according to the build.
 /// Unsupported inputs and execution failures are errors, never a CPU retry.
 solve_result solve(const Eigen::SparseMatrix<double>& L,
                    const Eigen::VectorXd& b,

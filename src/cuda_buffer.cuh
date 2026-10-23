@@ -74,6 +74,22 @@ public:
         std::swap(count_, next.count_);
     }
 
+    // Copy the first count elements into an exact allocation; larger or equal
+    // requests keep the current capacity.
+    void shrink_preserve(std::size_t count, const char* allocate_what,
+                         const char* copy_what, const char* release_what) {
+        if (count >= count_) return;
+        cuda_buffer next;
+        next.tracker_ = tracker_;
+        next.allocate(count, allocate_what);
+        if (count)
+            Check(cudaMemcpy(next.data_, data_, count * sizeof(T),
+                             cudaMemcpyDeviceToDevice), copy_what);
+        reset(release_what);
+        std::swap(data_, next.data_);
+        std::swap(count_, next.count_);
+    }
+
     void reserve(std::size_t count) {
         grow_preserve(count, 0, "cudaMalloc", nullptr, "cudaFree during growth");
     }

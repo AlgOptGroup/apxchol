@@ -1,5 +1,4 @@
 #include <gtest/gtest.h>
-#include "scoped_env.h"
 #include "scoped_omp_threads.h"
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/preconditioner.h"
@@ -15,13 +14,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <future>
 #include <memory>
 #include <span>
 #include <stdexcept>
 #include <string>
-#include <string_view>
 #include <vector>
 
 namespace {
@@ -115,9 +112,8 @@ Eigen::SparseMatrix<double> solve_matrix(int n, double shift) {
 
 TEST(GpuFactorFinalize, CompleteOwnedPermutationAndGrounding) {
     REQUIRE_FINALIZER_DEVICE();
-    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop("APXCHOL_FACTOR_DROP", "0");
-    scoped_env segmentation("APXCHOL_GPU_DF_SPLIT", "1");
+    const apxchol::factor_options options{
+        .factor_storage = apxchol::factor_storage_type::fp32, .drop_tolerance = 0};
     const std::vector<edge> edges = {{1, 0, 2.0}, {1, 3, 3.0}};
     const std::vector<node_index> order = {1, 3, 0, 2};
     complete_factor fixture(4, edges, order);
@@ -125,17 +121,17 @@ TEST(GpuFactorFinalize, CompleteOwnedPermutationAndGrounding) {
     EXPECT_EQ(reference.perm, (std::vector<node_index>{2, 0, 3, 1}));
     for (node_index m : {3u, 4u}) {
         apxchol::cuda_sptrsv ordinary, adopted;
-        ordinary.setup(reference.L, m);
-        auto factor = fixture.state.finalize_device_factor(reference.perm, m);
+        ordinary.setup(reference.L, m, options);
+        auto factor = fixture.state.finalize_device_factor(reference.perm, m, options.factor_storage, options.drop_tolerance);
         ASSERT_FALSE(factor->empty());
-        adopted.setup_adopting_device_factor_for_research(std::move(*factor));
+        adopted.setup_adopting_device_factor_for_research(std::move(*factor), options);
         ASSERT_TRUE(factor->empty());
         EXPECT_TRUE(adopted.adopted_device_factor());
         EXPECT_LE(adopted.adoption_host_download_bytes(), 512u);
         EXPECT_EQ(adopted.stored_nnz(), ordinary.stored_nnz());
         EXPECT_EQ(adopted.drop_stats().dropped_flush, ordinary.drop_stats().dropped_flush);
         apxchol::omp_sptrsv cpu;
-        cpu.setup(reference.L, m);
+        cpu.setup(reference.L, m, options);
         for (int k = 0; k < 5; ++k) {
             std::vector<double> a(m), b(m), c(m), scratch(m);
             for (node_index i = 0; i < m; ++i) a[i] = b[i] = c[i] = std::sin(i + 3 * k + 0.1);
@@ -169,28 +165,25 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
     for (std::size_t i = 0; i < export_reference.L.vals_.size(); ++i)
         ASSERT_EQ(std::bit_cast<std::uint32_t>(retained.exported.L.vals_[i]),
                   std::bit_cast<std::uint32_t>(export_reference.L.vals_[i]));
-    for (const char* fp16 : {"float32", "float16"}) {
-        scoped_env storage("APXCHOL_FACTOR_STORAGE", fp16);
-        for (const char* rel : {"0", "0.00001", "0.0001", "0.2"}) {
-            scoped_env drop("APXCHOL_FACTOR_DROP", rel);
+    for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
+        for (double rel : {0.0, 0.00001, 0.0001, 0.2}) {
+            const apxchol::factor_options options{.factor_storage = storage, .drop_tolerance = rel};
             for (node_index m : {n - 1, n}) {
-                SCOPED_TRACE(std::string(fp16) + "/" + rel + "/" + std::to_string(m));
+                SCOPED_TRACE((storage == apxchol::factor_storage_type::fp16 ? "float16/" : "float32/")
+                    + std::to_string(rel) + "/" + std::to_string(m));
                 apxchol::cuda_sptrsv ordinary, adopted;
-                ordinary.setup(reference.L, m);
-                const auto requested = std::string_view(fp16) == "float16"
-                    ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32;
-                scoped_env conflicting("APXCHOL_FACTOR_STORAGE", std::string_view(fp16) == "float16" ? "float32" : "float16");
-                auto factor = fixture.state.finalize_device_factor(reference.perm, m, requested);
-                auto retained_factor = retained.state.finalize_device_factor(reference.perm, m, requested);
+                ordinary.setup(reference.L, m, options);
+                auto factor = fixture.state.finalize_device_factor(reference.perm, m, storage, rel);
+                auto retained_factor = retained.state.finalize_device_factor(reference.perm, m, storage, rel);
                 auto lt = apxchol::cuda_host::build_L11_csc_int<float>(reference.L, m);
                 auto scale = apxchol::cuda_host::column_scales(lt);
-                const bool half = std::string_view(fp16) == "float16";
+                const bool half = storage == apxchol::factor_storage_type::fp16;
                 if (half) {
                     for (node_index j = 0; j < m; ++j)
                         if (!std::isfinite(1.0f / scale[j]) ||
                             !std::isfinite(lt.vals[lt.ptr[j]] / scale[j])) scale[j] = 1.0f;
                 }
-                apxchol::cuda_host::apply_factor_drop(lt, scale, std::atof(rel), half);
+                apxchol::cuda_host::apply_factor_drop(lt, scale, rel, half);
                 std::vector<std::byte> expected;
                 auto append = [&](const auto* data, std::size_t count) {
                     auto bytes = std::as_bytes(std::span(data, count));
@@ -213,8 +206,11 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
                 }
                 EXPECT_EQ(fixture.state.encode_finalized_factor_for_test(*factor), expected);
                 EXPECT_EQ(retained.state.encode_finalized_factor_for_test(*retained_factor), expected);
-                adopted.setup_adopting_device_factor_for_research(std::move(*factor), requested);
-                EXPECT_EQ(adopted.fp16(), std::string_view(fp16) == "float16");
+                complete_factor consumed(n, edges, order);
+                auto consumed_factor = consumed.state.finalize_device_factor(reference.perm, m, storage, rel, true);
+                EXPECT_EQ(consumed.state.encode_finalized_factor_for_test(*consumed_factor), expected);
+                adopted.setup_adopting_device_factor_for_research(std::move(*factor), options);
+                EXPECT_EQ(adopted.fp16(), half);
                 const auto& want = ordinary.drop_stats(); const auto& got = adopted.drop_stats();
                 EXPECT_EQ(got.rel, want.rel); EXPECT_EQ(got.nnz_factor, want.nnz_factor);
                 EXPECT_EQ(got.nnz_stored, want.nnz_stored); EXPECT_EQ(got.dropped, want.dropped);
@@ -232,8 +228,6 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
 
 TEST(GpuFactorFinalize, ConsumingSolveAcceptsDefaultFp16AndCompensatedDrop) {
     REQUIRE_FINALIZER_DEVICE();
-    scoped_env storage("APXCHOL_FACTOR_STORAGE", nullptr);
-    scoped_env drop("APXCHOL_FACTOR_DROP", nullptr);
     scoped_omp_threads serial(1);
     for (double shift : {0.0, 1.0}) {
         auto A = solve_matrix(1025, shift);
@@ -251,40 +245,47 @@ TEST(GpuFactorFinalize, ConsumingSolveAcceptsDefaultFp16AndCompensatedDrop) {
 
 TEST(GpuFactorFinalize, InvalidPermutationAndExtentFailClosed) {
     REQUIRE_FINALIZER_DEVICE();
-    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop("APXCHOL_FACTOR_DROP", "0");
+    const apxchol::factor_options options{
+        .factor_storage = apxchol::factor_storage_type::fp32, .drop_tolerance = 0};
     const std::vector<edge> edges = {{0, 1, 1}, {0, 2, 2}};
     const std::vector<node_index> order = {0, 1, 2};
     complete_factor fixture(3, edges, order);
     auto& state = fixture.state;
     const auto& perm = fixture.reference.perm;
-    EXPECT_THROW(state.finalize_device_factor(std::vector<node_index>{0, 1, 1}, 3), std::invalid_argument);
-    EXPECT_THROW(state.finalize_device_factor(std::vector<node_index>{0, 1}, 3), std::invalid_argument);
-    EXPECT_THROW(state.finalize_device_factor(std::vector<node_index>{0, 1, 3}, 3), std::invalid_argument);
-    EXPECT_THROW(state.finalize_device_factor(perm, 0), std::invalid_argument);
-    EXPECT_THROW(state.finalize_device_factor(perm, 4), std::invalid_argument);
-    EXPECT_NO_THROW(state.finalize_device_factor(perm, 3));
+    EXPECT_THROW(state.finalize_device_factor(std::vector<node_index>{0, 1, 1}, 3, options.factor_storage, options.drop_tolerance), std::invalid_argument);
+    EXPECT_THROW(state.finalize_device_factor(std::vector<node_index>{0, 1}, 3, options.factor_storage, options.drop_tolerance), std::invalid_argument);
+    EXPECT_THROW(state.finalize_device_factor(std::vector<node_index>{0, 1, 3}, 3, options.factor_storage, options.drop_tolerance), std::invalid_argument);
+    EXPECT_THROW(state.finalize_device_factor(perm, 0, options.factor_storage, options.drop_tolerance), std::invalid_argument);
+    EXPECT_THROW(state.finalize_device_factor(perm, 4, options.factor_storage, options.drop_tolerance), std::invalid_argument);
+    EXPECT_NO_THROW(state.finalize_device_factor(perm, 3, options.factor_storage, options.drop_tolerance));
     // The existing Compute Sanitizer CTest checks these repeated allocations.
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-    for (int i = 0; i < 8; ++i) EXPECT_NO_THROW(state.finalize_device_factor(perm, 3));
+    for (int i = 0; i < 8; ++i) EXPECT_NO_THROW(state.finalize_device_factor(perm, 3, options.factor_storage, options.drop_tolerance));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    auto factor = state.finalize_device_factor(
+        perm, 3, options.factor_storage, options.drop_tolerance, true);
+    ASSERT_FALSE(factor->empty());
+    EXPECT_THROW(state.finalize_device_factor(perm, 3), std::logic_error);
+    EXPECT_THROW(state.download_factor_log(), std::logic_error);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 }
 
 TEST(GpuFactorFinalize, PreconditionerInstallsAndReplacesOwnedCapsules) {
     REQUIRE_FINALIZER_DEVICE();
-    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop("APXCHOL_FACTOR_DROP", "0");
+    const apxchol::factor_options options{
+        .factor_storage = apxchol::factor_storage_type::fp32, .drop_tolerance = 0};
     const std::vector<edge> edges = {{1, 0, 2.0}, {1, 3, 3.0}};
     const std::vector<node_index> order = {1, 3, 0, 2};
     complete_factor fixture(4, edges, order);
     const auto& reference = fixture.reference;
     apxchol::detail::gpu_preconditioner preconditioner;
     preconditioner.set_keep_factor(true);
+    preconditioner.set_options(options);
     apxchol::omp_sptrsv cpu;
-    cpu.setup(reference.L, 4);
+    cpu.setup(reference.L, 4, options);
     for (int repetition = 0; repetition < 2; ++repetition) {
         auto factor = reference;
-        factor.research_device_factor = fixture.state.finalize_device_factor(reference.perm, 4);
+        factor.research_device_factor = fixture.state.finalize_device_factor(reference.perm, 4, options.factor_storage, options.drop_tolerance);
         preconditioner.set_factor(std::move(factor));
         ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
         ASSERT_TRUE(preconditioner.factor().sddm);
@@ -299,6 +300,7 @@ TEST(GpuFactorFinalize, PreconditionerInstallsAndReplacesOwnedCapsules) {
     for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
         apxchol::factor_options options;
         options.factor_storage = storage;
+        options.drop_tolerance = 0;
         preconditioner.set_options(options);
         for (double shift : {0.0, 1.0}) {
             preconditioner.compute(solve_matrix(64, shift));
@@ -317,8 +319,8 @@ TEST(GpuFactorFinalize, PreconditionerInstallsAndReplacesOwnedCapsules) {
 
 TEST(GpuFactorFinalize, SharedCapsulesAndExplicitHostImportsPreserveOwnership) {
     REQUIRE_FINALIZER_DEVICE();
-    scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop("APXCHOL_FACTOR_DROP", "0");
+    const apxchol::factor_options options{
+        .factor_storage = apxchol::factor_storage_type::fp32, .drop_tolerance = 0};
     scoped_omp_threads serial(1);
     const std::vector<edge> edges = {{1, 0, 2.0}, {1, 3, 3.0}};
     const std::vector<node_index> order = {1, 3, 0, 2};
@@ -327,16 +329,18 @@ TEST(GpuFactorFinalize, SharedCapsulesAndExplicitHostImportsPreserveOwnership) {
         const node_index m = sddm ? 4 : 3;
         auto reference = fixture.reference;
         reference.sddm = sddm;
-        reference.research_device_factor = fixture.state.finalize_device_factor(reference.perm, m);
+        reference.research_device_factor = fixture.state.finalize_device_factor(reference.perm, m, options.factor_storage, options.drop_tolerance);
         {
             apxchol::detail::gpu_preconditioner shared_owner;
+            shared_owner.set_options(options);
             EXPECT_THROW(shared_owner.set_factor(reference), std::invalid_argument);
         }
         ASSERT_FALSE(reference.research_device_factor->empty());
         ASSERT_EQ(reference.research_device_factor.use_count(), 1);
         auto unique = reference;
-        unique.research_device_factor = fixture.state.finalize_device_factor(reference.perm, m);
+        unique.research_device_factor = fixture.state.finalize_device_factor(reference.perm, m, options.factor_storage, options.drop_tolerance);
         apxchol::detail::gpu_preconditioner moved;
+        moved.set_options(options);
         moved.set_factor(std::move(unique));
         ASSERT_TRUE(moved.trsv().adopted_device_factor());
         EXPECT_TRUE(moved.factor().L.vals_.empty());
@@ -346,14 +350,14 @@ TEST(GpuFactorFinalize, SharedCapsulesAndExplicitHostImportsPreserveOwnership) {
         std::vector<double> b(m), expected(m), observed(m);
         for (node_index i = 0; i < m; ++i) b[i] = std::sin(i + 0.25);
         apxchol::cuda_sptrsv imported;
-        imported.setup(reference.L, m);
+        imported.setup(reference.L, m, options);
         EXPECT_FALSE(imported.adopted_device_factor());
         imported.solve_LLt(b.data(), expected.data());
         moved.trsv().solve_LLt(b.data(), observed.data());
         EXPECT_EQ(observed, expected);
-        auto import_copy = [reference, b, m]() {
+        auto import_copy = [reference, b, m, options]() {
             apxchol::cuda_sptrsv solver;
-            solver.setup(reference.L, m);
+            solver.setup(reference.L, m, options);
             std::vector<double> result(m);
             solver.solve_LLt(b.data(), result.data());
             return std::pair{solver.adopted_device_factor(), std::move(result)};
@@ -372,7 +376,7 @@ TEST(GpuFactorFinalize, SharedCapsulesAndExplicitHostImportsPreserveOwnership) {
         EXPECT_EQ(exported.L.inner_.size(), exported.L.nonZeros());
         EXPECT_FALSE(exported.research_device_factor);
         apxchol::cuda_sptrsv host_import;
-        host_import.setup(exported.L, sddm ? 64 : 63);
+        host_import.setup(exported.L, sddm ? 64 : 63, options);
         EXPECT_TRUE(host_import.ready());
         EXPECT_FALSE(host_import.adopted_device_factor());
     }

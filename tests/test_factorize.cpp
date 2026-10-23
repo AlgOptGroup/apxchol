@@ -1,12 +1,10 @@
 #include <gtest/gtest.h>
 #include "grid_laplacian.h"
-#include "scoped_env.h"
 #include "scoped_omp_threads.h"
 #include <array>
 #include <bit>
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -29,6 +27,9 @@
 #include "apxchol/solver/partition/priority_greedy.h"
 #include "apxchol/solver/partitioner_helpers.h"
 #include "apxchol/solver/solve.h"
+#if defined(APXCHOL_USE_METAL)
+#include "apxchol/solver/metal_solver.h"
+#endif
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/gpu_block_frontend.h"
 #include "gpu_preconditioner_fixture.h"
@@ -36,6 +37,16 @@
 #endif
 
 // ── Helpers ──────────────────────────────────────────
+
+static apxchol::factorization factorize_controlled(
+        apxchol::graph graph, const apxchol::factor_options& options,
+        const apxchol::detail::factorization_controls& controls,
+        apxchol::checkpoint* checkpoint = nullptr) {
+    apxchol::block_greedy_partitioner partitioner;
+    return apxchol::factorize_impl(apxchol::make_tree_elim(options), partitioner,
+        std::move(graph), options, checkpoint, nullptr,
+        apxchol::detail::setup_route::cpu, false, controls);
+}
 
 TEST(SetupDiagnostics, EndpointRadixSortMatchesComparisonSort) {
     std::mt19937_64 rng(1234567);
@@ -524,6 +535,82 @@ TEST(FactorAssembly, SerialAndParallelInvariantScansMatchByteForByte) {
     }
 }
 
+TEST(FactorAssembly, RejectsNonfiniteEntriesOutsideParallelRegion) {
+    const scoped_threads team(2);
+    apxchol::detail::factor_entry entry{1, 0};
+    std::vector<apxchol::detail::factor_col> cols(2);
+    cols[0].vertex = 0;
+    cols[0].diag = 1;
+    cols[0].entries = &entry;
+    cols[0].entry_count = 1;
+    cols[1].vertex = 1;
+    cols[1].diag = 1;
+    apxchol::factorization factor;
+    EXPECT_NO_THROW(apxchol::detail::build_csc(factor, cols, 2, nullptr));
+    for (float value : {std::numeric_limits<float>::infinity(),
+                        std::numeric_limits<float>::quiet_NaN()}) {
+        entry.value = value;
+        EXPECT_THROW(apxchol::detail::build_csc(factor, cols, 2, nullptr),
+                     std::range_error);
+    }
+}
+
+TEST(FactorRegularization, RejectsUnrepresentableExcess) {
+    const scoped_threads team(2);
+    for (int n : {3, 16385}) {
+        SCOPED_TRACE(n);
+        const auto L = path_laplacian(n);
+        for (const auto& [scale, regularization] :
+             {std::pair{1e10, 1e300}, std::pair{1e-30, 1e-300}}) {
+            const Eigen::SparseMatrix<double> A = scale * L;
+            apxchol::factor_options opts;
+            opts.regularization = regularization;
+            EXPECT_THROW(apxchol::factorize(A, opts), std::range_error);
+        }
+    }
+}
+
+TEST(FactorRegularization, RejectsUnrepresentableStoredDiagonal) {
+    const scoped_threads team(2);
+    const auto L = path_laplacian(3);
+    for (double regularization : {1e300, 1e-100}) {
+        SCOPED_TRACE(regularization);
+        apxchol::solve_options opts;
+        opts.backend = apxchol::solve_backend::cpu;
+        opts.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
+        opts.factor_opts.regularization = regularization;
+        EXPECT_THROW(apxchol::cpu_solver(L, opts), std::range_error);
+    }
+}
+
+TEST(FactorRegularization, AcceptsRepresentableExtremesAndGroundedDefaults) {
+    const scoped_threads team(2);
+    const auto L = path_laplacian(3);
+    Eigen::VectorXd b(3);
+    b << 1, -2, 1;
+    for (double regularization : {0.0, 4.0}) {
+        apxchol::solve_options opts;
+        opts.backend = apxchol::solve_backend::cpu;
+        opts.factor_opts.regularization = regularization;
+        const auto result = apxchol::solve(L, b, opts);
+        EXPECT_TRUE(result.converged);
+        EXPECT_LT((L * result.x - b).norm() / b.norm(), opts.tol);
+    }
+    Eigen::SparseMatrix<double> identity(3, 3);
+    identity.setIdentity();
+    for (double regularization : {1e-300, 1e50}) {
+        apxchol::factor_options opts;
+        opts.regularization = regularization;
+        const auto factor = apxchol::factorize(identity, opts);
+        EXPECT_TRUE(factor.sddm);
+        for (int col = 0; col < 3; ++col) {
+            const auto diagonal = factor_diag(factor.L, col);
+            EXPECT_GT(diagonal, 0);
+            EXPECT_TRUE(std::isfinite(diagonal));
+        }
+    }
+}
+
 
 
 TEST(VecPoolAos, ParallelRebuiltFactorsPreserveSolveContract) {
@@ -574,15 +661,14 @@ TEST(VecPoolAos, AutoIncrementalDegreesPreserveTheFactorByteForByte) {
     opts.seed = 19;
     opts.omp_threshold = 16;
     opts.min_is_fraction = 0.0;
-    auto run = [&](const char* mode) {
-        const scoped_env gate(
-            "APXCHOL_INCREMENTAL_DEGREE_SPARSE", mode);
-        return apxchol::factorize(
-            L, opts);
+    using degree_cache = apxchol::detail::factorization_controls::degree_cache;
+    auto run = [&](degree_cache mode) {
+        return factorize_controlled(apxchol::make_graph(L), opts,
+                                    {.incremental_degrees = mode});
     };
-    const auto baseline = run("0");
-    const auto automatic = run(nullptr);
-    const auto named_auto = run("auto");
+    const auto baseline = run(degree_cache::disabled);
+    const auto automatic = run(degree_cache::automatic);
+    const auto forced = run(degree_cache::forced);
     ASSERT_FALSE(baseline.rounds.empty());
     ASSERT_EQ(baseline.rounds.front().is_size,
               static_cast<std::size_t>(clique_count));
@@ -591,8 +677,8 @@ TEST(VecPoolAos, AutoIncrementalDegreesPreserveTheFactorByteForByte) {
         clique_count * (clique_size - 1), 8));
     expect_same_factor(baseline, automatic,
                        "full prune vs default incremental degrees");
-    expect_same_factor(automatic, named_auto,
-                       "default vs explicitly named auto degrees");
+    expect_same_factor(automatic, forced,
+                       "automatic vs forced incremental degrees");
 }
 
 TEST(VecPoolAos, IncrementalDegreeCacheDoesNotLeakIntoBkResidualLoop) {
@@ -621,14 +707,13 @@ TEST(VecPoolAos, IncrementalDegreeCacheDoesNotLeakIntoBkResidualLoop) {
     opts.seed = 19;
     opts.omp_threshold = 16;
     opts.parallel_residual_threshold = 5;
-    auto run = [&](const char* mode) {
-        const scoped_env gate(
-            "APXCHOL_INCREMENTAL_DEGREE_SPARSE", mode);
-        return apxchol::factorize(
-            L, opts);
+    using degree_cache = apxchol::detail::factorization_controls::degree_cache;
+    auto run = [&](degree_cache mode) {
+        return factorize_controlled(apxchol::make_graph(L), opts,
+                                    {.incremental_degrees = mode});
     };
-    const auto baseline = run("0");
-    const auto automatic = run(nullptr);
+    const auto baseline = run(degree_cache::disabled);
+    const auto automatic = run(degree_cache::automatic);
     ASSERT_FALSE(baseline.rounds.empty());
     EXPECT_TRUE(apxchol::detail::incremental_degree_worthwhile(
         n, baseline.rounds.front().avg_deg,
@@ -733,14 +818,15 @@ TEST(PruneSkip, HubGridSolvesAtEveryFactorIncludingTheAggressiveOne) {
     apxchol::solve_options opts;
     opts.tol = 1e-8; opts.max_iter = 500; opts.factor_opts.seed = 7;
     opts.factor_opts.omp_threshold = 16;
-    auto run = [&](const char* factor) {
-        const scoped_env gate("APXCHOL_PRUNE_SKIP", factor);
-        apxchol::cpu_solver solver(A, opts);
+    auto run = [&](double skip_factor) {
+        auto factor = factorize_controlled(apxchol::make_graph(A), opts.factor_opts,
+                                           {.prune_skip_factor = skip_factor});
+        apxchol::cpu_solver solver(A, std::move(factor), opts);
         return solver.solve(b);
     };
-    const auto off = run("0");
-    const auto standard = run(nullptr);
-    const auto aggressive = run("1");
+    const auto off = run(0);
+    const auto standard = run(4);
+    const auto aggressive = run(1);
     for (const auto* result : {&off, &standard, &aggressive}) {
         EXPECT_LT(result->residual, 1e-8);
         EXPECT_LT((A * result->x - b).norm() / b.norm(), 1e-7);
@@ -751,16 +837,15 @@ TEST(PruneSkip, HubGridSolvesAtEveryFactorIncludingTheAggressiveOne) {
     // The fixture must really arm the rule: an unwalked hub is reported at its
     // raw count, dead entries included, so some round's average degree is
     // larger than the exact one.
-    auto round_degrees = [&](const char* factor) {
-        const scoped_env gate("APXCHOL_PRUNE_SKIP", factor);
-        const auto f = apxchol::factorize(
-            A, opts.factor_opts);
+    auto round_degrees = [&](double skip_factor) {
+        const auto f = factorize_controlled(apxchol::make_graph(A), opts.factor_opts,
+                                           {.prune_skip_factor = skip_factor});
         std::vector<double> avg;
         for (const auto& round : f.rounds) avg.push_back(round.avg_deg);
         return avg;
     };
-    const auto exact = round_degrees("0");
-    const auto skipped = round_degrees(nullptr);
+    const auto exact = round_degrees(0);
+    const auto skipped = round_degrees(4);
     ASSERT_GE(exact.size(), 3u);
     bool some_round_overestimates = false;
     for (std::size_t r = 0; r < std::min(exact.size(), skipped.size()); ++r)
@@ -1059,28 +1144,45 @@ static void expect_repeated_solves_bit_identical(const Eigen::SparseMatrix<doubl
     EXPECT_EQ(w1.iterations, w2.iterations);
     EXPECT_EQ(w1.residual, w2.residual);
     EXPECT_TRUE((w1.x.array() == w2.x.array()).all());
-    // The Eigen-facing application (apply -> _solve_impl): same guarantee. On
-    // a Laplacian it follows the center-k schedule (APXCHOL_GROUND=center-k,
-    // see env_knobs.h): only every K-th application since the last
-    // reset_apply_count() runs the two mean passes, so compare applications
-    // at the same phase (restart the schedule before each call).
-    const auto& pc = slv.preconditioner();
-    pc.reset_apply_count();
+    // Public applications are independent of prior solve/apply calls.
     Eigen::VectorXd z1 = slv.apply(b);
-    pc.reset_apply_count();
     Eigen::VectorXd z2 = slv.apply(b);
     EXPECT_TRUE((z1.array() == z2.array()).all());
     if (laplacian) {
-        // The K-th application after a restart centres: mean zero to rounding.
-        const int K = apxchol::detail::env_knobs::get().center_k;
-        pc.reset_apply_count();
-        Eigen::VectorXd zk;
-        for (int i = 0; i < K; ++i) zk = slv.apply(b);
-        EXPECT_NEAR(zk.mean(), 0.0, 1e-13 * zk.cwiseAbs().maxCoeff());
+        EXPECT_NEAR(z1.mean(), 0.0, 1e-13 * z1.cwiseAbs().maxCoeff());
         // The returned SOLUTION is min-norm regardless of the schedule
         // (cpu_solver::solve centres x once at the end).
         EXPECT_NEAR(r1.x.mean(), 0.0, 1e-14 * r1.x.cwiseAbs().maxCoeff());
         EXPECT_NEAR(w1.x.mean(), 0.0, 1e-14 * w1.x.cwiseAbs().maxCoeff());
+    }
+}
+
+TEST(Grounding, PublicApplyIsIndependentOfCallOrderAndPanelWidth) {
+    const auto matrix = grid_laplacian(8, 8);
+    const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 64.0);
+    apxchol::cpu_solver owner(matrix);
+    const Eigen::VectorXd expected = owner.apply(rhs);
+    ASSERT_GT(expected.norm(), 0.0);
+    const double tolerance = 1e-12 * expected.norm();
+    EXPECT_NEAR(expected.mean(), 0.0, tolerance);
+
+    Eigen::MatrixXd panel(matrix.rows(), 3), output(matrix.rows(), 3);
+    panel.col(0) = rhs;
+    panel.col(1) = (2 * rhs.array() + 3).matrix();
+    panel.col(2) = (rhs.array() - 7).matrix();
+    // Cross the internal PCG centering period while mixing public entry points.
+    for (int repeat = 0; repeat < 12; ++repeat) {
+        SCOPED_TRACE(repeat);
+        const Eigen::VectorXd scalar = owner.apply(rhs);
+        EXPECT_TRUE((scalar.array() == expected.array()).all());
+        const Eigen::VectorXd eigen = owner.preconditioner().solve(rhs);
+        EXPECT_TRUE((eigen.array() == expected.array()).all());
+        owner.apply(panel, output);
+        EXPECT_LE((output.col(0) - expected).norm(), tolerance);
+        EXPECT_LE((output.col(1) - 2 * expected).norm(), 2 * tolerance);
+        EXPECT_LE((output.col(2) - expected).norm(), tolerance);
+        for (int column = 0; column < panel.cols(); ++column)
+            EXPECT_NEAR(output.col(column).mean(), 0.0, tolerance);
     }
 }
 
@@ -1403,12 +1505,11 @@ TEST(ResidualSparsifyGate, DuplicateHeavyIndexedGraphConvergesWithEitherSetting)
     apxchol::factor_options options;
     options.parallel_residual_threshold = 5;
     options.min_is_fraction = 0.5;
-    for (const char* setting : {"0", "1"}) {
-        SCOPED_TRACE(setting);
-        const scoped_env sparsify("APXCHOL_RESIDUAL_SPARSIFY", setting);
+    for (bool sparsify : {false, true}) {
+        SCOPED_TRACE(sparsify);
         apxchol::checkpoint timings;
-        auto factor = apxchol::factorize(graph, options, &timings);
-        EXPECT_EQ(timings.total("setup.sparsify_residual") > 0.0, *setting == '1')
+        auto factor = factorize_controlled(graph, options, {.residual_sparsify = sparsify}, &timings);
+        EXPECT_EQ(timings.total("setup.sparsify_residual") > 0.0, sparsify)
             << "fixture must exercise the residual sparsification gate";
         apxchol::cpu_solver solver(L, std::move(factor));
         const auto result = solver.solve(b, 1e-8, 500);
@@ -1677,33 +1778,104 @@ TEST(PriorityGreedy, ParallelPicksExcludeSharedNeighborsAndResetScratch) {
     }
 }
 
-#if defined(APXCHOL_USE_CUDA)
-TEST(GpuSptrsvConfiguration, UsesDataflowWithEitherStorage) {
-    for (const char* choice : {static_cast<const char*>(nullptr), "", "dataflow"}) {
-        const scoped_env selected("APXCHOL_GPU_SPTRSV", choice);
-        for (const char* storage : {static_cast<const char*>(nullptr), "float32", "float16"}) {
-            const scoped_env fp16("APXCHOL_FACTOR_STORAGE", storage);
-            EXPECT_EQ(apxchol::cuda_sptrsv::fp16_resolved(),
-                      !storage || std::string_view(storage) == "float16");
-            apxchol::sparse_csc factor;
-            factor.n_ = 1;
-            factor.outer_ = {0, 1};
-            factor.inner_ = {0};
-            factor.vals_ = {2.0f};
-            apxchol::cuda_sptrsv trsv;
-            ASSERT_NO_THROW(trsv.setup(factor, 1));
-            EXPECT_STREQ(trsv.backend_name(), "dataflow");
-            EXPECT_EQ(trsv.fp16(), !storage || std::string_view(storage) == "float16");
-        }
+static apxchol::factorization custom_factor_for_adoption() {
+    apxchol::factorization F;
+    F.sddm = true;
+    F.perm = {2, 0, 1};
+    F.L.n_ = 3;
+    F.L.outer_ = {0, 4, 6, 7};
+    F.L.inner_ = {0, 2, 1, 2, 1, 2, 2}; // Unsorted, duplicate off-diagonals are valid.
+    F.L.vals_ = {2, -0.1f, -0.25f, -0.15f, 3, -0.5f, 4};
+    return F;
+}
+
+TEST(FactorAdoption, RejectsMalformedArraysPermutationAndRounds) {
+    using F = apxchol::factorization;
+    const std::pair<const char*, void (*)(F&)> mutations[] = {
+        {"short permutation", [](F& f) { f.perm.pop_back(); }},
+        {"duplicate permutation", [](F& f) { f.perm[1] = f.perm[0]; }},
+        {"out-of-range permutation", [](F& f) { f.perm[0] = 3; }},
+        {"short outer array", [](F& f) { f.L.outer_.pop_back(); }},
+        {"nonzero first offset", [](F& f) { f.L.outer_[0] = 1; }},
+        {"decreasing offsets", [](F& f) { f.L.outer_[1] = 7; }},
+        {"excess final offset", [](F& f) { ++f.L.outer_.back(); }},
+        {"short values", [](F& f) { f.L.vals_.pop_back(); }},
+        {"missing diagonal", [](F& f) { f.L.inner_[0] = 1; }},
+        {"zero diagonal", [](F& f) { f.L.vals_[0] = 0; }},
+        {"out-of-range row", [](F& f) { f.L.inner_[1] = 3; }},
+        {"upper-triangle entry", [](F& f) { f.L.inner_[5] = 0; }},
+        {"nonfinite value", [](F& f) { f.L.vals_[1] = std::numeric_limits<float>::infinity(); }},
+        {"oversized round", [](F& f) { f.rounds = {{3, 4, 0, 0, 0}}; }},
+        {"dependent round", [](F& f) { f.rounds = {{3, 2, 0, 0, 0}}; }},
+    };
+    for (const auto& [name, mutate] : mutations) {
+        SCOPED_TRACE(name);
+        auto factor = custom_factor_for_adoption();
+        mutate(factor);
+        apxchol::apx_cholesky preconditioner;
+        EXPECT_THROW(preconditioner.set_factor(factor), std::invalid_argument);
+#if defined(APXCHOL_USE_METAL)
+        Eigen::SparseMatrix<double> A(3, 3);
+        A.setIdentity();
+        EXPECT_THROW(apxchol::metal_solver(A, factor), std::invalid_argument);
+#endif
     }
 }
 
-TEST(GpuSptrsvConfiguration, RejectsUnknownAndRetiredBackendsBeforeSetup) {
-    for (const char* choice : {"cusparse", "auto", "levelset", "typo"}) {
-        const scoped_env selected("APXCHOL_GPU_SPTRSV", choice);
+TEST(FactorAdoption, PreservesCustomEntriesAndRoundMetadata) {
+    auto factor = custom_factor_for_adoption();
+    factor.rounds = {{3, 0, 0, 0, 0}, {3, 1, 0, 0, 0}, {2, 1, 0, 0, 0}};
+    Eigen::Matrix3d lower = Eigen::Matrix3d::Zero();
+    for (int col = 0; col < 3; ++col)
+        for (auto p = factor.L.outer_[col]; p < factor.L.outer_[col + 1]; ++p)
+            lower(factor.L.inner_[p], col) += factor.L.vals_[p];
+    const Eigen::Matrix3d permuted = lower * lower.transpose();
+    Eigen::Matrix3d A;
+    for (int row = 0; row < 3; ++row)
+        for (int col = 0; col < 3; ++col)
+            A(row, col) = permuted(factor.perm[row], factor.perm[col]);
+    apxchol::apx_cholesky preconditioner;
+    preconditioner.set_keep_factor(true);
+    preconditioner.set_options({.drop_tolerance = 0});
+    ASSERT_NO_THROW(preconditioner.set_factor(factor));
+    EXPECT_EQ(preconditioner.factor().L.inner_, factor.L.inner_);
+    EXPECT_EQ(preconditioner.factor().L.vals_, factor.L.vals_);
+    EXPECT_EQ(preconditioner.factor().rounds.size(), factor.rounds.size());
+    const Eigen::Vector3d b(1, 2, -3);
+    const Eigen::Vector3d x = preconditioner.solve(b);
+    EXPECT_LT((A * x - b).norm(), 1e-12);
+}
+
+TEST(FactorAdoption, GroundedColumnMayBeEmptyOrZero) {
+    for (bool empty : {false, true}) {
+        apxchol::factorization factor;
+        factor.perm = {0};
+        factor.L.n_ = 1;
+        factor.L.outer_ = {0, apxchol::edge_index(!empty)};
+        if (!empty) { factor.L.inner_ = {0}; factor.L.vals_ = {0}; }
+        apxchol::apx_cholesky preconditioner;
+        ASSERT_NO_THROW(preconditioner.set_factor(std::move(factor)));
+        const Eigen::VectorXd result = preconditioner.solve(Eigen::VectorXd::Zero(1));
+        EXPECT_TRUE(result.isZero());
+    }
+}
+
+#if defined(APXCHOL_USE_CUDA)
+TEST(GpuSptrsvConfiguration, UsesDataflowWithEitherStorage) {
+    for (const auto storage : {apxchol::factor_storage_type::automatic,
+                               apxchol::factor_storage_type::fp32,
+                               apxchol::factor_storage_type::fp16}) {
+        const bool fp16 = storage != apxchol::factor_storage_type::fp32;
+        EXPECT_EQ(apxchol::cuda_sptrsv::fp16_resolved(storage), fp16);
+        apxchol::sparse_csc factor;
+        factor.n_ = 1;
+        factor.outer_ = {0, 1};
+        factor.inner_ = {0};
+        factor.vals_ = {2.0f};
         apxchol::cuda_sptrsv trsv;
-        EXPECT_THROW(trsv.setup(apxchol::sparse_csc{}, 0),
-                     std::invalid_argument);
+        ASSERT_NO_THROW(trsv.setup(factor, 1, {.factor_storage = storage}));
+        EXPECT_STREQ(trsv.backend_name(), "dataflow");
+        EXPECT_EQ(trsv.fp16(), fp16);
     }
 }
 
@@ -1913,9 +2085,6 @@ TEST(GpuBoundedSelection, OwnedZeroDegreeCandidatesMakeProgress) {
 }
 
 TEST(GpuBoundedSelection, ConsumingSolveChecksOriginalOperatorResidual) {
-    const scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-    const scoped_env fp32("APXCHOL_FACTOR_STORAGE", "float32");
-    const scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     const scoped_omp_threads serial(1);
     const auto A = grid_laplacian(9, 7);
     Eigen::VectorXd exact(A.rows());
@@ -1926,6 +2095,8 @@ TEST(GpuBoundedSelection, ConsumingSolveChecksOriginalOperatorResidual) {
         options.backend = apxchol::solve_backend::gpu;
         options.tol = 1e-8; options.max_iter = 500; options.stagnation_window = 0;
         options.factor_opts.seed = seed;
+        options.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
+        options.factor_opts.drop_tolerance = 0;
         options.factor_opts.partition.degree_quantile = 0.5;
         Eigen::VectorXd first_solution;
         Eigen::Index first_iterations = 0;
