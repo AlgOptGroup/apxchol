@@ -12,16 +12,10 @@
 namespace {
 struct item { bool backbone; };
 struct omp_settings {
-#ifdef _OPENMP
     int threads = omp_get_max_threads(), dynamic = omp_get_dynamic();
     ~omp_settings() { omp_set_num_threads(threads); omp_set_dynamic(dynamic); }
-#endif
     void set(int threads) {
-#ifdef _OPENMP
         omp_set_dynamic(0); omp_set_num_threads(threads);
-#else
-        (void)threads;
-#endif
     }
 };
 constexpr std::size_t block_items = 16384;

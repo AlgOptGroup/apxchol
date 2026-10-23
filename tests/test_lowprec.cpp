@@ -321,19 +321,17 @@ TEST(LowPrec, SetupStoresNarrowValueOfEveryEntryAndTheColumnScales) {
                     }
                 ASSERT_TRUE(found);
             }
-        EXPECT_EQ(trsv.lowprec_stats().offdiag, offdiag);
-        EXPECT_EQ(trsv.lowprec_stats().dropped, 0u);
+        EXPECT_EQ(trsv.drop_stats().offdiag, offdiag);
+        EXPECT_EQ(trsv.drop_stats().dropped, 0u);
         // fp32 / fp64 have fp32's range: nothing flushes here.
-        EXPECT_EQ(trsv.lowprec_stats().flushed, 0u);
-        EXPECT_EQ(trsv.lowprec_stats().subnormal, 0u);
+        EXPECT_EQ(trsv.drop_stats().flushed, 0u);
+        EXPECT_EQ(trsv.drop_stats().subnormal, 0u);
     }
 }
 
-// A hand-built column with one flushed and one subnormal ratio: the counts
-// are exact under FP16_SCALED (default: the subnormal is flushed too, so
-// flushed=2 / subnormal=0; APXCHOL_FP16_KEEP_SUBNORMAL=1: flushed=1 /
-// subnormal=1) and zero everywhere else. The forward solve is exact w.r.t.
-// the STORED values either way.
+// A hand-built column with one flushed and one subnormal ratio: on the fp32
+// storage nothing flushes and the counts are zero. The forward solve is exact
+// w.r.t. the STORED values.
 TEST(LowPrec, FlushAndSubnormalCountsAreExact) {
     // These state the DEFAULT (fp32) storage contract, so pin it: the suite
     // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
@@ -348,20 +346,17 @@ TEST(LowPrec, FlushAndSubnormalCountsAreExact) {
     L.outer_ = {0, 4, 6, 7, 8};
     L.inner_ = {0, 1, 2, 3,  1, 2,  2,  3};
     L.vals_  = {2.0f, 1.0f, 1e-6f, 1e-9f,  1.5f, -0.25f,  1.0f,  1.0f};
-    for (int keep_sub = 0; keep_sub < 2; ++keep_sub) {
-        SCOPED_TRACE(keep_sub ? "APXCHOL_FP16_KEEP_SUBNORMAL=1" : "default (fp16 subnormals flushed)");
-        if (keep_sub) setenv("APXCHOL_FP16_KEEP_SUBNORMAL", "1", 1);
+    {
         apxchol::omp_sptrsv trsv;
         trsv.setup(L, 4);
-        unsetenv("APXCHOL_FP16_KEEP_SUBNORMAL");
-        EXPECT_EQ(trsv.lowprec_stats().offdiag, 4u);
-        EXPECT_EQ(trsv.lowprec_stats().dropped, 0u);
-        EXPECT_EQ(trsv.lowprec_stats().nnz_factor, 8u);
-        EXPECT_EQ(trsv.lowprec_stats().nnz_stored, 8u);
+        EXPECT_EQ(trsv.drop_stats().offdiag, 4u);
+        EXPECT_EQ(trsv.drop_stats().dropped, 0u);
+        EXPECT_EQ(trsv.drop_stats().nnz_factor, 8u);
+        EXPECT_EQ(trsv.drop_stats().nnz_stored, 8u);
         EXPECT_EQ(trsv.stored_nnz(), 8u);
-        EXPECT_EQ(trsv.lowprec_stats().factor_subnormal, 0u);   // every fp32 value here is normal
-        EXPECT_EQ(trsv.lowprec_stats().flushed, 0u);
-        EXPECT_EQ(trsv.lowprec_stats().subnormal, 0u);
+        EXPECT_EQ(trsv.drop_stats().factor_subnormal, 0u);   // every fp32 value here is normal
+        EXPECT_EQ(trsv.drop_stats().flushed, 0u);
+        EXPECT_EQ(trsv.drop_stats().subnormal, 0u);
         EXPECT_FALSE(apxchol::omp_sptrsv::format_flushes(1e-9f, 1.0f));   // fp32's range: only 0 stores as 0
         EXPECT_TRUE(apxchol::omp_sptrsv::format_flushes(0.0f, 1.0f));
         // The forward/back solves still run and are exact w.r.t. the STORED
@@ -493,7 +488,7 @@ TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
         std::uint64_t L11_nnz = 0;
         for (node_index j = 0; j < m; ++j)
             for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) L11_nnz += L.inner_[p] < m;
-        const auto& st = trsv.lowprec_stats();
+        const auto& st = trsv.drop_stats();
         EXPECT_EQ(st.nnz_factor, L11_nnz);
         EXPECT_EQ(st.nnz_stored, ref.kept);
         EXPECT_EQ(trsv.stored_nnz(), ref.kept);
@@ -525,8 +520,8 @@ TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
             EXPECT_EQ(below, 0u);
         }
         // Reference has the same kept structure count-wise (its stored nnz is the full L11).
-        EXPECT_EQ(rf.lowprec_stats().nnz_stored, L11_nnz);
-        EXPECT_EQ(rf.lowprec_stats().dropped, 0u);
+        EXPECT_EQ(rf.drop_stats().nnz_stored, L11_nnz);
+        EXPECT_EQ(rf.drop_stats().dropped, 0u);
 
         // Solves agree to ~1e-12 (same arithmetic up to the 4-way accumulator
         // grouping; the zeroed terms contribute exact zeros).
@@ -570,13 +565,13 @@ TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
         // same kept set) with the compensation this test switched off.
         apxchol::omp_sptrsv plain;
         { scoped_drop_off off; plain.setup(L, m); }
-        EXPECT_EQ(plain.lowprec_stats().rel, 0.0);
-        EXPECT_EQ(plain.lowprec_stats().dropped, 0u);
-        EXPECT_EQ(plain.lowprec_stats().nnz_stored, L11_nnz);
+        EXPECT_EQ(plain.drop_stats().rel, 0.0);
+        EXPECT_EQ(plain.drop_stats().dropped, 0u);
+        EXPECT_EQ(plain.drop_stats().nnz_stored, L11_nnz);
         EXPECT_EQ(plain.stored_nnz(), L11_nnz);
         apxchol::omp_sptrsv dflt;
         { scoped_env unset("APXCHOL_FACTOR_DROP", nullptr); dflt.setup(L, m); }
-        EXPECT_EQ(dflt.lowprec_stats().rel, apxchol::kFactorDropRelDefault);
+        EXPECT_EQ(dflt.drop_stats().rel, apxchol::kFactorDropRelDefault);
         EXPECT_EQ(dflt.stored_nnz(), ref.kept);
     }
 }
@@ -607,23 +602,23 @@ TEST(LowPrec, FactorDropEdgeCases) {
         setenv("APXCHOL_FACTOR_DROP", rel, 1);
         apxchol::omp_sptrsv t; t.setup(L, 2000);
         unsetenv("APXCHOL_FACTOR_DROP");
-        EXPECT_EQ(t.lowprec_stats().dropped, 0u);
+        EXPECT_EQ(t.drop_stats().dropped, 0u);
         EXPECT_EQ(t.stored_nnz(), static_cast<std::uint64_t>(L.nonZeros()));
     }
     {
         setenv("APXCHOL_FACTOR_DROP", "1e-30", 1);   // below everything: only format zeros go
         apxchol::omp_sptrsv t; t.setup(L, 2000);
         unsetenv("APXCHOL_FACTOR_DROP");
-        EXPECT_EQ(t.lowprec_stats().dropped, 0u);
-        EXPECT_EQ(t.stored_nnz(), static_cast<std::uint64_t>(L.nonZeros()) - t.lowprec_stats().dropped);
+        EXPECT_EQ(t.drop_stats().dropped, 0u);
+        EXPECT_EQ(t.stored_nnz(), static_cast<std::uint64_t>(L.nonZeros()) - t.drop_stats().dropped);
     }
     {
         setenv("APXCHOL_FACTOR_DROP", "2", 1);        // > 1: every off-diagonal goes, diagonal stays
         apxchol::omp_sptrsv t; t.setup(L, 2000);
         unsetenv("APXCHOL_FACTOR_DROP");
-        EXPECT_EQ(t.lowprec_stats().dropped, offdiag);
+        EXPECT_EQ(t.drop_stats().dropped, offdiag);
         EXPECT_EQ(t.stored_nnz(), 2000u);
-        EXPECT_EQ(t.lowprec_stats().offdiag, 0u);
+        EXPECT_EQ(t.drop_stats().offdiag, 0u);
         for (node_index j = 0; j < 2000; ++j) {
             ASSERT_EQ(t.csc_col_ptr()[j], static_cast<edge_index>(j));
             ASSERT_EQ(t.csc_row_idx()[j], j);
@@ -708,13 +703,13 @@ TEST(LowPrecFp16, StorageContractAndCompensatedDiagonal) {
             worst_colsum = std::max(worst_colsum,
                 std::fabs((static_cast<double>(trsv.fp16_diag()[j]) + stored_sum) - (d0 + x_sum)) / abs_scale);
         }
-        EXPECT_EQ(trsv.lowprec_stats().offdiag, offdiag);
+        EXPECT_EQ(trsv.drop_stats().offdiag, offdiag);
         EXPECT_LT(worst_colsum, 4e-7);                     // one fp32 rounding of the diagonal
         // The 1e-7-scaled entries sit ~2^-23 below their column max: fp16 must
         // have flushed a good fraction of the off-diagonals.
-        EXPECT_GT(trsv.lowprec_stats().flushed, offdiag / 20);
-        EXPECT_EQ(trsv.lowprec_stats().subnormal, 0u);
-        EXPECT_EQ(trsv.lowprec_stats().scale_fallback, 0u);
+        EXPECT_GT(trsv.drop_stats().flushed, offdiag / 20);
+        EXPECT_EQ(trsv.drop_stats().subnormal, 0u);
+        EXPECT_EQ(trsv.drop_stats().scale_fallback, 0u);
     }
 }
 
@@ -732,7 +727,7 @@ TEST(LowPrecFp16, DegenerateColumnScaleFallsBackToOneAndTheSetupStaysFinite) {
     apxchol::omp_sptrsv trsv;
     ASSERT_NO_THROW(trsv.setup(L, 3));
     ASSERT_TRUE(trsv.fp16());
-    EXPECT_EQ(trsv.lowprec_stats().scale_fallback, 1u);
+    EXPECT_EQ(trsv.drop_stats().scale_fallback, 1u);
     EXPECT_EQ(trsv.col_scales()[1], 1.0f);                 // the fallback
     EXPECT_EQ(trsv.col_scales()[0], 0.5f);                 // untouched
     for (node_index j = 0; j < 3; ++j) {

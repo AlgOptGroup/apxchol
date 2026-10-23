@@ -163,7 +163,7 @@ operator_scan require_operator(const Eigen::SparseMatrix<double>& A);
 /// Ceiling on `operator_scan::positive_mass_fraction()` above which lumping is
 /// refused rather than applied silently. Override with APXCHOL_LUMP_MAX.
 ///
-/// 0.25, and the basis is measured (docs/m-matrix-lumping.md):
+/// 0.25, and the basis is measured:
 ///   * the two populations in the suite are four decades apart. Everything
 ///     lumping exists to rescue sits at rho <= 2e-5 (thermal2 2.0e-5,
 ///     parabolic_fem 3e-6 -- 33% of its off-diagonals are positive but they

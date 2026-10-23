@@ -6,7 +6,7 @@
 /// types are UNSIGNED. Two roles, deliberately different sizes:
 ///
 ///   node_index : vertex ids. n << 4.29B for any realistic graph, so this stays
-///                32-bit even under APXCHOL_64BIT_INDICES -- the large row-index
+///                32-bit even under APXCHOL_64BIT_EDGE_INDICES -- the large row-index
 ///                arrays (factor inner indices) never double.
 ///   edge_index : cumulative column offsets and edge ids, which DO reach billions
 ///                on dense factors / over-allocated pools -> the one widened by
@@ -20,8 +20,6 @@
 ///   APXCHOL_64BIT_NODE_INDICES -> node_index = uint64. Needed for graphs with
 ///       more than ~4.29B vertices. Since #edges >= #vertices, a 64-bit node
 ///       index implies a 64-bit edge index -- this knob AUTO-WIDENS edges too.
-///   APXCHOL_64BIT_INDICES (deprecated) -> alias for the EDGE knob (the realistic
-///       overflow case; keeps node_index 32-bit, the memory-optimal default).
 ///
 /// Unsigned-safety rules (the surface is tiny -- audited):
 ///   * `npos = (T)-1` is a valid sentinel, but ONLY compared with `==`/`!=`
@@ -34,11 +32,8 @@
 #include <cstdio>
 #include <cstdlib>
 
-// A 64-bit node index forces 64-bit edges; the legacy macro maps to the edge knob.
+// A 64-bit node index forces 64-bit edges.
 #if defined(APXCHOL_64BIT_NODE_INDICES) && !defined(APXCHOL_64BIT_EDGE_INDICES)
-#  define APXCHOL_64BIT_EDGE_INDICES
-#endif
-#if defined(APXCHOL_64BIT_INDICES) && !defined(APXCHOL_64BIT_EDGE_INDICES)
 #  define APXCHOL_64BIT_EDGE_INDICES
 #endif
 
@@ -75,6 +70,18 @@ struct directed_pool_edge {
         return a.to < b.to || (a.to == b.to && a.w < b.w);
     }
 };
+
+namespace detail {
+
+/// splitmix64 output finalizer (Steele, Lea & Flood 2014), shared by the
+/// counter-based random streams and the entry/pair hashes.
+inline constexpr std::uint64_t splitmix64_mix(std::uint64_t z) noexcept {
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+} // namespace detail
 
 // (No `index_t` alias: every use is now explicitly node_index or edge_index so
 //  the node/edge width distinction is type-checked, not by-convention.)

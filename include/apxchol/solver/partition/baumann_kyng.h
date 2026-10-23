@@ -12,12 +12,8 @@
 #include "apxchol/solver/partitioner.h"
 #include <algorithm>
 #include <vector>
-#include <cstdio>
-#include <cstdlib>
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 namespace apxchol {
 
@@ -29,7 +25,7 @@ struct baumann_kyng_partitioner {
     /// The measured single default avoids making the factor depend on the
     /// caller's thread count.  c=0.1 wins from 2 through 72 threads while
     /// remaining neutral at one thread; c=0.05 is faster in some tails but has
-    /// a weaker iteration-count margin.  See AGENTS.md for the campaign ledger.
+    /// a weaker iteration-count margin.
     double sampling_constant = 0.1;
 
     uint64_t round = 0;
@@ -73,16 +69,12 @@ struct baumann_kyng_partitioner {
         uint64_t hash_thresh = (p >= 1.0) ? UINT64_MAX
                              : uint64_t(p * double(UINT64_MAX));
 
-        uint64_t round_seed = ctx.seed
-            ^ (round * 6364136223846793005ULL + 1442695040888963407ULL);
+        const uint64_t round_seed = detail::partition_round_seed(ctx.seed, round);
         auto prio = [round_seed](node_index v) -> uint64_t {
-            return (uint64_t(v) ^ round_seed) * 11400714819323198485ULL;
+            return detail::fibonacci_vertex_hash(v, round_seed);
         };
 
-        int nt = 1;
-        #ifdef _OPENMP
-        nt = omp_get_max_threads();
-        #endif
+        const int nt = omp_get_max_threads();
 
         // Resolve the by-route sentinel here too: this partitioner can be driven
         // directly, without factorize() having normalised the options first.
@@ -104,10 +96,8 @@ struct baumann_kyng_partitioner {
             #pragma omp parallel reduction(+:sample_degree_sum, sample_count, selected_degree_work) \
                 if(active.size() > ctx.omp_threshold)
             {
-                int tid = 0, nthreads = 1;
-                #ifdef _OPENMP
-                tid = omp_get_thread_num(); nthreads = omp_get_num_threads();
-                #endif
+                const int tid = omp_get_thread_num();
+                const int nthreads = omp_get_num_threads();
                 size_t bs = active.size() * size_t(tid) / nthreads;
                 size_t be = active.size() * size_t(tid + 1) / nthreads;
                 for (size_t i = bs; i < be; ++i) {
@@ -131,10 +121,8 @@ struct baumann_kyng_partitioner {
             #pragma omp parallel reduction(+:sample_degree_sum, sample_count) \
                 if(active.size() > ctx.omp_threshold)
             {
-                int tid = 0, nthreads = 1;
-                #ifdef _OPENMP
-                tid = omp_get_thread_num(); nthreads = omp_get_num_threads();
-                #endif
+                const int tid = omp_get_thread_num();
+                const int nthreads = omp_get_num_threads();
                 size_t bs = active.size() * size_t(tid) / nthreads;
                 size_t be = active.size() * size_t(tid + 1) / nthreads;
                 auto& my_s = local_sampled_[tid];
@@ -166,7 +154,7 @@ struct baumann_kyng_partitioner {
             // (higher degree) never block eligible low-degree ones, and low-degree
             // wins, giving a min-degree-like elimination order.
             auto prio2 = [&](node_index v) -> uint64_t {
-                const uint64_t h = (uint64_t(v) ^ round_seed) * 11400714819323198485ULL;
+                const uint64_t h = prio(v);
                 if (!tiebreak) return h;
                 return (uint64_t(deg_by_vertex_[v]) << 40) | (h >> 24);
             };
@@ -197,13 +185,6 @@ struct baumann_kyng_partitioner {
         if (sample_count > 0)
             est_avg_degree = sample_degree_sum / double(sample_count);
         selected_degree_work_ = selected_degree_work;
-
-        // Work trace: per-round iteration cost (active = the O(|active|) full scan) and
-        // edge-visit cost (sample_deg = Σ deg over sampled vertices). Sum over rounds to
-        // compare total IS-finding work vs m (settles the O(m) vs O(m·d) amortization Q).
-        if (std::getenv("APXCHOL_WORK_TRACE"))
-            std::fprintf(stderr, "[bkwork] active=%zu sampled=%lld sample_deg=%.0f\n",
-                         active.size(), sample_count, sample_degree_sum);
 
         ++round;
     }

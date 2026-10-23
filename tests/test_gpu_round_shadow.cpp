@@ -252,7 +252,7 @@ checked_cpu_round run_authoritative_cpu_round(
 
     std::vector<apxchol::detail::factor_col> columns;
     apxchol::detail::eliminate_partition(
-        apxchol::detail::tree_elimination{}, graph, partition, columns,
+        apxchol::tree_elimination{}, graph, partition, columns,
         workspace, options, nullptr, work_hint);
     const auto comparison =
         apxchol::detail::compare_gpu_round_shadow_with_cpu(
@@ -286,7 +286,7 @@ apxchol::detail::gpu_round_shadow_cpu_comparison run_serial_cpu_round(
     }
     std::vector<apxchol::detail::factor_col> columns;
     apxchol::detail::eliminate_partition(
-        apxchol::detail::tree_elimination{}, graph, partition, columns,
+        apxchol::tree_elimination{}, graph, partition, columns,
         workspace, options, nullptr, work_hint);
     if (factor_log) *factor_log = materialize_factor_log(columns);
     return apxchol::detail::compare_gpu_round_shadow_with_cpu(
@@ -302,7 +302,7 @@ apxchol::detail::gpu_round_shadow_cpu_comparison run_serial_cpu_round(
         const gpu_round_shadow_input& input) {
     std::vector<std::vector<apxchol::detail::factor_entry>> entries(input.pivots.size());
     std::vector<apxchol::detail::factor_col> columns;
-    std::vector<apxchol::detail::deferred_edge> fill;
+    std::vector<apxchol::deferred_edge> fill;
     for (std::size_t k = 0; k < input.pivots.size(); ++k) {
         const auto v = input.pivots[k];
         const auto begin = input.owner_offsets[v], end = input.owner_offsets[v+1];
@@ -338,7 +338,7 @@ apxchol::detail::gpu_round_shadow_cpu_comparison run_serial_cpu_round(
         }
         columns.push_back({v,static_cast<apxchol::factor_value_t>(root),entries[k].data(),
                            static_cast<node_index>(entries[k].size())});
-        apxchol::detail::tree_elimination{}.sample_clique(
+        apxchol::tree_elimination{}.sample_clique(
             neighbors,degree,input.seeds[k],apxchol::edge_emitter(fill));
     }
     for (auto e : fill) graph.add_edge(e.u,e.v,e.w);
@@ -537,7 +537,7 @@ parallel_cpu_round_result run_parallel_cpu_round(
     std::atomic<std::uint32_t> worker_mask{0};
     std::atomic<int> team_width{0};
     std::latch first_samples(workers);
-    const apxchol::detail::tree_elimination tree;
+    const apxchol::tree_elimination tree;
     const auto recording_tree = apxchol::as_eliminator(
         [&](std::span<apxchol::weighted_neighbor> neighbors, double degree,
             std::uint64_t seed, apxchol::edge_emitter out) {
@@ -2178,9 +2178,9 @@ TEST(GpuOwnedPrefix, TwoRoundsPreserveOrderedHandbackAndCpuPeel) {
     tail_options.seed = kOwnedSeed;
     std::vector<apxchol::detail::factor_col> expected_tail;
     auto oracle_active = active;
-    apxchol::detail::eliminate_remaining(apxchol::detail::tree_elimination{}, graph,
+    apxchol::detail::eliminate_remaining(apxchol::tree_elimination{}, graph,
         active, columns, actual_ws, tail_options);
-    apxchol::detail::eliminate_remaining(apxchol::detail::tree_elimination{}, oracle,
+    apxchol::detail::eliminate_remaining(apxchol::tree_elimination{}, oracle,
         oracle_active, expected_tail, expected_ws, tail_options);
     ASSERT_EQ(columns.size(), kOwnedVertices);
     ASSERT_EQ(expected_tail.size(), kOwnedVertices - prefix);

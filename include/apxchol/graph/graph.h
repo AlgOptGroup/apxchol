@@ -146,10 +146,6 @@ public:
         adj_.sort_slab(v);
     }
 
-    /// compact pool to remove abandoned slabs from doubling.
-    /// Reduces memory; rebuilds with tight cap=count for all vertices.
-    void compact_adj() { adj_.compact(); }
-
     /// live fraction (1 - abandoned/pool_size).
     double adj_live_fraction() const { return adj_.live_fraction(); }
 
@@ -195,13 +191,9 @@ public:
         return count;
     }
 
-    node_index prune_and_visit(node_index v) {
-        return prune_and_visit(v, [](node_index){});
-    }
-
-    /// Convenience wrapper — prune + count, no visitor.
+    /// Prune + count, no visitor.
     node_index prune_and_degree(node_index v) {
-        return prune_and_visit(v);
+        return prune_and_visit(v, [](node_index) {});
     }
 
     // ── active-aware queries ──
@@ -542,12 +534,9 @@ private:
                     std::min(min_offtree_probability, edge_probability);
         }
         auto draw = [&](node_index u, node_index v, std::uint64_t salt = 0) {
-            std::uint64_t z = seed ^ salt ^
+            const std::uint64_t z = detail::splitmix64_mix(seed ^ salt ^
                 (static_cast<std::uint64_t>(u) * 0x9E3779B97F4A7C15ULL) ^
-                (static_cast<std::uint64_t>(v) * 0xBF58476D1CE4E5B9ULL);
-            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-            z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-            z ^= z >> 31;
+                (static_cast<std::uint64_t>(v) * 0xBF58476D1CE4E5B9ULL));
             return static_cast<double>(z >> 11) * 0x1.0p-53;
         };
 
@@ -813,11 +802,6 @@ struct residual_coalescer {
                        std::span<const node_index> active,
                        std::size_t sample_vertices = 256) {
         return g.estimate_active_sparsify_sample(active, sample_vertices);
-    }
-
-    static auto rebuild(graph& g,
-                        std::span<const node_index> active) {
-        return g.coalesce_active(active);
     }
 
     static auto sparsify(graph& g,

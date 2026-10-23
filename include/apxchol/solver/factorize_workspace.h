@@ -20,7 +20,7 @@ namespace apxchol {
 struct factorize_workspace {
     struct per_thread {
         std::vector<weighted_neighbor>             neighbors;
-        std::vector<detail::deferred_edge>         edge_buffer;
+        std::vector<deferred_edge>         edge_buffer;
 
         std::vector<std::pair<node_index, double>> excess_buffer;
         // Pooled backends deduplicate each pivot in a compact local hash table

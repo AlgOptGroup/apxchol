@@ -19,9 +19,7 @@
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <Eigen/IterativeLinearSolvers>
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/preconditioner.h"
@@ -39,20 +37,6 @@
 
 // ── Helpers ──────────────────────────────────────────
 
-TEST(SetupDiagnostics, WorkDistributionExposesConcentrationAndIdleWorkers) {
-    const auto balanced = apxchol::detail::summarize_work_distribution(
-        {9, 8, 7, 6}, 2);
-    EXPECT_EQ(balanced.total, 30u);
-    EXPECT_EQ(balanced.maximum, 9u);
-    EXPECT_DOUBLE_EQ(balanced.lpt_efficiency, 1.0);
-
-    const auto singleton = apxchol::detail::summarize_work_distribution(
-        {10}, 4);
-    EXPECT_EQ(singleton.total, 10u);
-    EXPECT_EQ(singleton.maximum, 10u);
-    EXPECT_DOUBLE_EQ(singleton.lpt_efficiency, 0.25);
-}
-
 TEST(SetupDiagnostics, EndpointRadixSortMatchesComparisonSort) {
     std::mt19937_64 rng(1234567);
     std::vector<apxchol::node_index> values(20000);
@@ -63,7 +47,6 @@ TEST(SetupDiagnostics, EndpointRadixSortMatchesComparisonSort) {
     values[2] = values[3] = 17;
     auto expected = values;
     std::sort(expected.begin(), expected.end());
-#ifdef _OPENMP
     std::shuffle(values.begin(), values.end(), rng);
     std::vector<apxchol::node_index> scratch(values.size());
     std::vector<std::array<std::size_t, 256>> histograms(8);
@@ -72,9 +55,6 @@ TEST(SetupDiagnostics, EndpointRadixSortMatchesComparisonSort) {
         values, scratch, histograms, omp_get_thread_num(),
         omp_get_num_threads());
     EXPECT_EQ(values, expected);
-#else
-    GTEST_SKIP() << "parallel build required for the collective radix path";
-#endif
 }
 
 TEST(EliminationDedup, PooledLocalHashPreservesOrderSumsAndEpochReuse) {
@@ -352,19 +332,15 @@ namespace {
 struct scoped_threads {
     int saved = 1;
     int saved_dynamic = 0;
-    explicit scoped_threads([[maybe_unused]] int n) {
-#ifdef _OPENMP
+    explicit scoped_threads(int n) {
         saved = omp_get_max_threads();
         saved_dynamic = omp_get_dynamic();
         omp_set_dynamic(0);
         omp_set_num_threads(n);
-#endif
     }
     ~scoped_threads() {
-#ifdef _OPENMP
         omp_set_num_threads(saved);
         omp_set_dynamic(saved_dynamic);
-#endif
     }
 };
 
@@ -531,7 +507,6 @@ TEST(FactorAssembly, SerialAndParallelInvariantScansMatchByteForByte) {
     }
     EXPECT_EQ(outer[n], static_cast<apxchol::edge_index>(2 * n - 1));
 
-#ifdef _OPENMP
     for (const int threads : {2, 3, 8, 16}) {
         apxchol::factorization parallel;
         {
@@ -547,15 +522,11 @@ TEST(FactorAssembly, SerialAndParallelInvariantScansMatchByteForByte) {
             serial, parallel,
             "serial vs invariant assembly at T=" + std::to_string(threads));
     }
-#endif
 }
 
 
 
 TEST(VecPoolAos, ParallelRebuiltFactorsPreserveSolveContract) {
-#ifndef _OPENMP
-    GTEST_SKIP() << "serial build: there is no parallel apply path";
-#else
     const scoped_threads team(16);
     const auto L = weighted_grid_laplacian(120, 120, 7.25, 0.03125);
     apxchol::factor_options opts;
@@ -575,7 +546,6 @@ TEST(VecPoolAos, ParallelRebuiltFactorsPreserveSolveContract) {
 #endif
     // Exact production slot/scatter coverage lives in
     // GpuRoundShadowReference.ParallelProductionApplyMatchesTheCanonicalReference.
-#endif
 }
 
 TEST(VecPoolAos, AutoIncrementalDegreesPreserveTheFactorByteForByte) {
@@ -800,9 +770,6 @@ TEST(PruneSkip, HubGridSolvesAtEveryFactorIncludingTheAggressiveOne) {
 }
 
 TEST(FactorizeDeterminism, SameGraphParallelSelectionIsExact) {
-#ifndef _OPENMP
-    GTEST_SKIP() << "serial build: there is no parallel selection path";
-#else
     const scoped_threads team(16);
     int actual_threads = 0;
     #pragma omp parallel
@@ -847,16 +814,9 @@ TEST(FactorizeDeterminism, SameGraphParallelSelectionIsExact) {
         bk.est_avg_degree = 4.0;
         expect_same_graph_selection(snapshot, candidates, context, bk);
     }
-#endif
 }
 
 TEST(FactorizeDeterminism, ParallelRebuiltFactorsPreserveSolveContract) {
-#ifndef _OPENMP
-    GTEST_SKIP() << "serial build: there is no parallel selection path";
-#else
-    if (const char* e = std::getenv("APXCHOL_OMP_THRESHOLD"); e && *e)
-        GTEST_SKIP() << "APXCHOL_OMP_THRESHOLD=" << e
-                     << " overrides the omp_threshold this test sets";
     // 14400 candidates against a 256-vertex OpenMP gate: most of the ~45
     // elimination rounds take the parallel branch. 16 threads whatever the box
     // has -- oversubscription is welcome here, it widens the window the
@@ -885,7 +845,6 @@ TEST(FactorizeDeterminism, ParallelRebuiltFactorsPreserveSolveContract) {
             if (::testing::Test::HasFatalFailure()) return;
         }
     }
-#endif
 }
 
 // The T=1 half of the contract: one thread, byte-identical factor. Cheap and
@@ -1407,11 +1366,11 @@ TEST(IsYieldHandoff, UsesCandidatesAndProtectsTheSmallTail) {
     // Relative yield does not discard a selection already large enough for
     // parallel elimination. Zero progress still hands off unconditionally.
     EXPECT_FALSE(selection_should_handoff(
-        3700, 3700, 37375, 173224, 0.10, 500, 2000));
+        3700, 37375, 173224, 0.10, 500, 2000));
     EXPECT_TRUE(selection_should_handoff(
-        1900, 1900, 20000, 100000, 0.10, 500, 2000));
+        1900, 20000, 100000, 0.10, 500, 2000));
     EXPECT_TRUE(selection_should_handoff(
-        0, 0, 20000, 100000, 0.10, 500, 2000));
+        0, 20000, 100000, 0.10, 500, 2000));
 }
 
 TEST(ResidualSparsifyGate, UsesObservedTrafficAndHandoffYield) {
@@ -1674,7 +1633,6 @@ TEST(PriorityGreedy, SerialFallbackPreservesExactSelectedSetAndMaximality) {
 
 TEST(PriorityGreedy, ParallelPicksExcludeSharedNeighborsAndResetScratch) {
     const scoped_threads team(4);
-#ifdef _OPENMP
     int actual_threads = 1;
 #pragma omp parallel
     {
@@ -1682,9 +1640,6 @@ TEST(PriorityGreedy, ParallelPicksExcludeSharedNeighborsAndResetScratch) {
         actual_threads = omp_get_num_threads();
     }
     ASSERT_GT(actual_threads, 1) << "shared-neighbor coverage requires a parallel team";
-#else
-    GTEST_SKIP() << "shared-neighbor coverage requires OpenMP";
-#endif
     constexpr apxchol::node_index leaves = 128;
     constexpr apxchol::node_index n = leaves + 2;
     apxchol::graph G(n);

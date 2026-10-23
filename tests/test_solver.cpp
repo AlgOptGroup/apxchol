@@ -889,7 +889,6 @@ TEST(Solver, CpuSingletonPanelsRespectStridesWarmStartsAndBudgets) {
     }
 }
 
-#ifdef _OPENMP
 namespace {
 template<class Owner>
 void check_thread_budget(const Sparse& matrix, int ambient, int budget,
@@ -999,7 +998,6 @@ TEST(Solver, ThreadBudgetPreservesNestedTeamFallback) {
     }
     omp_set_max_active_levels(previous);
 }
-#endif
 
 TEST(Solver, RejectsNegativeThreadBudget) {
     const Sparse matrix = operator_matrix();

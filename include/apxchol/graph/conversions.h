@@ -13,9 +13,7 @@
 #include <ranges>
 #include <vector>
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 namespace apxchol {
 
@@ -59,7 +57,6 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
 
     std::vector<double> diag(n, 0.0);
 
-#ifdef _OPENMP
     // This builder owns a fresh graph. A caller may already be in an unrelated
     // OpenMP team; do not join that team's collective reserve or its barrier.
     const auto reserve_initial = [&](auto begin, auto end, const auto& incoming) {
@@ -159,31 +156,26 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
         }
     }
     if (!built_from_columns) {
-    {
-        // ── Parallel build for vec_pool — O(n + nt) memory ────────
-        // incoming[] is one shared array of size n (atomic increments in
-        // PASS 1 to count per-vertex degree). PASS 2 consumes fixed logical
-        // column ranges [col_bs[t], col_bs[t+1]), including on reduced teams.
-        // Directed AoS writes both endpoint records into adjacency slabs
-        // using atomic claims, then sorts each touched slab after the writes.
-        // Column boundaries and counts are deterministic. Final slab sorting
-        // restores neighbor order regardless of the arrival order of writes;
-        // it does not require a particular runtime assignment of the ranges.
+        // Split both column passes by stored entries across the actual team.
+        // Atomic counts and endpoint writes are independent of that split;
+        // sorting each touched slab restores deterministic neighbor order.
+        // Outer pointers also bound column storage when L is uncompressed.
         const int nt = std::max(1, omp_get_max_threads());
+        const int* outer_ptr = L.outerIndexPtr();
         std::vector<node_index> incoming(static_cast<size_t>(n), 0);
-        std::vector<node_index> col_bs(nt + 1, 0);
-        for (int t = 0; t < nt; ++t)
-            col_bs[t + 1] = static_cast<node_index>(int64_t(outer) * (t + 1) / nt);
 
         // PASS 1: atomic count of incoming + collect diag.
-        #pragma omp parallel for schedule(static)
-        for (node_index k = 0; k < outer; ++k) {
-            for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it) {
-                if (it.row() > it.col()) {
-                    std::atomic_ref(incoming[it.row()]).fetch_add(1, std::memory_order_relaxed);
-                    std::atomic_ref(incoming[it.col()]).fetch_add(1, std::memory_order_relaxed);
-                } else if (it.row() == it.col()) {
-                    diag[k] = it.value();
+        #pragma omp parallel
+        {
+            const auto [col_lo, col_hi] = detail::work_balanced_range(outer_ptr, outer);
+            for (node_index k = col_lo; k < col_hi; ++k) {
+                for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it) {
+                    if (it.row() > it.col()) {
+                        std::atomic_ref(incoming[it.row()]).fetch_add(1, std::memory_order_relaxed);
+                        std::atomic_ref(incoming[it.col()]).fetch_add(1, std::memory_order_relaxed);
+                    } else if (it.row() == it.col()) {
+                        diag[k] = it.value();
+                    }
                 }
             }
         }
@@ -223,18 +215,17 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
             std::vector<node_index>().swap(incoming);
             g.record_edges_added(off_diag_nnz);
 
-            // PASS 2: consume every pre-counted range, even on a reduced team.
-            #pragma omp parallel for num_threads(nt) schedule(static)
-            for (int t = 0; t < nt; ++t) {
-                for (node_index k = col_bs[t]; k < col_bs[t + 1]; ++k)
+            // PASS 2: write both incidences of each lower-triangle entry.
+            #pragma omp parallel
+            {
+                const auto [col_lo, col_hi] = detail::work_balanced_range(outer_ptr, outer);
+                for (node_index k = col_lo; k < col_hi; ++k)
                     for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it) {
                         if (it.row() > it.col()) {
                             const auto u = static_cast<node_index>(it.row());
                             const auto v = static_cast<node_index>(it.col());
-                            {
-                                g.adj_atomic_push_directed(u, v, -it.value());
-                                g.adj_atomic_push_directed(v, u, -it.value());
-                            }
+                            g.adj_atomic_push_directed(u, v, -it.value());
+                            g.adj_atomic_push_directed(v, u, -it.value());
                         }
                     }
             }
@@ -245,22 +236,6 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
                 g.adj_sort_slab(touched[i]);
         }
     }
-    } // !built_from_columns
-#else
-    {
-        // Phase 1 (serial): extract edges and diagonal.
-        for (node_index k = 0; k < outer; ++k)
-            for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it) {
-                if (it.row() > it.col())
-                    g.add_edge(static_cast<node_index>(it.row()),
-                               static_cast<node_index>(it.col()),
-                               -it.value());
-                else if (it.row() == it.col())
-                    diag[k] = it.value();
-            }
-    }
-
-#endif
 
     // Phase 2: excess = diag − weighted degree.  Zero for pure Laplacians.
     //
@@ -280,7 +255,7 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
     // The relative 1e-12 tolerance absorbs fp accumulation-order ulps
     // (column-sum order vs. the ingestion order that built diag[]).
     //
-    // APXCHOL_GROUND=reg (experiment knob, see env_knobs.h): ground the
+    // APXCHOL_GROUND=reg (see env_knobs.h): ground the
     // matrix here instead of by mean-centring in the preconditioner -- every
     // vertex gets excess[v] = max(exact_excess, reg_eps * diag[v]), i.e. an
     // explicit self-loop to ground of relative size reg_eps. Any positive
@@ -290,16 +265,22 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
     const double reg_eps =
         detail::env_knobs::get().ground == detail::grounding_kind::reg
             ? detail::env_knobs::get().reg_eps : 0.0;
-    #pragma omp parallel for schedule(static) if(n > 16384)
-    for (node_index k = 0; k < outer; ++k) {
-        double wdeg = 0.0;
-        for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it)
-            if (it.row() != it.col())
-                wdeg -= it.value();
-        double excess = diag[k] - wdeg;
-        excess = excess > diag[k] * 1e-12 ? excess : 0.0;
-        if (reg_eps > 0.0) excess = std::max(excess, reg_eps * diag[k]);
-        g.excess(k) = excess;
+    // Each column's sum stays serial, so the work-balanced split cannot
+    // change the result.
+    #pragma omp parallel if(n > 16384)
+    {
+        const auto [col_lo, col_hi] =
+            detail::work_balanced_range(L.outerIndexPtr(), outer);
+        for (node_index k = col_lo; k < col_hi; ++k) {
+            double wdeg = 0.0;
+            for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it)
+                if (it.row() != it.col())
+                    wdeg -= it.value();
+            double excess = diag[k] - wdeg;
+            excess = excess > diag[k] * 1e-12 ? excess : 0.0;
+            if (reg_eps > 0.0) excess = std::max(excess, reg_eps * diag[k]);
+            g.excess(k) = excess;
+        }
     }
     return g;
 }
