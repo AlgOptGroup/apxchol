@@ -771,7 +771,7 @@ private:
         for (bool reverse : {false, true}) {
             const auto ptr = reverse ? LT_ptr : L_ptr;
             const auto stats = cuda_host::dataflow_row_stats(ptr);
-            const unsigned split = dataflow_split_threshold_for(stats);
+            const unsigned split = stats.split_threshold(data_.nnz);
             data_.df_split_min[reverse] = split;
             const auto plan = df::pack(ptr.data(), {unsigned(mi), reverse}, blocks, split);
             const int batches = plan.words.size() / df::lanes;
@@ -810,7 +810,7 @@ private:
             data_.factor_bytes += plan.bytes;
             data_.adoption_host_download_bytes += plan.host_download_bytes;
             if (data_.verbose) {
-                dataflow_print_direction_stats(plan.stats, dataflow_split_threshold_for(plan.stats),
+                dataflow_print_direction_stats(plan.stats, data_.df_split_min[reverse],
                     reverse, plan.n_batches, plan.n_slots, plan.n_split);
             }
         }
@@ -822,7 +822,7 @@ private:
         APXCHOL_CUDA_CHECK(cudaMalloc(&data_.d_df_tag, tag_words * sizeof(unsigned)));
         APXCHOL_CUDA_CHECK(cudaMalloc(&data_.d_df_ticket, sizeof(unsigned)));
         data_.factor_bytes += tag_words * sizeof(unsigned) + sizeof(unsigned);
-        data_.df_grid = dataflow_grid_size<1, 1>(data_.fp16);
+        data_.df_grid = dataflow_grid_size();
 
         if (data_.verbose) { size_t mf=0, mt=0; cudaMemGetInfo(&mf,&mt);
             fprintf(stderr,"[mem] SpTRSV dataflow: 2x factor (CSR L+L^T)=%.2fGB (%zuB/value) "
@@ -830,10 +830,6 @@ private:
                     2.0*data_.nnz*(4.0+(double)value_bytes_effective())/1e9, value_bytes_effective(),
                     data_.fwd_batches, data_.bck_batches, data_.df_grid, kDataflowBlock, tag_words * 4.0 / 1e6,
                     data_.df_slots, data_.df_split_rows, mf/1e9, mt/1e9); }
-    }
-
-    unsigned dataflow_split_threshold_for(const detail::gpu_dataflow::row_stats& stats) const {
-        return stats.split_threshold(data_.nnz);
     }
 
     void dataflow_print_direction_stats(const detail::gpu_dataflow::row_stats& st,
@@ -865,8 +861,6 @@ private:
 
     template<unsigned Columns>
     void reserve_panel_workspace() const {
-        if constexpr (Columns == 2)
-            if (!data_.df_pair_grid) data_.df_pair_grid = dataflow_grid_size<2, 1>(data_.fp16);
         if (Columns <= data_.panel_capacity) return;
         const std::size_t tags = static_cast<std::size_t>(data_.m) + data_.df_slots;
         if (tags > std::numeric_limits<unsigned>::max() / Columns)
@@ -892,8 +886,7 @@ private:
     }
 
     void reserve_lane_plan() const {
-        if (data_.df_lane_grid) return;
-        const int grid = dataflow_grid_size<4, 4>(data_.fp16);
+        if (data_.lane_plan_ready) return;
         std::array<detail::dataflow_device_plan, 2> next{};
         try {
             for (unsigned reverse = 0; reverse < 2; ++reverse) {
@@ -916,7 +909,7 @@ private:
             data_.factor_bytes += plan.bytes;
             data_.adoption_host_download_bytes += plan.host_download_bytes;
         }
-        data_.df_lane_grid = grid;
+        data_.lane_plan_ready = true;
     }
 
     template<unsigned Columns = 1, unsigned RhsLanes = 1>
@@ -926,20 +919,18 @@ private:
         // Initialize roots, then solve each direction with the shared dataflow worker.
         const int m = static_cast<int>(data_.m);
         const unsigned tag_count = unsigned(data_.m) + unsigned(data_.df_slots);
-        const int grid = RhsLanes == 4 ? data_.df_lane_grid : Columns == 1 ? data_.df_grid
-            : data_.df_pair_grid;
         auto* const y = Columns == 1 ? data_.d_y : data_.d_panel_y;
         auto* const tags = Columns == 1 ? data_.d_df_tag : data_.d_df_panel_tag;
         dataflow_solve<Columns, RhsLanes>(0, m, false, data_.L_row_ptr, data_.L_col_idx, data_.L_values, data_.diag, nullptr,
                        RhsLanes == 1 ? data_.d_fwd_words : data_.lane_plans[0].words,
                        RhsLanes == 1 ? data_.d_fwd_segments : data_.lane_plans[0].segments,
                        RhsLanes == 1 ? data_.fwd_batches : data_.lane_plans[0].n_batches,
-                       tags, tag_count, data_.d_df_ticket, grid, data_.d_x, y, active, rhs64, nullptr, active_stride);
+                       tags, tag_count, data_.d_df_ticket, data_.df_grid, data_.d_x, y, active, rhs64, nullptr, active_stride);
         dataflow_solve<Columns, RhsLanes>(0, m, true, data_.LT_row_ptr, data_.LT_col_idx, data_.LT_values, data_.diag, data_.inv_scale2,
                        RhsLanes == 1 ? data_.d_bck_words : data_.lane_plans[1].words,
                        RhsLanes == 1 ? data_.d_bck_segments : data_.lane_plans[1].segments,
                        RhsLanes == 1 ? data_.bck_batches : data_.lane_plans[1].n_batches,
-                       tags, tag_count, data_.d_df_ticket, grid, y, data_.d_x, active, nullptr, out64, active_stride);
+                       tags, tag_count, data_.d_df_ticket, data_.df_grid, y, data_.d_x, active, nullptr, out64, active_stride);
     }
 
     void destroy() noexcept {
@@ -988,10 +979,9 @@ private:
         unsigned*     d_df_panel_tag = nullptr;
         unsigned*     d_df_ticket       = nullptr;   // shared ticket counter
         int           df_grid         = 0;
-        int df_pair_grid = 0;
         std::array<unsigned, 2> df_split_min{};
         std::array<detail::dataflow_device_plan, 2> lane_plans{};
-        int df_lane_grid = 0;
+        bool lane_plan_ready = false;
         unsigned panel_capacity = 0;
         // fp16 storage: binary16
         // values of CSR(L~^T) and CSR(L~), the fp32 scaled diagonal and the

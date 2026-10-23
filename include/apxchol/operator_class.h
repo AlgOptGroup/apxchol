@@ -162,28 +162,6 @@ operator_scan scan_operator(const Eigen::SparseMatrix<double>& A);
 operator_scan require_operator(const Eigen::SparseMatrix<double>& A,
                                double lump_max_mass = kDefaultLumpMassCeiling);
 
-/// Ceiling on `operator_scan::positive_mass_fraction()` above which lumping is
-/// refused rather than applied silently; factor_options::lump_max_mass controls it.
-///
-/// 0.25, and the basis is measured:
-///   * the two populations in the suite are four decades apart. Everything
-///     lumping exists to rescue sits at rho <= 2e-5 (thermal2 2.0e-5,
-///     parabolic_fem 3e-6 -- 33% of its off-diagonals are positive but they
-///     carry no mass, which is why the ceiling is on MASS and not on count).
-///     Everything genuinely not M-matrix-approximable sits at rho >= 0.40
-///     (bcsstk13 0.397, bcsstk01 0.939). 0.25 is inside that gap with orders
-///     of magnitude of margin on both sides.
-///   * on three ill-conditioned grid families with rho swept 0 -> 1, an EXACT
-///     Cholesky of the lumped matrix still needs only half the iterations
-///     Jacobi does at rho = 0.20 (22 vs 43) and 0.63x at rho = 0.30; the ratio
-///     reaches 1.0 -- the factorization buying nothing at all -- at rho ~ 0.75.
-///     0.25 is therefore where a full factorization still pays for its setup
-///     by a factor of ~2 over the trivial preconditioner.
-///   * confirmed on the real adversarial pair: at rho = 0.397 bcsstk13 needs
-///     1272 PCG iterations with the exact lumped preconditioner (Jacobi 1515),
-///     and at rho = 0.939 bcsstk01 needs 44 (Jacobi 48).
-
-
 /// Apply the M-matrix lumping to `A` in place; returns the number of stored
 /// positive off-diagonal ENTRIES removed (two per pair, both triangles).
 ///

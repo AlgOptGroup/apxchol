@@ -102,7 +102,6 @@ apxchol::solve_options setup_options(const mxArray* options) {
             } else fail("apxchol:badInput", "unknown option '" + name + "'");
         }
     }
-    apxchol::detail::validate_solve_options(result);
     return result;
 }
 

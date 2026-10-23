@@ -4,6 +4,7 @@
 
 namespace apxchol {
 
+// Maximum positive off-diagonal mass fraction accepted for lumping by default.
 inline constexpr double kDefaultLumpMassCeiling = 0.25;
 
 namespace detail {

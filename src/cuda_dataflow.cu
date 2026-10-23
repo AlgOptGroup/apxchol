@@ -126,20 +126,11 @@ void launch(cudaStream_t stream, dataflow_memory<Value, Columns, RhsLanes> memor
 } // namespace
 
 
-template<unsigned Columns, unsigned RhsLanes>
-int dataflow_grid_size(bool fp16) {
-    int device, sms, resident;
+int dataflow_grid_size() {
+    int device, sms;
     dataflow_check(cudaGetDevice(&device), "query device");
     dataflow_check(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device), "query SM count");
-    if (fp16)
-        dataflow_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                           &resident, solve_dataflow<dataflow_memory<__half, Columns, RhsLanes>>, kDataflowBlock, 0),
-                       "query FP16 occupancy");
-    else
-        dataflow_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                           &resident, solve_dataflow<dataflow_memory<float, Columns, RhsLanes>>, kDataflowBlock, 0),
-                       "query FP32 occupancy");
-    return std::max(1, std::min(sms * resident, sms));
+    return sms;
 }
 
 template<unsigned Columns, unsigned RhsLanes>
@@ -158,9 +149,6 @@ void dataflow_solve(cudaStream_t stream, int m, bool reverse, const int *ptr, co
     if (diag) run(static_cast<const __half*>(val));
     else run(static_cast<const float*>(val));
 }
-template int dataflow_grid_size<1, 1>(bool);
-template int dataflow_grid_size<2, 1>(bool);
-template int dataflow_grid_size<4, 4>(bool);
 template void dataflow_solve<1, 1>(cudaStream_t, int, bool, const int*, const int*, const void*, const float*, const double*, const unsigned*, const detail::gpu_dataflow::segment*, unsigned, unsigned*, unsigned, unsigned*, int, const float*, float*, const unsigned*, const double*, double*, unsigned);
 template void dataflow_solve<2, 1>(cudaStream_t, int, bool, const int*, const int*, const void*, const float*, const double*, const unsigned*, const detail::gpu_dataflow::segment*, unsigned, unsigned*, unsigned, unsigned*, int, const float*, float*, const unsigned*, const double*, double*, unsigned);
 template void dataflow_solve<4, 4>(cudaStream_t, int, bool, const int*, const int*, const void*, const float*, const double*, const unsigned*, const detail::gpu_dataflow::segment*, unsigned, unsigned*, unsigned, unsigned*, int, const float*, float*, const unsigned*, const double*, double*, unsigned);

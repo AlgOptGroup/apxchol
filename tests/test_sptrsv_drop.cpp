@@ -1178,7 +1178,7 @@ void expect_drop_stats_equal(const apxchol::factor_drop_stats& a,
 // thousands of segment items is also the deadlock torture).
 TEST(GpuDataflow, MatchesTheSerialDoubleReferenceBothDirectionsAndIsDeterministic) {
     const node_index n = 60001, m = n - 1;
-    const int resident = apxchol::dataflow_grid_size(false);
+    const int resident = apxchol::dataflow_grid_size();
     ASSERT_GE(resident, 1);
     for (int kind = 0; kind < 2; ++kind) {
         SCOPED_TRACE(kind ? "hub-tail factor" : "no-hub factor");
@@ -1548,7 +1548,7 @@ TEST(GpuDataflow, GraphReplayResetsDependenciesForChangedRightHandSides) {
         auto* output = memory.upload(rhs.data(), rhs.size());
         cudaStream_t stream;
         ASSERT_EQ(cudaStreamCreate(&stream), cudaSuccess);
-        const int grid = apxchol::dataflow_grid_size(fp16);
+        const int grid = apxchol::dataflow_grid_size();
         ASSERT_EQ(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal), cudaSuccess);
         const void* values = fp16 ? static_cast<const void*>(factor.d_Lv16)
                                   : static_cast<const void*>(factor.d_Lv);
@@ -1613,7 +1613,7 @@ TEST(GpuDataflowDevicePlan, TilePackingPreservesFp32AndFp16SweepsBitForBit) {
                 auto* rhs = memory.upload(input.data(), input.size());
                 auto* answer = memory.upload(input.data(), input.size());
                     for (bool fp16 : {false, true}) {
-                    const int resident = apxchol::dataflow_grid_size(fp16);
+                    const int resident = apxchol::dataflow_grid_size();
                     run_sweep(F, host_device, reverse, fp16, tags, ctrl, resident, rhs, answer);
                     const auto expected = dev_download(answer, m);
                     for (int grid : {1, 7, resident}) {

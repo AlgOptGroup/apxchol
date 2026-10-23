@@ -369,21 +369,18 @@ private:
         ensure_part_();
         const bool center = !F_.sddm && take_center_();
         std::array<double, Columns> rz{};
-        std::array<bool, Columns> centers{};
-        centers.fill(center);
-        apply_core<Columns>(r, r_sum, centers, z, &rz);
+        apply_core<Columns>(r, r_sum, center, z, &rz);
         return rz;
     }
 
     template<int Columns>
     void apply_columns(const double* b, double* z) const {
         ensure_part_();
-        std::array<bool, Columns> centers{};
-        centers.fill(!F_.sddm);
-        const auto sums = std::any_of(centers.begin(), centers.end(), [](bool c) { return c; })
+        const bool center = !F_.sddm;
+        const auto sums = center
             ? detail::det_sum_columns<Columns>(b, n_, part_.data())
             : std::array<double, Columns>{};
-        apply_core<Columns>(b, sums, centers, z, nullptr);
+        apply_core<Columns>(b, sums, center, z, nullptr);
     }
 
     void ensure_part_() const {
@@ -398,12 +395,12 @@ private:
     }
 
     /// Shared body of _solve_impl / apply_fused: z = M^{-1} b.
-    /// `b_sum` = Σ b and `centers` selects columns that need the two
+    /// `b_sum` = Σ b and `center` selects whether to perform the two
     /// Laplacian mean passes (both ignored for SDDM). If `rz_out` is non-null
     /// the final unpermute gather also accumulates b·z into it.
     template<int Columns>
     void apply_core(const double* b, const std::array<double, Columns>& b_sum,
-                    const std::array<bool, Columns>& centers, double* z, std::array<double, Columns>* rz_out) const {
+                    bool center, double* z, std::array<double, Columns>* rz_out) const {
         static_assert(Columns > 0 && Columns <= detail::kPartStride);
         static_assert(!on_gpu || Columns == 1);
         if (cp_) { cp_->descend("solve"); cp_->tick(); }
@@ -416,14 +413,14 @@ private:
 
         std::array<double, Columns> mean{};
         for (int c = 0; c < Columns; ++c)
-            if (centers[c] && n > 0)
+            if (center && n > 0)
                 mean[c] = b_sum[c] / static_cast<double>(n);
 
         // perm[original] is the position in the factor; RHS columns are contiguous.
         #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
         for (Eigen::Index v = 0; v < n; ++v)
             for (int c = 0; c < Columns; ++c)
-                z[std::size_t(P[v]) * Columns + c] = b[v * Columns + c] - (centers[c] ? mean[c] : 0.0);
+                z[std::size_t(P[v]) * Columns + c] = b[v * Columns + c] - (center ? mean[c] : 0.0);
         if (cp_) (*cp_)("permute");
 
         double* out;
@@ -444,10 +441,10 @@ private:
             std::fill_n(out + (n - 1) * Columns, Columns, 0.0);
 
         std::array<double, Columns> shift{};
-        if (std::any_of(centers.begin(), centers.end(), [](bool c) { return c; })) {
+        if (center) {
             shift = detail::det_sum_columns<Columns>(out, n, part);
             for (int c = 0; c < Columns; ++c)
-                shift[c] = centers[c] ? shift[c] / static_cast<double>(n) : 0.0;
+                shift[c] /= static_cast<double>(n);
         }
         int nt_used = 1;
         #pragma omp parallel if(workers > 1) num_threads(workers)

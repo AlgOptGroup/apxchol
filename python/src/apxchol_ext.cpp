@@ -125,7 +125,6 @@ apxchol::solve_options parse_options(const py::dict& d) {
                 "invalid value for option '" + key + "': " + std::string(e.what()));
         }
     }
-    apxchol::detail::validate_solve_options(so);
     return so;
 }
 

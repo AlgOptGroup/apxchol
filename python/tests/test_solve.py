@@ -264,7 +264,6 @@ def test_every_public_entry_rejects_an_adjacency_matrix():
     A = grid2d_adjacency(8)
     b = np.ones(A.shape[0])
     for call in (lambda: apxchol.factorize(A),
-                 lambda: apxchol.factorize(A),
                  lambda: apxchol.Solver(A),
                  lambda: apxchol.solve(A, b)):
         with pytest.raises(ValueError, match="Condition FAILED: positive diagonal"):
