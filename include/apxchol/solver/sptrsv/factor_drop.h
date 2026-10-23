@@ -10,26 +10,11 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <memory>
 #include <vector>
 
 namespace apxchol {
 
-// Relative to the largest off-diagonal magnitude in each column.
-// APXCHOL_FACTOR_DROP overrides this at setup; nonpositive values disable it.
-inline constexpr double kFactorDropRelDefault = 1e-4;
-
-// APXCHOL_FACTOR_DROP=<rel> resolution, read at every setup(): unset (or
-// empty) -> kFactorDropRelDefault; set -> its value, where anything <= 0
-// (including "0" and unparsable text, which atof reads as 0) turns the
-// drop OFF.
-inline double factor_drop_rel_from_env() {
-    const char* e = std::getenv("APXCHOL_FACTOR_DROP");
-    if (!e || !*e) return kFactorDropRelDefault;
-    const double r = std::atof(e);
-    return r > 0.0 ? r : 0.0;
-}
 // Per-column scale contract: s_j of the factor column [first, last) whose
 // FIRST entry is the diagonal: max |off-diagonal|, or 1.0f if the column has
 // no nonzero off-diagonal (so v / s_j is always defined). The reference of the

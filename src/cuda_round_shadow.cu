@@ -322,8 +322,8 @@ private:
 
 class event_timer {
 public:
-    event_timer()
-        : enabled_(gpu_setup_diagnostics()),
+    explicit event_timer(bool enabled)
+        : enabled_(enabled),
           begin_("create start event", enabled_), end_("create end event", enabled_) {}
 
     event_timer(const event_timer&) = delete;
@@ -1666,6 +1666,8 @@ struct round_common_scratch {
 };
 
 struct gpu_round_shadow_device_state::impl {
+    bool verbose = false;
+    bool audit_selection_independence = false;
     clique_sampler sampler = clique_sampler::gks;
     allocation_tracker tracker;
     round_common_scratch owned_common_scratch;
@@ -1739,8 +1741,8 @@ struct gpu_round_shadow_device_state::impl {
     bool fail_after_cuda_operation_for_test = false;
 #endif
 
-    explicit impl(clique_sampler kind = clique_sampler::gks)
-        : sampler(kind), owned_common_scratch(tracker), cycle_workspace(tracker),
+    explicit impl(clique_sampler kind, bool diagnostics)
+        : verbose(diagnostics), sampler(kind), owned_common_scratch(tracker), cycle_workspace(tracker),
           cycle_plan_cut(tracker), cycle_plan_state(tracker),
           cycle_status(tracker), residual_0(tracker), residual_1(tracker),
           owner_offsets_0(tracker), owner_offsets_1(tracker),
@@ -1860,7 +1862,6 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     const bool count_owned_spans = resident_rows_all_live;
     const std::size_t input_count = resident_count;
     const std::size_t next_slot = 1 - current_slot;
-    const bool audit_selection_independence = gpu_round_selection_audit_requested();
 
     cuda_check(cudaFree(nullptr), "initialize CUDA context");
 #if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
@@ -1998,12 +1999,13 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
 
     // CUB scratch grows to each call's exact query; the capacity is retained.
     cub_workspace cub(cub_temp, selected_count, &preflight);
-    event_timer timer;
-    const bool total_diagnostics = gpu_setup_diagnostics();
+    event_timer timer(verbose);
+    const bool total_diagnostics = verbose;
     cuda_event total_begin("create total start event", total_diagnostics);
     cuda_event total_end("create total end event", total_diagnostics);
 
     gpu_round_shadow_report report;
+    report.timings.enabled = verbose;
     report.input_incidences = r;
     report.resident_input_incidences = input_count;
     report.input_generation = generation;
@@ -2343,7 +2345,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                 if (status[0])
                     throw std::domain_error("GPU cycle sampler: invalid plan or edge outside normal pool range");
                 report.sampler_numerical_fallbacks = status[1];
-                if (gpu_setup_diagnostics()) std::fprintf(stderr,
+                if (verbose) std::fprintf(stderr,
                     "[gpu-clique-sampler] sampler=trace_cycle pivots=%zu normal_pivots=%llu "
                     "oversized_pivots=%llu numerical_gks_fallbacks=%u device_sampling=1\n",
                     p,
@@ -2672,8 +2674,8 @@ void gpu_round_shadow_device_state::impl::reject_device_generation(
     poison_failed_generation();
 }
 
-gpu_round_shadow_device_state::gpu_round_shadow_device_state(clique_sampler sampler)
-    : impl_(std::make_unique<impl>(sampler)) {
+gpu_round_shadow_device_state::gpu_round_shadow_device_state(clique_sampler sampler, bool verbose)
+    : impl_(std::make_unique<impl>(sampler, verbose)) {
     if (sampler != clique_sampler::gks && sampler != clique_sampler::trace_cycle)
         throw std::invalid_argument("unsupported GPU clique sampler");
 }
@@ -2699,6 +2701,10 @@ gpu_round_shadow_device_state& gpu_round_shadow_device_state::operator=(
 }
 
 #if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
+void gpu_round_shadow_device_state::set_selection_audit_for_test(bool enabled) {
+    impl_->audit_selection_independence = enabled;
+}
+
 void gpu_round_shadow_device_state::
 inject_failure_after_cuda_operation_for_test() {
     if (impl_->poisoned)
@@ -2723,7 +2729,7 @@ std::unique_ptr<gpu_block_frontend> gpu_round_shadow_device_state::initialize_ow
     impl::failed_generation_guard guard{*impl_};
     if (impl_->has_state || impl_->poisoned || impl_->factor_column_count)
         throw std::logic_error("GPU direct CSC initialization requires a fresh numerical owner");
-    const auto start = gpu_setup_diagnostic_clock::now();
+    const auto start = gpu_setup_diagnostic_clock::now(impl_->verbose);
     const std::size_t n = static_cast<std::size_t>(input.vertex_count);
     const std::size_t nnz = input.nonzeros;
     cuda_check(cudaGetDevice(&impl_->cuda_device), "bind CSC initialization device");
@@ -2760,7 +2766,7 @@ std::unique_ptr<gpu_block_frontend> gpu_round_shadow_device_state::initialize_ow
         "allocate initial CSC offsets", "grow initial CSC offsets");
     impl_->ensure_state_buffer(impl_->active, n, "allocate initial CSC active", "grow initial CSC active");
     impl_->ensure_state_buffer(impl_->excess, n, "allocate initial CSC excess", "grow initial CSC excess");
-    event_timer timer;
+    event_timer timer(impl_->verbose);
     const float upload_ms = timer.measure_ms([&] {
         copy_to_device(ptr.get(), input.offsets, n + 1, "upload CSC pointers");
         copy_to_device(idx.get(), input.rows, nnz, "upload CSC rows");
@@ -2822,17 +2828,17 @@ std::unique_ptr<gpu_block_frontend> gpu_round_shadow_device_state::initialize_ow
     impl_->fingerprint.active = content.active.host();
     impl_->fingerprint.active_count = n; impl_->fingerprint.live_incidences = directed;
     impl_->owned_residual_epoch = std::make_shared<const int>(0);
-    const auto selector_start = gpu_setup_diagnostic_clock::now();
+    const auto selector_start = gpu_setup_diagnostic_clock::now(impl_->verbose);
     auto frontend = std::unique_ptr<gpu_block_frontend>(new gpu_block_frontend(
-        static_cast<node_index>(n), directed / 2, gpu_block_frontend::owned_initialization_tag{}));
+        static_cast<node_index>(n), directed / 2, gpu_block_frontend::owned_initialization_tag{}, impl_->verbose));
     frontend->bind_owned_residual(impl_->residual_0.get(), impl_->owner_offsets_0.get(),
         impl_->active.get(), directed, impl_->resident_selection_content, impl_->owned_residual_epoch);
     const double selector_ms = 1e3 * std::chrono::duration<double>(
-        gpu_setup_diagnostic_clock::now() - selector_start).count();
+        gpu_setup_diagnostic_clock::now(impl_->verbose) - selector_start).count();
     const double total_ms = 1e3 * std::chrono::duration<double>(
-        gpu_setup_diagnostic_clock::now() - start).count();
+        gpu_setup_diagnostic_clock::now(impl_->verbose) - start).count();
     sddm = host_status[1] != 0;
-    if (gpu_setup_diagnostics()) std::fprintf(stderr, "[gpu-owned-csc] n=%zu directed=%u input_nnz=%zu sddm=%d "
+    if (impl_->verbose) std::fprintf(stderr, "[gpu-owned-csc] n=%zu directed=%u input_nnz=%zu sddm=%d "
         "host_graph_bytes=0 host_snapshot_bytes=0 selector_edge_upload_bytes=0 "
         "csc_upload_bytes=%zu scalar_download_bytes=%zu owner_tracked_peak_bytes=%zu "
         "planned_total_peak_bytes=%zu upload_ms=%.6f count_excess_ms=%.6f "
@@ -2892,7 +2898,7 @@ gpu_round_shadow_device_state::initialize_owned_raw_for_test(
     impl_->owned_residual_epoch = std::make_shared<const int>(0);
     auto frontend = std::unique_ptr<gpu_block_frontend>(new gpu_block_frontend(
         input.vertex_count, fingerprint.live_incidences / 2,
-        gpu_block_frontend::owned_initialization_tag{}));
+        gpu_block_frontend::owned_initialization_tag{}, impl_->verbose));
     frontend->bind_owned_residual(impl_->residual_0.get(), impl_->owner_offsets_0.get(),
         impl_->active.get(), count, impl_->resident_selection_content, impl_->owned_residual_epoch);
     guard.commit();
@@ -3077,7 +3083,7 @@ double gpu_round_shadow_device_state::probe_owned_distinct_degree(
     }
     std::size_t sum = 0;
     for (auto degree : distinct) sum += degree;
-    if (gpu_setup_diagnostics())
+    if (impl_->verbose)
         std::fprintf(stderr, "[gpu-owned-sparsify-probe] samples=%zu physical_incidences=%zu "
             "scalar_upload_bytes=%zu scalar_download_bytes=%zu peak_device_bytes=%zu\n",
             samples, count, samples * (sizeof(node_index) + sizeof(owned_probe_range)),
@@ -3188,13 +3194,14 @@ void gpu_round_shadow_device_state::reject_device_generation(
 std::shared_ptr<cuda_sptrsv_device_factor>
 gpu_round_shadow_device_state::finalize_device_factor(
         std::span<const node_index> permutation, node_index factor_dim,
-        factor_storage_type storage, bool consume_factor_log) {
+        factor_storage_type storage, double drop_rel, bool consume_factor_log) {
+    if (!std::isfinite(drop_rel) || drop_rel < 0.0)
+        throw std::invalid_argument("factor drop tolerance must be finite and nonnegative");
     impl_->require_current_device("factor finalization");
     if (impl_->poisoned || !impl_->has_state || !impl_->generation_accepted ||
         !impl_->owned_prefix_materialized || impl_->factor_log_consumed)
         throw std::logic_error("GPU finalizer requires an accepted generation and published owned output");
     const bool fp16 = cuda_sptrsv::fp16_resolved(storage);
-    const double drop_rel = factor_drop_rel_from_env();
     const std::size_t n = permutation.size(), m = factor_dim;
     if (m == 0 || m > n || n >= std::size_t(INT_MAX) ||
         impl_->factor_column_count != n || impl_->vertex_count != n ||
@@ -3388,7 +3395,7 @@ gpu_round_shadow_device_state::finalize_device_factor(
     lp.release(); li.release(); lti.release();
     if (column_ptr == ltp.get()) ltp.release(); else dropped_ptr.release();
     const std::size_t upload = n * sizeof(node_index);
-    if (gpu_setup_diagnostics()) std::fprintf(stderr, "[gpu-factor-finalize] device_columns=%zu device_entries=%zu m=%zu nnz=%d host_upload_bytes=%zu scalar_download_bytes=%zu prefix_download_bytes=0 owner_resident_bytes=%zu owner_peak_bytes=%zu planned_peak_bytes=%zu factor_log_consumed=%d storage=%s factor_drop_rel=%.17g dropped_threshold=%llu dropped_flush=%llu fp16_flushed=%llu\n",
+    if (impl_->verbose) std::fprintf(stderr, "[gpu-factor-finalize] device_columns=%zu device_entries=%zu m=%zu nnz=%d host_upload_bytes=%zu scalar_download_bytes=%zu prefix_download_bytes=0 owner_resident_bytes=%zu owner_peak_bytes=%zu planned_peak_bytes=%zu factor_log_consumed=%d storage=%s factor_drop_rel=%.17g dropped_threshold=%llu dropped_flush=%llu fp16_flushed=%llu\n",
         n, impl_->factor_entry_count, m, nnz, upload, 4 * sizeof(int) + extra_download,
         resident_bytes, tracker.peak, preflight.planned(), consume_factor_log ? 1 : 0,
         fp16 ? "fp16" : "fp32", drop_rel,

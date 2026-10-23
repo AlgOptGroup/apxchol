@@ -1,5 +1,4 @@
 #include <gtest/gtest.h>
-#include "scoped_env.h"
 #include "gpu_preconditioner_fixture.h"
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/pcg_cuda.h"
@@ -405,10 +404,6 @@ TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneDeviceAttempt) {
     GTEST_SKIP() << "end-to-end GPU operator construction requires 32-bit node indices";
 #else
     REQUIRE_OWNED_SPARSIFY_DEVICE();
-    scoped_env trace_enabled("APXCHOL_GPU_BLOCK_TRACE", "1");
-    scoped_env sparsify("APXCHOL_RESIDUAL_SPARSIFY", "1");
-    scoped_env full_precision_factor("APXCHOL_FACTOR_STORAGE", "float32");
-    scoped_env drop("APXCHOL_FACTOR_DROP", "0");
     constexpr int n = 17;
     std::vector<Eigen::Triplet<double>> entries;
     for (int u = 0; u < n; ++u) for (int v = 0; v < n; ++v)
@@ -420,6 +415,9 @@ TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneDeviceAttempt) {
     const Eigen::VectorXd rhs = original * exact;
     apxchol::solve_options options;options.tol = 1e-8;options.max_iter = 1000;
     options.backend = apxchol::solve_backend::gpu;
+    options.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
+    options.factor_opts.drop_tolerance = 0;
+    options.factor_opts.verbose = true;
     options.factor_opts.parallel_residual_threshold = 1;
     options.factor_opts.omp_threshold = 0;
     options.factor_opts.partition.degree_quantile = .8;

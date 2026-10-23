@@ -1,57 +1,15 @@
 #pragma once
-// fp16 STORAGE for the SpTRSV factor values -- the type, the converters, and
-// the per-solver selection shared by both SpTRSV backends.
+// FP16 triangular-solve storage and per-solver selection.
 //
-// Selected at setup by factor_options::factor_storage, or by the environment
-// when the option is automatic:
-//
-//     APXCHOL_FACTOR_STORAGE = auto | float16 | float32
-//
-// (resolve_fp16_storage() below is the one reader; unset resolves per
-// DEVICE -- OFF on the CPU, ON on the GPU -- because the two have different
-// measured verdicts, see the backend headers). Before 2026-08-20 the CPU side
-// was a CMake cache variable, APXCHOL_SPTRSV_LOWPREC=OFF|FP16_SCALED, and the
-// GPU side a separate env, APXCHOL_GPU_SPTRSV_FP16; both are gone.
-//
-// The shape of the storage:
-//
-//   * ONLY the off-diagonals of the SpTRSV's CSR/CSC value arrays are stored
-//     narrow; the DIAGONAL is kept fp32 in a separate array (omp_sptrsv::diag_
-//     on the CPU, d_diag_ on the GPU) -- a narrow diagonal was the dominant
-//     iteration-count damage of the first all-bf16 variant: the scaled
-//     L_jj / s_j (omp_sptrsv::stored_diag) plus the column's rounding residual.
-//   * The factor itself (sparse_csc::vals_, factor_value_t) is fp32; the
-//     narrowing happens once at SpTRSV setup. CPU and GPU-host preparation
-//     share detail::narrow_scaled_fp16, a pure per-entry conversion, so
-//     the CSR transpose and CSC copy use the same bits. Device finalization
-//     implements this contract separately in CUDA.
-//   * Every read in the solve kernels widens to fp64 (CPU) / fp32 (GPU) in
-//     registers via widen(); the arithmetic is unchanged and the kernels are
-//     one source for every storage type (the CPU's fat-level kernels of the
-//     16-bit storage are SIMD: packed widening and FP64 arithmetic). This is a
-//     preconditioner-QUALITY knob (PCG iteration count), never a
-//     residual-floor one.
-//
-//   The format: IEEE binary16 (11 significant bits, 2^-11 relative in the
-//   normal range) of L_ij / s_j with a per-COLUMN scale s_j = max_i |L_ij|
-//   over column j's off-diagonals (stored fp32; 1.0f if the column has no
-//   nonzero off-diagonal). The scaling maps every column's largest
-//   off-diagonal to +-1.0 exactly, so no entry overflows; entries below
-//   2^-14 of their column max would fall into fp16's SUBNORMAL range and are
-//   FLUSHED to signed zero at storage time. setup() counts the flushed and
-//   the subnormal and reports them under APXCHOL_VERBOSE. The scale is NOT
-//   multiplied back by the CPU/CUDA kernels: it is folded into the vectors
-//   (forward_solve returns D y, transpose_solve takes it and scales its input
-//   by D^-2; see docs/precision.md).
-//
-// (The bf16 / bf16-scaled / fp24 siblings that were measured against it --
-// 8-bit mantissa 3-6x the PCG iterations on IPM, fp24 marginal -- were removed
-// 2026-08-18; only fp16 with per-column folded scaling + fp32 diagonal +
-// column-sum compensation stayed.)
-//
-// Both SpTRSV backends share these storage conversions and the env reader.
+// Off-diagonals store L_ij / s_j in binary16, where s_j is the column's
+// maximum absolute off-diagonal (one for an empty/zero column). With the normal
+// floating-point environment, conversion rounds to nearest, ties to even;
+// subnormals flush to signed zero.
+// Scales, compensated diagonals, constructed factors and exports remain FP32.
+// CPU solve arithmetic widens to FP64; GPU triangular solves use FP32.
+// CPU/CUDA fold the scales into the solve vectors, while Metal reconstructs
+// FP32 coefficients. See docs/precision.md for the storage contract.
 #include <cmath>
-#include <cstdlib>
 #include <stdexcept>
 #include <string_view>
 
@@ -73,9 +31,6 @@ inline factor_storage_type parse_factor_storage(std::string_view value) {
 }
 
 inline bool resolve_fp16_storage(factor_storage_type storage, bool default_fp16) {
-    if (storage == factor_storage_type::automatic)
-        if (const char* e = std::getenv("APXCHOL_FACTOR_STORAGE"); e && *e)
-            storage = parse_factor_storage(e);
     switch (storage) {
     case factor_storage_type::automatic: return default_fp16;
     case factor_storage_type::fp16: return true;

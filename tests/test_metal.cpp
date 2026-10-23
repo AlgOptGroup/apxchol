@@ -114,14 +114,16 @@ apxchol::solve_options keep_opts() {
 
 // Independent FP64 sweeps of the stored FP32 factor, with host centering at
 // the public apply boundary. Device scheduling may change the rounding order.
-Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::VectorXd& r, bool fp16 = false) {
+Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::VectorXd& r,
+                             const apxchol::factor_options& options = {}) {
+    const bool fp16 = options.factor_storage == apxchol::factor_storage_type::fp16;
     const std::size_t n = static_cast<std::size_t>(r.size());
     const bool lap = !F.sddm;
     const std::int64_t m = lap ? static_cast<std::int64_t>(n) - 1 : static_cast<std::int64_t>(n);
     auto backward = apxchol::cuda_host::build_L11_csc_int<float>(F.L, m);
     auto scales = apxchol::cuda_host::column_scales(backward);
     if (fp16) apxchol::cuda_host::normalize_fp16_scales(backward, scales);
-    apxchol::cuda_host::apply_factor_drop(backward, scales, apxchol::factor_drop_rel_from_env(), fp16);
+    apxchol::cuda_host::apply_factor_drop(backward, scales, options.drop_tolerance, fp16);
     if (fp16) {
         const auto narrow = apxchol::cuda_host::narrow_fp16_scaled(backward, scales);
         for (int j = 0; j < m; ++j) {
@@ -386,7 +388,7 @@ TEST_F(MetalDevice, FourColumnPlansReuseStorageAfterScalarAndWarmSolves) {
             Eigen::MatrixXd X(A.rows(), 4);
             const auto result = owner.solve(B, X, 1e-8, 1000, pass == 2 ? &warm : nullptr);
             ASSERT_EQ(result.columns.size(), 4u);
-            if (pass == 2) EXPECT_EQ(result.columns[0].iterations, 0);
+            if (pass == 2) { EXPECT_EQ(result.columns[0].iterations, 0); }
             for (unsigned q = 0; q < 4; ++q) {
                 EXPECT_LE(result.columns[q].residual, 1e-8);
                 EXPECT_LE(true_residual(A, B.col(q), X.col(q)), 1e-8);
@@ -1012,6 +1014,11 @@ TEST_F(MetalDevice, CommonSolverAdoptsHostFactorWithCpuOnlyOptions) {
     EXPECT_EQ(adopted.backend(), apxchol::solve_backend::gpu);
     options.backend = apxchol::solve_backend::automatic;
     EXPECT_EQ(apxchol::solver(A, F, options).backend(), apxchol::solve_backend::cpu);
+    options.factor_opts.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+    EXPECT_EQ(apxchol::solver(A, F, options).backend(), apxchol::solve_backend::cpu);
+    options.backend = apxchol::solve_backend::gpu;
+    EXPECT_THROW(apxchol::solver(A, F, options), std::invalid_argument);
+    EXPECT_THROW(apxchol::metal_solver(A, F, options), std::invalid_argument);
     options.backend = static_cast<apxchol::solve_backend>(-1);
     EXPECT_THROW(apxchol::solver(A, F, options), std::invalid_argument);
 }
@@ -1023,6 +1030,89 @@ TEST(MetalOptions, UnsupportedOptionsFailBeforeDeviceSetup) {
     EXPECT_THROW(apxchol::metal_solver(A, options), std::invalid_argument);
 }
 
+TEST_F(MetalDevice, PerSolverPreparationOptionsAreIndependent) {
+    const Sparse A = grid(7, 9);
+    auto options = keep_opts();
+    EXPECT_FALSE(apxchol::metal_solver(A, options).factor().sddm);
+    options.factor_opts.regularization = 1e-8;
+    EXPECT_TRUE(apxchol::metal_solver(A, options).factor().sddm);
+    options.factor_opts.regularization = 0;
+    EXPECT_FALSE(apxchol::metal_solver(A, options).factor().sddm);
+
+    Sparse near = grid(7, 9, 0.25);
+    near.coeffRef(0, 1) = near.coeffRef(1, 0) = 1e-6;
+    options.factor_opts.lump_max_mass = 0;
+    EXPECT_THROW(apxchol::metal_solver(near, options), std::invalid_argument);
+    options.factor_opts.lump_max_mass = 0.25;
+    EXPECT_EQ(apxchol::metal_solver(near, options).factor().lumped_offdiag, 2);
+    options.factor_opts.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+    EXPECT_THROW(apxchol::metal_solver(A, options), std::invalid_argument);
+}
+
+TEST_F(MetalDevice, PerSolverStorageAndDropMatchTheReference) {
+    const Sparse A = grid(11, 13, 0.25, true);
+    const auto factor = apxchol::factorize(A);
+    const auto b = rhs(A.rows(), 3, false);
+    for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
+        for (double drop : {0.0, 0.1, 0.0}) {
+            auto options = keep_opts();
+            options.factor_opts.factor_storage = storage;
+            options.factor_opts.drop_tolerance = drop;
+            const apxchol::metal_solver solver(A, factor, options);
+            const auto expected = emulate_apply(factor, b, options.factor_opts);
+            EXPECT_LT((solver.apply(b) - expected).norm() / expected.norm(), 2e-5);
+        }
+    }
+}
+
+TEST_F(MetalDevice, VerbosityAndTimingsArePerSolver) {
+    const Sparse A = grid(7, 9, 0.25);
+    const auto b = rhs(A.rows(), 4, false);
+    for (bool verbose : {false, true, false}) {
+        apxchol::solve_options options;
+        options.backend = apxchol::solve_backend::gpu;
+        options.factor_opts.verbose = verbose;
+        options.collect_timings = false;
+        testing::internal::CaptureStderr();
+        apxchol::solve_result result;
+        try { result = apxchol::solve(A, b, options); }
+        catch (...) { (void)testing::internal::GetCapturedStderr(); throw; }
+        const auto output = testing::internal::GetCapturedStderr();
+        EXPECT_EQ(output.find("[apxchol] Metal PCG") != std::string::npos, verbose) << output;
+        EXPECT_TRUE(result.converged);
+        EXPECT_LE(true_residual(A, b, result.x), options.tol);
+        EXPECT_EQ(result.timings.total("setup"), 0.0);
+        EXPECT_EQ(result.timings.total("pcg"), 0.0);
+    }
+}
+
+TEST_F(MetalDevice, ScalarAndPanelOutputsRejectInputAliasing) {
+    const Sparse A = grid(4, 5, 0.25);
+    const auto b = rhs(A.rows(), 3, false);
+    const apxchol::metal_solver direct(A);
+    apxchol::solve_result result;
+    result.x = b;
+    EXPECT_THROW(direct.solve(result.x, result), std::invalid_argument);
+    EXPECT_EQ(result.x, b);
+    EXPECT_THROW(direct.solve(b, result, -1, -1, &result.x), std::invalid_argument);
+    EXPECT_EQ(result.x, b);
+    result.x.resize(1);
+    EXPECT_THROW(direct.solve(b, result, 0), std::invalid_argument);
+    EXPECT_EQ(result.x.size(), 1);
+
+    apxchol::solve_options options;
+    options.backend = apxchol::solve_backend::gpu;
+    const apxchol::solver owner(A, options);
+    Eigen::MatrixXd B = b.replicate(1, 4), X = B;
+    EXPECT_THROW(owner.solve(B, B), std::invalid_argument);
+    EXPECT_EQ(B, X);
+    const apxchol::const_matrix_view guess(X);
+    EXPECT_THROW(owner.solve(B, X, -1, -1, &guess), std::invalid_argument);
+    EXPECT_EQ(X, B);
+    Eigen::MatrixXd wrong(A.rows() - 1, 4);
+    EXPECT_THROW(owner.solve(B, wrong), std::invalid_argument);
+}
+
 TEST_F(MetalDevice, Float16FactorUsesSharedStorageAndConverges) {
     for (const double shift : {0.0, 0.25}) {
         const auto A = grid(37, 29, shift, true);
@@ -1031,7 +1121,7 @@ TEST_F(MetalDevice, Float16FactorUsesSharedStorageAndConverges) {
         apxchol::metal_solver solver(A, options);
         for (unsigned salt : {1u, 4u}) {
             const auto b = rhs(A.rows(), salt, shift == 0);
-            const auto expected = emulate_apply(solver.factor(), b, true);
+            const auto expected = emulate_apply(solver.factor(), b, options.factor_opts);
             EXPECT_LT((solver.apply(b) - expected).norm() / expected.norm(), 2e-5);
             const auto result = solver.solve(b, 1e-9, 1000);
             EXPECT_LT(true_residual(A, b, result.x), 1e-8);
@@ -1069,7 +1159,7 @@ TEST_F(MetalDevice, Float16TinyColumnScaleKeepsFinitePreconditioning) {
         F.perm = {0, 1};
         F.sddm = true;
         apxchol::metal_solver solver(A, F, options);
-        const auto expected = emulate_apply(F, b, true);
+        const auto expected = emulate_apply(F, b, options.factor_opts);
         const auto actual = solver.apply(b);
         EXPECT_TRUE(actual.allFinite());
         EXPECT_LT((actual - expected).norm() / expected.norm(), 2e-5);
@@ -1130,7 +1220,7 @@ TEST_F(MetalDevice, ResidentArenaIgnoresNonGraphEntries) {
         else A.coeffRef(0, 1) = A.coeffRef(1, 0) = 0.125;
         A.makeCompressed();
         const apxchol::metal_solver solver(A);
-        if (kind == 2) EXPECT_EQ(solver.factor().lumped_offdiag, 2);
+        if (kind == 2) { EXPECT_EQ(solver.factor().lumped_offdiag, 2); }
         const auto b = rhs(A.rows(), 3, false);
         const auto result = solver.solve(b, 1e-8, 200);
         EXPECT_LT(true_residual(A, b, result.x), 1e-8);
@@ -1160,7 +1250,7 @@ TEST_F(MetalDevice, NonemptyFactorGrowthPreservesExportAndSolve) {
         const apxchol::metal_solver solver(A, options);
         const auto result = solver.solve(b, 1e-8, 200);
         EXPECT_LT(true_residual(A, b, result.x), 1e-8);
-        const auto expected = emulate_apply(solver.factor(), b, fp16);
+        const auto expected = emulate_apply(solver.factor(), b, options.factor_opts);
         EXPECT_LT((solver.apply(b) - expected).norm() / expected.norm(), 2e-5);
     }
 }
@@ -1174,7 +1264,7 @@ TEST_F(MetalDevice, ResidentOwnerKeepsOnlyRequestedHostFactorValues) {
                                                  : apxchol::factor_storage_type::fp32;
         apxchol::metal_solver exported(A, options);
         const auto b = rhs(A.rows(), 3, laplacian);
-        const auto expected = emulate_apply(exported.factor(), b, fp16);
+        const auto expected = emulate_apply(exported.factor(), b, options.factor_opts);
         EXPECT_LT((exported.apply(b) - expected).norm() / expected.norm(), 2e-5);
         options.keep_factor_values = false;
         apxchol::metal_solver resident(A, options);

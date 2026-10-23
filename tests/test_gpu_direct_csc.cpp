@@ -26,10 +26,6 @@ using matrix = Eigen::SparseMatrix<double>;
 using host_graph = apxchol::graph;
 using apxchol::detail::gpu_round_shadow_input;
 
-// Local guards follow the existing GPU round-shadow tests; no process-wide
-// cached grounding knob is changed by this test file.
-
-
 struct weighted_edge { int u, v; double weight; };
 
 matrix make_matrix(int n, const std::vector<weighted_edge>& edges, double shift = 0.0) {
@@ -178,7 +174,7 @@ TEST(GpuDirectCscHost, CertifiedEligibilityMatchesRawForValidatedInputs) {
     fixtures.push_back(unrelated_zeros);
     auto lumped = make_matrix(3, {{0,1,1.0},{1,2,-1e-6}}, 1.0);
     const apxchol::operator_view op_lumped(lumped);
-    if (apxchol::detail::env_knobs::get().lump) { EXPECT_EQ(op_lumped.lumped(), 2); }
+    EXPECT_EQ(op_lumped.lumped(), 2);
     fixtures.push_back(lumped);
     for (std::size_t i = 0; i < fixtures.size(); ++i) {
         SCOPED_TRACE(i);
@@ -231,7 +227,6 @@ TEST(GpuDirectCsc, InitialArraysMatchHostBuilderIncludingRoundingAndSignedZero) 
     GTEST_SKIP() << "CUDA direct CSC experiment and test hooks required";
 #else
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
-    ASSERT_EQ(apxchol::detail::env_knobs::get().ground, apxchol::detail::grounding_kind::center_k);
     std::vector<matrix> fixtures;
     fixtures.push_back(make_matrix(9, {{0,3,2.0},{1,3,0.5},{3,4,0x1p-10},{5,6,4.0}}));
     fixtures.push_back(make_matrix(1, {}));
@@ -285,7 +280,6 @@ TEST(GpuDirectCsc, ExcessUsesOriginalOrderedDoublesAndStrictThresholdBeforeRegul
     GTEST_SKIP() << "CUDA direct CSC experiment and test hooks required";
 #else
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
-    ASSERT_EQ(apxchol::detail::env_knobs::get().ground, apxchol::detail::grounding_kind::center_k);
     scoped_omp_threads serial(1);
     constexpr double diagonal = 1e12;
     const double equal = diagonal - 1.0;
@@ -501,11 +495,6 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
 #else
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
     scoped_omp_threads serial(1);
-    scoped_env setup_trace("APXCHOL_SPTRSV_SETUP_TRACE", "1");
-    scoped_env fp16("APXCHOL_FACTOR_STORAGE", nullptr);
-    scoped_env drop("APXCHOL_FACTOR_DROP", nullptr);
-    scoped_env backend("APXCHOL_GPU_SPTRSV", nullptr);
-    scoped_env tail("APXCHOL_RESIDUAL_SPARSIFY", "0");
     constexpr int n = 257;
     std::vector<weighted_edge> edges;
     for (int u = 0; u < n; ++u) for (int offset : {1,7}) edges.push_back({u,(u+offset)%n,1.0});
@@ -516,20 +505,17 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
         for (int v = 0; v < n; ++v) exact[v] = std::sin(v + 0.25);
         const Eigen::VectorXd b = A * exact;
         apxchol::detail::gpu_preconditioner preconditioner;
+        apxchol::factor_options factor_options;
+        factor_options.verbose = true;
+        preconditioner.set_options(factor_options);
         testing::internal::CaptureStderr();
         try { preconditioner.compute(A); }
         catch (...) { const auto trace=testing::internal::GetCapturedStderr(); ADD_FAILURE()<<trace; throw; }
         const auto trace = testing::internal::GetCapturedStderr();
-        if (apxchol::detail::gpu_setup_diagnostics()) {
-            ASSERT_NE(trace.find("[gpu-owned-csc] n=257 "),std::string::npos) << trace;
-            EXPECT_NE(trace.find("host_graph_bytes=0 host_snapshot_bytes=0 selector_edge_upload_bytes=0"),std::string::npos) << trace;
-            EXPECT_NE(trace.find("factor_entry_download_bytes=0"),std::string::npos) << trace;
-            EXPECT_EQ(trace.find("handback_download_bytes="),std::string::npos) << trace;
-        } else {
-            EXPECT_EQ(trace.find("[gpu-owned-"), std::string::npos) << trace;
-            EXPECT_EQ(trace.find("[gpu-round-shadow]"), std::string::npos) << trace;
-            EXPECT_EQ(trace.find("[gpu-setup-receipt]"), std::string::npos) << trace;
-        }
+        ASSERT_NE(trace.find("[gpu-owned-csc] n=257 "),std::string::npos) << trace;
+        EXPECT_NE(trace.find("host_graph_bytes=0 host_snapshot_bytes=0 selector_edge_upload_bytes=0"),std::string::npos) << trace;
+        EXPECT_NE(trace.find("factor_entry_download_bytes=0"),std::string::npos) << trace;
+        EXPECT_EQ(trace.find("handback_download_bytes="),std::string::npos) << trace;
         ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
         EXPECT_TRUE(preconditioner.trsv().fp16());
         EXPECT_GT(preconditioner.trsv().drop_stats().rel,0.0);

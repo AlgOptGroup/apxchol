@@ -21,18 +21,20 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 ## Where things live
 
 - Algorithm defaults and their rationale: `include/apxchol/solver/factor_options.h`. Build options: root `CMakeLists.txt` and `cmake/apxchol_core.cmake`, which the root, Python and benchmark projects share.
-- Precision and storage contract: `docs/precision.md`. Extension seams: `docs/extending.md`. Supported runtime environment variables: README.
+- Precision and storage contract: `docs/precision.md`. Extension seams: `docs/extending.md`.
 - Operator validation and M-matrix lumping: `operator_class`. Adjacency detection belongs to the CLI (`src/mtx_input.h`); bindings accept assembled operators only.
 - Measurement contracts: `benchmarks/README.md`.
 
 ## Route invariants
 
+- Solver controls are typed per-instance options, not environment variables. Validate them before setup; bindings share compiled defaults. Libraries are quiet by default, and `collect_timings` controls optional checkpoints. Standard OpenMP/CUDA runtime and build controls remain external; reference-only tuning stays internal to tests.
 - `solve_backend` (`automatic`, `cpu`, `gpu`) fixes one complete setup/solve route before setup. Explicit GPU requests fail for unsupported options, input or devices. Once selected, errors never retry on another route. Report the selected route in results and CLI output.
 - `cpu_solver`, public `factorize()` and Eigen preconditioning stay on CPU in GPU builds and must not initialize CUDA. Disabled or pristine GPU lifetimes must not initialize CUDA either.
 - CUDA and Metal own factorization, finalization, operator preparation and PCG on device. They require compressed, sorted, unique, fully paired CSC input; automatic selection uses CPU otherwise. They report a recomputed FP64 residual against the original operator, with verification inside Solve timing.
 
 ## Determinism and numerical invariants
 
+- Public preconditioner application centers Laplacian input/output on every call; only internal PCG uses periodic centering. All backends derive `converged` from the original-system exit residual and effective tolerance, with verification included in Solve timing.
 - Canonical neighbors sort by weight, then vertex. Preserve ordered duplicate sums, exact cumulative weights, `upper_bound` sampling and per-elimination random streams.
 - OpenMP work uses the actual team size, never the requested one; every logical range must execute under reduced or nested teams. Caller-operator loops split work with `detail::work_balanced_range`; reductions stay thread-ordered.
 - Partitioner conflict resolution is deterministic for a given graph, context and team size. Symmetric-input pairing shortcuts must preserve results bit for bit. Prune skipping must retain its full-walk audit for hidden eligible vertices; it need not reproduce the same factor as full pruning.

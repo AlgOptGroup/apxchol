@@ -119,6 +119,28 @@ run_config parse_args(int argc, char* argv[]) {
     app.add_option("--threads", cfg.solve_opts.num_threads,
                    "CPU thread ceiling (0 = OpenMP default; small work may use fewer)")
         ->check(CLI::NonNegativeNumber)->capture_default_str();
+    app.add_option("--factor-storage", cfg.solve_opts.factor_opts.factor_storage,
+                   "Factor storage: auto, float16 or float32")
+        ->transform(CLI::CheckedTransformer(std::map<std::string, factor_storage_type>{
+            {"auto", factor_storage_type::automatic},
+            {"float16", factor_storage_type::fp16},
+            {"float32", factor_storage_type::fp32}}));
+    app.add_option("--cpu-schedule", cfg.solve_opts.factor_opts.cpu_schedule,
+                   "CPU triangular-solve schedule: auto or levels")
+        ->transform(CLI::CheckedTransformer(std::map<std::string, cpu_sptrsv_schedule>{
+            {"auto", cpu_sptrsv_schedule::automatic},
+            {"levels", cpu_sptrsv_schedule::levels}}));
+    app.add_option("--factor-drop", cfg.solve_opts.factor_opts.drop_tolerance,
+                   "Relative factor-entry dropping threshold (0 disables dropping)")
+        ->capture_default_str();
+    app.add_option("--regularization", cfg.solve_opts.factor_opts.regularization,
+                   "Minimum preconditioner diagonal excess relative to the diagonal")
+        ->capture_default_str();
+    app.add_option("--lump-max-mass", cfg.solve_opts.factor_opts.lump_max_mass,
+                   "Maximum positive off-diagonal mass fraction allowed for lumping")
+        ->capture_default_str();
+    app.add_flag_callback("--no-timings", [&] { cfg.solve_opts.collect_timings = false; },
+                          "Disable solver timing collection");
     app.add_option("--tol", cfg.solve_opts.tol, "Relative residual tolerance")
         ->capture_default_str();
     app.add_option("--maxiter", cfg.solve_opts.max_iter, "Maximum PCG iterations")
@@ -165,6 +187,8 @@ run_config parse_args(int argc, char* argv[]) {
 
     if (!rhs_str.empty())    cfg.rhs_path     = rhs_str;
     if (!output_str.empty()) cfg.output_path  = output_str;
+    cfg.solve_opts.factor_opts.verbose = verbose;
+    detail::validate_solve_options(cfg.solve_opts);
     setup_logging(quiet, verbose);
     return cfg;
 }

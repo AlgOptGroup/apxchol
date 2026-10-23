@@ -1,7 +1,6 @@
 #include "metal_setup.h"
 #include "metal_setup_options.h"
 #include "apxchol/solver/partition/block_greedy.h"
-#include "apxchol/env_knobs.h"
 #include "apxchol/operator_class.h"
 #include "metal_setup/finalizer.h"
 #import <Foundation/Foundation.h>
@@ -102,6 +101,7 @@ void prepare_lane_plans(id<MTLDevice> device, const factorization& factor,
 resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double> &A,
                           const solve_options &options, checkpoint *cp, bool input_prechecked) {
     @autoreleasepool {
+        validate_factor_options(options.factor_opts);
         if (!metal_setup_options_supported(options.factor_opts))
             throw std::invalid_argument("Metal device setup currently requires FP32 graph storage "
                                         "and default block-greedy GKS options");
@@ -115,9 +115,9 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         if (!input_prechecked && !gpu_owned_csc_layout_supported(A, offdiagonals, &zeros))
             throw std::invalid_argument(
                 "Metal device setup requires compressed, sorted, unique and paired 32-bit CSC storage");
-        if (!input_prechecked && !metal_setup_regularization_supported(env_knobs::get(), &A))
+        if (!input_prechecked && !metal_setup_regularization_supported(options.factor_opts.regularization, &A))
             throw std::invalid_argument(metal_regularization_error);
-        const operator_view validated(A);
+        const operator_view validated(A, options.factor_opts.lump_max_mass);
         if (cp)
             (*cp)("operator_prepare");
         const bool unchanged = &validated.matrix() == &A;
@@ -130,9 +130,7 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         const auto graph = unchanged ? input : upload(device, validated.matrix());
         if (cp)
             (*cp)("metal_input");
-        const auto &environment = env_knobs::get();
-        const float regularization =
-            environment.ground == grounding_kind::reg ? float(environment.reg_eps) : 0;
+        const float regularization = float(options.factor_opts.regularization);
         auto raw = cached.factorizer.run(
             unsigned(A.rows()), unsigned(validated.matrix().nonZeros()),
             unsigned(validated.scan().offdiag_nnz - validated.lumped()), options.factor_opts.seed,
@@ -162,7 +160,7 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
             build_csc(F, columns, n, nullptr);
         }
         const bool half = resolve_fp16_storage(options.factor_opts.factor_storage, false);
-        auto finalized = cached.finalizer.run(raw, laplacian, half, factor_drop_rel_from_env());
+        auto finalized = cached.finalizer.run(raw, laplacian, half, options.factor_opts.drop_tolerance);
         if (cp)
             (*cp)("metal_factor_prep");
         out.operator_exact = input.operator_exact;

@@ -86,7 +86,8 @@ boundary. Use `-DAPXCHOL_NATIVE_ARCH=OFF` for portable builds.
 
 `cmake -LH build` lists build options. Algorithm defaults live in
 [factor_options.h](include/apxchol/solver/factor_options.h).
-FP16 factor storage narrows scaled off-diagonals, retaining FP32 diagonals; it
+`factor_options::factor_storage` selects triangular-solve storage (`automatic`, `fp16`, or `fp32`); the default is CUDA FP16 and CPU/Metal FP32.
+FP16 narrows scaled off-diagonals, retaining FP32 diagonals; it
 does not change the outer PCG to FP16. See [precision and storage](docs/precision.md).
 `--sampler gks|trace_cycle` selects the clique sampler; GKS remains
 its default. Trace-cycle supports CPU and CUDA setup.
@@ -94,17 +95,6 @@ its default. Trace-cycle supports CPU and CUDA setup.
 `--backend auto|cpu|gpu` select a complete setup/solve route. The default `auto`
 uses CPU for scalar systems and for Metal inputs of at most 32,768 rows when CPU supports the requested storage. Otherwise selection follows device availability, input and option compatibility.
 `solve_result.backend` and the CLI report the actual route.
-
-### Supported environment variables
-
-| Variable | Effect |
-|---|---|
-| `APXCHOL_FACTOR_STORAGE=auto\|float16\|float32` | Triangular-solve factor storage (`auto`: CUDA FP16, CPU/Metal FP32). An explicit per-solver storage choice takes precedence. |
-| `APXCHOL_VERBOSE` | When set, prints setup and solve diagnostics to stderr. |
-| `APXCHOL_CPU_SPTRSV=auto\|levels` | CPU triangular-solve schedule. `auto` (default) uses the critical-tail schedule when possible; `levels` is the level-scheduled reference. |
-
-Other `APXCHOL_*` variables read by the library are unsupported diagnostics:
-they may change or disappear without notice and are not part of the API.
 
 ### Backend capabilities
 

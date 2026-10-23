@@ -23,27 +23,13 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <stdexcept>
-#include <string_view>
 #include <thread>
 #include <vector>
 
 namespace apxchol::detail {
-
-enum class cpu_sptrsv_schedule_mode { automatic, levels };
-
-inline cpu_sptrsv_schedule_mode cpu_sptrsv_schedule_from_env() {
-    const char* value = std::getenv("APXCHOL_CPU_SPTRSV");
-    if (value == nullptr || *value == '\0' || std::string_view(value) == "auto")
-        return cpu_sptrsv_schedule_mode::automatic;
-    if (std::string_view(value) == "levels")
-        return cpu_sptrsv_schedule_mode::levels;
-    throw std::invalid_argument(
-        "APXCHOL_CPU_SPTRSV must be auto or levels");
-}
 
 struct critical_schedule_plan {
     unsigned processors = 0;

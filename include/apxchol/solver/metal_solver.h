@@ -30,6 +30,7 @@ public:
     explicit metal_solver(const Eigen::SparseMatrix<double>& A,
                           const solve_options& opts = {}, checkpoint* cp = nullptr);
     /// Adopts an externally computed factorization of A (values retained).
+    /// Construction options (including regularization/lumping) are not reapplied.
     metal_solver(const Eigen::SparseMatrix<double>& A, factorization F,
                  const solve_options& opts = {}, checkpoint* cp = nullptr);
     ~metal_solver();

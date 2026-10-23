@@ -28,7 +28,7 @@ This separate project compares apxchol with other sparse solvers using common in
   no failure silently falls back to another route. The fair/scaling runners force
   their device and require matching `execution_route` CSV/repetition receipts.
   Old mixed-route rows remain historical and cannot resume a current comparison.
-- `APXCHOL_REPORT_FILL` reads the actual held factor and its SpTRSV drop statistics.
+- `--report-fill` reads the actual held factor and its SpTRSV drop statistics.
   It never constructs another factor or uploads a host diagnostic factor. Raw
   factor off-diagonals and stored L11 entries are distinct counts; CSR and CSC each
   hold the latter. The input denominator counts stored off-diagonal entries after
@@ -106,6 +106,8 @@ Runner controls include `--only`, `--threads`, `--repeat`, `--store`.
 Machine-local paths belong in ignored `paths_local.py`/`paths_local.cmake`;
 [runner_common.py](runner_common.py) defines defaults. `--dump-mtx` and
 `--dump-rhs` export the shared operator/RHS in separate driver invocations.
+
+The C++ benchmark accepts `--factor-storage auto|float16|float32`, `--cpu-schedule auto|levels`, `--factor-drop`, `--regularization`, `--lump-max-mass` and `--degree-quantile` for apxchol v1. These pass directly to the library's options; named configurations retain their sampler/partitioner choices. `--profile` prints its timing breakdown. Timing collection remains enabled so Setup and Solve retain their measured boundaries; ambient `APXCHOL_*` solver overrides are not read.
 
 ## Weighted and additional inputs
 

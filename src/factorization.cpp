@@ -141,7 +141,7 @@ static void assemble_csc(
             #pragma omp barrier
 
             // Each factor_col writes to one distinct CSC column. Catch a
-            // worker allocation failure, finish the workshare collectively,
+            // worker failure, finish the workshare collectively,
             // and rethrow only after leaving OpenMP.
             std::vector<std::pair<node_index, factor_value_t>> col_entries;
             #pragma omp for schedule(dynamic, 256)
@@ -153,11 +153,15 @@ static void assemble_csc(
                     const node_index perm_col =
                         static_cast<node_index>(i);
                     assert(perm[col.vertex] == perm_col);
+                    if (!std::isfinite(col.diag) || col.diag <= 0)
+                        throw std::range_error("factor diagonal is not representable in FP32");
 
                     col_entries.clear();
                     col_entries.reserve(col.entry_count);
                     for (node_index j = 0; j < col.entry_count; ++j) {
                         const auto& [nbr, val] = col.entries[j];
+                        if (!std::isfinite(val))
+                            throw std::range_error("factor entry is not representable in FP32");
                         col_entries.emplace_back(
                             perm[nbr], static_cast<factor_value_t>(-val));
                     }
@@ -206,9 +210,6 @@ void build_csc(factorization& result,
     // i-th eliminated vertex.
     result.perm.assign(n, 0);
     if (build_values) {
-        if (std::getenv("APXCHOL_VERBOSE"))
-            std::fprintf(stderr,
-                         "[apxchol] factor CSC assembly: fused invariant team\n");
         assemble_csc(result, factor_cols, n, cp);
     } else {
         // Match the metadata left by release_values() without allocating,
@@ -246,8 +247,9 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
     // The scan and optional M-matrix copy/lumping are required by apxchol's
     // preconditioner (not common benchmark parsing), so they belong to setup.
     // Keep the phase visible rather than hiding it inside make_graph.
+    detail::validate_factor_options(opts_in);
     if (cp) { cp->descend("setup"); cp->tick(); }
-    const operator_view op(L);
+    const operator_view op(L, opts_in.lump_max_mass);
     if (cp) (*cp)("operator_prepare");
 
     // Include operator validation and graph construction in setup timing.
@@ -291,7 +293,7 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
     // make_graph then skips its per-entry transpose-partner search.
     const bool triangles_bit_identical =
         &A == &L && op.scan().triangles_bit_identical;
-    auto G = detail::make_graph_from_operator(A, triangles_bit_identical);
+    auto G = detail::make_graph_from_operator(A, triangles_bit_identical, opts.regularization);
     return do_factorize(std::move(G));
 }
 

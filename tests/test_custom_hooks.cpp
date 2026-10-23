@@ -5,25 +5,14 @@
 #include "apxchol/solver/partitioner_helpers.h"
 #include <gtest/gtest.h>
 #include "grid_laplacian.h"
-#include "scoped_env.h"
 #include <algorithm>
-#include <cstdlib>
 #include <limits>
 #include <span>
 #include <vector>
 
 namespace {
-// RAII env override: these tests state the DEFAULT (fp32) SpTRSV storage
-// contract, and the suite is also run with APXCHOL_FACTOR_STORAGE=float16 in the
-// environment, so they pin it.
-
-
-// "Exact factor => O(1) PCG iterations" bound. An exact Cholesky factor stored
-// at fp32 preconditions PCG to <= 3 iterations. (Under the fp16 STORAGE --
-// APXCHOL_FACTOR_STORAGE=float16, see lowprec.h -- every off-diagonal carries a 2^-11
-// relative rounding, so the "exact" factor is only an approximate one and PCG
-// needs a few more; iteration count, not the residual floor, is what
-// precision buys. These tests run at the default fp32 storage.)
+// An exact FP32 factor preconditions PCG to at most three iterations.
+// FP16 storage rounding may require one more iteration on this fixture.
 constexpr int kExactFactorMaxIters = 3;
 
 using apxchol::test::grid_laplacian;
@@ -110,41 +99,27 @@ TEST(CustomEliminator, LambdaViaAsEliminator) {
 }
 
 TEST(CustomEliminator, ExactCliqueFactorIsExact) {
-    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
-    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
-
     // With the exact clique rule the factorization is exact Cholesky:
     // P^T L L^T P == A up to roundoff (no sampling at all).
     auto A = grid_laplacian(8, 8);
     auto b = apxchol::generate_test_rhs(A.rows());
-    auto solve_once = [&] {
+    auto solve_once = [&](apxchol::factor_storage_type storage) {
         auto G = apxchol::make_graph(A);
         auto F = apxchol::factorize(std::move(G), exact_clique_eliminator{});
-        apxchol::cpu_solver slv(A, std::move(F));
+        apxchol::solve_options options;
+        options.factor_opts.factor_storage = storage;
+        apxchol::cpu_solver slv(A, std::move(F), options);
         return slv.solve(b, 1e-12, 50);
     };
-#if defined(APXCHOL_USE_CUDA)
-    // The GPU SpTRSV's fp16 factor storage is a RUNTIME mode, default ON
-    // where a kernel backend resolves on the fp32 build -- so pin it per
-    // sub-case: "exact factor => O(1) iterations" requires LOSSLESS factor
-    // storage (under fp16 every stored off-diagonal carries a 2^-11 relative
-    // rounding and the factor is only approximately exact: one extra
-    // iteration on this grid). The residual floor is unaffected either way.
     for (bool fp16 : {false, true}) {
-        SCOPED_TRACE(fp16 ? "fp16 storage" : "lossless storage");
-        setenv("APXCHOL_FACTOR_STORAGE", fp16 ? "float16" : "float32", /*overwrite=*/1);
-        auto res = solve_once();
+        if (fp16 && !apxchol::omp_sptrsv::fp16_supported()) continue;
+        SCOPED_TRACE(fp16 ? "fp16 storage" : "fp32 storage");
+        const auto storage = fp16 ? apxchol::factor_storage_type::fp16
+                                  : apxchol::factor_storage_type::fp32;
+        const auto res = solve_once(storage);
         EXPECT_LE(res.iterations, kExactFactorMaxIters + (fp16 ? 1 : 0));
         EXPECT_LT(res.residual, 1e-12);
     }
-    unsetenv("APXCHOL_FACTOR_STORAGE");
-#else
-    auto res = solve_once();
-    // An exact factor preconditions PCG to convergence in O(1) iterations.
-    EXPECT_LE(res.iterations, kExactFactorMaxIters);
-    EXPECT_LT(res.residual, 1e-12);
-#endif
 }
 
 TEST(CustomPartitioner, StatefulInstanceConverges) {

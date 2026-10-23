@@ -5,7 +5,7 @@
 //   * the storage CONTRACT of omp_sptrsv::setup for whatever storage this
 //     build compiled: every stored CSR/CSC value == narrow_value(v, s_j),
 //     the per-column scales, the off-diagonal flush/subnormal statistics, the
-//     fp16 subnormal flush, and the compacting drop APXCHOL_FACTOR_DROP=<rel>
+//     fp16 subnormal flush, and the compacting drop factor_options::drop_tolerance
 //     (every build): stored nnz == kept entries, and the compacted SpTRSV
 //     solves like the zeroed-but-not-removed reference.
 #include <gtest/gtest.h>
@@ -13,7 +13,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <limits>
 #include <random>
 #include <string>
@@ -47,40 +46,31 @@ float storage_reference(float x) {
 
 double rel_err(double y, double x) { return std::fabs(y - x) / std::fabs(x); }
 
-// RAII env override for tests that state a STORAGE contract on the un-dropped
-// factor: the compacting drop (APXCHOL_FACTOR_DROP, ON by default at 1e-4 with
-// column-sum compensation -- see omp.h) would remove / rescale the tiny
-// entries these tests seed. Restores the previous value on scope exit.
-struct scoped_drop_off : scoped_env {
-    scoped_drop_off() : scoped_env("APXCHOL_FACTOR_DROP", "0") {}
-};
-
 } // namespace
 
-TEST(FactorStorage, EnvironmentPrecedenceAndBackendDefaults) {
+TEST(FactorStorage, BackendDefaultsIgnoreEnvironment) {
     using enum apxchol::factor_storage_type;
     using apxchol::detail::resolve_fp16_storage;
-    for (bool gpu_default : {false, true}) {
-        scoped_env named("APXCHOL_FACTOR_STORAGE", nullptr);
-        EXPECT_EQ(resolve_fp16_storage(automatic, gpu_default), gpu_default);
-        for (const char* value : {"", "auto", "float16", "float32"}) {
+    for (bool default_fp16 : {false, true}) {
+        scoped_env unset("APXCHOL_FACTOR_STORAGE", nullptr);
+        EXPECT_EQ(resolve_fp16_storage(automatic, default_fp16), default_fp16);
+        for (const char* value : {"", "auto", "float16", "float32", "invalid"}) {
             scoped_env setting("APXCHOL_FACTOR_STORAGE", value);
-            const bool expected = !*value || std::string_view(value) == "auto"
-                ? gpu_default : std::string_view(value) == "float16";
-            EXPECT_EQ(resolve_fp16_storage(automatic, gpu_default), expected);
-            EXPECT_TRUE(resolve_fp16_storage(fp16, gpu_default));
-            EXPECT_FALSE(resolve_fp16_storage(fp32, gpu_default));
+            EXPECT_EQ(resolve_fp16_storage(automatic, default_fp16), default_fp16);
+            EXPECT_TRUE(resolve_fp16_storage(fp16, default_fp16));
+            EXPECT_FALSE(resolve_fp16_storage(fp32, default_fp16));
         }
     }
 }
 
-TEST(FactorStorage, InvalidSettingsFailUnlessOverridden) {
-    using enum apxchol::factor_storage_type;
+TEST(FactorStorage, InvalidEnumIsRejected) {
+    using apxchol::factor_storage_type;
     using apxchol::detail::resolve_fp16_storage;
-    for (const char* bad : {"on", "float64", "0", "1", "float16,float32"}) {
-        scoped_env setting("APXCHOL_FACTOR_STORAGE", bad);
-        EXPECT_THROW(resolve_fp16_storage(automatic, false), std::invalid_argument);
-        EXPECT_FALSE(resolve_fp16_storage(fp32, false));
+    for (int invalid : {-1, 3}) {
+        EXPECT_THROW(resolve_fp16_storage(static_cast<factor_storage_type>(invalid), false),
+                     std::invalid_argument);
+        EXPECT_THROW(resolve_fp16_storage(static_cast<factor_storage_type>(invalid), true),
+                     std::invalid_argument);
     }
 }
 
@@ -283,11 +273,6 @@ std::vector<float> reference_scales(const sparse_csc& L) {
 // Every stored CSC value equals narrow_value(v, s_j) bit-for-bit, and so
 // does its CSR twin; the scales (if any) match; offdiag count is right.
 TEST(LowPrec, SetupStoresNarrowValueOfEveryEntryAndTheColumnScales) {
-    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
-    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
-
-    scoped_drop_off drop_off;   // storage contract on the un-dropped factor
     // Reuse output storage across growth and shrink as well as the serial
     // and parallel transpose paths; every new factor must overwrite it.
     apxchol::omp_sptrsv trsv;
@@ -302,7 +287,7 @@ TEST(LowPrec, SetupStoresNarrowValueOfEveryEntryAndTheColumnScales) {
         for (node_index j = 0; j < m; ++j)
             ASSERT_EQ(apxchol::omp_sptrsv::column_scale(L.vals_.data(), L.outer_[j], L.outer_[j + 1]), s[j]);
 
-        trsv.setup(L, m);
+        trsv.setup(L, m, {.drop_tolerance = 0});
         ASSERT_EQ(trsv.csc_vals().size(), static_cast<size_t>(L.nonZeros()));
         std::uint64_t offdiag = 0;
         for (node_index j = 0; j < m; ++j)
@@ -333,11 +318,6 @@ TEST(LowPrec, SetupStoresNarrowValueOfEveryEntryAndTheColumnScales) {
 // storage nothing flushes and the counts are zero. The forward solve is exact
 // w.r.t. the STORED values.
 TEST(LowPrec, FlushAndSubnormalCountsAreExact) {
-    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
-    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
-
-    scoped_drop_off drop_off;   // the 1e-6 / 1e-9 entries must reach the storage format
     // 4x4 lower factor: column 0 = diag 2, off-diagonals 1.0 (max), 1e-6 (fp16
     // subnormal after scaling), 1e-9 (flushed). Columns 1..3: diagonal only /
     // one plain off-diagonal.
@@ -348,7 +328,7 @@ TEST(LowPrec, FlushAndSubnormalCountsAreExact) {
     L.vals_  = {2.0f, 1.0f, 1e-6f, 1e-9f,  1.5f, -0.25f,  1.0f,  1.0f};
     {
         apxchol::omp_sptrsv trsv;
-        trsv.setup(L, 4);
+        trsv.setup(L, 4, {.drop_tolerance = 0});
         EXPECT_EQ(trsv.drop_stats().offdiag, 4u);
         EXPECT_EQ(trsv.drop_stats().dropped, 0u);
         EXPECT_EQ(trsv.drop_stats().nnz_factor, 8u);
@@ -381,7 +361,7 @@ TEST(LowPrec, FlushAndSubnormalCountsAreExact) {
     }
 }
 
-// ── Compacting drop: APXCHOL_FACTOR_DROP=<rel> ──────────────────────────
+// ── Compacting drop: factor_options::drop_tolerance ──────────────────────────
 namespace {
 
 // The reference "dense drop": the same factor with the entries the drop
@@ -439,7 +419,7 @@ dense_drop reference_dense_drop(const sparse_csc& L, node_index m, double rel) {
 
 } // namespace
 
-// APXCHOL_FACTOR_DROP=<rel> (every build): off-diagonals with |v| < rel * s_j
+// With drop_tolerance=rel: off-diagonals with |v| < rel * s_j
 // (and those the storage format would store as zero) are REMOVED before the
 // CSR/CSC are built: stored nnz == the number of kept entries, the diagonal
 // is always kept (first in every CSC column, last in every CSR row), the
@@ -451,10 +431,6 @@ dense_drop reference_dense_drop(const sparse_csc& L, node_index m, double rel) {
 // 50000), with a spread of magnitudes so ~half of the off-diagonals fall
 // under 1e-4.
 TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
-    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
-    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
-
     struct cfg { node_index n; bool laplacian; };
     for (cfg c : {cfg{3000, false}, cfg{3001, true}, cfg{60000, false}, cfg{60001, true}}) {
         const node_index m = c.laplacian ? c.n - 1 : c.n;
@@ -476,13 +452,13 @@ TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
         const dense_drop ref = reference_dense_drop(L, m, rel);
         ASSERT_GT(ref.zeroed, ref.kept / 4);   // the test has teeth: a big chunk goes
 
-        // Compacted (env set for this setup only).
+        // Compacted factor and the equivalent zeroed reference.
         apxchol::omp_sptrsv trsv;
-        { scoped_env drop("APXCHOL_FACTOR_DROP", "1e-4"); trsv.setup(L, m); }
+        trsv.setup(L, m, {.drop_tolerance = rel});
         // Reference: dense drop, the drop itself off (the zeroed entries stay
         // stored -- a stored zero solves like an absent entry).
         apxchol::omp_sptrsv rf;
-        { scoped_drop_off off; rf.setup(ref.Lz, m); }
+        rf.setup(ref.Lz, m, {.drop_tolerance = 0});
 
         // Counts.
         std::uint64_t L11_nnz = 0;
@@ -560,31 +536,23 @@ TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
         }
         EXPECT_LT(worst, 1e-11);
 
-        // The env is read at every setup: rel = 0 -> nothing is dropped, and
-        // unset -> the default kFactorDropRelDefault (== the 1e-4 above, so the
-        // same kept set) with the compensation this test switched off.
+        // A zero threshold preserves every entry; the default matches rel above.
         apxchol::omp_sptrsv plain;
-        { scoped_drop_off off; plain.setup(L, m); }
+        plain.setup(L, m, {.drop_tolerance = 0});
         EXPECT_EQ(plain.drop_stats().rel, 0.0);
         EXPECT_EQ(plain.drop_stats().dropped, 0u);
         EXPECT_EQ(plain.drop_stats().nnz_stored, L11_nnz);
         EXPECT_EQ(plain.stored_nnz(), L11_nnz);
         apxchol::omp_sptrsv dflt;
-        { scoped_env unset("APXCHOL_FACTOR_DROP", nullptr); dflt.setup(L, m); }
-        EXPECT_EQ(dflt.drop_stats().rel, apxchol::kFactorDropRelDefault);
+        dflt.setup(L, m);
+        EXPECT_EQ(dflt.drop_stats().rel, apxchol::factor_options{}.drop_tolerance);
         EXPECT_EQ(dflt.stored_nnz(), ref.kept);
     }
 }
 
-// rel = 0 / unset / negative = off; the diagonal survives ANY rel (even > 1,
-// which drops every off-diagonal), the scales are unchanged by the drop, and
-// on FP16_SCALED a tiny rel still removes what fp16 flushes (a stored zero is
-// a stored entry) -- the drop's second criterion.
+// Zero disables dropping; invalid thresholds fail. The diagonal survives
+// even when a threshold above one removes every off-diagonal.
 TEST(LowPrec, FactorDropEdgeCases) {
-    // These state the DEFAULT (fp32) storage contract, so pin it: the suite
-    // is also run with APXCHOL_FACTOR_STORAGE=float16 in the environment.
-    scoped_env fp32_storage("APXCHOL_FACTOR_STORAGE", "float32");
-
     sparse_csc L = make_random_lower(2000, 4.0, 31, -1.0, 1.0);
     for (edge_index p = 0; p < L.nonZeros(); ++p)
         if ((p % 5) == 2) L.vals_[p] = static_cast<factor_value_t>(L.vals_[p] * 1e-9);   // fp16-flush range
@@ -597,25 +565,21 @@ TEST(LowPrec, FactorDropEdgeCases) {
             fp16_zero += std::abs(float(h)) < 0x1p-14f;
         }
     ASSERT_GT(fp16_zero, 100u);
-    for (const char* rel : {"0", "-1", "abc"}) {
-        SCOPED_TRACE(std::string("APXCHOL_FACTOR_DROP=") + rel);
-        setenv("APXCHOL_FACTOR_DROP", rel, 1);
-        apxchol::omp_sptrsv t; t.setup(L, 2000);
-        unsetenv("APXCHOL_FACTOR_DROP");
+    for (double rel : {-1.0, std::numeric_limits<double>::quiet_NaN(),
+                       std::numeric_limits<double>::infinity()}) {
+        apxchol::omp_sptrsv t;
+        EXPECT_THROW(t.setup(L, 2000, {.drop_tolerance = rel}), std::invalid_argument);
+    }
+    for (double rel : {0.0, 1e-30}) {
+        SCOPED_TRACE(rel);
+        apxchol::omp_sptrsv t;
+        t.setup(L, 2000, {.drop_tolerance = rel});
         EXPECT_EQ(t.drop_stats().dropped, 0u);
         EXPECT_EQ(t.stored_nnz(), static_cast<std::uint64_t>(L.nonZeros()));
     }
     {
-        setenv("APXCHOL_FACTOR_DROP", "1e-30", 1);   // below everything: only format zeros go
-        apxchol::omp_sptrsv t; t.setup(L, 2000);
-        unsetenv("APXCHOL_FACTOR_DROP");
-        EXPECT_EQ(t.drop_stats().dropped, 0u);
-        EXPECT_EQ(t.stored_nnz(), static_cast<std::uint64_t>(L.nonZeros()) - t.drop_stats().dropped);
-    }
-    {
-        setenv("APXCHOL_FACTOR_DROP", "2", 1);        // > 1: every off-diagonal goes, diagonal stays
-        apxchol::omp_sptrsv t; t.setup(L, 2000);
-        unsetenv("APXCHOL_FACTOR_DROP");
+        apxchol::omp_sptrsv t;
+        t.setup(L, 2000, {.drop_tolerance = 2});
         EXPECT_EQ(t.drop_stats().dropped, offdiag);
         EXPECT_EQ(t.stored_nnz(), 2000u);
         EXPECT_EQ(t.drop_stats().offdiag, 0u);
@@ -634,9 +598,8 @@ TEST(LowPrec, FactorDropEdgeCases) {
     }
 }
 
-// ── The fp16 STORAGE at runtime (APXCHOL_FACTOR_STORAGE=float16) ─────────────────
-// The storage is a per-setup choice now, not a build flag, so these state its
-// contract against the same binary that runs the fp32 tests above:
+// ── FP16 storage ─────────────────────────────────────────────────────────
+// These tests check the per-setup storage contract:
 //   * every stored slot is narrow_value<_Float16>(v, s_j) bit-for-bit, in the
 //     CSC and in its CSR twin, with fp16 subnormals flushed to signed zero;
 //   * col_scales() are the documented per-column maxima;
@@ -652,8 +615,6 @@ bool fp16_available() { return apxchol::omp_sptrsv::fp16_supported(); }
 
 TEST(LowPrecFp16, StorageContractAndCompensatedDiagonal) {
     if (!fp16_available()) GTEST_SKIP() << "CPU lacks AVX/F16C";
-    scoped_drop_off drop_off;                              // storage contract on the un-dropped factor
-    scoped_env fp16("APXCHOL_FACTOR_STORAGE", "float16");
     apxchol::omp_sptrsv trsv;
     for (node_index m : {node_index(3000), node_index(60000), node_index(2000)}) {
         SCOPED_TRACE("m=" + std::to_string(m));
@@ -662,7 +623,7 @@ TEST(LowPrecFp16, StorageContractAndCompensatedDiagonal) {
             if ((p % 7) == 3) L.vals_[p] = static_cast<factor_value_t>(L.vals_[p] * 1e-7);
         const std::vector<float> s = reference_scales(L);
 
-        trsv.setup(L, m);
+        trsv.setup(L, m, {.factor_storage = apxchol::factor_storage_type::fp16, .drop_tolerance = 0});
         ASSERT_TRUE(trsv.fp16());
         EXPECT_EQ(trsv.value_bytes(), 2u);
         ASSERT_EQ(trsv.csc_vals16().size(), static_cast<size_t>(L.nonZeros()));
@@ -715,8 +676,6 @@ TEST(LowPrecFp16, StorageContractAndCompensatedDiagonal) {
 
 TEST(LowPrecFp16, DegenerateColumnScaleFallsBackToOneAndTheSetupStaysFinite) {
     if (!fp16_available()) GTEST_SKIP() << "CPU lacks AVX/F16C";
-    scoped_drop_off drop_off;
-    scoped_env fp16("APXCHOL_FACTOR_STORAGE", "float16");
     // Column 1's only off-diagonal is ~1e-40: s_j is an fp32 subnormal and
     // fp32(1 / s_j) overflows, so the setup must fall back to s_j = 1.
     sparse_csc L;
@@ -725,7 +684,7 @@ TEST(LowPrecFp16, DegenerateColumnScaleFallsBackToOneAndTheSetupStaysFinite) {
     L.inner_ = {0, 2,  1, 2,  2};
     L.vals_  = {2.0f, -0.5f,  3.0f, 1e-40f,  4.0f};
     apxchol::omp_sptrsv trsv;
-    ASSERT_NO_THROW(trsv.setup(L, 3));
+    ASSERT_NO_THROW(trsv.setup(L, 3, {.factor_storage = apxchol::factor_storage_type::fp16, .drop_tolerance = 0}));
     ASSERT_TRUE(trsv.fp16());
     EXPECT_EQ(trsv.drop_stats().scale_fallback, 1u);
     EXPECT_EQ(trsv.col_scales()[1], 1.0f);                 // the fallback

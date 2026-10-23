@@ -211,17 +211,11 @@ struct degree_is_eligible {
     }
 };
 
-double elapsed_ms(clock_type::time_point start) {
-    if (!gpu_setup_diagnostics())
+double elapsed_ms(clock_type::time_point start, bool verbose) {
+    if (!verbose)
         return std::numeric_limits<double>::quiet_NaN();
-    return std::chrono::duration<double, std::milli>(clock_type::now() - start)
+    return std::chrono::duration<double, std::milli>(clock_type::now(verbose) - start)
         .count();
-}
-
-bool trace_enabled() {
-    if (!gpu_setup_diagnostics()) return false;
-    const char *e = std::getenv("APXCHOL_GPU_BLOCK_TRACE");
-    return e && *e && std::strcmp(e, "0") != 0;
 }
 
 template<class Operation>
@@ -245,6 +239,7 @@ bool add_allocation(std::size_t &total, std::size_t count,
 } // namespace
 
 struct gpu_block_frontend::impl {
+    bool verbose;
     template<class Input, class T, class Predicate>
     auto select_operation(Input input, T* output, std::size_t count,
                           Predicate predicate) {
@@ -264,8 +259,8 @@ struct gpu_block_frontend::impl {
     }
 
     explicit impl(node_index n_in, std::size_t initial_edges,
-                  std::shared_ptr<gpu_device_selection_producer> producer)
-        : n(n_in), live_edge_count(initial_edges), active_count(n_in),
+                  std::shared_ptr<gpu_device_selection_producer> producer, bool diagnostics)
+        : verbose(diagnostics), n(n_in), live_edge_count(initial_edges), active_count(n_in),
           selection_producer(std::move(producer)) {
         if (n >= static_cast<node_index>(INT_MAX))
             throw std::overflow_error(
@@ -436,7 +431,7 @@ struct gpu_block_frontend::impl {
     gpu_block_frontend::prepare_result
     prepare(std::span<const node_index> active,
             const partition_options &options) {
-        const auto start = clock_type::now();
+        const auto start = clock_type::now(verbose);
 
         if (active.size() != active_count)
             throw std::logic_error(
@@ -476,8 +471,8 @@ struct gpu_block_frontend::impl {
             active_ids[current_active].get(), candidates_original.get(),
             active.size(), degree_is_eligible{owned_view, threshold}));
 
-        last_prepare = elapsed_ms(start);
-        if (trace_enabled()) {
+        last_prepare = elapsed_ms(start, verbose);
+        if (verbose) {
             std::fprintf(stderr,
                          "[gpu-block] prepare active=%zu candidates=%zu "
                          "edges=%zu %.3f ms\n",
@@ -537,12 +532,12 @@ struct gpu_block_frontend::impl {
     }
 
     const partition_result &select_block_greedy() {
-        const auto start = clock_type::now();
+        const auto start = clock_type::now(verbose);
         result.data.clear();
         if (!candidate_count) {
             selected_size = 0;
             selected_degree_work = 0;
-            last_select = elapsed_ms(start);
+            last_select = elapsed_ms(start, verbose);
             return result;
         }
 
@@ -566,8 +561,8 @@ struct gpu_block_frontend::impl {
         cuda_check(cudaGetLastError(), "restore block-greedy candidate status");
         cuda_check(cudaDeviceSynchronize(), "finish block-greedy selection");
 
-        last_select = elapsed_ms(start);
-        if (trace_enabled())
+        last_select = elapsed_ms(start, verbose);
+        if (verbose)
             std::fprintf(stderr,
                 "[gpu-bounded-selection] passes=%u candidate_visits=%llu "
                 "seed=%llu phase=%llu scratch_capacity_bytes=%zu\n",
@@ -575,7 +570,7 @@ struct gpu_block_frontend::impl {
                 static_cast<unsigned long long>(bounded_seed),
                 static_cast<unsigned long long>(bounded_phase),
                 update_ids.count() * sizeof(node_index));
-        if (trace_enabled()) {
+        if (verbose) {
             std::fprintf(stderr,
                          "[gpu-block] select candidates=%zu chosen=%zu %.3f ms\n",
                          candidate_count, chosen, last_select);
@@ -703,9 +698,9 @@ gpu_block_frontend::probe_runtime(node_index n) {
 }
 
 gpu_block_frontend::gpu_block_frontend(
-    node_index n, std::size_t undirected_edges, owned_initialization_tag)
+    node_index n, std::size_t undirected_edges, owned_initialization_tag, bool verbose)
     : p_(std::make_unique<impl>(n, undirected_edges,
-          std::shared_ptr<gpu_device_selection_producer>(new gpu_device_selection_producer()))) {}
+          std::shared_ptr<gpu_device_selection_producer>(new gpu_device_selection_producer()), verbose)) {}
 
 void gpu_block_frontend::reset() noexcept {
     if (!p_) return;

@@ -3,6 +3,7 @@
 #include "apxchol/sparse_csc.h"
 #include "apxchol/big_alloc.h"
 #include "apxchol/solver/detail/cpu_parallel.h"
+#include "apxchol/solver/factor_options.h"
 #include "apxchol/solver/sptrsv/critical_schedule.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"   // the compacting drop (shared with the CUDA backend)
 #include "apxchol/solver/sptrsv/transpose.h"     // the CSC -> CSR transpose (shared with the CUDA backend)
@@ -13,7 +14,6 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
-#include <cstdlib>
 #include <memory>
 #include <stdexcept>
 #include <type_traits>
@@ -129,18 +129,11 @@ private:
 
 } // namespace detail
 
-// kFactorDropRelDefault (the compacting drop's default threshold, 1e-4, and
-// the measurements behind it), factor_drop_rel_from_env(),
-// factor_column_scale() and the drop itself
-// (compact_factor_columns) live in factor_drop.h -- ONE host implementation
-// shared with the CUDA backend; the "COMPACTING DROP" section below is the
-// authoritative description of what it does and why.
-
 /// OpenMP sparse triangular solver: shared row arithmetic under either the
 /// established level-set schedule (Anderson & Saad 1989; Naumov 2011) or the
 /// critical-parent staleness-2 weak-barrier schedule in critical_schedule.h.
 ///
-/// setup() resolves APXCHOL_CPU_SPTRSV=auto|levels. AUTO builds the round-level
+/// Automatic scheduling builds the round-level
 /// schedule and, for a multi-thread team, replaces its contiguous trailing run
 /// of thin levels with a critical-parent plan. Fat levels stay on the established
 /// level-set kernel. Without elimination-round metadata, without a thin suffix,
@@ -175,11 +168,11 @@ private:
 ///
 /// The critical-tail path preserves same-processor dependencies in topological
 /// order and uses a staleness-2 weak barrier for cross-processor dependencies.
-/// APXCHOL_LEVEL_DUMP=1 prints both the level census and the resolved tail plan.
+/// verbose setup prints the level census and resolved tail plan.
 
 // Storage contract (derivation and historical decisions: docs/precision.md):
 //
-// * FP32 arrays by default; APXCHOL_FACTOR_STORAGE=float16 selects scaled FP16
+// * FP32 arrays by default; factor_storage=fp16 selects scaled FP16
 //   off-diagonals on x86 with AVX/F16C and on Apple ARM64, including portable builds. Arithmetic
 //   remains FP64 in both cases; only the stored preconditioner changes.
 // * Scale s_j is the pre-drop maximum absolute off-diagonal of column j, or
@@ -214,8 +207,7 @@ public:
         return false;
 #endif
     }
-    /// Resolve the next setup's storage; automatic reads APXCHOL_FACTOR_STORAGE
-    /// and defaults to FP32. Unsupported FP16 requests fail.
+    /// Resolve storage; automatic uses FP32. Unsupported FP16 requests fail.
     static bool fp16_resolved(factor_storage_type storage = factor_storage_type::automatic) {
         const bool want = detail::resolve_fp16_storage(storage, false);
         if (want && !fp16_supported())
@@ -245,7 +237,7 @@ public:
     // arguments: convert the CSC once, then transpose its stored values so
     // both copies agree bit-for-bit (a no-op cast on the fp32
     // storage, exactly the static_cast it always did). The compacting drop
-    // (APXCHOL_FACTOR_DROP) happens BEFORE this: dropped entries never reach it.
+    // (drop_tolerance) happens BEFORE this: dropped entries never reach it.
     template <class V = sptrsv_value_t>
     static V narrow_value(factor_value_t v, float s) {
         if constexpr (std::is_same_v<V, _Float16>) {
@@ -268,7 +260,7 @@ public:
     }
 
     // THE compacting-drop predicate (public so the tests can state it): the
-    // off-diagonal v of a column with scale s survives APXCHOL_FACTOR_DROP=rel
+    // off-diagonal v of a column with scale s survives drop_tolerance=rel
     // iff |v| >= rel * s and the storage format does not map it to zero. The
     // diagonal is never passed through this (always kept).
     template <class V = sptrsv_value_t>
@@ -329,7 +321,7 @@ public:
         std::uint64_t flushed           = 0;   // stored as zero although the factor value was nonzero
         std::uint64_t subnormal         = 0;   // stored as a subnormal of the storage format
         std::uint64_t factor_subnormal  = 0;   // factor entries (fp32, diagonal incl.) that are fp32 subnormals
-        std::uint64_t dropped           = 0;   // off-diagonals removed by APXCHOL_FACTOR_DROP (= the two below)
+        std::uint64_t dropped           = 0;   // off-diagonals removed by the drop predicate (= the two below)
         std::uint64_t dropped_threshold = 0;   //   ... because |L_ij| < rel * s_j
         std::uint64_t dropped_flush     = 0;   //   ... because the storage format stores them as zero anyway
         std::uint64_t nnz_factor        = 0;   // nnz of L11 as factorized (before the drop)
@@ -348,10 +340,10 @@ public:
 
     /// Analyze L11 = L.topLeftCorner(m, m): build CSR, CSC, and level sets.
     /// L is read only; the caller keeps it. The storage width is resolved from
-    /// explicit storage option or the environment at setup.
+    /// the storage option at setup.
     void setup(const sparse_csc& L, node_index m,
-               factor_storage_type storage = factor_storage_type::automatic) {
-        setup_dispatch(L, m, nullptr, storage);
+               const factor_options& options = {}) {
+        setup_dispatch(L, m, nullptr, options);
     }
 
     /// Same analysis, but the SpTRSV CONSUMES L: its row/value arrays are
@@ -365,25 +357,28 @@ public:
     /// (if it did) or else after the CSC copy. Column pointers stay (nonZeros()
     /// still works). For callers that keep the factor, use setup().
     void setup_consuming(sparse_csc& L, node_index m,
-                         factor_storage_type storage = factor_storage_type::automatic) {
-        setup_dispatch(L, m, &L, storage);
+                         const factor_options& options = {}) {
+        setup_dispatch(L, m, &L, options);
     }
 
 private:
     void setup_dispatch(const sparse_csc& L, node_index m, sparse_csc* consumed,
-                        factor_storage_type storage) {
-        fp16_ = fp16_resolved(storage);
+                        const factor_options& options) {
+        detail::validate_factor_options(options);
+        verbose_ = options.verbose;
+        fp16_ = fp16_resolved(options.factor_storage);
         if (fp16_) {
-            setup_impl<_Float16>(L, m, consumed);
+            setup_impl<_Float16>(L, m, consumed, options);
             return;
         }
-        setup_impl<float>(L, m, consumed);
+        setup_impl<float>(L, m, consumed, options);
     }
 
     // `consumed` != nullptr: `L` may be released as soon as it is dead (see
     // setup_consuming); it then always aliases &L. V is the storage type.
     template <class V>
-    void setup_impl(const sparse_csc& L, node_index m, sparse_csc* consumed) {
+    void setup_impl(const sparse_csc& L, node_index m, sparse_csc* consumed,
+                    const factor_options& options) {
         constexpr bool kScaled = std::is_same_v<V, _Float16>;   // narrow_value / stored_diag read s_j
         m_ = m;
 #ifdef __APPLE__
@@ -392,7 +387,7 @@ private:
         // Keep the outer solve team when one Laplacian row is grounded.
         team_rows_ = m < L.rows() && L.rows() - m == 1 ? L.rows() : m;
 #endif
-        const bool trace = std::getenv("APXCHOL_SPTRSV_SETUP_TRACE") != nullptr;
+        const bool trace = verbose_;
         auto now = []() {
             return std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -477,9 +472,8 @@ private:
         }
         mark("L11_alias_or_copy");
 
-        // APXCHOL_FACTOR_DROP=<rel> (both storages; default kFactorDropRelDefault,
-        // <= 0 = off). The column-sum compensation is unconditional.
-        const double factor_drop_rel = factor_drop_rel_from_env();
+        // Both formats preserve column sums after threshold dropping.
+        const double factor_drop_rel = options.drop_tolerance;
         stats_ = lowprec_statistics{};
         stats_.rel        = factor_drop_rel;
         stats_.nnz_factor = static_cast<std::uint64_t>(nnz);
@@ -532,7 +526,7 @@ private:
                 inv_scale_[j] = 1.0f / col_scale[j];
         }
 
-        // ── Compacting drop (APXCHOL_FACTOR_DROP; see the file header) ──
+        // ── Compacting drop ──
         // O(nnz) parallel work, no atomics: per-column kept count -> serial
         // prefix over m_+1 -> parallel compacted copy (+ the column-sum
         // compensation, per column, in the same pass). The compacted arrays
@@ -632,9 +626,9 @@ private:
                         throw std::runtime_error(
                             "apxchol omp_sptrsv: fp16 factor storage cannot represent column " + std::to_string(j) +
                             " (diag=" + std::to_string(diag_[j]) + ", inv_scale^2=" + std::to_string(r * r) +
-                            "); set APXCHOL_FACTOR_STORAGE=float32");
+                            "); select factor_storage=fp32");
                 }
-                if (std::getenv("APXCHOL_VERBOSE"))
+                if (verbose_)
                     std::fprintf(stderr,
                         "[apxchol] fp16 storage: diag = fp32(L_jj / s_j) + the column's rounding residual;"
                         " scale fallbacks (s_j := 1)=%llu, columns with L_jj < s_j=%llu; fat-level kernel=%s\n",
@@ -642,7 +636,7 @@ private:
                         static_cast<unsigned long long>(n_dlt),
                         simd_fp16_kernel() ? "simd" : "scalar");
             }
-            if (std::getenv("APXCHOL_VERBOSE")) {
+            if (verbose_) {
                 const double den = n_off ? static_cast<double>(n_off) : 1.0;
                 std::fprintf(stderr,
                     "[apxchol] sptrsv storage %s: stored_nnz=%llu offdiag=%llu"
@@ -659,7 +653,7 @@ private:
                     const std::uint64_t off0 = n_off + stats_.dropped;
                     const double den0 = off0 ? static_cast<double>(off0) : 1.0;
                     std::fprintf(stderr,
-                        "[apxchol] factor drop (APXCHOL_FACTOR_DROP=%g, column sums preserved): dropped=%llu"
+                        "[apxchol] factor drop (drop_tolerance=%g, column sums preserved): dropped=%llu"
                         " (%.4f%% of %llu off-diagonals; threshold=%llu, format_zero=%llu)"
                         " stored_nnz %llu -> %llu (%.4f%% of factor)\n",
                         factor_drop_rel,
@@ -692,7 +686,7 @@ private:
         if constexpr (kScaled)
             transpose(csc_col_ptr_.data(), csc_row_idx_.data(), csc_vals.data());
 
-        build_schedule(mark);
+        build_schedule(options.cpu_schedule, mark);
         ready_ = true;
     }
 
@@ -754,20 +748,12 @@ private:
     }
 #endif
 
-    static bool round_levels_disabled() {
-        const char* value = std::getenv("APXCHOL_ROUND_LEVELS");
-        return value != nullptr && std::atoi(value) == 0;
-    }
-
     bool round_bounds_valid() const {
-        return !round_levels_disabled() &&
-               detail::round_level_ranges::valid_metadata(
-                   pending_round_bounds_, m_);
+        return detail::round_level_ranges::valid_metadata(pending_round_bounds_, m_);
     }
 
     template <class Mark>
-    void build_schedule(Mark&& mark) {
-        const auto mode = detail::cpu_sptrsv_schedule_from_env();
+    void build_schedule(cpu_sptrsv_schedule mode, Mark&& mark) {
         const unsigned processors = detail::cpu_solve_threads(team_rows_);
         hybrid_active_ = false;
         hybrid_fwd_level_end_ = 0;
@@ -775,14 +761,14 @@ private:
         critical_plan_.clear();
         critical_barrier_.clear();
         build_levels(mark);
-        if (mode == detail::cpu_sptrsv_schedule_mode::automatic)
+        if (mode == cpu_sptrsv_schedule::automatic)
             build_hybrid_tail(processors, mark);
 
-        if (std::getenv("APXCHOL_VERBOSE")) {
+        if (verbose_) {
             std::fprintf(stderr,
                 "[apxchol] CPU SpTRSV schedule: %s (%s, processors=%u)\n",
                 hybrid_active_ ? "level-set+critical-tail" : "level-set",
-                mode == detail::cpu_sptrsv_schedule_mode::automatic
+                mode == cpu_sptrsv_schedule::automatic
                     ? "auto" : "levels forced",
                 processors);
         }
@@ -837,8 +823,7 @@ private:
         hybrid_active_ = critical_plan_.row_count != 0;
         if (hybrid_active_) {
             mark("hybrid_critical_tail");
-            if (const char* value = std::getenv("APXCHOL_LEVEL_DUMP");
-                value && *value) {
+            if (verbose_) {
                 std::fprintf(stderr,
                     "[trsv-hybrid] processors=%u bulk_levels=%zu "
                     "tail_levels=%zu tail_rows=%u critical_supersteps=%zu\n",
@@ -875,8 +860,7 @@ private:
     // structure, never a value) ─────────────────────────────────────────
     template <class Mark>
     void build_levels(Mark&& mark) {
-        // Round-as-level (DEFAULT when round boundaries are available;
-        // APXCHOL_ROUND_LEVELS=0 forces the topological scan): assign each column
+        // Round-as-level when validated round boundaries are available: assign each column
         // its elimination-round index as its level. This is correct: same-round IS
         // columns are mutually independent (no edge, no fill between them -> L=0),
         // so they share a level; every L-dependency points to an earlier round
@@ -981,7 +965,7 @@ private:
             mark("bck_levels");
         }
 
-        if (const char* e = std::getenv("APXCHOL_LEVEL_DUMP"); e && *e) {
+        if (verbose_) {
             long long fwd_max = 0, bck_max = 0;
             with_base_levels<fwd_dir>([&](const auto& levels) {
                 for (std::size_t l = 0; l < levels.size(); ++l)
@@ -1473,6 +1457,7 @@ private:
     node_index m_ = 0;
     node_index team_rows_ = 0;
     bool ready_ = false;
+    bool verbose_ = false;
     bool fp16_  = false;   // the storage the last setup() resolved
 
     // The CSR/CSC arrays are streamed on every level-set sweep and are far
@@ -1728,7 +1713,7 @@ private:
 
     // Level sets.
     // Materialized row lists only for the topological fallback (no usable round
-    // metadata, or APXCHOL_ROUND_LEVELS=0). The normal round-derived schedule
+    // metadata). The normal round-derived schedule
     // keeps these empty and reads contiguous ranges directly from the active
     // setup-time bounds snapshot.
     std::vector<std::vector<node_index>> fwd_levels_;
@@ -1744,7 +1729,7 @@ private:
     std::size_t hybrid_fwd_level_end_ = 0;
     std::size_t hybrid_bck_level_begin_ = 0;
     // Optional: cumulative IS-size per elimination round (column->round boundaries).
-    // When set + APXCHOL_ROUND_LEVELS, levels are read off the rounds instead of
+    // With valid metadata, levels are read off the rounds instead of
     // an O(nnz) topological depth scan (same structure -- same-round IS columns are
     // independent; peel columns get their own sequential level).
     std::vector<node_index> pending_round_bounds_;

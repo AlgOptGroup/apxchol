@@ -4,12 +4,27 @@
 #include <cstddef>
 #include <limits>
 #include <string>
+#include <string_view>
+#include <stdexcept>
 
 #include "apxchol/types.h"
+#include "apxchol/detail/operator_options.h"
 #include "apxchol/lowprec.h"
 #include "apxchol/solver/elimination/sampler.h"
 
 namespace apxchol {
+
+enum class cpu_sptrsv_schedule { automatic, levels };
+
+namespace detail {
+
+inline cpu_sptrsv_schedule parse_cpu_schedule(std::string_view value) {
+    if (value == "auto") return cpu_sptrsv_schedule::automatic;
+    if (value == "levels") return cpu_sptrsv_schedule::levels;
+    throw std::invalid_argument("cpu_schedule must be auto or levels");
+}
+
+} // namespace detail
 
 /// Strategy for the serial residual peel that runs after the main parallel
 /// IS-finding loop bails out.  All strategies are serial; they differ only
@@ -102,9 +117,17 @@ struct partition_options {
 
 struct factor_options {
     unsigned seed = 42;
+    /// Matrix-input diagonal regularization as a fraction of each diagonal; zero disables it.
+    double regularization = 0;
+    /// Matrix-input lumping ceiling; zero rejects positive off-diagonals.
+    double lump_max_mass = kDefaultLumpMassCeiling;
     /// Triangular-solve storage; construction arithmetic and exports are unchanged.
-    /// automatic uses APXCHOL_FACTOR_STORAGE or the backend default (CPU/Metal fp32, CUDA fp16).
+    /// automatic uses the backend default (CPU/Metal fp32, CUDA fp16).
     factor_storage_type factor_storage = factor_storage_type::automatic;
+    cpu_sptrsv_schedule cpu_schedule = cpu_sptrsv_schedule::automatic;
+    /// Relative off-diagonal drop threshold; zero disables threshold dropping.
+    double drop_tolerance = 1e-4;
+    bool verbose = false;
     partition_options partition{};   // selection knobs (see above)
     /// Minimum selector yield before handing a large residual to the BK path:
     /// selected regions / vertices ELIGIBLE under the degree cap. Relative to
@@ -219,4 +242,41 @@ struct factor_options {
 
 };
 
+namespace detail {
+inline void validate_factor_options(const factor_options& options) {
+    validate_regularization(options.regularization);
+    validate_lump_max_mass(options.lump_max_mass);
+    if (!std::isfinite(options.drop_tolerance) || options.drop_tolerance < 0)
+        throw std::invalid_argument("drop_tolerance must be finite and nonnegative");
+    const double quantile = options.partition.degree_quantile;
+    if (!std::isfinite(quantile) ||
+        (quantile != degree_quantile_by_route && !(quantile >= 0 && quantile < 1)))
+        throw std::invalid_argument("degree_quantile must be -1 (automatic) or in [0, 1)");
+    if (!std::isfinite(options.partition.degree_multiplier) ||
+        options.partition.degree_multiplier <= 0)
+        throw std::invalid_argument("degree_multiplier must be finite and positive");
+    if (!std::isfinite(options.min_is_fraction) ||
+        options.min_is_fraction < 0 || options.min_is_fraction > 1)
+        throw std::invalid_argument("min_is_fraction must be in [0, 1]");
+    if (options.cpu_schedule != cpu_sptrsv_schedule::automatic &&
+        options.cpu_schedule != cpu_sptrsv_schedule::levels)
+        throw std::invalid_argument("invalid CPU triangular-solve schedule");
+    if (options.factor_storage != factor_storage_type::automatic &&
+        options.factor_storage != factor_storage_type::fp16 &&
+        options.factor_storage != factor_storage_type::fp32)
+        throw std::invalid_argument("invalid factor storage");
+    if (options.sampler != clique_sampler::gks && options.sampler != clique_sampler::trace_cycle)
+        throw std::invalid_argument("invalid clique sampler");
+    if (options.residual_peel != residual_peel_strategy::natural &&
+        options.residual_peel != residual_peel_strategy::min_degree &&
+        options.residual_peel != residual_peel_strategy::bk_serial)
+        throw std::invalid_argument("invalid residual peel strategy");
+}
+inline void validate_graph_options(const factor_options& options) {
+    validate_factor_options(options);
+    if (options.regularization != 0 || options.lump_max_mass != kDefaultLumpMassCeiling)
+        throw std::invalid_argument("regularization and lump_max_mass require matrix input; "
+                                    "a supplied graph must already have valid positive weights");
+}
+} // namespace detail
 } // namespace apxchol
