@@ -8,7 +8,6 @@
 #include "apxchol/types.h"
 #include <bit>
 #include <cstdint>
-#include <cstring>
 #include <utility>
 #ifdef _OPENMP
 #include <omp.h>

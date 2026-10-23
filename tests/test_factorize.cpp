@@ -332,7 +332,7 @@ namespace {
 struct scoped_threads {
     int saved = 1;
     int saved_dynamic = 0;
-    explicit scoped_threads([[maybe_unused]] int n) {
+    explicit scoped_threads(int n) {
         saved = omp_get_max_threads();
         saved_dynamic = omp_get_dynamic();
         omp_set_dynamic(0);

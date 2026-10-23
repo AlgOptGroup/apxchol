@@ -156,25 +156,13 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
         }
     }
     if (!built_from_columns) {
-    {
-        // ── Parallel build for vec_pool — O(n + nt) memory ────────
-        // incoming[] is one shared array of size n (atomic increments in
-        // PASS 1 to count per-vertex degree). PASS 2 consumes fixed logical
-        // column ranges [col_bs[t], col_bs[t+1]), including on reduced teams.
-        // Directed AoS writes both endpoint records into adjacency slabs
-        // using atomic claims, then sorts each touched slab after the writes.
-        // Column boundaries and counts are deterministic. Final slab sorting
-        // restores neighbor order regardless of the arrival order of writes;
-        // it does not require a particular runtime assignment of the ranges.
-        // Column ranges are split by stored entries (detail::work_balanced_range;
-        // the outer pointers bound each column's entries even when L is
-        // uncompressed). Both passes do independent per-column work.
+        // Split both column passes by stored entries across the actual team.
+        // Atomic counts and endpoint writes are independent of that split;
+        // sorting each touched slab restores deterministic neighbor order.
+        // Outer pointers also bound column storage when L is uncompressed.
         const int nt = std::max(1, omp_get_max_threads());
         const int* outer_ptr = L.outerIndexPtr();
         std::vector<node_index> incoming(static_cast<size_t>(n), 0);
-        std::vector<node_index> col_bs(nt + 1, 0);
-        for (int t = 0; t < nt; ++t)
-            col_bs[t + 1] = detail::work_balanced_range(outer_ptr, outer, t, nt).second;
 
         // PASS 1: atomic count of incoming + collect diag.
         #pragma omp parallel
@@ -227,18 +215,17 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
             std::vector<node_index>().swap(incoming);
             g.record_edges_added(off_diag_nnz);
 
-            // PASS 2: consume every pre-counted range, even on a reduced team.
-            #pragma omp parallel for num_threads(nt) schedule(static)
-            for (int t = 0; t < nt; ++t) {
-                for (node_index k = col_bs[t]; k < col_bs[t + 1]; ++k)
+            // PASS 2: write both incidences of each lower-triangle entry.
+            #pragma omp parallel
+            {
+                const auto [col_lo, col_hi] = detail::work_balanced_range(outer_ptr, outer);
+                for (node_index k = col_lo; k < col_hi; ++k)
                     for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it) {
                         if (it.row() > it.col()) {
                             const auto u = static_cast<node_index>(it.row());
                             const auto v = static_cast<node_index>(it.col());
-                            {
-                                g.adj_atomic_push_directed(u, v, -it.value());
-                                g.adj_atomic_push_directed(v, u, -it.value());
-                            }
+                            g.adj_atomic_push_directed(u, v, -it.value());
+                            g.adj_atomic_push_directed(v, u, -it.value());
                         }
                     }
             }
@@ -249,7 +236,6 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
                 g.adj_sort_slab(touched[i]);
         }
     }
-    } // !built_from_columns
 
     // Phase 2: excess = diag − weighted degree.  Zero for pure Laplacians.
     //

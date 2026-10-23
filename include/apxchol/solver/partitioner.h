@@ -171,7 +171,7 @@ public:
     void add(node_index v) {
         if (!mask_[v]) {
             mask_[v] = 1;
-            per_thread_[thread_id()].push_back(v);
+            per_thread_[omp_get_thread_num()].push_back(v);
         }
     }
     void remove(node_index v) { mask_[v] = 0; }
@@ -198,9 +198,6 @@ public:
     }
 
 private:
-    static int thread_id() {
-        return omp_get_thread_num();
-    }
     std::vector<char> mask_;
     std::vector<std::vector<node_index>> per_thread_;
     partition_result result_;

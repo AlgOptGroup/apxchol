@@ -60,7 +60,6 @@
 // exceeds the work) -- both callers go through use_parallel_transpose(m).
 #include <algorithm>
 #include <cstdint>
-#include <cstdlib>
 #include <memory>
 #include <vector>
 
