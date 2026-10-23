@@ -23,7 +23,7 @@ def record(status, total, *, threads=16, cap=None, solver="amgcl", config=""):
         "metrics": {} if total is None else {
             "total_s": total, "stop_contract": "original-v1"},
         "status": status,
-        "provenance": {"git_sha": sweep_fair._head_sha()},
+        "provenance": {"git_sha": rc.git_sha()},
     }
     if cap is not None:
         out["timeout_cap_s"] = cap
@@ -137,6 +137,39 @@ class JuliaDriverPathTest(unittest.TestCase):
 
 
 class ThreadScalingStoreTest(unittest.TestCase):
+    def test_resume_checks_the_stored_identity_not_only_the_filename(self):
+        with tempfile.TemporaryDirectory() as store, \
+             mock.patch.object(thread_scaling, "CELLS", store):
+            thread_scaling.emit("m", "audit", "A", "amgcl", "cfg", 4,
+                                {"total_s": 1, "stop_contract": "original-v1"}, "complete")
+            path = pathlib.Path(store) / "m__amgcl_cfg__t4.json"
+            cell = json.loads(path.read_text())
+            for field, value in (("matrix_id", "other"), ("solver", "other"),
+                                 ("config", "other"), ("threads", 8), ("device", "gpu")):
+                with self.subTest(field=field):
+                    changed = {**cell, "cell": {**cell["cell"], field: value}}
+                    path.write_text(json.dumps(changed))
+                    self.assertFalse(thread_scaling.done("m", "amgcl", "cfg", 4))
+
+    def test_render_requires_the_explicitly_selected_source_revision(self):
+        with tempfile.TemporaryDirectory() as store, \
+             mock.patch.object(thread_scaling, "CELLS", store):
+            thread_scaling.emit("m", "audit", "A", "solver", "cfg", 4,
+                                {"total_s": 1, "stop_contract": "original-v1"}, "complete")
+            path = pathlib.Path(store) / "m__solver_cfg__t4.json"
+            cell = json.loads(path.read_text())
+            cell["provenance"]["git_sha"] = "b" * 40
+            path.write_text(json.dumps(cell))
+            self.assertFalse(thread_scaling.done("m", "solver", "cfg", 4))
+            with self.assertRaisesRegex(RuntimeError, "source revision"):
+                thread_scaling._scaling_records()
+            with mock.patch.dict(thread_scaling.PROV, {"git_sha": "b" * 40}):
+                self.assertEqual(thread_scaling._scaling_records(), [(str(path), cell)])
+            cell.pop("provenance")
+            path.write_text(json.dumps(cell))
+            with self.assertRaisesRegex(RuntimeError, "measurement contract"):
+                thread_scaling._scaling_records()
+
     def test_resume_rejects_malformed_records(self):
         with tempfile.TemporaryDirectory() as store, \
              mock.patch.object(thread_scaling, "CELLS", store):
@@ -321,6 +354,36 @@ class ThreadScalingStoreTest(unittest.TestCase):
 
 
 class CellSchemaTest(unittest.TestCase):
+    def test_stale_cell_is_preserved_until_replacement_returns(self):
+        old = record("complete", 3.0)
+        old["provenance"]["git_sha"] = "b" * 40
+        with tempfile.TemporaryDirectory() as store, \
+             mock.patch.object(rc, "CELLS", store), \
+             mock.patch.object(sweep_fair, "THREADS", 16), \
+             mock.patch.object(sweep_fair, "DEVICE", "cpu"), \
+             mock.patch.object(sweep_fair, "build_toolchain", return_value={}), \
+             mock.patch.object(rc, "benchmark_openmp_provenance", return_value={}):
+            path = pathlib.Path(rc.cell_path("audit", "m", "amgcl", "", 16, "cpu"))
+            path.parent.mkdir(parents=True)
+            old_text = json.dumps(old)
+            path.write_text(old_text)
+
+            def failed_runner():
+                self.assertEqual(path.read_text(), old_text)
+                raise RuntimeError("interrupted runner")
+
+            with self.assertRaisesRegex(RuntimeError, "interrupted runner"):
+                sweep_fair.step("audit", "m", "amgcl", "", failed_runner, "AMGCL")
+            self.assertEqual(path.read_text(), old_text)
+
+            def completed_runner():
+                self.assertEqual(path.read_text(), old_text)
+                return "complete", {"total_s": 1.0, "stop_contract": "original-v1"}
+
+            sweep_fair.step("audit", "m", "amgcl", "", completed_runner, "AMGCL")
+            self.assertEqual(json.loads(path.read_text())["metrics"]["total_s"], 1.0)
+            self.assertTrue(sweep_fair.cell_done("audit", "m", "amgcl", ""))
+
     def test_malformed_status_reruns_fair_sweep(self):
         with tempfile.TemporaryDirectory() as store, \
              mock.patch.object(rc, "CELLS", store):
@@ -329,7 +392,7 @@ class CellSchemaTest(unittest.TestCase):
             for status in (None, [], {}, 0, True):
                 with self.subTest(status=status):
                     path.write_text(json.dumps(record(status, 1.0)))
-                    self.assertFalse(sweep_fair.stored_cell_done(
+                    self.assertFalse(rc.cell_done(
                         "audit", "m", "amgcl", "", 16, "cpu"))
 
     def test_cuda_init_is_parsed_as_separate_seconds(self):
@@ -444,6 +507,42 @@ class FairSweepSelectionTest(unittest.TestCase):
         self.assertEqual(set(dispatched), {"parabolic_fem", "iter0010"})
         self.assertEqual(dispatched["parabolic_fem"][0], "suitesparse")
         self.assertEqual(dispatched["iter0010"][0], "ipm")
+
+
+class CmgAvailabilityTest(unittest.TestCase):
+    def test_legacy_adapter_stops_before_export_or_solver_execution(self):
+        cmg = sweep_fair.cmg_matlab_runner
+        with mock.patch.object(cmg, "_dump") as export, \
+             mock.patch.object(cmg, "sh") as run, \
+             mock.patch.object(rc, "emit_cell") as emit:
+            ready, reason = cmg.available()
+            self.assertFalse(ready)
+            self.assertIn("local RHS", reason)
+            self.assertEqual(cmg.run_one("grid_500"), "UNAVAILABLE: " + reason)
+        export.assert_not_called()
+        run.assert_not_called()
+        emit.assert_not_called()
+
+    def test_sweep_reports_unavailable_cmg_once_before_first_matrix(self):
+        state = {"probed": False, "ok": False, "why": ""}
+        def matrix(mid, *_args):
+            self.assertTrue(state["probed"])
+            sweep_fair.run_cmg(mid)
+            sweep_fair.run_cmg(mid)
+        argv = ["sweep_fair.py", "--only", "grid_500", "--no-julia", "--no-parac"]
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(sweep_fair, "_CMG_STATE", state), \
+             mock.patch.object(sweep_fair, "RUN_CMG", True), \
+             mock.patch.object(sweep_fair, "JULIA", []), \
+             mock.patch.object(sweep_fair, "RUN_PARAC", False), \
+             mock.patch.object(sweep_fair, "do_matrix", side_effect=matrix), \
+             mock.patch.object(sweep_fair.cmg_matlab_runner, "run_one") as run, \
+             mock.patch("builtins.print") as output:
+            sweep_fair.main()
+        unavailable = [call for call in output.call_args_list
+                       if "UNAVAILABLE" in str(call.args[0])]
+        self.assertEqual(len(unavailable), 1)
+        run.assert_not_called()
 
 
 class JuliaPreflightTest(unittest.TestCase):

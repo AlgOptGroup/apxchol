@@ -12,7 +12,7 @@ also runs the examples. Run one test while iterating with
 CI builds `tests/cmake_consumer` to check the
 [CMake consumer](README.md#use-from-cmake) requirements with warnings as errors.
 The [workflow](.github/workflows/ci.yml) defines compiler and backend coverage;
-CUDA is compiled but not run because hosted runners have no GPU.
+the CUDA job compiles without running device tests.
 
 Use focused regressions for changed behavior, then the relevant suite. CUDA
 changes require a local CUDA build and device run. Metal changes require an

@@ -97,21 +97,22 @@ def done(mid, solver, config, t):
     if (not rc.cell_is_current(record, PROV.get("git_sha"))
             or record.get("schema") != SCALING_SCHEMA):
         return False
+    expected = {"matrix_id": mid, "solver": solver, "config": config,
+                "threads": t, "device": DEVICE}
+    if any(record["cell"].get(key) != value for key, value in expected.items()):
+        return False
     provenance = record["provenance"]
     if any(provenance.get(key) != PROV.get(key) for key in
            ("repeat", "warmup", "timing_protocol")):
         return False
     status = record["status"]
-    if (solver == "apxchol_v1" and status in {"complete", "not_converged"}
-            and record["metrics"].get("execution_route") != DEVICE):
-        return False
     return status not in RERUN_STATUSES and status in (
         "complete", "not_converged", "timeout", "failed", "oom", "n/a")
 
 
 def _scaling_records():
-    """Load the selected records; every one must meet the current contract and
-    the scaling schema, since this path has an exact expected denominator."""
+    """Require the selected source revision, measurement contract and scaling
+    schema for every record in this exact-denominator input."""
     wanted = {(solver, config) for _, solver, config in
               CPP + ([("ParAC", "parac", "")] if INCLUDE_PARAC else [])}
     matrices = {m[0] for m in MATS}
@@ -132,8 +133,10 @@ def _scaling_records():
         if SCOPE_FILTER and (cell.get("matrix_id") not in matrices or
                              (cell.get("solver"), cell.get("config", "")) not in wanted):
             continue
-        if not rc.cell_meets_contract(record):
-            raise RuntimeError(f"cell {filename} does not meet the current measurement contract")
+        if not rc.cell_is_current(record, PROV.get("git_sha")):
+            raise RuntimeError(
+                f"cell {filename} does not meet the measurement contract "
+                f"for source revision {PROV.get('git_sha')}")
         if record.get("schema") != SCALING_SCHEMA:
             raise RuntimeError(
                 f"stale scaling schema in {filename}: "

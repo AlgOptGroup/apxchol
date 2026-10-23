@@ -3016,7 +3016,7 @@ int main(int argc, char** argv) {
         r.iterations = -1; r.rel_residual = -1.0;
         return r;
     };
-    auto run_desing = [&](const std::string& key, const std::string& base,
+    [[maybe_unused]] auto run_desing = [&](const std::string& key, const std::string& base,
                           auto single) -> BenchResult {
         auto plan = resolve_desing(key, args.decompose, args.ground, disconnected);
         if (!plan.supported) return make_na(base);
@@ -3031,14 +3031,7 @@ int main(int argc, char** argv) {
         return single(L, b, graph_name, args.tol, args.maxiter, plan.ground);
     };
 
-    // No solver below this point consumes the graph-adjacency staging form;
-    // every one of them uses the assembled Eigen operator L.  Keeping `adj`
-    // alive was harmless on the ordinary suite but retained one separately
-    // allocated Edge vector per vertex on procedural giant grids.  At
-    // grid2d-11500 / grid3d-480 that pushed AMGCL's process RSS to the GH200
-    // module-local memory boundary even though its measured hierarchy fits.
-    // Release both the inner allocations and the outer vector capacity once
-    // the operator has been assembled.
+    // All solvers use L; release adjacency staging before running them.
     std::vector<std::vector<Edge>>().swap(adj);
 
 #ifdef HAVE_APXCHOL_V1

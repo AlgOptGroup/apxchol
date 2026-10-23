@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 from pathlib import Path
 import shlex
@@ -254,10 +255,16 @@ class CellReuseTest(unittest.TestCase):
     def test_current_cell_is_reused(self):
         self.assertTrue(rc.cell_is_current(self.cell(), self.SHA))
 
+    def test_legacy_cmg_tag_and_current_revision_do_not_establish_shared_inputs(self):
+        cell = self.cell(cell={"solver": "cmg", "device": "cpu", "matrix_id": "grid"})
+        self.assertEqual(cell["metrics"]["stop_contract"], "original-v1")
+        self.assertFalse(rc.cell_meets_contract(cell))
+        self.assertFalse(rc.cell_is_current(cell, self.SHA))
+
     def test_other_revision_is_rerun(self):
         self.assertFalse(rc.cell_is_current(self.cell(), "b" * 40))
         self.assertFalse(rc.cell_is_current(self.cell(), ""))
-        # The contract alone still holds for rendering stored observations.
+        # Meeting the contract alone does not match the selected source revision.
         self.assertTrue(rc.cell_meets_contract(self.cell()))
 
     def test_old_stop_contract_is_rejected(self):
@@ -269,6 +276,40 @@ class CellReuseTest(unittest.TestCase):
         mismatch = self.cell(metrics={"stop_contract": "original-v1", "total_s": 1.0,
                                       "execution_route": "gpu"})
         self.assertFalse(rc.cell_meets_contract(mismatch))
+
+    def test_missing_route_cannot_hide_behind_missing_total(self):
+        cell = self.cell(metrics={"stop_contract": "original-v1", "setup_s": 1})
+        self.assertFalse(rc.cell_meets_contract(cell))
+
+    def test_source_provenance_is_required_for_historical_rendering(self):
+        for provenance in (None, {}, {"git_sha": ""}, {"git_sha": " "},
+                           {"git_sha": True}, {"git_sha": []}):
+            with self.subTest(provenance=provenance):
+                self.assertFalse(rc.cell_meets_contract(self.cell(provenance=provenance)))
+
+    def test_standalone_runners_share_revision_and_timeout_checks(self):
+        with tempfile.TemporaryDirectory() as store, \
+             mock.patch.object(rc, "CELLS", store), \
+             mock.patch.object(rc, "git_sha", return_value=self.SHA):
+            for solver in ("parac", "parac_physics"):
+                with self.subTest(solver=solver):
+                    key = ("audit", "m", solver, "", 4, "cpu")
+                    path = rc.emit_cell(
+                        *key[:4], "complete", {"stop_contract": "original-v1", "total_s": 1},
+                        *key[4:], {"git_sha": self.SHA})
+                    cell = json.loads(Path(path).read_text())
+                    self.assertTrue(rc.cell_done(*key))
+                    cell["provenance"]["git_sha"] = "b" * 40
+                    Path(path).write_text(json.dumps(cell))
+                    self.assertFalse(rc.cell_done(*key))
+                    cell["provenance"]["git_sha"] = self.SHA
+                    cell.update(status="timeout", metrics={})
+                    Path(path).write_text(json.dumps(cell))
+                    self.assertFalse(rc.cell_done(*key))
+                    cell["timeout_cap_s"] = 60
+                    Path(path).write_text(json.dumps(cell))
+                    self.assertTrue(rc.cell_done(*key))
+                    self.assertFalse(rc.cell_done(*key, rerun_timeouts=True))
 
     def test_timeout_needs_a_recorded_cap(self):
         self.assertFalse(rc.cell_meets_contract(self.cell(status="timeout", metrics={})))

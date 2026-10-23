@@ -259,47 +259,6 @@ option(BENCH_HYPRE_USE_CUDA "Enable Hypre CUDA support (requires CUDA 13.x; need
 if (APXCHOL_DEVICE STREQUAL "CUDA" AND BENCH_HYPRE_USE_CUDA)
     set(HYPRE_ENABLE_CUDA ON CACHE BOOL "" FORCE)
 endif()
-# Pre-enable CUDA language before FetchContent_MakeAvailable(hypre) so that
-# Hypre's internal enable_language(CUDA) call is a no-op (avoids re-running
-# the compiler ID test, which fails with GCC 16 + CUDA 13.2 stdlib headers).
-# Also set CMAKE_CUDA_ARCHITECTURES so CMake's internal try_compile tests
-# don't fail with "CUDA_ARCHITECTURES is empty".
-if (APXCHOL_DEVICE STREQUAL "CUDA" OR BENCH_HYPRE_USE_CUDA)
-    include(CheckLanguage)
-    # Remember the requested CUDA host compiler BEFORE check_language runs. check_language()
-    # executes a sub-CMake and writes `set(CMAKE_CUDA_HOST_COMPILER "<what the sub-build
-    # resolved>")` into its result file (CheckLanguage.cmake:111), which SHADOWS the cache
-    # entry in this scope. So -DCMAKE_CUDA_HOST_COMPILER was silently discarded and nvcc fell
-    # back to its own default -- every benchmarks/build*-cuda configured this way was hosted
-    # by whatever nvcc picked (g++-15 here) no matter what was requested, with no diagnostic.
-    set(_apxchol_requested_cuda_host "${CMAKE_CUDA_HOST_COMPILER}")
-    check_language(CUDA)
-    if (_apxchol_requested_cuda_host AND
-        NOT "${CMAKE_CUDA_HOST_COMPILER}" STREQUAL "${_apxchol_requested_cuda_host}")
-        message(STATUS "Restoring requested CUDA host compiler: ${_apxchol_requested_cuda_host}")
-        set(CMAKE_CUDA_HOST_COMPILER "${_apxchol_requested_cuda_host}"
-            CACHE FILEPATH "Host compiler nvcc drives" FORCE)
-    endif()
-    if (CMAKE_CUDA_COMPILER)
-        if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-            # Auto-detect via nvidia-smi, fallback to native (CMake 3.18+ keyword)
-            execute_process(
-                COMMAND nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits
-                OUTPUT_VARIABLE _gpu_caps OUTPUT_STRIP_TRAILING_WHITESPACE
-                ERROR_QUIET RESULT_VARIABLE _smi_ok
-            )
-            if (_smi_ok EQUAL 0 AND _gpu_caps)
-                string(REGEX MATCH "[0-9]+\\.[0-9]+" _cap "${_gpu_caps}")
-                string(REPLACE "." "" _arch "${_cap}")
-                set(CMAKE_CUDA_ARCHITECTURES "${_arch}" CACHE STRING "CUDA architectures")
-                message(STATUS "Auto-detected CUDA architecture: sm_${_arch}")
-            else()
-                set(CMAKE_CUDA_ARCHITECTURES "native" CACHE STRING "CUDA architectures")
-            endif()
-        endif()
-        enable_language(CUDA)
-    endif()
-endif()
 FetchContent_MakeAvailable(hypre)
 
 # ── GPU RCHOL — Liang et al. (2025) ──────────────────
@@ -582,6 +541,7 @@ function(test_solver_rejection name solver)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_solver_rejection.cmake)
 endfunction()
 test_solver_rejection(contract_rejects_unknown_solver unknown_solver)
+test_solver_rejection(contract_rejects_retired_solver apxchol)
 test_solver_rejection(contract_rejects_no_solver none)
 test_solver_rejection(contract_all_rejects_unknown_solver "all,unknown_solver")
 add_test(NAME contract_rejects_retired_storage

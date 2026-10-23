@@ -73,8 +73,9 @@ no untimed, matrix-specific tolerance calibration before retained runs. Julia
 uses fixed tiny connected/disconnected/SDDM fixtures to warm its native closure
 types before timing; these fixtures do not depend on the measured matrix.
 
-Canonical MATLAB CMG is unavailable on ARM64.
-Its Linux container recipe remains in [cmg/Dockerfile.matlab](cmg/Dockerfile.matlab):
+The MATLAB CMG adapter is excluded from comparisons until it uses the shared
+operator and RHS: it currently generates its own RHS and shifts Laplacians.
+The Linux container recipe remains in [cmg/Dockerfile.matlab](cmg/Dockerfile.matlab):
 
 ```sh
 docker build -t apxchol-matlab-cmg:r2026a -f benchmarks/cmg/Dockerfile.matlab benchmarks/cmg
@@ -82,7 +83,7 @@ docker build -t apxchol-matlab-cmg:r2026a -f benchmarks/cmg/Dockerfile.matlab be
 
 Set `APXCHOL_MATLAB_ROOT` to a licensed MATLAB R2026a installation and
 `APXCHOL_CMG_SOLVER` to a CMG checkout whose MEX files were built with `makeCMG`
-for that MATLAB version. The runner mounts both installations into the container.
+for that MATLAB version.
 
 ## Build and run
 
@@ -147,7 +148,11 @@ contract; an arbitrary directed PageRank matrix must not be relabelled as SDDM.
 ## Thread-scaling plots
 
 Rendering does not run solvers and writes ignored `results/plots` previews by
-default. Every selected cell must meet the current measurement contract.
+default. Every selected cell must meet the measurement contract and match the
+selected source revision, which defaults to the current checkout. To render an
+archived package's results, explicitly select its full revision with
+`--source-commit SHA`; that output describes the archived source, not the current
+checkout. Mixed revisions are rejected.
 
 ```sh
 PYTHONPATH=benchmarks python3 benchmarks/thread_scaling.py --render-only --compact \
