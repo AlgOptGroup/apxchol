@@ -478,7 +478,9 @@ TEST(Solver, CudaWarmStartsPreserveOriginalResidualAndIterationBudget) {
             EXPECT_GT(into.iterations, 0);
             EXPECT_EQ(into.x.size(), 0);
             expect_solution(matrix, rhs, output);
-            if (kind != 0) EXPECT_NEAR(output.mean(), 0.0, 1e-12);
+            if (kind != 0) {
+                EXPECT_NEAR(output.mean(), 0.0, 1e-12);
+            }
             const double before = result.timings.total("pcg");
             owner.solve(rhs, result, options.tol, options.max_iter, &x0);
             EXPECT_GT(result.timings.total("pcg"), before);
@@ -693,7 +695,9 @@ TEST(Solver, GpuScalarAndBatchedResidualsDescribeReturnedSolutions) {
                             ASSERT_TRUE(x.allFinite());
                             const double norm = b.stableNorm();
                             const double measured = norm ? (b - matrix * x).stableNorm() / norm : 0;
-                            if (!norm) EXPECT_TRUE(x.isZero(0.0));
+                            if (!norm) {
+                                EXPECT_TRUE(x.isZero(0.0));
+                            }
                             EXPECT_LE(result.iterations, budget);
                             EXPECT_NEAR(result.residual, measured, 1e-12 * (1 + measured));
                         };

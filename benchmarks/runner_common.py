@@ -2,7 +2,7 @@
 """Shared harness for the benchmark runners.
 
 One canonical copy of the pieces that were duplicated (with drift) across
-sweep_fair.py / parac_runner.py / thread_scaling.py / fill_pass.py:
+sweep_fair.py / parac_runner.py / thread_scaling.py:
 
   - sh()           hardened subprocess harness: process-group kill on timeout
                    (the orphan-on-timeout bug fix, 2026-06-11), optional env and
@@ -18,9 +18,9 @@ sweep_fair.py / parac_runner.py / thread_scaling.py / fill_pass.py:
                    by the compute-process name to match.
   - ParAC constants + the AMD-reorder cache path helper.
 
-All runners (sweep_fair, thread_scaling, fill_pass, selector_levels) import these helpers rather than carrying their own copies.
+All runners (sweep_fair, thread_scaling, parac_runner) import these helpers rather than carrying their own copies.
 """
-import hashlib, json, math, os, re, shlex, signal, subprocess, tempfile, threading
+import functools, hashlib, json, math, os, re, shlex, signal, subprocess, tempfile, threading
 from pathlib import Path
 
 try:
@@ -113,8 +113,51 @@ def sh(cmd, timeout=1800, env=None, mem_cap_gb=None):
 
 
 # ── provenance ──────────────────────────────────────────────────────────────────
+@functools.cache
 def git_sha():
     return sh(f"git -C {ROOT} rev-parse HEAD", timeout=30).stdout.strip()
+
+
+def cell_meets_contract(cell):
+    """Whether a stored cell satisfies the current measurement contract:
+    recorded source provenance, original-v1 stopping, a matching complete-route
+    receipt for apxchol timings, and a recorded cap for timeouts."""
+    if not isinstance(cell, dict) or not isinstance(cell.get("cell"), dict):
+        return False
+    # The retained MATLAB adapter generates its own RHS and shifts Laplacians.
+    # Its original-v1 tag does not establish the shared original A,b contract.
+    if cell["cell"].get("solver") == "cmg":
+        return False
+    status, metrics = cell.get("status"), cell.get("metrics", {})
+    if not isinstance(status, str) or not isinstance(metrics, dict):
+        return False
+    provenance = cell.get("provenance")
+    if (not isinstance(provenance, dict)
+            or not isinstance(provenance.get("git_sha"), str)
+            or not provenance["git_sha"].strip()):
+        return False
+    if status == "timeout":
+        return timeout_cap({"timeout_cap_s": cell.get("timeout_cap_s")}) is not None
+    if status in {"complete", "not_converged"}:
+        if metrics.get("stop_contract") != "original-v1":
+            return False
+        identity = cell["cell"]
+        if identity.get("solver") == "apxchol_v1":
+            if (identity.get("device") not in ("cpu", "gpu")
+                    or metrics.get("execution_route") != identity["device"]):
+                return False
+    return True
+
+
+def cell_is_current(cell, head_sha):
+    """Whether a stored cell may be reused at revision ``head_sha`` on resume.
+
+    Fails closed: only cells produced at this exact revision that meet the
+    current contract are reused; anything else is re-run and replaced after its
+    runner returns.
+    """
+    return (cell_meets_contract(cell)
+            and cell["provenance"]["git_sha"] == head_sha)
 
 def boost_state():
     try:
@@ -894,16 +937,46 @@ def cell_status(family, mid, solver, config, threads, device):
     try: return json.load(open(path)).get("status")
     except (json.JSONDecodeError, OSError): return None
 
-def cell_done(family, mid, solver, config, threads, device, terminal=DEFAULT_TERMINAL):
+def stored_cell(family, mid, solver, config, threads, device):
+    """Load one exact key, rejecting malformed or mismatched input identities."""
     path = cell_path(family, mid, solver, config, threads, device)
     try:
-        with open(path) as handle: cell = json.load(handle)
-    except (OSError, json.JSONDecodeError): return False
-    if cell.get("status") in {"complete", "not_converged"}:
-        if (cell.get("metrics") or {}).get("stop_contract") != "original-v1": return False
-        if solver == "apxchol_v1" and (cell.get("metrics") or {}).get("execution_route") != device:
-            return False
-    return cell.get("status") in terminal
+        with open(path) as handle:
+            cell = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(cell, dict) or not isinstance(cell.get("cell"), dict):
+        return None
+    expected = {
+        "family": family,
+        "matrix_id": mid,
+        "solver": solver,
+        "config": config,
+        "threads": threads,
+        "device": device,
+    }
+    if any(cell["cell"].get(key) != value for key, value in expected.items()):
+        return None
+    matrix = MATRICES.get(mid, {})
+    if "input_sha256" in matrix:
+        expected_meta = matrix_meta_for(mid)
+        actual_meta = cell.get("matrix_meta") or {}
+        if not isinstance(actual_meta, dict):
+            return None
+        for key in ("input_sha256", "input_manifest_sha256", "kind", "class"):
+            if actual_meta.get(key) != expected_meta.get(key):
+                return None
+    return cell
+
+
+def cell_done(family, mid, solver, config, threads, device,
+              terminal=DEFAULT_TERMINAL, *, rerun_timeouts=False):
+    """Reuse terminal cells only at this revision under the current contract."""
+    cell = stored_cell(family, mid, solver, config, threads, device)
+    if not cell_is_current(cell, git_sha()):
+        return False
+    status = cell["status"]
+    return status in terminal and not (rerun_timeouts and status == "timeout")
 
 
 # ── peak-VRAM sidecar (GPU axis) ────────────────────────────────────────────────

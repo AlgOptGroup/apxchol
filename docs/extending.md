@@ -4,8 +4,10 @@ Factorization alternates between selecting an independent set of vertices and
 replacing each selected star by sampled Schur-complement edges. These are the
 public **partitioner** and **eliminator** template seams. The resulting factor
 can be used by the existing solvers without changing their PCG loop.
-See [examples](../examples) for complete programs and [AGENTS.md](../AGENTS.md)
-for build commands and current defaults.
+See [examples](../examples) for complete programs, the
+[README](../README.md#build-and-run) for build commands and
+[factor_options.h](../include/apxchol/solver/factor_options.h) for current
+defaults and their rationale.
 
 ## Custom clique sampling
 
@@ -61,7 +63,7 @@ struct my_partitioner {
     static constexpr std::string_view name = "mine";
     static constexpr bool degree_prepass = true;
 
-        void find_partition(apxchol::graph& G,
+    void find_partition(apxchol::graph& G,
                         std::span<const apxchol::node_index> candidates,
                         const apxchol::partition_context& ctx,
                         apxchol::selection& out);
@@ -91,8 +93,11 @@ selected set and insertion order must be deterministic for the same graph,
 context, and team size; dynamic arrival order must not choose the result.
 
 The graph is mutable only to permit pruning already-dead incidences.
-`G.adj(v)`, `G.edge_target(idx, v)`, and `G.is_active(u)` provide traversal;
-`G.prune_and_degree(v)` and `G.prune_and_visit(v, f)` remove dead entries.
+`G.adj(v)` yields incidence records whose `.to` member is the neighbor,
+`G.neighbors(v)` yields `{to, w}` pairs with FP64 weights, and `G.is_active(u)`
+tells whether a neighbor is still live. Incidences to eliminated vertices stay
+in `G.adj(v)` until pruned; `G.prune_and_degree(v)` and
+`G.prune_and_visit(v, f)` remove them, calling `f(u)` for each live neighbor.
 Do not otherwise mutate the represented graph. `G.m()` counts ever-added
 edges, not current live edges.
 
