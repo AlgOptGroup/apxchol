@@ -25,9 +25,7 @@
 #include <random>
 #include <string>
 #include <vector>
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 #include "apxchol/sparse_csc.h"
 #include "apxchol/solver/sptrsv/omp.h"
@@ -170,7 +168,6 @@ pair_out solve_pair(const apxchol::omp_sptrsv& t, const std::vector<double>& x) 
     t.transpose_solve(o.w.data(), o.w.data());
     return o;
 }
-#ifdef _OPENMP
 // setup() records a four-lane critical plan. Entering solve from an outer team
 // while max_active_levels==1 forces its explicitly requested inner team to one
 // lane, exercising the real team-mismatch fallback instead of merely changing
@@ -193,7 +190,6 @@ pair_out solve_pair_with_forced_team_mismatch(
     EXPECT_EQ(outer_threads, 2);
     return out;
 }
-#endif
 void expect_same_bytes(const pair_out& a, const pair_out& b, const char* what) {
     const std::size_t n = a.y.size() * sizeof(double);
     EXPECT_EQ(0, std::memcmp(a.y.data(), b.y.data(), n)) << what << ": forward";
@@ -251,21 +247,13 @@ level_shape shape(const apxchol::omp_sptrsv& t, bool fwd) {
 }
 
 std::vector<int> thread_counts() {
-#ifdef _OPENMP
     const int mx = omp_get_max_threads();
     std::vector<int> t = {1, 2, 3, 4};
     if (std::find(t.begin(), t.end(), mx) == t.end()) t.push_back(mx);
     return t;
-#else
-    return {1};
-#endif
 }
 void set_threads(int t) {
-#ifdef _OPENMP
     omp_set_num_threads(t);
-#else
-    (void)t;
-#endif
 }
 
 } // namespace
@@ -430,11 +418,9 @@ TEST(SpTRSVRoundRanges, EmptyFirstTailRangePreservesHybridBoundary) {
     expect_same_bytes(reference, solve_pair(hybrid, x),
                       "empty first tail range");
 
-#ifdef _OPENMP
     expect_same_bytes(reference,
                       solve_pair_with_forced_team_mismatch(hybrid, x),
                       "empty first tail range after runtime team mismatch");
-#endif
 }
 
 // The same bytes at every thread count, both shapes, both directions, in and
@@ -536,13 +522,11 @@ TEST(CriticalSchedule, HybridRunsFatPrefixAndCriticalThinTailByteIdentically) {
                           "hybrid after caller thread-limit change");
     }
 
-#ifdef _OPENMP
     // A true setup/runtime team mismatch must preserve both the bulk-prefix
     // and critical-tail arithmetic, including the fat-prefix template path.
     expect_same_bytes(reference,
                       solve_pair_with_forced_team_mismatch(hybrid, x),
                       "hybrid after forced runtime team mismatch");
-#endif
 }
 
 TEST(CriticalSchedule, HybridPreservesFp16Arithmetic) {
@@ -574,11 +558,9 @@ TEST(CriticalSchedule, HybridPreservesFp16Arithmetic) {
         expect_same_bytes(reference, solve_pair(hybrid, x),
                           "fp16 hybrid after caller thread-limit change");
     }
-#ifdef _OPENMP
     expect_same_bytes(reference,
                       solve_pair_with_forced_team_mismatch(hybrid, x),
                       "fp16 hybrid after runtime team mismatch");
-#endif
 }
 
 TEST(CriticalSchedule, HybridLimitsArePureLevelsAndPureCritical) {
@@ -683,10 +665,8 @@ TEST(SpTRSVLevelset, SmallFactorsSkipParallelScheduling) {
             const auto x = random_x(n, 113);
             const auto reference = solve_pair(trsv, x);
             if (std::string_view(storage) == "float32") expect_correct_pair(L, x, reference);
-#ifdef _OPENMP
             expect_same_bytes(reference, solve_pair_with_forced_team_mismatch(trsv, x),
                               "small factor in a nested team");
-#endif
         }
     }
 }
@@ -768,8 +748,6 @@ TEST(CriticalSchedule, HybridGroupsInteriorThinRounds) {
         expect_same_bytes(reference, solve_pair(levels, x), "interior thin rounds, levels");
         expect_same_bytes(reference, solve_pair(hybrid, x), "interior thin rounds, hybrid");
     }
-#ifdef _OPENMP
     expect_same_bytes(reference, solve_pair_with_forced_team_mismatch(hybrid, x),
                       "interior thin rounds after runtime team mismatch");
-#endif
 }

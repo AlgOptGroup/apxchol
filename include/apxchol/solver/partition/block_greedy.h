@@ -21,9 +21,7 @@
 #include <cstdint>
 #include <vector>
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 namespace apxchol {
 
@@ -90,7 +88,6 @@ private:
             return du < dv || (du == dv && u < v);
         };
 
-        #ifdef _OPENMP
         if (omp_get_max_threads() > 1 && candidates.size() > ctx.omp_threshold) {
             const size_t nt = static_cast<size_t>(omp_get_max_threads());
             if (per_thread_boundary_.size() < nt)
@@ -175,17 +172,6 @@ private:
                 // Resolving against the snapshot always takes the over-drop of a
                 // chain (a beats b beats c across three blocks: b loses to a and
                 // c loses to b, so both go even though b itself is leaving).
-                // That is precisely the worst case the pre-2026-08-20 racy
-                // single-phase pass already produced whenever a thread happened
-                // to read chosen[b] before b's owner cleared it, so it cannot
-                // cost more IS than that pass already did on a bad interleaving:
-                // measured on a 120x120 grid at T=32, per-round IS sizes move by
-                // <= 0.5% (round 2: 1400-1405 racy across runs -> 1398) and the
-                // round count stays inside the racy spread (44, vs 44-47). PCG
-                // iteration counts do not get worse -- on grid 300x300 and
-                // 600x600 the deterministic factor lands at or below EVERY count
-                // the racy build produced over 3 runs (300 at T=32: 43 vs
-                // 43/45/46; 600 at T=32: 46 vs 48/48/50).
                 // An exact index-ordered resolution — v survives iff no neighbor
                 // that beats it SURVIVES — is a recursive definition along those
                 // chains; the serial form of it was ~6x slower on dense residuals
@@ -236,29 +222,13 @@ private:
                 // repair costs O(sum of degrees over the frontier) instead of
                 // another pass over every candidate.  That is the whole point.
                 // On a well-numbered mesh the drop set is a thin block
-                // boundary, so the repair stays a rounding error on the scan
-                // it is attached to — measured in adjacency-slot visits at
-                // T=16, 1.6% of the greedy+conflict scan on grid_2000 and 2.2%
-                // on ecology1, against 33% and 28% for the same repair done by
-                // rescanning all candidates.  On a graph whose numbering
-                // carries no locality (com-Youtube, as-Skitter) the frontier
-                // is much larger, but that is exactly where the repair pays by
-                // avoiding thousands of weak BG rounds.  With the current
-                // candidate-relative yield rule, same-binary T=16 A/B at seed
-                // 42 (three interleaved repair runs, each bracketed by plain
-                // null arms) gives:
-                //
-                //   com-Youtube  setup median 5.40 -> 4.68 s, total 13.00 ->
-                //                11.26 s, despite iterations 22 -> 23.
-                //   as-Skitter   component-consistent RHS, factor nnz
-                //                18.439M -> 18.393M, iterations 27 -> 26;
-                //                paired process CPU time -36%, -33%, -33%.
-                //
-                // Repair-only-at-bail and active-size floor/ceiling gates were
-                // also built.  They lose the early ordering effect, retain the
-                // extra rounds, or perturb quality without the setup saving;
-                // none survived.  Keep the full frontier repair rather than
-                // adding one of those governors.
+                // boundary, so the repair stays a small fraction of the scan
+                // it is attached to. On a graph whose numbering carries no
+                // locality (com-Youtube, as-Skitter) the frontier is much
+                // larger, but that is exactly where the repair pays by avoiding
+                // thousands of weak BG rounds. Gating the repair (only at bail,
+                // or by active-size floors/ceilings) lost quality or the setup
+                // saving; keep the full frontier repair.
                 //
                 // Admission, repeated to fixpoint: a frontier vertex is
                 // PENDING when no chosen active neighbor blocks it, and is
@@ -368,7 +338,6 @@ private:
                 }
             }
         } else
-        #endif
         {
             // Serial greedy. No blocks, so no cross-block drops and nothing to
             // repair: a candidate goes unpicked only when a neighbor is chosen,

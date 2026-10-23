@@ -10,7 +10,6 @@
 
 #include "apxchol/solver/partitioner.h"
 #include "apxchol/solver/partitioner_helpers.h"
-#include "apxchol/solver/partition/priority_greedy_config.h"
 #include <algorithm>
 #include <atomic>
 
@@ -22,7 +21,8 @@ struct priority_greedy_partitioner {
     static constexpr bool degree_prepass = true;
 
     uint64_t round = 0;
-    int parallel_passes = detail::priority_greedy_parallel_passes();
+    /// Parallel fixed-priority passes before the exact serial fallback.
+    int parallel_passes = 16;
 
     void find_partition(graph& G, std::span<const node_index> candidates,
                         const partition_context& ctx, selection& out) {
@@ -45,8 +45,7 @@ private:
         // Pick all local minima, exclude their neighbors, and repeat. Immutable
         // priorities make this a parallel execution of one greedy order, not
         // textbook Luby (which redraws priorities between passes).
-        uint64_t round_seed = ctx.seed
-            ^ (round * 6364136223846793005ULL + 1442695040888963407ULL);
+        const uint64_t round_seed = detail::partition_round_seed(ctx.seed, round);
         // Degree-aware priority (degree_tiebreak): compare degree first, then
         // the full hash and vertex id. The local-min IS prefers low-degree
         // candidates (parallel min-degree) without the overflow/collision risk
@@ -54,7 +53,7 @@ private:
         const bool tiebreak = ctx.options.degree_tiebreak;
         const auto degrees  = ctx.degrees;
         auto hash = [&](node_index v) -> uint64_t {
-            return (uint64_t(v) ^ round_seed) * 11400714819323198485ULL;
+            return detail::fibonacci_vertex_hash(v, round_seed);
         };
         auto precedes = [&](node_index a, node_index b) {
             if (tiebreak && degrees[a] != degrees[b])

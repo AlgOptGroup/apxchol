@@ -9,14 +9,11 @@ namespace apxchol {
 
 // Value types of the factor and of the SpTRSV's own copies of it, shared by
 // BOTH the OpenMP (omp.h) and CUDA (cuda.h) backends so they mean the same
-// thing on CPU and GPU. Both are fp32, UNCONDITIONALLY: the fp64 baseline
-// (CMake APXCHOL_SPTRSV_FP32=OFF) was removed 2026-08-20 -- fp32 halves the
-// two largest factor copies (csr/csc on CPU, d_vals on GPU), cutting memory
-// and the bandwidth on the bandwidth-bound triangular solve, and it costs
-// only a few extra PCG iterations ("changes iters, not the residual floor"):
-// the outer PCG (vectors, dots, SpMV/residual) stays fp64 and still converges
-// to 1e-8. Nothing in the tree ever shipped or measured against the fp64
-// storage; the GPU's dataflow backend never supported it at all.
+// thing on CPU and GPU. Both are fp32, UNCONDITIONALLY: fp32 halves the two
+// largest factor copies (csr/csc on CPU, d_vals on GPU), cutting memory and
+// the bandwidth of the bandwidth-bound triangular solve, and costs only a few
+// extra PCG iterations: the outer PCG (vectors, dots, SpMV/residual) stays
+// fp64 and still converges to 1e-8.
 //
 //   - factor_value_t : what the FACTOR (sparse_csc::vals_, the assembler's
 //     output) stores. The SpTRSV's setup reads the exact fp32 diagonal and
@@ -38,7 +35,7 @@ using sptrsv_value_t = float;
 ///   - column pointers (`outer_`)  -> edge_index : a cumulative NON-NEGATIVE
 ///     offset that can reach billions, so it is the widenable one.
 ///   - row indices     (`inner_`)  -> node_index : a vertex id, < 2^32 by default,
-///     so it stays 32-bit even under APXCHOL_64BIT_INDICES.
+///     so it stays 32-bit even under APXCHOL_64BIT_EDGE_INDICES.
 ///
 /// Overflow safety: the only place a value can exceed its type is the cumulative
 /// column pointer; `set_outer`/`finish` assert it stays <= edge_index max. We

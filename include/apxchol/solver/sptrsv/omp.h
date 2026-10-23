@@ -19,9 +19,7 @@
 #include <type_traits>
 #include <vector>
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 #ifdef __x86_64__
 #include <immintrin.h>
 #endif
@@ -198,7 +196,7 @@ private:
 // * Thin levels use scalar accumulation. FP16 fat levels use F16C conversion
 //   with scalar gathers on AVX2/FMA targets; single-RHS FP32 uses the scalar kernel.
 //   Their different accumulation orders need not produce identical bits.
-// * drop_stats()/lowprec_stats() retain the counts and memory diagnostics.
+// * drop_stats() retains the counts and memory diagnostics.
 //   Reporting does not change these numerical/storage rules.
 
 class omp_sptrsv {
@@ -318,12 +316,6 @@ public:
         }
     }
 
-    // APXCHOL_FACTOR_DROP=<rel> resolution, read at every setup(): unset (or
-    // empty) -> kFactorDropRelDefault; set -> its value, where anything <= 0
-    // (including "0" and unparsable text, which atof reads as 0) turns the
-    // drop OFF.
-    static double factor_drop_rel_from_env() { return apxchol::factor_drop_rel_from_env(); }
-
     // Statistics of the last setup() (see the file header): what the
     // compacting drop did to L11 = L.topLeftCorner(m, m) (rel / nnz_factor /
     // nnz_stored / dropped*) and what the storage format did to
@@ -350,9 +342,6 @@ public:
         std::uint64_t scale_fallback    = 0;
         std::uint64_t diag_below_scale  = 0;
     };
-    const lowprec_statistics& lowprec_stats() const { return stats_; }
-    // The same record under the name the drop-only callers use:
-    // rel / nnz_factor / nnz_stored / dropped are its drop half.
     const lowprec_statistics& drop_stats() const { return stats_; }
     // nnz held by the SpTRSV's CSR / CSC (each) after the last setup().
     std::uint64_t stored_nnz() const { return stats_.nnz_stored; }
@@ -443,13 +432,17 @@ private:
             const factor_value_t* L_vals = L.valuePtr();
             const node_index drop_row = L.rows() - 1;
             // PASS 1 (parallel): per-column count of entries with row < m.
+            // Both passes split columns by stored entries.
             std::vector<node_index> col_kept(m_, 0);
-            #pragma omp parallel for schedule(static)
-            for (node_index j = 0; j < m_; ++j) {
-                node_index kept = 0;
-                for (edge_index p = L_outer[j]; p < L_outer[j + 1]; ++p)
-                    if (L_inner[p] != drop_row) ++kept;
-                col_kept[j] = kept;
+            #pragma omp parallel
+            {
+                const auto [first, last] = detail::work_balanced_range(L_outer, m_);
+                for (node_index j = first; j < last; ++j) {
+                    node_index kept = 0;
+                    for (edge_index p = L_outer[j]; p < L_outer[j + 1]; ++p)
+                        if (L_inner[p] != drop_row) ++kept;
+                    col_kept[j] = kept;
+                }
             }
             // Prefix sum (serial, m_+1 entries — sub-ms).
             L11_outer_local.resize(static_cast<size_t>(m_) + 1);
@@ -463,14 +456,17 @@ private:
             L11_inner_local = std::make_unique_for_overwrite<node_index[]>(static_cast<size_t>(nnz));
             L11_vals_local = std::make_unique_for_overwrite<factor_value_t[]>(static_cast<size_t>(nnz));
             // PASS 2 (parallel): scatter entries to compacted positions.
-            #pragma omp parallel for schedule(static)
-            for (node_index j = 0; j < m_; ++j) {
-                edge_index out = L11_outer_local[j];
-                for (edge_index p = L_outer[j]; p < L_outer[j + 1]; ++p) {
-                    if (L_inner[p] == drop_row) continue;
-                    L11_inner_local[out] = L_inner[p];
-                    L11_vals_local[out]  = L_vals[p];
-                    ++out;
+            #pragma omp parallel
+            {
+                const auto [first, last] = detail::work_balanced_range(L_outer, m_);
+                for (node_index j = first; j < last; ++j) {
+                    edge_index out = L11_outer_local[j];
+                    for (edge_index p = L_outer[j]; p < L_outer[j + 1]; ++p) {
+                        if (L_inner[p] == drop_row) continue;
+                        L11_inner_local[out] = L_inner[p];
+                        L11_vals_local[out]  = L_vals[p];
+                        ++out;
+                    }
                 }
             }
             L11_outer = L11_outer_local.data();
@@ -506,9 +502,12 @@ private:
             need_scale = factor_drop_rel > 0.0;
         }
         if (need_scale) {
-            #pragma omp parallel for schedule(static)
-            for (node_index j = 0; j < m_; ++j)
-                col_scale[j] = column_scale(L11_vals, L11_outer[j], L11_outer[j + 1]);
+            #pragma omp parallel
+            {
+                const auto [first, last] = detail::work_balanced_range(L11_outer, m_);
+                for (node_index j = first; j < last; ++j)
+                    col_scale[j] = column_scale(L11_vals, L11_outer[j], L11_outer[j + 1]);
+            }
             mark("col_scale");
         }
         if constexpr (kScaled) {
@@ -1119,10 +1118,8 @@ private:
 
     template <class Dir, class V, int Columns = 1>
     void solve_hybrid(const double* x_in, double* y_out) const {
-        bool team_ok = false;
-#ifdef _OPENMP
         const unsigned processors = critical_plan_.processors;
-        team_ok = true;
+        bool team_ok = true;
         // Keep both phases in one team. The last level-set workshare already
         // barriers before the critical tail in the forward direction. The
         // reverse direction needs one explicit phase barrier because a lane
@@ -1146,7 +1143,6 @@ private:
                 }
             }
         }
-#endif
         if (!team_ok) {
             // No row was touched unless the setup-time team materialized.
             // Replay the snapshotted base levels serially, retaining each
@@ -1209,7 +1205,6 @@ private:
 
     template <class Dir, class V, int Columns = 1>
     void solve_critical_team_impl(const double* x_in, double* y_out) const {
-#ifdef _OPENMP
         const unsigned processor =
             static_cast<unsigned>(omp_get_thread_num());
         const std::size_t steps = critical_plan_.steps;
@@ -1218,8 +1213,7 @@ private:
         for (std::size_t step = 0; step < steps; ++step) {
             const std::size_t stored_step = Dir::forward
                 ? step : steps - 1 - step;
-            const std::size_t slot =
-                static_cast<std::size_t>(processor) * steps + stored_step;
+            const std::size_t slot = critical_plan_.slot(processor, stored_step);
             const std::size_t begin = ptr[slot];
             const std::size_t end = ptr[slot + 1];
             if (begin != end)
@@ -1233,10 +1227,6 @@ private:
             }
             critical_barrier_.arrive(processor);
         }
-#else
-        (void)x_in;
-        (void)y_out;
-#endif
     }
 
     // ── THE level-set kernel (both directions, both storages) ──────────
@@ -1485,14 +1475,9 @@ private:
     bool ready_ = false;
     bool fp16_  = false;   // the storage the last setup() resolved
 
-    // SpTRSV's CSR/CSC arrays are read by the inner forward/back loops at
-    // ~50 GB/s effective on T=16. With default 4 KB pages and ~32 MB per
-    // array, the L2 dTLB (3072 entries × 4 KB = 12 MB coverage) gets blown
-    // out on every level-set sweep — measured dTLB miss rate is 19% on
-    // IPM iter40. big_alloc (mmap + MADV_HUGEPAGE + MADV_POPULATE_WRITE)
-    // backs each array with 2 MB hugepages, dropping dTLB pressure from
-    // ~16384 pages/array to ~16. Expected -5-10% PCG solve win on
-    // bandwidth-bound IPM workloads.
+    // The CSR/CSC arrays are streamed on every level-set sweep and are far
+    // larger than the dTLB reach of base pages. big_alloc requests huge pages
+    // where available to reduce address-translation overhead.
     template<typename T>
     using big_vec = std::vector<T, util::big_alloc<T>>;
     // Index/value output arrays are overwritten in full by the immediately
@@ -1610,7 +1595,7 @@ private:
     }
 
     // sum over q in [p, end) of widen(vals[q]) * y[idx[q]] -- the thin-level
-    // kernel: scalar, 4-way accumulators (see solve.cpp:31 for the rationale).
+    // kernel: scalar, 4-way accumulators.
     template <class V>
     static double dot_thin(const V* __restrict vals, const node_index* __restrict idx,
                            edge_index p, edge_index end, const double* __restrict y) {
@@ -1650,7 +1635,7 @@ private:
     using half_vector [[gnu::vector_size(dot_lanes * sizeof(_Float16))]] = _Float16;
 
     [[gnu::target("avx2,f16c,fma"), gnu::always_inline]]
-    static inline dot_vector widen_vector(half_vector h) {
+    static dot_vector widen_vector(half_vector h) {
 #ifdef __clang__
         return __builtin_convertvector(h, dot_vector);
 #else

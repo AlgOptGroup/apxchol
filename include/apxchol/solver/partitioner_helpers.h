@@ -5,8 +5,6 @@
 /// partitioners are welcome to them.  Sampling-based partitioners that
 /// estimate degrees (baumann_kyng) skip the O(active + edges) pre-pass on
 /// purpose; that choice is why it is not hoisted into the orchestrator.
-/// (detail:: below additionally holds the internal bulk-apply of deferred
-/// edge/excess updates used by the elimination phase.)
 
 #include "apxchol/checkpoint.h"
 #include "apxchol/graph/graph.h"
@@ -20,9 +18,7 @@
 #include <utility>
 #include <vector>
 
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 namespace apxchol {
 
@@ -58,11 +54,6 @@ inline node_index parallel_degree_quantile(
     size_t rank = static_cast<size_t>(q * n_active);
     if (rank >= n_active) rank = n_active - 1;
 
-#ifndef _OPENMP
-    std::vector<node_index> scratch(degrees.begin(), degrees.begin() + n_active);
-    std::nth_element(scratch.begin(), scratch.begin() + rank, scratch.end());
-    return scratch[rank];
-#else
     histograms.resize(static_cast<size_t>(omp_get_max_threads()));
     std::array<size_t, 256> totals{};
     node_index prefix = 0;
@@ -107,7 +98,6 @@ inline node_index parallel_degree_quantile(
         }
     }
     return prefix;
-#endif
 }
 
 /// Fill vertex-indexed degrees and compact eligible vertices in the original
@@ -121,16 +111,6 @@ inline size_t parallel_ordered_degree_filter(
         std::vector<node_index>& live_degrees,
         std::vector<node_index>& eligible_storage,
         std::vector<size_t>& offsets) {
-#ifndef _OPENMP
-    if (eligible_storage.size() < active.size())
-        eligible_storage.resize(active.size());
-    size_t out = 0;
-    for (size_t i = 0; i < active.size(); ++i) {
-        live_degrees[active[i]] = degrees[i];
-        if (degrees[i] <= threshold) eligible_storage[out++] = active[i];
-    }
-    return out;
-#else
     const int max_threads = omp_get_max_threads();
     offsets.resize(static_cast<size_t>(max_threads) + 1);
     if (eligible_storage.size() < active.size())
@@ -167,7 +147,6 @@ inline size_t parallel_ordered_degree_filter(
             if (degrees[i] <= threshold) eligible_storage[out++] = active[i];
     }
     return offsets[static_cast<size_t>(used_threads)];
-#endif
 }
 
 /// Stable parallel replacement for erase_if(active, !is_live). Scratch and
@@ -178,9 +157,6 @@ void parallel_stable_active_filter(std::vector<node_index>& active,
                                    std::vector<node_index>& scratch,
                                    std::vector<size_t>& offsets,
                                    IsLive&& is_live) {
-#ifndef _OPENMP
-    std::erase_if(active, [&](node_index v) { return !is_live(v); });
-#else
     const int max_threads = omp_get_max_threads();
     offsets.resize(static_cast<size_t>(max_threads) + 1);
     if (scratch.size() < active.size()) scratch.resize(active.size());
@@ -214,7 +190,6 @@ void parallel_stable_active_filter(std::vector<node_index>& active,
     }
     scratch.resize(offsets[static_cast<size_t>(used_threads)]);
     active.swap(scratch);
-#endif
 }
 
 /// Standard pre-pass: prune edges to eliminated vertices and fill
@@ -274,17 +249,5 @@ inline double prune_and_degrees(graph& G,
 
     return total_degree / double(active.size());
 }
-
-namespace detail {
-
-inline int factorize_thread_num() {
-#ifdef _OPENMP
-    return omp_get_thread_num();
-#else
-    return 0;
-#endif
-}
-
-} // namespace detail
 
 } // namespace apxchol

@@ -17,9 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <variant>
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/detail/gpu_solve_session.h"
 #elif defined(APXCHOL_USE_METAL)
@@ -31,17 +29,6 @@ namespace apxchol {
 
 namespace {
 
-// (APXCHOL_FTZ=1 -- setting the x86 MXCSR FTZ + DAZ bits on the master and on
-// every OpenMP team thread at PCG entry -- lived here until 2026-08-20. It
-// was REFUTED end to end: no subnormal ever enters this computation, so the
-// bits are a no-op that costs one extra fork-join per solve. Evidence, T=1
-// so the whole pipeline is deterministic: FTZ on vs off gives a BYTE-IDENTICAL
-// solution vector on iter0040 (same md5, residual 8.074599861229295e-09 to
-// all 16 digits, 57 iterations) and identical iterations/residual on
-// grid_2000 (49, 7.813e-09) -- a flushed or treated-as-zero subnormal would
-// have to change a bit. The factor census agrees: factor_subnormal = 0 of
-// 4.6M / 21.9M stored fp32 values on the two. See "Retired knobs" in
-// AGENTS.md for the timing A/B.)
 // Eigen's parallel SpMV requires Eigen::initParallel() to be called
 // once per process before any threaded operation.  Calling it from a
 // function-local static keeps it lazy and thread-safe.
@@ -59,16 +46,6 @@ void print_sptrsv_banner(bool fp16) {
                      fp16 ? std::size_t(2) : sizeof(sptrsv_value_t));
 }
 
-// Parallel symmetric SpMV: y = L * x where L is stored as a row-major
-// FULL symmetric matrix (NOT just lower triangle). Each thread owns a
-// row range and computes y[i] = Σ_k val[k] * x[col[k]] without races.
-//
-// Required because Eigen's selfadjointView * x and plain (L * x) for
-// sparse L are SEQUENTIAL — neither path uses Eigen::nbThreads() for
-// the SpMV kernel even when EIGEN_HAS_OPENMP is defined. Empirical
-// on a 7.9M-nnz LP-IPM matrix:
-//   Eigen selfadjoint SpMV:   6.4 ms @ any T  (10 GB/s)
-//   This parallel CSR SpMV:   2.4 ms @ T=16   (26 GB/s, 2.7x faster)
 // One O(nnz) parallel storage scan resolves both direct-copy prerequisites.
 // Besides the fp32 test, explicitly check the nondecreasing-inner-index
 // property used by equal_range below. Eigen's normal insertion paths preserve
@@ -86,17 +63,23 @@ inline operator_storage_properties scan_operator_storage(
     const int* inner = L.innerIndexPtr();
     bool exact = true;
     bool sorted = true;
-    #pragma omp parallel for schedule(static) reduction(&& : exact, sorted)
-    for (Eigen::Index col = 0; col < L.outerSize(); ++col) {
-        const int begin = outer[col];
-        const int end = L.isCompressed()
-            ? outer[col + 1]
-            : begin + L.innerNonZeroPtr()[col];
-        for (int p = begin; p < end; ++p) {
-            if (static_cast<double>(static_cast<float>(v[p])) != v[p])
-                exact = false;
-            if (p > begin && inner[p - 1] > inner[p])
-                sorted = false;
+    const Eigen::Index n = L.outerSize();
+    #pragma omp parallel reduction(&& : exact, sorted)
+    {
+        // An uncompressed matrix has slack inside its column ranges, so the
+        // outer pointers still bound (over-estimate) each column's work.
+        const auto [lo, hi] = detail::work_balanced_range(outer, n);
+        for (Eigen::Index col = lo; col < hi; ++col) {
+            const int begin = outer[col];
+            const int end = L.isCompressed()
+                ? outer[col + 1]
+                : begin + L.innerNonZeroPtr()[col];
+            for (int p = begin; p < end; ++p) {
+                if (static_cast<double>(static_cast<float>(v[p])) != v[p])
+                    exact = false;
+                if (p > begin && inner[p - 1] > inner[p])
+                    sorted = false;
+            }
         }
     }
     return {exact, sorted};
@@ -187,51 +170,54 @@ bool copy_symmetric_csc_as_owned_csr(
     Eigen::Index lower_nnz = 0;
     Eigen::Index upper_nnz = 0;
     bool upper_is_paired = true;
-    #pragma omp parallel for schedule(static) \
-        reduction(+ : lower_nnz, upper_nnz) reduction(&& : upper_is_paired)
-    for (Eigen::Index col = 0; col < n; ++col) {
-        dst_outer[col] = src_outer[col];
-        const int col_i = static_cast<int>(col);
-        for (int p = src_outer[col]; p < src_outer[col + 1];) {
-            const int row = src_inner[p];
-            int run_end = p + 1;
-            while (run_end < src_outer[col + 1] &&
-                   src_inner[run_end] == row)
-                ++run_end;
-            const int run_size = run_end - p;
+    #pragma omp parallel reduction(+ : lower_nnz, upper_nnz) \
+        reduction(&& : upper_is_paired)
+    {
+        const auto [lo, hi] = detail::work_balanced_range(src_outer, n);
+        for (Eigen::Index col = lo; col < hi; ++col) {
+            dst_outer[col] = src_outer[col];
+            const int col_i = static_cast<int>(col);
+            for (int p = src_outer[col]; p < src_outer[col + 1];) {
+                const int row = src_inner[p];
+                int run_end = p + 1;
+                while (run_end < src_outer[col + 1] &&
+                       src_inner[run_end] == row)
+                    ++run_end;
+                const int run_size = run_end - p;
 
-            for (int q = p; q < run_end; ++q) {
-                dst_inner[q] = row;
-                dst_vals[q] = static_cast<S>(src_vals[q]);
-            }
-            if (row < col_i) {
-                upper_nnz += run_size;
-                // Destination CSR(row=col, col=row) must use the canonical
-                // lower values L(col,row), found in source CSC column `row`.
-                // Compressed Eigen matrices may contain duplicate sorted
-                // inner indices, so require and copy the whole partner run
-                // one-for-one. A mere lower_bound hit plus globally balanced
-                // triangle counts can accept opposite multiplicity errors on
-                // two coordinates and silently change the operator.
-                const int begin = src_outer[row];
-                const int end = src_outer[row + 1];
-                const auto partners = std::equal_range(
-                    src_inner + begin, src_inner + end, col_i);
-                const int partner_begin = static_cast<int>(
-                    partners.first - src_inner);
-                const int partner_size = static_cast<int>(
-                    partners.second - partners.first);
-                if (partner_size == run_size) {
-                    for (int offset = 0; offset < run_size; ++offset)
-                        dst_vals[p + offset] = static_cast<S>(
-                            src_vals[partner_begin + offset]);
-                } else {
-                    upper_is_paired = false;
+                for (int q = p; q < run_end; ++q) {
+                    dst_inner[q] = row;
+                    dst_vals[q] = static_cast<S>(src_vals[q]);
                 }
-            } else if (row > col_i) {
-                lower_nnz += run_size;
+                if (row < col_i) {
+                    upper_nnz += run_size;
+                    // Destination CSR(row=col, col=row) must use the canonical
+                    // lower values L(col,row), found in source CSC column `row`.
+                    // Compressed Eigen matrices may contain duplicate sorted
+                    // inner indices, so require and copy the whole partner run
+                    // one-for-one. A mere lower_bound hit plus globally balanced
+                    // triangle counts can accept opposite multiplicity errors on
+                    // two coordinates and silently change the operator.
+                    const int begin = src_outer[row];
+                    const int end = src_outer[row + 1];
+                    const auto partners = std::equal_range(
+                        src_inner + begin, src_inner + end, col_i);
+                    const int partner_begin = static_cast<int>(
+                        partners.first - src_inner);
+                    const int partner_size = static_cast<int>(
+                        partners.second - partners.first);
+                    if (partner_size == run_size) {
+                        for (int offset = 0; offset < run_size; ++offset)
+                            dst_vals[p + offset] = static_cast<S>(
+                                src_vals[partner_begin + offset]);
+                    } else {
+                        upper_is_paired = false;
+                    }
+                } else if (row > col_i) {
+                    lower_nnz += run_size;
+                }
+                p = run_end;
             }
-            p = run_end;
         }
     }
     dst_outer[n] = src_outer[n];
@@ -471,6 +457,13 @@ void for_rhs_panels(const_matrix_view B, matrix_view X, const const_matrix_view 
         panel.template operator()<1>();
 }
 
+// Shared constructor preamble of both cpu_solver constructors.
+void prepare_cpu_solver(const solve_options& opts) {
+    if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu)
+        throw std::invalid_argument("cpu_solver requires the CPU backend");
+    ensure_eigen_parallel();
+}
+
 } // namespace
 
 // ── cpu_solver: factor + operator built once, PCG-solve many b ──────────────────
@@ -481,9 +474,7 @@ cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
                        const solve_options& opts, checkpoint* cp)
     : opts_(opts), n_(L.rows()) {
     const detail::thread_budget threads(opts_.num_threads);
-    if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu)
-        throw std::invalid_argument("cpu_solver requires the CPU backend");
-    ensure_eigen_parallel();
+    prepare_cpu_solver(opts_);
 
     // Build preconditioner.
     precond_.set_options(opts_.factor_opts);
@@ -509,9 +500,7 @@ cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
                        const solve_options& opts, checkpoint* cp)
     : opts_(opts), n_(L.rows()) {
     const detail::thread_budget threads(opts_.num_threads);
-    if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu)
-        throw std::invalid_argument("cpu_solver requires the CPU backend");
-    ensure_eigen_parallel();
+    prepare_cpu_solver(opts_);
 
     if (static_cast<Eigen::Index>(F.L.rows()) != n_)
         throw std::invalid_argument("cpu_solver: factorization dimension mismatch");
@@ -552,13 +541,8 @@ void cpu_solver::build_operator(const Eigen::SparseMatrix<double>& L,
         // Operator A storage precision: fp32 when every caller value
         // round-trips fp32 (lossless), else fp64. Resolve this BEFORE building
         // so the direct path writes the final scalar width and never creates a
-        // transient fp64 Lrm merely to cast it. APXCHOL_FP32_OPERATOR
-        // overrides: "0" forces fp64, any other value forces fp32 (may floor
-        // if inexact).
-        { const char* e = std::getenv("APXCHOL_FP32_OPERATOR");
-          if (e && std::string(e) == "0")   op_fp32_ = false;
-          else if (e && *e != '\0')         op_fp32_ = true;
-          else                              op_fp32_ = storage.fp32_exact; }
+        // transient fp64 Lrm merely to cast it.
+        op_fp32_ = storage.fp32_exact;
 
         // Lrm conversion is one-time SETUP work for the parallel SpMV;
         // checkpoint it under "setup" so bench's setup_time/solve_time

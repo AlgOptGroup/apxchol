@@ -74,35 +74,6 @@ namespace detail {
 //                                  or different v's. count_[v] is the atomic
 //                                  counter.
 //
-// Runtime tunables (env-var driven, evaluated once at first init).
-//   APXCHOL_VEC_POOL_INITIAL_CAP     (int)  -- first slab cap (slots).
-//                                              Default 4. Try 6, 8, 12 to
-//                                              capture typical post-fill degree
-//                                              on grids.
-//   APXCHOL_VEC_POOL_GROWTH_NUM/DENOM       -- grow cap by num/denom each grow.
-//                                              Default 2/1 (doubling). Try 3/2
-//                                              for 1.5× to reduce overshoot.
-struct vec_pool_config {
-    node_index initial_cap;
-    int     growth_num;
-    int     growth_denom;
-
-    static const vec_pool_config& get() {
-        static const vec_pool_config c = []() {
-            vec_pool_config x;
-            auto env_int = [](const char* k, int def) {
-                const char* v = std::getenv(k);
-                return v ? std::atoi(v) : def;
-            };
-            x.initial_cap      = env_int("APXCHOL_VEC_POOL_INITIAL_CAP", 4);
-            x.growth_num       = env_int("APXCHOL_VEC_POOL_GROWTH_NUM",   2);
-            x.growth_denom     = env_int("APXCHOL_VEC_POOL_GROWTH_DENOM", 1);
-            return x;
-        }();
-        return c;
-    }
-};
-
 // Stable-address, segmented pool. Slabs never straddle a segment, so their
 // compact integer offsets remain valid while workers claim disjoint ranges
 // independently. Only used segments are mmap'ed; unlike one giant lazy
@@ -352,22 +323,18 @@ template<typename Value> struct basic_vec_pool_incidence {
     /// invoking atomic_push_reserved in parallel — grow() reallocates the
     /// vertex's slab and is NOT thread-safe.
     ///
-    /// Grows geometrically (configurable growth ratio, default 2x doubling)
-    /// just like std::vector::reserve. On dense matrices (IPM), this
-    /// dramatically reduces the number of grows over successive rounds.
-    /// Earlier "tight" reserve_for (cap = need exactly) caused every round
-    /// to trigger a grow + std::copy on touched vertices, making vec_pool
-    /// 80% slower than vec on IPM bg+tree/x2/ps1.
+    /// Grows geometrically (2x doubling) like std::vector::reserve, so a
+    /// vertex touched in successive rounds is not regrown and copied every
+    /// round.
     void reserve_for(node_index v, node_index need) {
         if (cap_[v] >= need)
             return;
         abandoned_ += cap_[v];
-        const auto& cfg = vec_pool_config::get();
         // Geometric over-allocation: at least `need`, but try cap * growth.
         node_index new_cap = need;
         if (cap_[v] > 0) {
             const node_index geo =
-                static_cast<node_index>(int64_t(cap_[v]) * cfg.growth_num / cfg.growth_denom);
+                static_cast<node_index>(int64_t(cap_[v]) * 2);
             if (geo > new_cap)
                 new_cap = geo;
         }
@@ -411,7 +378,7 @@ template<typename Value> struct basic_vec_pool_incidence {
         std::sort(p, p + count_[v]);
     }
 
-    /// Directed-inline diagnostic: discard inactive endpoints and combine all
+    /// Residual coalescing: discard inactive endpoints and combine all
     /// parallel records with the same target into one fp32 record. Sorting by
     /// (target,weight) gives both endpoint slabs the same deterministic fp64
     /// accumulation order.
@@ -440,34 +407,22 @@ template<typename Value> struct basic_vec_pool_incidence {
         return {before, out};
     }
 
-    void filter(node_index v, auto&& pred, auto&& on_keep) {
+    /// Stable in-place removal of the records failing `pred`. The clean
+    /// prefix is not copied onto itself, so the common no-removal case is a
+    /// read-only pass.
+    void filter(node_index v, auto&& pred) {
         value_type* p = pool_.ptr(base_[v]);
         const node_index count = count_[v];
-
-        // Do not copy the clean prefix onto itself. In the common no-removal
-        // case this makes filter a read-only pass; after the first hole, the
-        // usual stable compaction resumes. This is the same first-hole shape
-        // used by remove_if, written out so on_keep still runs exactly once
-        // for every survivor.
         node_index out = 0;
-        while (out < count && pred(p[out])) {
-            on_keep(p[out]);
+        while (out < count && pred(p[out]))
             ++out;
-        }
         if (out == count)
             return;
 
         for (node_index i = out + 1; i < count; ++i)
-            if (pred(p[i])) {
-                p[out] = p[i];
-                on_keep(p[out]);
-                ++out;
-            }
+            if (pred(p[i]))
+                p[out++] = p[i];
         count_[v] = out;
-    }
-
-    void filter(node_index v, auto&& pred) {
-        filter(v, pred, [](const value_type&) {});
     }
 
     std::size_t memory_bytes() const {
@@ -511,7 +466,6 @@ template<typename Value> struct basic_vec_pool_incidence {
     ///   round_incoming : per-vertex fill counts for the imminent round (or
     ///   null).
     void compact(const std::vector<node_index>* round_incoming = nullptr) {
-        const auto& cfg = vec_pool_config::get();
         auto target_cap = [&](node_index v) -> node_index {
             const node_index cnt = count_[v];
             if (cnt == 0)
@@ -519,7 +473,7 @@ template<typename Value> struct basic_vec_pool_incidence {
             const node_index inc = round_incoming ? (*round_incoming)[v] : 0;
             const node_index need = cnt + inc;
             const node_index hr =
-                static_cast<node_index>(int64_t(cnt) * cfg.growth_num / cfg.growth_denom);
+                static_cast<node_index>(int64_t(cnt) * 2);
             return hr > need ? hr : need; // 2x count, fit round need
         };
         decltype(pool_) new_pool;
@@ -569,7 +523,6 @@ template<typename Value> struct basic_vec_pool_incidence {
         const size_t touched_n = static_cast<size_t>(touched_end - touched_begin);
         const size_t begin = touched_n * static_cast<size_t>(tid) / static_cast<size_t>(team);
         const size_t end = touched_n * static_cast<size_t>(tid + 1) / static_cast<size_t>(team);
-        const auto& cfg = vec_pool_config::get();
         auto& grows = bulk_thread_grows_[static_cast<size_t>(tid)];
         grows.clear();
         size_t local_abandoned = 0;
@@ -581,7 +534,7 @@ template<typename Value> struct basic_vec_pool_incidence {
             node_index new_cap = need;
             if (cap_[v] > 0) {
                 const node_index geo =
-                    static_cast<node_index>(int64_t(cap_[v]) * cfg.growth_num / cfg.growth_denom);
+                    static_cast<node_index>(int64_t(cap_[v]) * 2);
                 if (geo > new_cap)
                     new_cap = geo;
             }
@@ -633,17 +586,17 @@ template<typename Value> struct basic_vec_pool_incidence {
     }
 
 private:
+    static constexpr node_index initial_cap = 4;
+
     void grow(node_index v) {
         // Account for the slab we are about to abandon.
         abandoned_ += cap_[v];
         ++grow_count_;
-        const auto& cfg = vec_pool_config::get();
         node_index new_cap;
         if (cap_[v] == 0) {
-            new_cap = cfg.initial_cap;
+            new_cap = initial_cap;
         } else {
-            // Geometric grow: cap * (growth_num / growth_denom).
-            new_cap = static_cast<node_index>(int64_t(cap_[v]) * cfg.growth_num / cfg.growth_denom);
+            new_cap = static_cast<node_index>(int64_t(cap_[v]) * 2);
             if (new_cap <= cap_[v])
                 new_cap = cap_[v] + 1;
         }

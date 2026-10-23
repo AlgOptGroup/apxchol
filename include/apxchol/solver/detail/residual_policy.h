@@ -37,12 +37,11 @@ inline bool is_yield_too_small(size_t selected, size_t candidates,
 }
 
 inline bool selection_should_handoff(
-        size_t selected_regions, size_t selected_vertices, size_t candidates,
-        size_t active, double min_fraction,
+        size_t selected, size_t candidates, size_t active, double min_fraction,
         size_t residual_handoff_threshold, size_t omp_threshold) {
-    if (selected_regions == 0) return true;
-    if (omp_threshold != 0 && selected_vertices >= omp_threshold) return false;
-    return is_yield_too_small(selected_regions, candidates, active,
+    if (selected == 0) return true;
+    if (omp_threshold != 0 && selected >= omp_threshold) return false;
+    return is_yield_too_small(selected, candidates, active,
                               min_fraction, residual_handoff_threshold);
 }
 
