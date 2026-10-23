@@ -1476,8 +1476,8 @@ private:
     bool fp16_  = false;   // the storage the last setup() resolved
 
     // The CSR/CSC arrays are streamed on every level-set sweep and are far
-    // larger than the dTLB reach of 4 KB pages. big_alloc (mmap +
-    // MADV_HUGEPAGE + MADV_POPULATE_WRITE) backs each array with 2 MB pages.
+    // larger than the dTLB reach of base pages. big_alloc requests huge pages
+    // where available to reduce address-translation overhead.
     template<typename T>
     using big_vec = std::vector<T, util::big_alloc<T>>;
     // Index/value output arrays are overwritten in full by the immediately

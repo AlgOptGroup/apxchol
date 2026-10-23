@@ -74,13 +74,6 @@ namespace detail {
 //                                  or different v's. count_[v] is the atomic
 //                                  counter.
 //
-// Slab geometry (vec_pool_config): initial cap 4, doubling growth.
-struct vec_pool_config {
-    node_index initial_cap = 4;   // first slab cap (slots)
-    int growth_num = 2;           // grow cap by growth_num / growth_denom
-    int growth_denom = 1;
-};
-
 // Stable-address, segmented pool. Slabs never straddle a segment, so their
 // compact integer offsets remain valid while workers claim disjoint ranges
 // independently. Only used segments are mmap'ed; unlike one giant lazy
@@ -337,12 +330,11 @@ template<typename Value> struct basic_vec_pool_incidence {
         if (cap_[v] >= need)
             return;
         abandoned_ += cap_[v];
-        constexpr vec_pool_config cfg{};
         // Geometric over-allocation: at least `need`, but try cap * growth.
         node_index new_cap = need;
         if (cap_[v] > 0) {
             const node_index geo =
-                static_cast<node_index>(int64_t(cap_[v]) * cfg.growth_num / cfg.growth_denom);
+                static_cast<node_index>(int64_t(cap_[v]) * 2);
             if (geo > new_cap)
                 new_cap = geo;
         }
@@ -474,7 +466,6 @@ template<typename Value> struct basic_vec_pool_incidence {
     ///   round_incoming : per-vertex fill counts for the imminent round (or
     ///   null).
     void compact(const std::vector<node_index>* round_incoming = nullptr) {
-        constexpr vec_pool_config cfg{};
         auto target_cap = [&](node_index v) -> node_index {
             const node_index cnt = count_[v];
             if (cnt == 0)
@@ -482,7 +473,7 @@ template<typename Value> struct basic_vec_pool_incidence {
             const node_index inc = round_incoming ? (*round_incoming)[v] : 0;
             const node_index need = cnt + inc;
             const node_index hr =
-                static_cast<node_index>(int64_t(cnt) * cfg.growth_num / cfg.growth_denom);
+                static_cast<node_index>(int64_t(cnt) * 2);
             return hr > need ? hr : need; // 2x count, fit round need
         };
         decltype(pool_) new_pool;
@@ -532,7 +523,6 @@ template<typename Value> struct basic_vec_pool_incidence {
         const size_t touched_n = static_cast<size_t>(touched_end - touched_begin);
         const size_t begin = touched_n * static_cast<size_t>(tid) / static_cast<size_t>(team);
         const size_t end = touched_n * static_cast<size_t>(tid + 1) / static_cast<size_t>(team);
-        constexpr vec_pool_config cfg{};
         auto& grows = bulk_thread_grows_[static_cast<size_t>(tid)];
         grows.clear();
         size_t local_abandoned = 0;
@@ -544,7 +534,7 @@ template<typename Value> struct basic_vec_pool_incidence {
             node_index new_cap = need;
             if (cap_[v] > 0) {
                 const node_index geo =
-                    static_cast<node_index>(int64_t(cap_[v]) * cfg.growth_num / cfg.growth_denom);
+                    static_cast<node_index>(int64_t(cap_[v]) * 2);
                 if (geo > new_cap)
                     new_cap = geo;
             }
@@ -596,17 +586,17 @@ template<typename Value> struct basic_vec_pool_incidence {
     }
 
 private:
+    static constexpr node_index initial_cap = 4;
+
     void grow(node_index v) {
         // Account for the slab we are about to abandon.
         abandoned_ += cap_[v];
         ++grow_count_;
-        constexpr vec_pool_config cfg{};
         node_index new_cap;
         if (cap_[v] == 0) {
-            new_cap = cfg.initial_cap;
+            new_cap = initial_cap;
         } else {
-            // Geometric grow: cap * (growth_num / growth_denom).
-            new_cap = static_cast<node_index>(int64_t(cap_[v]) * cfg.growth_num / cfg.growth_denom);
+            new_cap = static_cast<node_index>(int64_t(cap_[v]) * 2);
             if (new_cap <= cap_[v])
                 new_cap = cap_[v] + 1;
         }
