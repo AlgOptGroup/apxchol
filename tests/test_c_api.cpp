@@ -1593,8 +1593,6 @@ TEST(CApi, SolverFactorRoundTrip) {
 }
 
 TEST(CApi, OmpThresholdReachesTheFactorization) {
-    if (apxchol::detail::env_knobs::get().omp_threshold >= 0)
-        GTEST_SKIP() << "APXCHOL_OMP_THRESHOLD overrides factor_options::omp_threshold";
     // One thread, so factors are exactly repeatable; a nondefault threshold
     // must produce the C++ factorization with that threshold, which differs
     // from the default one here: a threshold of 1 keeps the low-yield first
