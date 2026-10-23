@@ -1343,7 +1343,9 @@ TEST(CApi, SolverFromFactorPreconditionsANearbyOperator) {
             const double res = true_residual(B, b, x);
             EXPECT_LT(res, o.tol);
             EXPECT_NEAR(info.relative_residual, res, 1e-3 * res);
-            if (shift == 0.0) EXPECT_LE(std::fabs(x.mean()), 1e-12 * x.norm());
+            if (shift == 0.0) {
+                EXPECT_LE(std::fabs(x.mean()), 1e-12 * x.norm());
+            }
 
             // The same solution as a solver that factorized B itself.
             handle fresh;
