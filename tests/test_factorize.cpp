@@ -586,7 +586,8 @@ TEST(FactorRegularization, RejectsUnrepresentableStoredDiagonal) {
 TEST(FactorRegularization, AcceptsRepresentableExtremesAndGroundedDefaults) {
     const scoped_threads team(2);
     const auto L = path_laplacian(3);
-    const Eigen::VectorXd b = (Eigen::Vector3d() << 1, -2, 1).finished();
+    Eigen::VectorXd b(3);
+    b << 1, -2, 1;
     for (double regularization : {0.0, 4.0}) {
         apxchol::solve_options opts;
         opts.backend = apxchol::solve_backend::cpu;
