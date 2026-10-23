@@ -1367,8 +1367,9 @@ TEST(GpuDataflow, ScalarAndPanelsMatchCpuReferenceAndAreDeterministic) {
                                 if (!active[2 * q]) EXPECT_EQ(actual[k], sentinel[k]);
                                 else error = std::max(error, std::abs(actual[k] - std::ldexp(y_cpu[row], q)));
                             }
-                            if (active[2 * q])
+                            if (active[2 * q]) {
                                 EXPECT_LT(error / std::ldexp(maxabs, q), fp16 ? kPairTolFp16 : kPairTolFp32);
+                            }
                         }
                         solve();
                         EXPECT_EQ(actual, dev_download(output, panel.size()));

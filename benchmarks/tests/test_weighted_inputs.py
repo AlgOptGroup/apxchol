@@ -139,10 +139,10 @@ class WeightedInputsTest(unittest.TestCase):
             path = Path(rc.cell_path("weighted", mid, "amgcl", "", 1, "cpu"))
             path.parent.mkdir(parents=True)
             path.write_text(json.dumps(cell))
-            self.assertIsNotNone(sweep_fair._stored_cell("weighted", mid, "amgcl", "", 1, "cpu"))
+            self.assertIsNotNone(rc.stored_cell("weighted", mid, "amgcl", "", 1, "cpu"))
             cell["matrix_meta"]["input_manifest_sha256"] = "0" * 64
             path.write_text(json.dumps(cell))
-            self.assertIsNone(sweep_fair._stored_cell("weighted", mid, "amgcl", "", 1, "cpu"))
+            self.assertIsNone(rc.stored_cell("weighted", mid, "amgcl", "", 1, "cpu"))
 
     def test_external_dump_caches_follow_manifest_identity(self):
         out, _ = self.generate()

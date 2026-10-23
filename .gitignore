@@ -14,7 +14,6 @@ data/
 # Generated cell stores and plot previews stay local.
 results/*
 benchmarks/results/
-scripts/baselines/
 
 # Machine-local paths to out-of-tree tools (benchmark runners / benchmark CMake)
 benchmarks/paths_local.py

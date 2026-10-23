@@ -71,55 +71,121 @@ jobs:
         run: ctest --test-dir build-benchmark --no-tests=error --output-on-failure --timeout 60
 
   linux:
-    name: Linux (${{ matrix.compiler.name }}, ${{ matrix.build.name }}, build + ctest)
+    name: Linux (${{ matrix.name }}, build + ctest)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        build: &build_modes
-          - name: native
-            native_arch: 'ON'
-          - name: portable
-            native_arch: 'OFF'
-        compiler:
-          - name: GCC 14
+        include:
+          - name: GCC 14, native
             cc: gcc-14
             cxx: g++-14
             packages: g++-14
-          - name: Clang 18
+            native_arch: 'ON'
+          - name: GCC 14, portable, 64-bit nodes, FP64 pool
+            cc: gcc-14
+            cxx: g++-14
+            packages: g++-14
+            native_arch: 'OFF'
+            cmake_args: -DAPXCHOL_64BIT_NODE_INDICES=ON -DAPXCHOL_POOL_FP32=OFF
+          - name: Clang 18, portable
             cc: clang-18
             cxx: clang++-18
             packages: clang-18 libomp-18-dev
+            native_arch: 'OFF'
+          - name: Clang 22, portable
+            cc: clang-22
+            cxx: clang++-22
+            llvm: '22'
+            packages: libomp-22-dev
+            native_arch: 'OFF'
     env:
-      CC: ${{ matrix.compiler.cc }}
-      CXX: ${{ matrix.compiler.cxx }}
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+      NATIVE_ARCH: ${{ matrix.native_arch }}
+      CMAKE_ARGS: ${{ matrix.cmake_args }}
+      CMAKE_BUILD_PARALLEL_LEVEL: '3'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add the LLVM apt repository
+        if: matrix.llvm
+        run: |
+          wget -qO "$RUNNER_TEMP/llvm.sh" https://apt.llvm.org/llvm.sh
+          sudo bash "$RUNNER_TEMP/llvm.sh" ${{ matrix.llvm }}
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ${{ matrix.packages }} libeigen3-dev ninja-build
+      - &configure-build
+        name: Configure + build (Release)
+        run: |
+          cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DAPXCHOL_NATIVE_ARCH=${NATIVE_ARCH} -DCMAKE_COMPILE_WARNING_AS_ERROR=ON ${CMAKE_ARGS:-}
+          cmake --build build
+      - &ctest
+        name: Run unit tests and examples
+        run: ctest --test-dir build --no-tests=error --output-on-failure
+
+  linux-gcc15:
+    name: Linux (GCC 15, portable, build + ctest)
+    runs-on: ubuntu-latest
+    # Ubuntu 24.04 does not package GCC 15; the official image does.
+    container: gcc:15
+    env:
+      CC: gcc
+      CXX: g++
+      NATIVE_ARCH: 'OFF'
       CMAKE_BUILD_PARALLEL_LEVEL: '3'
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y ${{ matrix.compiler.packages }} libeigen3-dev ninja-build
-      - &configure-build
-        name: Configure + build (Release)
+          apt-get update -qq
+          apt-get install -y --no-install-recommends cmake ninja-build libeigen3-dev
+      - *configure-build
+      - *ctest
+
+  cuda:
+    name: Linux (CUDA 13.4, GCC 14, compile only)
+    runs-on: ubuntu-24.04
+    # Compile only; native CUDA validation runs separately. C++23 needs CMake 4.4+.
+    env:
+      CC: gcc-14
+      CXX: g++-14
+      CUDAHOSTCXX: g++-14
+      CUDACXX: /usr/local/cuda-13.4/bin/nvcc
+      NATIVE_ARCH: 'OFF'
+      CMAKE_ARGS: -DAPXCHOL_DEVICE=CUDA -DCMAKE_CUDA_ARCHITECTURES=80
+      CMAKE_BUILD_PARALLEL_LEVEL: '3'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
         run: |
-          cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                -DAPXCHOL_NATIVE_ARCH=${{ matrix.build.native_arch }} -DCMAKE_COMPILE_WARNING_AS_ERROR=ON ${CMAKE_ARGS:-}
-          cmake --build build
-      - &ctest
-        name: Run unit tests
-        run: ctest --test-dir build --no-tests=error --output-on-failure
+          python -m pip install 'cmake>=4.4'
+          wget -qO "$RUNNER_TEMP/cuda-keyring.deb" \
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i "$RUNNER_TEMP/cuda-keyring.deb"
+          sudo apt-get update -qq
+          sudo apt-get install -y g++-14 libeigen3-dev ninja-build cuda-nvcc-13-4 cuda-cudart-dev-13-4
+      - *configure-build
 
   macos:
-    name: macOS (Apple Clang, ${{ matrix.build.name }}, ${{ matrix.device }}, build + ctest)
+    name: macOS (Apple Clang, ${{ matrix.device }}, ${{ matrix.native_arch == 'ON' && 'native' || 'portable' }}, build + ctest)
     runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
-        build: *build_modes
-        device: [CPU, METAL]
+        include:
+          - device: CPU
+            native_arch: 'OFF'
+          - device: METAL
+            native_arch: 'ON'
     env:
       CMAKE_ARGS: -DAPXCHOL_DEVICE=${{ matrix.device }}
+      NATIVE_ARCH: ${{ matrix.native_arch }}
       CMAKE_BUILD_PARALLEL_LEVEL: '3'
     steps:
       - uses: actions/checkout@v4

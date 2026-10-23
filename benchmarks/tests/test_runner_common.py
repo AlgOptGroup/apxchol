@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 from pathlib import Path
 import shlex
@@ -238,6 +239,99 @@ class OriginalStoppingReceiptTest(unittest.TestCase):
         row = rc.parse_csv(f"AMGCL,m,10,20,1,2,3,4,9e-9,0,1,0,-1,3,1,{over:.17e},original-v1,1,0.25\n")
         status, _ = rc.classify(row, 1e-8)
         self.assertEqual(status, "not_converged")
+
+class CellReuseTest(unittest.TestCase):
+    SHA = "a" * 40
+
+    def cell(self, **overrides):
+        record = {"cell": {"solver": "apxchol_v1", "device": "cpu", "matrix_id": "grid"},
+                  "status": "complete",
+                  "metrics": {"stop_contract": "original-v1", "total_s": 1.0,
+                              "execution_route": "cpu"},
+                  "provenance": {"git_sha": self.SHA}}
+        record.update(overrides)
+        return record
+
+    def test_current_cell_is_reused(self):
+        self.assertTrue(rc.cell_is_current(self.cell(), self.SHA))
+
+    def test_legacy_cmg_tag_and_current_revision_do_not_establish_shared_inputs(self):
+        cell = self.cell(cell={"solver": "cmg", "device": "cpu", "matrix_id": "grid"})
+        self.assertEqual(cell["metrics"]["stop_contract"], "original-v1")
+        self.assertFalse(rc.cell_meets_contract(cell))
+        self.assertFalse(rc.cell_is_current(cell, self.SHA))
+
+    def test_other_revision_is_rerun(self):
+        self.assertFalse(rc.cell_is_current(self.cell(), "b" * 40))
+        self.assertFalse(rc.cell_is_current(self.cell(), ""))
+        # Meeting the contract alone does not match the selected source revision.
+        self.assertTrue(rc.cell_meets_contract(self.cell()))
+
+    def test_old_stop_contract_is_rejected(self):
+        old = self.cell(metrics={"total_s": 1.0, "execution_route": "cpu"})
+        self.assertFalse(rc.cell_meets_contract(old))
+        self.assertFalse(rc.cell_is_current(old, self.SHA))
+
+    def test_route_mismatch_is_rejected(self):
+        mismatch = self.cell(metrics={"stop_contract": "original-v1", "total_s": 1.0,
+                                      "execution_route": "gpu"})
+        self.assertFalse(rc.cell_meets_contract(mismatch))
+
+    def test_missing_route_cannot_hide_behind_missing_total(self):
+        cell = self.cell(metrics={"stop_contract": "original-v1", "setup_s": 1})
+        self.assertFalse(rc.cell_meets_contract(cell))
+
+    def test_source_provenance_is_required_for_historical_rendering(self):
+        for provenance in (None, {}, {"git_sha": ""}, {"git_sha": " "},
+                           {"git_sha": True}, {"git_sha": []}):
+            with self.subTest(provenance=provenance):
+                self.assertFalse(rc.cell_meets_contract(self.cell(provenance=provenance)))
+
+    def test_standalone_runners_share_revision_and_timeout_checks(self):
+        with tempfile.TemporaryDirectory() as store, \
+             mock.patch.object(rc, "CELLS", store), \
+             mock.patch.object(rc, "git_sha", return_value=self.SHA):
+            for solver in ("parac", "parac_physics"):
+                with self.subTest(solver=solver):
+                    key = ("audit", "m", solver, "", 4, "cpu")
+                    path = rc.emit_cell(
+                        *key[:4], "complete", {"stop_contract": "original-v1", "total_s": 1},
+                        *key[4:], {"git_sha": self.SHA})
+                    cell = json.loads(Path(path).read_text())
+                    self.assertTrue(rc.cell_done(*key))
+                    cell["provenance"]["git_sha"] = "b" * 40
+                    Path(path).write_text(json.dumps(cell))
+                    self.assertFalse(rc.cell_done(*key))
+                    cell["provenance"]["git_sha"] = self.SHA
+                    cell.update(status="timeout", metrics={})
+                    Path(path).write_text(json.dumps(cell))
+                    self.assertFalse(rc.cell_done(*key))
+                    cell["timeout_cap_s"] = 60
+                    Path(path).write_text(json.dumps(cell))
+                    self.assertTrue(rc.cell_done(*key))
+                    self.assertFalse(rc.cell_done(*key, rerun_timeouts=True))
+
+    def test_timeout_needs_a_recorded_cap(self):
+        self.assertFalse(rc.cell_meets_contract(self.cell(status="timeout", metrics={})))
+        self.assertTrue(rc.cell_meets_contract(
+            self.cell(status="timeout", metrics={}, timeout_cap_s=600)))
+
+    def test_malformed_records_are_rejected(self):
+        for record in (None, [], {"status": "complete"}, {"cell": "x", "status": "complete"}):
+            self.assertFalse(rc.cell_meets_contract(record))
+            self.assertFalse(rc.cell_is_current(record, self.SHA))
+        for field in ("provenance", "metrics"):
+            for value in (None, [], ["x"], "x", 1, True):
+                with self.subTest(field=field, value=value):
+                    self.assertFalse(rc.cell_is_current(self.cell(**{field: value}), self.SHA))
+
+    def test_malformed_status_is_rejected(self):
+        for status in (None, [], {}, 0, True):
+            with self.subTest(status=status):
+                cell = self.cell(status=status)
+                self.assertFalse(rc.cell_meets_contract(cell))
+                self.assertFalse(rc.cell_is_current(cell, self.SHA))
+
 
 if __name__ == "__main__":
     unittest.main()
