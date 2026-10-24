@@ -44,6 +44,8 @@ Eigen::VectorXd z = solver.apply(r);
 operator and workspace. `cpu_solver` and Eigen's `apxchol::apx_cholesky` always
 use CPU setup and solves, including in CUDA builds. Singular
 Laplacians use their compatible subspace; SDDM operators retain a full factor.
+Passing a previously computed factor to `solver` reuses it on CPU, CUDA or
+Metal; select the GPU backend explicitly to upload it for GPU solves.
 
 ```bash
 pip install apxchol                 # or: pip install -e python
@@ -64,12 +66,18 @@ or `apxchol_laplacian(Adj)` in Octave for adjacency input. See the
 
 ### Use from CMake
 
-Link `apxchol_core` rather than copying its compiler flags:
+Build the core in your project and link its target:
 
 ```cmake
-add_subdirectory(path/to/apxchol)
-target_link_libraries(my_program PRIVATE apxchol_core)
+include(path/to/apxchol/cmake/apxchol_core.cmake)
+apxchol_add_core()
+target_link_libraries(my_program PRIVATE apxchol::core)
 ```
+
+For an installed library, replace the first two lines with
+`find_package(apxchol CONFIG REQUIRED)`. A standalone library build uses
+`cmake -S cmake/core -B build`, followed by `cmake --build build` and
+`cmake --install build --prefix /path/to/prefix`.
 
 The target supplies C++23 and the architecture flag used by the library.
 Matching architecture settings matter because Eigen objects cross the library
@@ -100,7 +108,7 @@ uses CPU for scalar systems and for Metal inputs of at most 32,768 rows when CPU
 
 CUDA uses device-owned factorization with 32-bit vertices, `block_greedy` selection and natural residual peeling. It requires compressed, sorted, unique, fully paired CSC input and supports both GKS and trace-cycle, warm starts and FP32 factor export. Exact-clique, exact-core and double-cycle overrides require CPU setup.
 
-Metal uses device-owned factorization for default `block_greedy` GKS options with FP32 graph weights and 32-bit vertices. It requires the same CSC layout as CUDA and supports FP32/FP16 solve storage, warm starts and optional FP32 factor export. Explicit host-factor adoption remains available through `metal_solver`; see its [precision limits](docs/precision.md#apple-metal-pcg).
+Metal uses device-owned factorization for default `block_greedy` GKS options with FP32 graph weights and 32-bit vertices. It requires the same CSC layout as CUDA and supports FP32/FP16 solve storage, warm starts and optional FP32 factor export; see its [precision limits](docs/precision.md#apple-metal-pcg).
 
 Automatic selection uses CPU when a configuration is incompatible with the available GPU backend. Explicit GPU requests fail if unsupported. Once selected, GPU setup or execution errors are reported without retrying on CPU. Public `factorize()` and custom CPU strategies remain available independently; see the [extension guide](docs/extending.md) for explicit factor handoff.
 

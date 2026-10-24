@@ -16,8 +16,6 @@
 #include <string>
 #include <vector>
 
-// check_cuda lives in apxchol/solver/sptrsv/cuda.h (already included
-// transitively via preconditioner.h).
 #include "apxchol/solver/pcg_cuda_kernels.h"
 #include "apxchol/solver/detail/gpu_pcg.h"
 #include "apxchol/solver/detail/gpu_scaling.h"
@@ -60,6 +58,7 @@ public:
         // Allocate the permutation before accepting device ownership. The
         // factor supplied this validated bijection; the builder checks the CSC.
         h_perm_.assign(perm.begin(), perm.begin() + n_);
+        APXCHOL_PCG_CUDA_CHECK(cudaGetDevice(&device_));
         if (!pcg_cuda::try_build_permuted_operator_csr(
                 static_cast<int>(n_), static_cast<int>(L.nonZeros()),
                 L.outerIndexPtr(), L.innerIndexPtr(), L.valuePtr(),
@@ -91,8 +90,7 @@ public:
                int& iters_out,
                double& residual_out,
                bool laplacian,
-               const Eigen::VectorXd* x0 = nullptr,
-               int stagnation_window = 0)
+               const Eigen::VectorXd* x0 = nullptr)
     {
         if (!ready_) throw std::runtime_error("cuda_pcg::solve: setup() not called");
         if (b_host.size() != n_ || (x0 && x0->size() != n_))
@@ -101,7 +99,7 @@ public:
         std::array<double, 1> residuals{};
         x_host.resize(n_);
         solve_columns<1>(precond, b_host, x_host, tol, max_iter, iterations,
-                         residuals, laplacian, x0, stagnation_window);
+                         residuals, laplacian, x0);
         iters_out = iterations[0];
         residual_out = residuals[0];
     }
@@ -110,9 +108,9 @@ public:
     void solve_panel(const Precond& precond, const Input& b_host, Output& x_host,
                     double tol, int max_iter, std::array<int, Columns>& iterations,
                     std::array<double, Columns>& residuals, bool laplacian,
-                    const Input* x0 = nullptr, int stagnation_window = 0) {
+                    const Input* x0 = nullptr) {
         solve_columns<Columns>(precond, b_host, x_host, tol, max_iter, iterations,
-                               residuals, laplacian, x0, stagnation_window);
+                               residuals, laplacian, x0);
     }
 
     bool ready() const { return ready_; }
@@ -122,13 +120,19 @@ public:
     bool fp32_operator() const { return matrix_.fp32; }
     /// Threads per row of the SpMV resolved from the average row length.
     int spmv_lanes() const { return spmv_lanes_; }
+    double device_memory_used_mb() const {
+        const detail::cuda_device_scope device(device_, detail::cuda_device_scope::checked{});
+        size_t free = 0, total = 0;
+        return cudaMemGetInfo(&free, &total) == cudaSuccess && total >= free
+            ? (total - free) / (1024.0 * 1024.0) : -1;
+    }
 
 private:
     template<unsigned Columns, class Precond, class Input, class Output>
     void solve_columns(const Precond& precond, const Input& b_host, Output& x_host,
                        double tol, int max_iter, std::array<int, Columns>& iterations,
                        std::array<double, Columns>& residuals, bool laplacian,
-                       const Input* x0, int stagnation_window) {
+                       const Input* x0) {
         static_assert(Columns == 1 || Columns == 2 || Columns == 4);
         if (std::uint64_t(n_) > std::numeric_limits<unsigned>::max() / Columns)
             throw std::overflow_error("GPU RHS panel exceeds packed index range");
@@ -137,6 +141,7 @@ private:
             x_host.rows() != n_ || x_host.cols() != Columns ||
             (x0 && (x0->rows() != n_ || x0->cols() != Columns)))
             throw std::invalid_argument("cuda_pcg::solve: dimensions mismatch");
+        const detail::cuda_device_scope device(device_, detail::cuda_device_scope::checked{});
         reserve_columns(Columns);
         using host_panel = Eigen::Matrix<double, Eigen::Dynamic, Columns,
             Columns == 1 ? Eigen::ColMajor : Eigen::RowMajor>;
@@ -184,7 +189,6 @@ private:
                 throw std::invalid_argument("CUDA solve: RHS and initial guess exceed the common scaling range");
             auto& st = h_state_[q];
             st.thr = tol;
-            st.prev = bnorm[q] * bnorm[q];
             st.active = 1;
             if (max_x0[q] != 0) { st.alpha = 1; any_warm = true; }
         }
@@ -194,8 +198,7 @@ private:
         // coordinate on entry rather than inheriting a prior width's contents.
         if (laplacian && n_)
             APXCHOL_PCG_CUDA_CHECK(cudaMemset(vectors_.z + (n_ - 1) * Columns, 0, Columns * sizeof(double)));
-        iteration<Precond, Columns> commands{*this, precond, bnorm,
-            static_cast<unsigned>(std::max(stagnation_window, 0))};
+        iteration<Precond, Columns> commands{*this, precond, bnorm};
         if (any_warm) {
             for (int64_t v = 0; v < n_; ++v)
                 for (unsigned q = 0; q < Columns; ++q)
@@ -235,7 +238,6 @@ private:
         cuda_pcg& s;
         const Precond& precond;
         std::array<double, Columns> bnorm;
-        unsigned window;
         void precondition() const {
             static_assert(sizeof(pcg_cuda::solve_state) % sizeof(unsigned) == 0);
             precond.trsv().template solve_LLt_dev<Columns>(s.vectors_.r, s.vectors_.z,
@@ -244,8 +246,7 @@ private:
         void finalize(unsigned mode, unsigned it) const {
             const int lanes = mode == detail::gpu_pcg::kFinalizeAlpha ? s.spmv_lanes_ : 1;
             const int blocks = pcg_cuda::pcg_blocks(s.n_ * lanes);
-            pcg_cuda::finalize<Columns>(0, s.vectors_.partial, blocks, s.vectors_.state, mode, it, bnorm,
-                               it ? window : 0);
+            pcg_cuda::finalize<Columns>(0, s.vectors_.partial, blocks, s.vectors_.state, mode, it, bnorm);
         }
         void step(detail::gpu_pcg::operation op) const {
             pcg_cuda::step<Columns>(0, op, s.n_, s.vectors_, s.matrix_, s.spmv_lanes_);
@@ -292,8 +293,9 @@ private:
         capacity_ = columns;
     }
 
-    void destroy() {
+    void destroy() noexcept {
         // A failed setup may own arrays before ready_ becomes true.
+        const detail::cuda_device_scope device(device_, device_ >= 0);
         release_workspace(vectors_, h_state_);
         for (void* pointer : std::initializer_list<void*>{matrix_.row_ptr, matrix_.col_idx,
                 matrix_.values_f64, matrix_.values_f32, matrix_.row_map})
@@ -302,9 +304,11 @@ private:
         capacity_ = 0;
         spmv_lanes_ = 1;
         ready_ = false;
+        device_ = -1;
     }
 
     int64_t n_ = 0;
+    int device_ = -1;
     bool ready_ = false;
     unsigned capacity_ = 0;
     pcg_cuda::operator_csr matrix_;

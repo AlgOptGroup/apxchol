@@ -9,9 +9,8 @@
 
 using namespace apxchol;
 
-// Exit codes: 0 = converged to --tol, 1 = did not converge (maxiter or
-// stagnation), 2 = input/output error. Argument-parse failures exit with
-// CLI11's own codes (see parse_args).
+// Exit codes: 0 = converged to --tol, 1 = did not converge, 2 = input/output
+// error. Argument-parse failures use CLI11's own codes (see parse_args).
 int main(int argc, char* argv[]) try {
     auto cfg = parse_args(argc, argv);
 

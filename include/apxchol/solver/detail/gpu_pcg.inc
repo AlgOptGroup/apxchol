@@ -15,7 +15,7 @@ APXCHOL_GPU_FUNCTION typename Math::wide sum_lanes(Math math, typename Math::wid
 
 template<class Wide, class Scalar>
 struct solve_state {
-    Wide rz, rr, thr, prev;
+    Wide rz, rr, thr;
     Scalar alpha, beta;
     unsigned active, iters;
 };
@@ -35,7 +35,7 @@ struct workspace {
 // comparison. The recurrence and its state transitions have one implementation.
 template<class Math, class State, class Wide>
 APXCHOL_GPU_FUNCTION State advance(Math math, State st, unsigned mode, Wide t,
-                     unsigned iteration, unsigned window = 0) {
+                     unsigned iteration) {
     if (mode == kFinalizeRzInit || mode == kFinalizeRz) {
         if (!math.positive(t)) st.active = 0;
         else {
@@ -54,10 +54,6 @@ APXCHOL_GPU_FUNCTION State advance(Math math, State st, unsigned mode, Wide t,
         st.iters = iteration;
         if (!math.valid_residual(t)) st.active = 0;
         else if (math.converged(t, st.thr)) st.active = 0;
-        else if (window && iteration % window == 0) {
-            if (math.stagnated(st.prev, t)) st.active = 0;
-            else st.prev = t;
-        }
     }
     return st;
 }

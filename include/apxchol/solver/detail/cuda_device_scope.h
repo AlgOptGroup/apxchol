@@ -1,10 +1,10 @@
 #pragma once
-#include <cuda_runtime.h>
+#include "cuda_error.h"
 
 namespace apxchol::detail {
 
-// Cleanup is best-effort and must not throw. Disabled scopes make no CUDA
-// calls, preserving lazy context initialization for host-only lifetimes.
+// Active operations use checked{}; cleanup is best-effort and never throws.
+// Disabled cleanup scopes make no CUDA calls, preserving host-only lifetimes.
 class cuda_device_scope {
 public:
     explicit cuda_device_scope(int device, bool enabled = true) noexcept {
@@ -12,6 +12,14 @@ public:
             cudaGetDevice(&saved_device_) == cudaSuccess &&
             saved_device_ != device &&
             cudaSetDevice(device) == cudaSuccess;
+    }
+    struct checked {};
+    cuda_device_scope(int device, checked) {
+        check_cuda(cudaGetDevice(&saved_device_), "cudaGetDevice");
+        if (saved_device_ != device) {
+            check_cuda(cudaSetDevice(device), "cudaSetDevice");
+            restore_ = true;
+        }
     }
     ~cuda_device_scope() {
         if (restore_) (void)cudaSetDevice(saved_device_);

@@ -13,12 +13,13 @@ inline constexpr int    default_max_iter = 200;
 
 enum class solve_backend { automatic, cpu, gpu };
 
+/// CPU/automatic are always available without querying a device. GPU requires
+/// a usable device and compatible compiled kernels; options may still be unsupported.
+bool backend_available(solve_backend backend) noexcept;
+
 struct solve_options {
     double tol       = default_tol;
     int    max_iter  = default_max_iter;
-    /// Check every N iterations whether residual improved by ≥50%.
-    /// If not, declare stagnation and stop early.  0 = disabled.
-    int    stagnation_window = 50;
     /// Keep the factor's row/value arrays alive after SpTRSV setup so
     /// solver::factor().L stays readable (costs one extra host factor copy;
     /// the bindings' L/D/P export needs it, including in CUDA builds).
@@ -133,6 +134,7 @@ public:
                        const Eigen::VectorXd* x0 = nullptr) const;
 
     /// One preconditioner application: z = M^{-1} r (forward+back SpTRSV).
+    /// Inputs must be finite, for both scalar and matrix application.
     Eigen::VectorXd apply(const Eigen::VectorXd& r) const;
 
     const apx_cholesky& preconditioner() const { return precond_; }
@@ -195,12 +197,13 @@ private:
 
 /// Reusable solver owning one CPU or GPU backend, selected once at setup.
 /// Owns its input data; movable, noncopyable, and not safe for concurrent calls.
-/// CUDA uses device-owned setup and does not accept supplied host factors.
+/// Supplied factors use CPU in automatic mode; an explicit GPU request uploads them.
 class solver {
 public:
     explicit solver(const Eigen::SparseMatrix<double>& A,
                     const solve_options& opts = {}, checkpoint* cp = nullptr);
-    /// Adopt F without reapplying factor-construction options, as cpu_solver does.
+    /// Adopt F without rebuilding or regularizing it. lump_max_mass still bounds
+    /// operator validation; factor storage, dropping and solve options apply.
     solver(const Eigen::SparseMatrix<double>& A, factorization F,
            const solve_options& opts = {}, checkpoint* cp = nullptr);
     ~solver();
@@ -217,6 +220,7 @@ public:
     solve_result solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
                        double tol = -1.0, int max_iter = -1,
                        const Eigen::VectorXd* x0 = nullptr) const;
+    /// Apply the preconditioner to finite scalar or matrix input.
     Eigen::VectorXd apply(const Eigen::VectorXd& r) const;
     /// Independent RHS columns, with bounded panel workspace. Output must not
     /// overlap the RHS or warm start. tol/max_iter apply to each column.

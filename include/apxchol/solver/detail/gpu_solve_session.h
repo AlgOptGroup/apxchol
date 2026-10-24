@@ -9,7 +9,6 @@ class gpu_solve_session {
     gpu_preconditioner precond;
     cuda_pcg gpcg;
     const bool use_cp;
-    const int stagnation_window;
 public:
     gpu_solve_session(const Eigen::SparseMatrix<double>& L,
                       const solve_options& opts, solve_result& res)
@@ -17,23 +16,30 @@ public:
         res.lumped_offdiag = precond.factor().lumped_offdiag;
     }
     gpu_solve_session(const Eigen::SparseMatrix<double>& L,
-                      const solve_options& opts, checkpoint* cp)
-        : use_cp(opts.collect_timings), stagnation_window(opts.stagnation_window) {
+                      const solve_options& opts, checkpoint* cp, factorization* F = nullptr)
+        : use_cp(opts.collect_timings) {
         validate_solve_options(opts);
         if (opts.backend == solve_backend::cpu)
             throw std::invalid_argument("GPU session cannot execute an explicit CPU request");
-        auto required = opts;
-        required.backend = solve_backend::gpu;
-        (void)select_solve_backend(required);
         precond.set_options(opts.factor_opts);
         precond.set_keep_factor(opts.keep_factor_values);
         if (use_cp) precond.set_checkpoint(cp);
-        precond.compute(L);
+        if (F) {
+            if (F->research_device_factor)
+                throw std::invalid_argument("GPU solver: supply a host factor without a device capsule");
+            if (L.rows() != L.cols() || static_cast<Eigen::Index>(F->L.rows()) != L.rows())
+                throw std::invalid_argument("GPU solver: factorization dimension mismatch");
+            precond.set_factor(std::move(*F));
+        } else {
+            auto required = opts;
+            required.backend = solve_backend::gpu;
+            (void)select_solve_backend(required);
+            precond.compute(L);
+            if (!precond.trsv().adopted_device_factor())
+                throw std::runtime_error("GPU route did not produce a device-owned factor");
+        }
         precond.set_checkpoint(nullptr);
-        if (!precond.trsv().adopted_device_factor())
-            throw std::runtime_error("GPU route did not produce a device-owned factor");
-        // Lumping (if any) happened inside compute(), on a private copy; the
-        // GPU operator below is built from L itself.
+        // Lumping changes only the factorization; the GPU operator uses L itself.
         if (cp && use_cp) { cp->descend("setup"); cp->tick(); }
         const auto operator_setup_begin = detail::gpu_setup_diagnostic_clock::now(opts.factor_opts.verbose);
         gpcg.setup(L, precond.factor().perm, opts.factor_opts.verbose);
@@ -66,16 +72,14 @@ public:
         gpcg.solve(precond, b, res.x,
                    tol, max_iter,
                    iters, rnorm,
-                   /*laplacian=*/ !precond.factor().sddm, x0, stagnation_window);
+                   /*laplacian=*/ !precond.factor().sddm, x0);
         if (use_cp) { res.timings("gpu_pcg_loop"); res.timings.ascend(); }
         res.iterations = iters;
         res.residual = rnorm;
         res.converged = rnorm < tol;
         // Solve-held device VRAM (gpcg's operator+vectors + the SpTRSV factor are
         // still resident here; everything is freed when gpcg/precond destruct).
-        { size_t mf = 0, mt = 0;
-          if (cudaMemGetInfo(&mf, &mt) == cudaSuccess && mt >= mf)
-              res.solve_vram_mb = (mt - mf) / (1024.0 * 1024.0); }
+        res.solve_vram_mb = gpcg.device_memory_used_mb();
     }
 
     batch_solve_result solve_panel(const_matrix_view B, matrix_view X, double tol,
@@ -92,7 +96,7 @@ public:
             std::array<int, Columns> iterations{};
             std::array<double, Columns> residuals{};
             gpcg.solve_panel<Columns>(precond, B, X, tol, max_iter, iterations, residuals,
-                                     !precond.factor().sddm, X0, stagnation_window);
+                                     !precond.factor().sddm, X0);
             for (unsigned q = 0; q < Columns; ++q) {
                 result.columns[q].iterations = iterations[q];
                 result.columns[q].residual = residuals[q];
@@ -102,10 +106,7 @@ public:
         if (B.cols() == 4) run.template operator()<4>();
         else run.template operator()<2>();
         if (use_cp) { result.timings("gpu_pcg_loop"); result.timings.ascend(); }
-        double vram_mb = -1;
-        size_t free = 0, total = 0;
-        if (cudaMemGetInfo(&free, &total) == cudaSuccess && total >= free)
-            vram_mb = (total - free) / (1024.0 * 1024.0);
+        const double vram_mb = gpcg.device_memory_used_mb();
         for (auto& column : result.columns) {
             column.backend = solve_backend::gpu;
             column.lumped_offdiag = precond.factor().lumped_offdiag;

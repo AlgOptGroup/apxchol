@@ -5,6 +5,7 @@
 #include "apxchol/solver/sptrsv/cuda.h"
 #include "apxchol/solver/gpu_block_frontend.h"
 #include "apxchol/solver/detail/cuda_device_scope.h"
+#include "apxchol/solver/detail/cuda_error.h"
 
 #include <cub/cub.cuh>
 #include <thrust/iterator/counting_iterator.h>
@@ -204,13 +205,9 @@ __global__ void finalizer_narrow_columns(
     if (count) atomicAdd(flushed, count);
 }
 
-[[noreturn]] void cuda_failure(cudaError_t error, const char* what) {
-    throw std::runtime_error(std::string("GPU round shadow: ") + what +
-                             ": " + cudaGetErrorString(error));
-}
-
 void cuda_check(cudaError_t error, const char* what) {
-    if (error != cudaSuccess) cuda_failure(error, what);
+    if (error != cudaSuccess)
+        check_cuda(error, (std::string("GPU round shadow: ") + what).c_str());
 }
 
 int blocks_for(std::size_t count, unsigned block_size = kBlock) {
@@ -285,7 +282,7 @@ public:
             tracker_.current, additional, "staged device plan");
         planned_ = std::max(planned_, required);
         if (!fits(additional))
-            throw std::runtime_error(
+            throw device_memory_error(
                 owner_ + stage + " does not fit in free device memory with "
                 "the 10% safety margin (required=" + std::to_string(required) +
                 ", resident=" + std::to_string(tracker_.current) +
@@ -1531,7 +1528,7 @@ void owned_probe_check_fit(std::size_t extra) {
     std::size_t free = 0, total = 0;
     cuda_check(cudaMemGetInfo(&free, &total), "query owned sparsification fit");
     if (extra > free || total / 10 > free - extra)
-        throw std::runtime_error("GPU sparsification scratch does not fit with device margin");
+        throw device_memory_error("GPU sparsification scratch does not fit with device margin");
 }
 
 void require_valid_device_selection(std::uint32_t status) {
@@ -1786,7 +1783,7 @@ struct gpu_round_shadow_device_state::impl {
         const cudaError_t status = cudaGetDevice(&current_device);
         if (status != cudaSuccess) {
             poison_failed_generation();
-            cuda_failure(status, operation);
+            cuda_check(status, operation);
         }
         if (cuda_device >= 0 && current_device != cuda_device) {
             poison_failed_generation();

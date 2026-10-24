@@ -4,6 +4,7 @@
 #include "apxchol/solver/detail/lower_triangle_csr.h"
 #include "apxchol/solver/detail/gpu_scaling.h"
 #include "apxchol/csc_work.h"
+#include "apxchol/operator_class.h"
 #include "host_spmv.h"
 #include <algorithm>
 #include <chrono>
@@ -26,6 +27,22 @@
 
 namespace apxchol {
 
+bool backend_available(solve_backend backend) noexcept {
+    if (backend == solve_backend::cpu || backend == solve_backend::automatic) return true;
+    if (backend != solve_backend::gpu) return false;
+    try {
+#if defined(APXCHOL_USE_CUDA)
+        return detail::gpu_round_shadow_runtime_available();
+#elif defined(APXCHOL_USE_METAL)
+        return metal_solver::available();
+#else
+        return false;
+#endif
+    } catch (...) {
+        return false;
+    }
+}
+
 void detail::validate_solve_parameters(double tol, int max_iter) {
     if (!(tol > 0) || !std::isfinite(tol))
         throw std::invalid_argument("solve tolerance must be finite and positive");
@@ -35,8 +52,6 @@ void detail::validate_solve_parameters(double tol, int max_iter) {
 
 void detail::validate_solve_options(const solve_options& opts) {
     validate_solve_parameters(opts.tol, opts.max_iter);
-    if (opts.stagnation_window < 0)
-        throw std::invalid_argument("stagnation_window must be nonnegative");
     if (opts.num_threads < 0)
         throw std::invalid_argument("num_threads must be nonnegative");
     if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu &&
@@ -704,7 +719,7 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
     if (part_.size() < part_size) part_.resize(part_size);
     double *r = r_.data(), *z = z_.data(), *p = p_.data(), *Ap = Ap_.data(), *part = part_.data();
     const bool laplacian = !precond_.factor().sddm;
-    std::array<double, C> norm{}, rr{}, rs{}, rz{}, prev{};
+    std::array<double, C> norm{}, rr{}, rs{}, rz{};
     std::array<bool, C> active{}, warm{};
     using Input = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
     if (x0) {
@@ -776,7 +791,6 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
     for (int c = 0; c < C; c++) {
         results[c].residual = norm[c] == 0 ? 0 : (warm[c] ? std::sqrt(rr[c]) / norm[c] : 1);
         active[c] = norm[c] != 0 && !(warm[c] && results[c].residual < tol);
-        prev[c] = 1;
         if (norm[c] == 0)
             for (Eigen::Index i = 0; i < n; i++) {
                 x[i * C + c] = 0;
@@ -863,15 +877,8 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
                 continue;
             results[c].iterations = i + 1;
             results[c].residual = std::sqrt(rr[c]) / norm[c];
-            if (results[c].residual < tol) {
+            if (results[c].residual < tol)
                 active[c] = false;
-                continue;
-            }
-            if (opts_.stagnation_window > 0 && (i + 1) % opts_.stagnation_window == 0) {
-                if (results[c].residual > prev[c] * 0.5)
-                    active[c] = false;
-                prev[c] = results[c].residual;
-            }
         }
         if (!any_active())
             break;
@@ -916,6 +923,8 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
 
 Eigen::VectorXd cpu_solver::apply(const Eigen::VectorXd& r) const {
     const detail::thread_budget threads(opts_.num_threads);
+    if (r.size() != n_ || !r.allFinite())
+        throw std::invalid_argument("cpu_solver::apply: RHS must be finite and match the operator size");
     return precond_.solve(r);
 }
 
@@ -971,6 +980,8 @@ batch_solve_result cpu_solver::solve_batch(const_matrix_view B, matrix_view X, d
 void cpu_solver::apply(const_matrix_view R, matrix_view Z) const {
     const detail::thread_budget threads(opts_.num_threads);
     detail::check_matrix_views(R, Z, n_);
+    if (!R.allFinite())
+        throw std::invalid_argument("cpu_solver::apply: RHS must be finite");
     for_rhs_panels(R, Z, nullptr, z_, panel_x_,
                    [&]<int C>(Eigen::Index, const double *r, double *z, const double *) {
                        precond_.apply_columns<C>(r, z);
@@ -1062,19 +1073,34 @@ struct solver::impl {
         const detail::thread_budget threads(opts.num_threads);
         if (!opts.collect_timings) cp = nullptr;
         if (A.rows() == 0) throw std::invalid_argument("solver: empty operator");
+        if (F) {
+            if (A.rows() != A.cols() || static_cast<Eigen::Index>(F->L.rows()) != A.rows())
+                throw std::invalid_argument("solver: factorization dimension mismatch");
+            require_operator(A, opts.factor_opts.lump_max_mass);
+            if (!F->sddm) {
+                for (Eigen::Index col = 0; col < A.cols(); ++col) {
+                    double diagonal = 0, positive = 0, degree = 0;
+                    for (Eigen::SparseMatrix<double>::InnerIterator entry(A, col); entry; ++entry)
+                        if (entry.row() == entry.col()) diagonal = entry.value();
+                        else if (entry.value() > 0) positive += entry.value();
+                        else degree -= entry.value();
+                    diagonal += positive; // Match lumping without copying the operator.
+                    if (diagonal - degree > diagonal * 1e-12)
+                        throw std::invalid_argument("a Laplacian factor cannot precondition an SDDM operator");
+                }
+            }
+        }
         if (cp) { cp->descend("setup"); cp->tick(); }
         const auto route = F && opts.backend == solve_backend::automatic
             ? solve_backend::cpu
-#if defined(APXCHOL_USE_METAL)
+#if defined(APXCHOL_USE_CUDA) || defined(APXCHOL_USE_METAL)
             : F && opts.backend == solve_backend::gpu ? solve_backend::gpu
 #endif
             : detail::select_solve_backend(opts, &A);
         if (cp) { (*cp)("backend_selection"); cp->ascend(); }
 #if defined(APXCHOL_USE_CUDA)
-        if (route == solve_backend::gpu) {
-            if (F) throw std::invalid_argument("CUDA solver cannot adopt a host factor; request CPU explicitly");
-            return owner_type(std::in_place_type<detail::gpu_solve_session>, A, opts, cp);
-        }
+        if (route == solve_backend::gpu)
+            return owner_type(std::in_place_type<detail::gpu_solve_session>, A, opts, cp, F);
 #elif defined(APXCHOL_USE_METAL)
         if (route == solve_backend::gpu) {
             if (F) return owner_type(std::in_place_type<metal_solver>, A, std::move(*F), opts, cp);

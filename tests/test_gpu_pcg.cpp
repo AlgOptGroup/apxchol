@@ -15,7 +15,6 @@ struct recurrence_math {
     bool accept_ratio(double x) const { return std::isfinite(x); }
     double ratio(double x, double y) const { return x / y; }
     bool converged(double x, double threshold) const { return x < threshold; }
-    bool stagnated(double previous, double current) const { return previous * 0.25 < current; }
 };
 
 struct step_math {
@@ -198,24 +197,19 @@ TEST(GpuPcg, DevicePredicationRespectsIterationLimitsAndConvergence) {
     }
 }
 
-TEST(GpuPcg, StagnationChecksOnlyAtWindowBoundaries) {
-    for (const unsigned window : {0u, 3u}) {
-        SCOPED_TRACE(window);
-        pcg::solve_state<double, double> state{};
-        state.prev = 16.0;
-        state.active = 1;
-        state = pcg::advance(recurrence_math{}, state, pcg::kFinalizeCheck, 64.0, 2, window);
+TEST(GpuPcg, ResidualGrowthDoesNotStopBeforeTolerance) {
+    pcg::solve_state<double, double> state{};
+    state.thr = 1e-16;
+    state.active = 1;
+    for (unsigned iteration : {1u, 50u, 100u, 150u}) {
+        state = pcg::advance(recurrence_math{}, state, pcg::kFinalizeCheck, 4.0, iteration);
         EXPECT_EQ(state.active, 1u);
-        EXPECT_EQ(state.prev, 16.0);
-        // Halving the norm is sufficient; the recurrence stores squared norms.
-        state = pcg::advance(recurrence_math{}, state, pcg::kFinalizeCheck, 4.0, 3, window);
-        EXPECT_EQ(state.active, 1u);
-        EXPECT_EQ(state.prev, window ? 4.0 : 16.0);
-        state = pcg::advance(recurrence_math{}, state, pcg::kFinalizeCheck, 1.1, 6, window);
-        EXPECT_EQ(state.active, window ? 0u : 1u);
-        EXPECT_EQ(state.iters, 6u);
-        EXPECT_EQ(state.rr, 1.1);
+        EXPECT_EQ(state.iters, iteration);
+        EXPECT_EQ(state.rr, 4.0);
     }
+    state = pcg::advance(recurrence_math{}, state, pcg::kFinalizeCheck, 1e-18, 151);
+    EXPECT_EQ(state.active, 0u);
+    EXPECT_EQ(state.iters, 151u);
 }
 
 TEST(GpuPcg, InputScalingKeepsOrdinaryValuesAndNormalizesExtremes) {

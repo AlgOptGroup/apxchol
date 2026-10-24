@@ -8,6 +8,7 @@
 #include <cmath>
 #include <future>
 #include <cstring>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -29,6 +30,7 @@ static_assert(std::is_move_constructible_v<apxchol::solver>);
 static_assert(std::is_move_assignable_v<apxchol::solver>);
 static_assert(!std::is_copy_constructible_v<apxchol::solver>);
 static_assert(!std::is_copy_assignable_v<apxchol::solver>);
+static_assert(noexcept(apxchol::backend_available(apxchol::solve_backend::gpu)));
 
 Sparse operator_matrix(int n = 64) {
     std::vector<Eigen::Triplet<double>> entries;
@@ -67,6 +69,28 @@ void expect_solution(const Sparse& matrix, const Eigen::VectorXd& rhs,
     EXPECT_LT((matrix * x - rhs).norm() / rhs.norm(), tolerance);
 }
 }  // namespace
+
+TEST(Solver, BackendAvailabilityKeepsHostQueriesOnHost) {
+#if defined(APXCHOL_USE_CUDA)
+    const bool started = apxchol::cuda_ctx::detail::state().started;
+#endif
+    EXPECT_TRUE(apxchol::backend_available(apxchol::solve_backend::cpu));
+    EXPECT_TRUE(apxchol::backend_available(apxchol::solve_backend::automatic));
+    EXPECT_FALSE(apxchol::backend_available(static_cast<apxchol::solve_backend>(-1)));
+    EXPECT_FALSE(apxchol::backend_available(static_cast<apxchol::solve_backend>(99)));
+#if defined(APXCHOL_USE_CUDA)
+    EXPECT_EQ(apxchol::cuda_ctx::detail::state().started, started);
+    if (const char* visible = std::getenv("CUDA_VISIBLE_DEVICES");
+        visible && (std::string(visible).empty() || std::string(visible) == "-1")) {
+        EXPECT_FALSE(apxchol::backend_available(apxchol::solve_backend::gpu));
+    }
+#elif defined(APXCHOL_USE_METAL)
+    EXPECT_EQ(apxchol::backend_available(apxchol::solve_backend::gpu),
+              apxchol::metal_solver::available());
+#else
+    EXPECT_FALSE(apxchol::backend_available(apxchol::solve_backend::gpu));
+#endif
+}
 
 TEST(Solver, CpuOwnerSurvivesInputsAndMovesAndReusesItsFactor) {
     const scoped_omp_threads threads(1);
@@ -134,6 +158,75 @@ TEST(Solver, CpuOwnerAdoptsAnIndependentFactorAndAppliesIt) {
     EXPECT_TRUE(same_bytes(automatic_owner.apply(rhs).data(),
                           reference_applied.data(), reference_applied.size()));
     expect_solution(matrix, rhs, automatic_owner.solve(rhs).x);
+}
+
+TEST(Solver, AdoptedLaplacianFactorRejectsPositiveExcessBeforeBackendSetup) {
+    const scoped_omp_threads threads(1);
+    Sparse laplacian(3, 3);
+    const std::vector<Eigen::Triplet<double>> entries{{0, 0, 1}, {0, 2, -1},
+        {1, 1, 1}, {1, 2, -1}, {2, 0, -1}, {2, 1, -1}, {2, 2, 2}};
+    laplacian.setFromTriplets(entries.begin(), entries.end());
+    const auto factor = apxchol::factorize(laplacian);
+    ASSERT_FALSE(factor.sddm);
+    for (const double positive : {0.0, 0.125})
+    for (const double scale : {1e-6, 1.0, 1e6}) {
+        SCOPED_TRACE(::testing::Message() << positive << ' ' << scale);
+        Sparse matrix = scale * laplacian;
+        matrix.coeffRef(0, 1) = scale * positive;
+        matrix.coeffRef(1, 0) = scale * positive;
+        matrix.coeffRef(0, 0) = matrix.coeffRef(1, 1) = scale * (1 - positive);
+        EXPECT_NO_THROW(apxchol::solver(matrix, factor, cpu_options()));
+        matrix.coeffRef(0, 0) = scale * (1 - positive + 4e-12);
+        for (const auto backend : {apxchol::solve_backend::cpu,
+                                   apxchol::solve_backend::automatic,
+                                   apxchol::solve_backend::gpu}) {
+            SCOPED_TRACE(static_cast<int>(backend));
+            auto options = cpu_options();
+            options.backend = backend;
+            try {
+                const apxchol::solver owner(matrix, factor, options);
+                FAIL() << "accepted a Laplacian factor for an SDDM operator";
+            } catch (const std::invalid_argument& error) {
+                EXPECT_NE(std::string(error.what()).find("Laplacian factor"), std::string::npos);
+            }
+        }
+        matrix.coeffRef(0, 0) = scale * (1 - positive + 0.25e-12);
+        EXPECT_NO_THROW(apxchol::solver(matrix, factor, cpu_options()));
+    }
+}
+
+TEST(Solver, AdoptedSddmFactorStillRequiresAValidOperator) {
+    const scoped_omp_threads threads(1);
+    const Sparse matrix = operator_matrix(16);
+    const auto factor = apxchol::factorize(matrix);
+    ASSERT_TRUE(factor.sddm);
+    Sparse asymmetric = matrix;
+    asymmetric.coeffRef(0, 1) *= 2;
+    EXPECT_THROW(apxchol::solver(asymmetric, factor, cpu_options()), std::invalid_argument);
+    Sparse nonfinite = matrix;
+    nonfinite.coeffRef(0, 0) = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(apxchol::solver(nonfinite, factor, cpu_options()), std::invalid_argument);
+    Sparse lower = matrix.triangularView<Eigen::Lower>();
+    EXPECT_THROW(apxchol::solver(lower, factor, cpu_options()), std::invalid_argument);
+    EXPECT_NO_THROW(apxchol::cpu_solver(lower, factor, cpu_options()));
+}
+
+TEST(Solver, AdoptedSddmFactorCanPreconditionALaplacian) {
+    const scoped_omp_threads threads(1);
+    Sparse laplacian(2, 2);
+    const std::vector<Eigen::Triplet<double>> entries{{0, 0, 1}, {0, 1, -1},
+                                                    {1, 0, -1}, {1, 1, 1}};
+    laplacian.setFromTriplets(entries.begin(), entries.end());
+    Sparse sddm = laplacian;
+    sddm.coeffRef(0, 0) += 1;
+    sddm.coeffRef(1, 1) += 1;
+    const auto factor = apxchol::factorize(sddm);
+    ASSERT_TRUE(factor.sddm);
+    const apxchol::solver owner(laplacian, factor, cpu_options());
+    const Eigen::Vector2d rhs(1, -1);
+    const auto result = owner.solve(rhs);
+    EXPECT_TRUE(result.converged);
+    expect_solution(laplacian, rhs, result.x);
 }
 
 TEST(Solver, CpuCallerOutputAndWarmStartsUseEachOwnersStorage) {
@@ -396,9 +489,6 @@ TEST(Solver, RejectsInvalidDefaultsAndResolvedOverrides) {
     invalid.max_iter = -1;
     reject(invalid);
     invalid = defaults;
-    invalid.stagnation_window = -1;
-    reject(invalid);
-    invalid = defaults;
     invalid.backend = static_cast<apxchol::solve_backend>(99);
     reject(invalid);
     const apxchol::solver owner(matrix, defaults);
@@ -504,6 +594,7 @@ TEST(Solver, CudaOwnerReusesOwnedInputAndAppliesFactor) {
         GTEST_SKIP() << "CUDA unavailable: " << cudaGetErrorString(status);
     ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
     if (count == 0) GTEST_SKIP() << "No CUDA devices";
+    ASSERT_TRUE(apxchol::backend_available(apxchol::solve_backend::gpu));
     const Sparse matrix = operator_matrix();
     auto options = cpu_options();
     options.backend = apxchol::solve_backend::gpu;
@@ -536,7 +627,7 @@ TEST(Solver, CudaOwnerReusesOwnedInputAndAppliesFactor) {
 #endif
 }
 
-TEST(Solver, CudaOwnerRejectsHostFactorsAndInvalidWarmStarts) {
+TEST(Solver, CudaOwnerAdoptsHostFactorsAndRejectsInvalidWarmStarts) {
 #if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
     GTEST_SKIP() << "32-bit-node CUDA owner required";
 #else
@@ -544,14 +635,15 @@ TEST(Solver, CudaOwnerRejectsHostFactorsAndInvalidWarmStarts) {
     auto options = cpu_options();
     const auto host_factor = apxchol::factorize(matrix, options.factor_opts);
     options.backend = apxchol::solve_backend::gpu;
-    EXPECT_THROW(apxchol::solver(matrix, host_factor, options), std::invalid_argument);
     int count = 0;
     const auto status = cudaGetDeviceCount(&count);
     if (status == cudaErrorNoDevice || status == cudaErrorInsufficientDriver)
         GTEST_SKIP() << "CUDA unavailable: " << cudaGetErrorString(status);
     ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
     if (count == 0) GTEST_SKIP() << "No CUDA devices";
-    apxchol::solver owner(matrix, options);
+    options.factor_opts.is_select = "priority_greedy";
+    EXPECT_THROW(apxchol::solver(matrix, options), std::invalid_argument);
+    apxchol::solver owner(matrix, host_factor, options);
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     Eigen::VectorXd x0 = Eigen::VectorXd::Zero(matrix.rows() - 1);
     EXPECT_THROW(owner.solve(rhs, -1.0, -1, &x0), std::invalid_argument);
@@ -664,7 +756,7 @@ TEST(Solver, CudaWarmStartsPreserveOriginalResidualAndIterationBudget) {
 #endif
 }
 
-TEST(Solver, CudaOwnerHonorsStagnationWindow) {
+TEST(Solver, CudaOwnerHonorsIterationBudgetWithPoorWarmStart) {
 #if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
     GTEST_SKIP() << "32-bit-node CUDA owner required";
 #else
@@ -679,26 +771,14 @@ TEST(Solver, CudaOwnerHonorsStagnationWindow) {
     const Eigen::VectorXd exact = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     const Eigen::VectorXd rhs = matrix * exact;
     const Eigen::VectorXd x0 = -1e6 * exact;
-    for (const int window : {1, 0}) {
-        SCOPED_TRACE(window);
-        auto options = cpu_options();
-        options.backend = apxchol::solve_backend::gpu;
-        options.stagnation_window = window;
-        apxchol::solver owner(matrix, options);
-        const auto first = owner.solve(rhs, options.tol, 1, &x0);
-        ASSERT_EQ(first.iterations, 1);
-        ASSERT_GT(first.residual, 0.5);
-        const auto next = owner.solve(rhs, options.tol, 2, &x0);
-        EXPECT_EQ(next.iterations, window > 0 ? 1 : 2);
-        if (window > 0) {
-            EXPECT_EQ(next.x, first.x);
-            EXPECT_EQ(next.residual, first.residual);
-        }
-    }
-    auto invalid = cpu_options();
-    invalid.backend = apxchol::solve_backend::gpu;
-    invalid.stagnation_window = -1;
-    EXPECT_THROW(apxchol::solver(matrix, invalid), std::invalid_argument);
+    auto options = cpu_options();
+    options.backend = apxchol::solve_backend::gpu;
+    apxchol::solver owner(matrix, options);
+    const auto first = owner.solve(rhs, options.tol, 1, &x0);
+    ASSERT_EQ(first.iterations, 1);
+    ASSERT_GT(first.residual, 0.5);
+    const auto next = owner.solve(rhs, options.tol, 2, &x0);
+    EXPECT_EQ(next.iterations, 2);
 #endif
 }
 
@@ -751,9 +831,21 @@ TEST(Solver, CudaScalesRhsAndWarmStartsForFloatPreconditioner) {
 #endif
 }
 
-#if defined(APXCHOL_USE_METAL)
-TEST(Solver, MetalOwnerPreservesStorageAndAdoptsItsFactor) {
+#if defined(APXCHOL_USE_CUDA) || defined(APXCHOL_USE_METAL)
+TEST(Solver, GpuOwnerPreservesStorageAndAdoptsItsFactor) {
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA owner required";
+#else
+#ifdef APXCHOL_USE_CUDA
+    int count = 0;
+    const auto status = cudaGetDeviceCount(&count);
+    if (status == cudaErrorNoDevice || status == cudaErrorInsufficientDriver)
+        GTEST_SKIP() << "CUDA unavailable: " << cudaGetErrorString(status);
+    ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
+    if (count == 0) GTEST_SKIP() << "No CUDA devices";
+#else
     if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
+#endif
     const scoped_omp_threads threads(1);
     const Sparse matrix = operator_matrix();
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
@@ -774,6 +866,8 @@ TEST(Solver, MetalOwnerPreservesStorageAndAdoptsItsFactor) {
         EXPECT_EQ(owner->rows(), matrix.rows());
         EXPECT_EQ(owner->factor_storage(), storage);
         const auto& exported = owner->factor();
+        options.factor_opts.is_select = "priority_greedy";
+        EXPECT_THROW(apxchol::solver(matrix, options), std::invalid_argument);
         apxchol::solver adopted(matrix, exported, options);
         EXPECT_EQ(adopted.backend(), apxchol::solve_backend::gpu);
         EXPECT_EQ(adopted.factor_storage(), storage);
@@ -808,6 +902,7 @@ TEST(Solver, MetalOwnerPreservesStorageAndAdoptsItsFactor) {
         expect_solution(matrix, rhs, output);
         expect_solution(matrix, -rhs, owner->solve(-rhs).x);
     }
+#endif
 }
 #endif
 
@@ -976,6 +1071,120 @@ TEST(Solver, CpuMatrixRhsRejectsAliasingAndAcceptsEmptyBatches) {
     EXPECT_TRUE(result.columns.empty());
     EXPECT_DOUBLE_EQ(result.timings.total("pcg"), 0.0);
     EXPECT_NO_THROW(owner.apply(empty, output));
+}
+
+namespace {
+template<class Owner>
+void check_nonfinite_apply(const Owner& owner) {
+    const Eigen::VectorXd finite = Eigen::VectorXd::Ones(owner.rows());
+    for (const double value : {std::numeric_limits<double>::quiet_NaN(),
+                               std::numeric_limits<double>::infinity(),
+                               -std::numeric_limits<double>::infinity()}) {
+        SCOPED_TRACE(value);
+        Eigen::VectorXd invalid = finite;
+        invalid[owner.rows() / 2] = value;
+        EXPECT_THROW(owner.apply(invalid), std::invalid_argument);
+        Eigen::MatrixXd input = finite.replicate(1, 4), output(owner.rows(), 4);
+        input.col(3) = invalid;
+        EXPECT_THROW(owner.apply(input, output), std::invalid_argument);
+    }
+    EXPECT_TRUE(owner.apply(finite).allFinite());
+}
+} // namespace
+
+TEST(Solver, CpuApplyRejectsNonFiniteInputs) {
+    const scoped_omp_threads threads(1);
+    const auto matrix = operator_matrix();
+    check_nonfinite_apply(apxchol::cpu_solver(matrix, cpu_options()));
+    check_nonfinite_apply(apxchol::solver(matrix, cpu_options()));
+}
+
+TEST(Solver, GpuApplyRejectsNonFiniteInputs) {
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA owner required";
+#else
+    if (!apxchol::backend_available(apxchol::solve_backend::gpu))
+        GTEST_SKIP() << "GPU unavailable";
+    const scoped_omp_threads threads(1);
+    auto options = cpu_options();
+    options.backend = apxchol::solve_backend::gpu;
+    check_nonfinite_apply(apxchol::solver(operator_matrix(), options));
+#endif
+}
+
+namespace {
+void check_slow_progress(apxchol::solve_backend backend) {
+    const scoped_omp_threads threads(1);
+    constexpr int n = 256;
+    Sparse identity(n, n);
+    identity.setIdentity();
+    std::vector<Eigen::Triplet<double>> entries;
+    for (int i = 0; i < n; ++i) {
+        entries.emplace_back(i, i, 2.0);
+        if (i) {
+            entries.emplace_back(i, i - 1, -1.0);
+            entries.emplace_back(i - 1, i, -1.0);
+        }
+    }
+    Sparse matrix(n, n);
+    matrix.setFromTriplets(entries.begin(), entries.end());
+    auto options = cpu_options();
+    options.backend = backend;
+    const apxchol::solver owner(matrix, apxchol::factorize(identity), options);
+    const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(n);
+    // With an identity preconditioner this SPD problem initially grows the
+    // residual, so the former 50-iteration progress test stopped it early.
+    const auto limited = owner.solve(rhs, 1e-8, 50);
+    ASSERT_EQ(limited.iterations, 50);
+    EXPECT_GT(limited.residual, 0.5);
+    EXPECT_FALSE(limited.converged);
+    const auto continued = owner.solve(rhs, 1e-8, 51);
+    EXPECT_EQ(continued.iterations, 51);
+    const auto solved = owner.solve(rhs, 1e-8, 512);
+    EXPECT_GT(solved.iterations, 50);
+    EXPECT_LE(solved.iterations, 512);
+    EXPECT_TRUE(solved.converged);
+    expect_solution(matrix, rhs, solved.x, 1e-8);
+
+    Eigen::MatrixXd B(n, 4), X(n, 4);
+    B.col(0) = rhs;
+    B.col(1).setZero();
+    B.col(2) = -2 * rhs;
+    B.col(3) = 0.5 * rhs;
+    for (const int budget : {50, 51, 512}) {
+        SCOPED_TRACE(budget);
+        const auto batch = owner.solve(B, X, 1e-8, budget);
+        ASSERT_EQ(batch.columns.size(), 4u);
+        EXPECT_EQ(batch.columns[1].iterations, 0);
+        EXPECT_TRUE(X.col(1).isZero(0.0));
+        for (const int c : {0, 2, 3}) {
+            const auto& result = batch.columns[c];
+            if (budget < 512) {
+                EXPECT_EQ(result.iterations, budget);
+                EXPECT_GT(result.residual, 0.5);
+                EXPECT_FALSE(result.converged);
+            } else {
+                EXPECT_GT(result.iterations, 50);
+                EXPECT_LE(result.iterations, budget);
+                EXPECT_TRUE(result.converged);
+                expect_solution(matrix, B.col(c), X.col(c), 1e-8);
+            }
+        }
+    }
+}
+}
+
+TEST(Solver, CpuScalarAndBatchContinueAfterSlowProgress) {
+    check_slow_progress(apxchol::solve_backend::cpu);
+}
+
+TEST(Solver, MetalScalarAndBatchContinueAfterSlowProgress) {
+#ifdef APXCHOL_USE_METAL
+    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "Metal unavailable";
+    check_slow_progress(apxchol::solve_backend::gpu);
+#else
+    GTEST_SKIP() << "Metal build required";
+#endif
 }
 
 TEST(Solver, CpuMatrixRhsKeepsConvergedColumnsWhileOtherColumnsContinue) {

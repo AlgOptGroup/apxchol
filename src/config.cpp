@@ -160,10 +160,6 @@ run_config parse_args(int argc, char* argv[]) {
     app.add_option("--omp-threshold", cfg.solve_opts.factor_opts.omp_threshold,
                    "Min active vertices before engaging OpenMP")
         ->capture_default_str();
-    app.add_option("--stagnation-window", cfg.solve_opts.stagnation_window,
-                   "Check convergence every N iters, stop if <50% improvement (0=disable)")
-        ->capture_default_str();
-
     const std::vector<std::string> partitioners = partitioner_names();
     std::string partitioner_help = "Independent set strategy (";
     for (std::size_t i = 0; i < partitioners.size(); ++i)

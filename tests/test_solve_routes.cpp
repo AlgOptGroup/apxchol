@@ -250,18 +250,43 @@ TEST(SolveRoutes, FactorStorageAppliesToNewAndAdoptedFactors) {
     }
 }
 
-TEST(SolveRoutes, RequiredGpuPreconditionerRejectsHostFactorBeforeCuda) {
+TEST(SolveRoutes, RequiredGpuPreconditionerValidatesHostFactorsBeforeCuda) {
 #if !defined(APXCHOL_USE_CUDA)
     GTEST_SKIP() << "CUDA preconditioner type required";
 #else
     const bool started = apxchol::cuda_ctx::detail::state().started;
     const auto matrix = operator_matrix();
-    apxchol::solve_options options;
-    options.keep_factor_values = true;
-    apxchol::cpu_solver cpu(matrix, options);
-    ASSERT_FALSE(cpu.preconditioner().factor().research_device_factor);
+    const auto valid = apxchol::factorize(matrix);
+    ASSERT_FALSE(valid.research_device_factor);
+    auto options = apxchol::solve_options{};
+    options.backend = apxchol::solve_backend::gpu;
+    for (int defect = 0; defect < 6; ++defect) {
+        auto malformed = valid;
+        switch (defect) {
+            case 0: malformed.perm[1] = malformed.perm[0]; break;
+            case 1: malformed.L.outer_.back()++; break;
+            case 2: malformed.L.vals_.front() = 0; break;
+            case 3: malformed.L.inner_.front() = malformed.L.rows(); break;
+            case 4: malformed.L.vals_.front() = std::numeric_limits<float>::quiet_NaN(); break;
+            case 5: malformed.L.release_values(); break;
+        }
+        apxchol::detail::gpu_preconditioner gpu;
+        EXPECT_THROW(gpu.set_factor(malformed), std::invalid_argument) << defect;
+        EXPECT_THROW(apxchol::solver(matrix, malformed, options), std::invalid_argument) << defect;
+    }
+    EXPECT_THROW(apxchol::solver(operator_matrix(32), valid, options), std::invalid_argument);
+    apxchol::factorization grounded;
+    grounded.L.n_ = 1;
+    grounded.L.outer_ = {0, 0};
+    grounded.perm = {0};
+    grounded.sddm = false;
     apxchol::detail::gpu_preconditioner gpu;
-    EXPECT_THROW(gpu.set_factor(cpu.preconditioner().factor()), std::invalid_argument);
+    try {
+        gpu.set_factor(grounded);
+        FAIL() << "a scalar Laplacian CUDA factor must be rejected";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find("scalar Laplacian"), std::string::npos);
+    }
     EXPECT_EQ(apxchol::cuda_ctx::detail::state().started, started);
 #endif
 }

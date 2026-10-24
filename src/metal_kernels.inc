@@ -6,11 +6,11 @@ using namespace metal;
 using namespace apxchol::detail::gpu_pcg;
 using namespace apxchol::detail::metal_host;
 
-static_assert(sizeof(Params) == 44, "Params mirrors the host layout");
-static_assert(__builtin_offsetof(Params, preconditioner_scale) == 36, "Params mirrors the host layout");
+static_assert(sizeof(Params) == 40, "Params mirrors the host layout");
+static_assert(__builtin_offsetof(Params, preconditioner_scale) == 32, "Params mirrors the host layout");
 
 using SolveState = solve_state<df, float>;
-static_assert(sizeof(SolveState) == 48, "SolveState mirrors detail::metal::solve_state");
+static_assert(sizeof(SolveState) == 40, "SolveState mirrors detail::metal::solve_state");
 
 constant bool kForward [[function_constant(0)]];
 constant bool kOperatorDf [[function_constant(1)]];
@@ -90,7 +90,6 @@ struct recurrence_math {
     bool accept_ratio(float x) const { return isfinite(x); }
     float ratio(df x, df y) const { return df_div(x, y).hi; }
     bool converged(df x, df threshold) const { return df_lt(x, threshold); }
-    bool stagnated(df previous, df current) const { return df_lt(df_mul_f(previous, 0.25f), current); }
 };
 
 template<unsigned Columns>
@@ -101,7 +100,7 @@ inline void finalize_columns(constant Params& P, device const df* partial,
     for (unsigned q = 0; q < Columns; ++q) {
         const auto sum = sum_lanes<kTreeLanes>(pcg_math<>{}, partials.values[q]);
         if (l == 0 && state[q].active)
-            state[q] = advance(recurrence_math{}, state[q], P.mode, sum, P.iter, P.window);
+            state[q] = advance(recurrence_math{}, state[q], P.mode, sum, P.iter);
     }
 }
 
