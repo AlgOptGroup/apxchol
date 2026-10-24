@@ -15,7 +15,18 @@ permissions:
   contents: read
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check release tag
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: cmake -DRELEASE_TAG="$RELEASE_TAG" -P cmake/check_release_version.cmake
+
   wheels:
+    needs: version
     uses: ./.github/workflows/wheels.yml
 
   publish:
