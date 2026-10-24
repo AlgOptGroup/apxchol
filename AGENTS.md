@@ -49,6 +49,10 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 - Uninitialized output buffers (`big_alloc<T,32,false,false>`, L11 temporaries) must be fully overwritten before first read; writer threads perform first touch.
 - Release transients at their last use and preserve factor-buffer lifetime through assembly; `clear()` does not release capacity. Requested and retained GPU scratch enter memory preflight.
 
+## C interface
+
+`include/apxchol/c_api.h` and `src/c_api.cpp` define the exception-safe `apxchol_c` target. Scalar and batched calls delegate to the shared CPU/CUDA/Metal owner; dense outputs must not overlap inputs. CSC views accept independent 32/64-bit index types; dense views use signed element strides. Keep defaults aligned with `solve_options` and ABI layouts aligned with `tests/test_c_header.c`. ABI 3 is under review: PR revisions do not bump it, and consumers must use matching headers and library. After release, incompatible changes require a version bump. Tolerance and iteration budget are per-call arguments. `NOT_CONVERGED` writes outputs without relaxing acceptance. Factor handles own immutable FP32 values; CPU, CUDA and Metal adoption copy them. Automatic host-factor adoption stays on CPU; an explicit GPU request uploads the supplied factor without factorizing again. Thread ceilings restore the caller's setting.
+
 ## Test map
 
 | Change | Tests |
@@ -59,6 +63,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 | Operators, input, routes, owners | `Operator*`, `MMatrixLumping.*`, `PermutedOperator.*`, `MtxInput*`, `AdjacencyInputRegression.*`, `SolveRoutes.*`, `Solve*`, `Solver.*`, `Checkpoint.*` |
 | CUDA | `Gpu*`, `CudaDeviceScope.*`, `gpu_factor_finalize_leak_check` (with compute-sanitizer) |
 | Metal | `Metal*`, `GpuDataflowPlan.*`; also under `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1` |
+| C ABI | `CApi.*`, `c_api_c_consumer` |
 | Benchmark harness | `benchmarks/tests` (unittest) and the benchmark project's CTest contracts |
 
 Integration correctness is not performance acceptance: compare original-system quality, setup, solve, one-RHS total, reuse and memory against a frozen baseline, following `benchmarks/README.md`.

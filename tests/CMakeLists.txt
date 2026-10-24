@@ -65,6 +65,16 @@ target_link_libraries(unit_tests PRIVATE
         GTest::gtest_main
 )
 
+add_executable(c_api_tests test_c_api.cpp)
+target_link_libraries(c_api_tests PRIVATE apxchol_c GTest::gtest_main)
+add_executable(c_api_c_consumer test_c_header.c)
+set_target_properties(c_api_c_consumer PROPERTIES
+    C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+target_link_libraries(c_api_c_consumer PRIVATE apxchol_c)
+add_test(NAME c_api_c_consumer COMMAND c_api_c_consumer)
+set_tests_properties(c_api_c_consumer PROPERTIES
+    TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=4")
+
 include(GoogleTest)
 # Default per-test wall-clock timeout: 120s. Individual tests are <250ms
 # when run alone; the long tail is when ctest -j<nproc> starves them of
@@ -77,8 +87,10 @@ include(GoogleTest)
 # Four threads is enough to exercise the parallel paths while leaving
 # headroom for ctest -j8 on a 32-core box. Override per-test with set_tests_
 # properties if a specific test needs more.
-gtest_discover_tests(unit_tests PROPERTIES TIMEOUT 120
-        ENVIRONMENT "OMP_NUM_THREADS=4")
+foreach(test_target IN ITEMS unit_tests c_api_tests)
+    gtest_discover_tests(${test_target} PROPERTIES TIMEOUT 120
+            ENVIRONMENT "OMP_NUM_THREADS=4")
+endforeach()
 # This test requests eight workers. A three-worker runtime limit exercises
 # actual-team slicing and rejects stale requested-worker radix histograms.
 add_test(NAME factorize_reduced_team_incremental_degrees

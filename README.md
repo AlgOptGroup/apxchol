@@ -2,7 +2,7 @@
 
 Parallel approximate-Cholesky preconditioning and PCG for sparse Laplacian
 and SDDM systems, with OpenMP CPU, CUDA and Apple Metal backends.
-C++, Python and Octave/MATLAB interfaces are included.
+C++, C, Python and Octave/MATLAB interfaces are included.
 
 ## Build and run
 
@@ -46,6 +46,14 @@ use CPU setup and solves, including in CUDA builds. Singular
 Laplacians use their compatible subspace; SDDM operators retain a full factor.
 Passing a previously computed factor to `solver` reuses it on CPU, CUDA or
 Metal; select the GPU backend explicitly to upload it for GPU solves.
+
+The `apxchol_c` target provides a [C API](include/apxchol/c_api.h) with reusable
+solver and factor handles, FP32 factor export, and status codes instead of exceptions.
+It uses the shared CPU, CUDA or Metal solver, including batched right-hand sides.
+Borrowed array views accept 32/64-bit CSC indices and strided dense arrays.
+Pass one column for a scalar solve and set tolerance and iteration budget per call;
+input and output arrays must not overlap.
+See the header for options, ownership and error handling.
 
 ```bash
 pip install apxchol                 # or: pip install -e python
