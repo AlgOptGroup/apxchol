@@ -7,19 +7,13 @@
 #include <stddef.h>
 #include <stdio.h>
 
-_Static_assert(APXCHOL_C_ABI_VERSION == 2, "C ABI version");
-_Static_assert(sizeof(apxchol_options) == 56, "apxchol_options layout");
+_Static_assert(APXCHOL_C_ABI_VERSION == 3, "C ABI version");
+_Static_assert(sizeof(apxchol_options) == 24, "apxchol_options layout");
 _Static_assert(offsetof(apxchol_options, backend) == 4, "apxchol_options layout");
-_Static_assert(offsetof(apxchol_options, tol) == 8, "apxchol_options layout");
-_Static_assert(offsetof(apxchol_options, degree_quantile) == 16, "apxchol_options layout");
-_Static_assert(offsetof(apxchol_options, max_iter) == 24, "apxchol_options layout");
-_Static_assert(offsetof(apxchol_options, stagnation_window) == 28, "apxchol_options layout");
-_Static_assert(offsetof(apxchol_options, seed) == 32, "apxchol_options layout");
-_Static_assert(offsetof(apxchol_options, threads) == 36, "apxchol_options layout");
-_Static_assert(offsetof(apxchol_options, sampler) == 40, "apxchol_options layout");
-_Static_assert(offsetof(apxchol_options, partitioner) == 44, "apxchol_options layout");
-_Static_assert(offsetof(apxchol_options, keep_factor_values) == 48, "apxchol_options layout");
-_Static_assert(offsetof(apxchol_options, factor_storage) == 52, "apxchol_options layout");
+_Static_assert(offsetof(apxchol_options, seed) == 8, "apxchol_options layout");
+_Static_assert(offsetof(apxchol_options, threads) == 12, "apxchol_options layout");
+_Static_assert(offsetof(apxchol_options, keep_factor_values) == 16, "apxchol_options layout");
+_Static_assert(offsetof(apxchol_options, factor_storage) == 20, "apxchol_options layout");
 _Static_assert(APXCHOL_BACKEND_CPU == 0 && APXCHOL_BACKEND_GPU == 1 && APXCHOL_BACKEND_AUTO == 2,
                "backend values");
 _Static_assert(APXCHOL_FACTOR_STORAGE_AUTO == 0, "automatic factor storage value");
@@ -50,7 +44,7 @@ static int solve_path(apxchol_solver* solver, const char* what) {
     char error[256];
     apxchol_solve_info info[2] = {{-1, NAN, -1}, {-1, NAN, -1}};
     const apxchol_status status =
-        apxchol_solver_solve(solver, 2, b, x0, x, -1.0, -1, info, sizeof info[0],
+        apxchol_solver_solve(solver, 2, b, x0, x, 1e-10, 200, info, sizeof info[0],
                              error, sizeof error);
     if (status != APXCHOL_STATUS_SUCCESS) {
         fprintf(stderr, "%s solve: %d %s\n", what, (int)status, error);
@@ -94,10 +88,10 @@ int main(void) {
 
     apxchol_options options;
     if (apxchol_c_abi_version() != APXCHOL_C_ABI_VERSION) return 1;
+    if (!apxchol_backend_available(APXCHOL_BACKEND_CPU)) return 1;
     if (apxchol_options_default(&options, sizeof options) != APXCHOL_STATUS_SUCCESS) return 1;
     if (options.factor_storage != APXCHOL_FACTOR_STORAGE_AUTO ||
         options.backend != APXCHOL_BACKEND_AUTO) return 1;
-    options.tol = 1e-10;
     options.threads = 1;
     options.factor_storage = APXCHOL_FACTOR_STORAGE_FLOAT32;
 
@@ -144,6 +138,9 @@ int main(void) {
     int failed = solve_path(solver, "create with factor");
     if (apxchol_solver_stats(solver, &stats) != APXCHOL_STATUS_SUCCESS ||
         stats.factor_storage != APXCHOL_FACTOR_STORAGE_FLOAT32) failed = 1;
+    if (apxchol_solver_export_factor(solver, 0, lcolptr, lrowval, lnzval, perm,
+                                     error, sizeof error) != APXCHOL_STATUS_SUCCESS ||
+        lcolptr[3] != stats.factor_nnz) failed = 1;
     /* The solver's retained factor, copied back out into a new handle. */
     factor = NULL;
     if (apxchol_solver_copy_factor(solver, &factor, error, sizeof error) !=

@@ -77,7 +77,7 @@ void step(cudaStream_t stream, detail::gpu_pcg::operation op, std::int64_t n,
 // Fold partials in the fixed tree and advance the device recurrence.
 template<unsigned Columns = 1>
 void finalize(cudaStream_t stream, const double* part, int blocks, solve_state* state,
-              unsigned mode, unsigned iteration, std::array<double, Columns> bnorm, unsigned window = 0);
+              unsigned mode, unsigned iteration, std::array<double, Columns> bnorm);
 
 // Restore the returned solution on device and check the original system,
 // independently of the recurrence's exit reason. Reuses the dead PCG scratch.

@@ -48,7 +48,8 @@ Laplacians use their compatible subspace; SDDM operators retain a full factor.
 The `apxchol_c` target provides a [C API](include/apxchol/c_api.h) with reusable
 solver and factor handles, FP32 factor export, and status codes instead of exceptions.
 It uses the shared CPU, CUDA or Metal solver, including batched right-hand sides.
-Pass one column for a scalar solve; input and output arrays must not overlap.
+Pass one column for a scalar solve and set tolerance and iteration budget per call;
+input and output arrays must not overlap.
 See the header for options, ownership and error handling.
 
 ```bash

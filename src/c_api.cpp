@@ -103,9 +103,6 @@ void require_struct_size(std::size_t given, std::size_t expected, const char* wh
         fail(s, std::string(what) + ".struct_size is newer than this library supports");
 }
 
-constexpr const char* kPartitionerNames[] = {"block_greedy", "priority_greedy",
-                                             "baumann_kyng"};
-
 apxchol_options default_options() {
     const apxchol::solve_options so;
     apxchol_options o{};
@@ -113,18 +110,9 @@ apxchol_options default_options() {
     o.backend = so.backend == apxchol::solve_backend::cpu ? APXCHOL_BACKEND_CPU
               : so.backend == apxchol::solve_backend::gpu ? APXCHOL_BACKEND_GPU
                                                             : APXCHOL_BACKEND_AUTO;
-    o.tol = so.tol;
-    o.max_iter = so.max_iter;
-    o.stagnation_window = so.stagnation_window;
     o.seed = so.factor_opts.seed;
     o.threads = so.num_threads;
-    o.sampler = so.factor_opts.sampler == apxchol::clique_sampler::trace_cycle
-        ? APXCHOL_SAMPLER_TRACE_CYCLE : APXCHOL_SAMPLER_GKS;
-    o.partitioner = APXCHOL_PARTITIONER_BLOCK_GREEDY;
-    for (int p = 0; p < 3; ++p)
-        if (so.factor_opts.is_select == kPartitionerNames[p]) o.partitioner = p;
     o.keep_factor_values = so.keep_factor_values ? 1 : 0;
-    o.degree_quantile = so.factor_opts.partition.degree_quantile;
     o.factor_storage = APXCHOL_FACTOR_STORAGE_AUTO;
     return o;
 }
@@ -143,10 +131,6 @@ apxchol::solve_options to_solve_options(const apxchol_options& o) {
     require(o.backend == APXCHOL_BACKEND_CPU || o.backend == APXCHOL_BACKEND_GPU ||
                 o.backend == APXCHOL_BACKEND_AUTO,
             "options.backend must be APXCHOL_BACKEND_CPU, GPU or AUTO");
-    require(o.sampler == APXCHOL_SAMPLER_GKS || o.sampler == APXCHOL_SAMPLER_TRACE_CYCLE,
-            "options.sampler must be APXCHOL_SAMPLER_GKS or APXCHOL_SAMPLER_TRACE_CYCLE");
-    require(o.partitioner >= 0 && o.partitioner < 3,
-            "options.partitioner is not an apxchol_partitioner value");
     require(o.keep_factor_values == 0 || o.keep_factor_values == 1,
             "options.keep_factor_values must be 0 or 1");
     require(o.factor_storage == APXCHOL_FACTOR_STORAGE_AUTO ||
@@ -161,17 +145,10 @@ apxchol::solve_options to_solve_options(const apxchol_options& o) {
         ? apxchol::factor_storage_type::automatic
         : o.factor_storage == APXCHOL_FACTOR_STORAGE_FLOAT16
             ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32;
-    so.tol = o.tol;
-    so.max_iter = o.max_iter;
-    so.stagnation_window = o.stagnation_window;
     so.num_threads = o.threads;
     so.collect_timings = false;
     so.keep_factor_values = o.keep_factor_values != 0;
     so.factor_opts.seed = o.seed;
-    so.factor_opts.is_select = kPartitionerNames[o.partitioner];
-    so.factor_opts.sampler = o.sampler == APXCHOL_SAMPLER_TRACE_CYCLE
-        ? apxchol::clique_sampler::trace_cycle : apxchol::clique_sampler::gks;
-    so.factor_opts.partition.degree_quantile = o.degree_quantile;
     try {
         apxchol::detail::validate_solve_options(so);
     } catch (const std::invalid_argument& error) {
@@ -441,6 +418,7 @@ apxchol_status apxchol_solver_solve(apxchol_solver* solver, int64_t nrhs, const 
                                     char* error_message, size_t error_capacity) {
     return guarded(error_message, error_capacity, false, [&]() -> apxchol_status {
         require(solver != nullptr, "solver is NULL");
+        apxchol::detail::validate_solve_parameters(tol, max_iter);
         const Eigen::Index count = block_size(solver->n(), nrhs);
         if (nrhs == 0) return APXCHOL_STATUS_SUCCESS;
         if (info != nullptr) {
@@ -552,9 +530,9 @@ apxchol_status apxchol_factor_create(int64_t n, const int64_t* colptr, const int
         require(out_factor != nullptr, "out_factor is NULL");
         const apxchol_options opt = read_options(options);
         const apxchol::solve_options so = to_solve_options(opt);
+        const apxchol::detail::thread_budget scope(opt.threads);
         const Eigen::SparseMatrix<double> A = import_csc(n, colptr, rowval, nzval, index_base);
         auto factor = std::make_unique<apxchol_factor>();
-        const apxchol::detail::thread_budget scope(opt.threads);
         // Public factorization retains native FP32 values on every build.
         factor->F = apxchol::factorize(A, so.factor_opts);
         *out_factor = factor.release();

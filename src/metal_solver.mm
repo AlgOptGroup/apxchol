@@ -42,18 +42,18 @@ static_assert(sizeof(df32) == 8);
 #define APXCHOL_GPU_CODE(...) __VA_ARGS__
 #include "metal_params.inc"
 #undef APXCHOL_GPU_CODE
-static_assert(sizeof(Params) == 44);
+static_assert(sizeof(Params) == 40);
 static_assert(offsetof(Params, mode) == 16);
-static_assert(offsetof(Params, m) == 28);
-static_assert(offsetof(Params, spmv_lanes) == 32);
-static_assert(offsetof(Params, preconditioner_scale) == 36);
-static_assert(offsetof(Params, mapped_rows) == 40);
+static_assert(offsetof(Params, m) == 24);
+static_assert(offsetof(Params, spmv_lanes) == 28);
+static_assert(offsetof(Params, preconditioner_scale) == 32);
+static_assert(offsetof(Params, mapped_rows) == 36);
 
 using solve_state = gpu_pcg::solve_state<df32, float>;
-static_assert(sizeof(solve_state) == 48);
+static_assert(sizeof(solve_state) == 40);
 static_assert(offsetof(solve_state, thr) == 16);
-static_assert(offsetof(solve_state, alpha) == 32);
-static_assert(offsetof(solve_state, active) == 40);
+static_assert(offsetof(solve_state, alpha) == 24);
+static_assert(offsetof(solve_state, active) == 32);
 
 const char kKernelSource[] =
     "\n#include <metal_stdlib>\nusing namespace metal;\n"
@@ -830,13 +830,11 @@ void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
         const double reference = bnorm[q].scaled(scale[q]);
         const double threshold = tol * reference;
         states[q].thr = mh::split_saturated(threshold * threshold);
-        states[q].prev = mh::split_saturated(reference * reference);
         states[q].active = 1;
         ran[q] = active = true;
     }
     if (active) {
         if (opts.collect_timings) cp("pack");
-        arguments.window = static_cast<std::uint32_t>(std::max(0, opts.stagnation_window));
         detail::gpu_pcg::solve(*this, static_cast<std::uint32_t>(max_iter), 4);
         if (opts.collect_timings) cp("gpu_pcg_loop");
     }

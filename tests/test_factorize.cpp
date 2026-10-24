@@ -2093,7 +2093,7 @@ TEST(GpuBoundedSelection, ConsumingSolveChecksOriginalOperatorResidual) {
     for (const unsigned seed : {0u, 42u}) {
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::gpu;
-        options.tol = 1e-8; options.max_iter = 500; options.stagnation_window = 0;
+        options.tol = 1e-8; options.max_iter = 500;
         options.factor_opts.seed = seed;
         options.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
         options.factor_opts.drop_tolerance = 0;

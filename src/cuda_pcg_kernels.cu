@@ -84,13 +84,12 @@ struct recurrence_math {
     __device__ bool accept_ratio(double x) const { return isfinite(x); }
     __device__ double ratio(double x, double y) const { return x / y; }
     __device__ bool converged(double x, double threshold) const { return sqrt(x) / bnorm < threshold; }
-    __device__ bool stagnated(double previous, double current) const { return previous * 0.25 < current; }
 };
 
 template<unsigned Columns>
 __global__ void __launch_bounds__(kBlockThreads)
 finalize_kernel(const double* part, int blocks, solve_state* state, unsigned mode,
-                unsigned iteration, column_sums<double, Columns> bnorm, unsigned window) {
+                unsigned iteration, column_sums<double, Columns> bnorm) {
     __shared__ double scratch[Columns][kWarps];
     const pcg_work<int> work{0, blocks, kBlockThreads, static_cast<int>(threadIdx.x), blocks};
     const auto sums = sum_partials_columns<Columns>(pcg_math<>{}, part, work);
@@ -100,7 +99,7 @@ finalize_kernel(const double* part, int blocks, solve_state* state, unsigned mod
         // have alpha=0 and retain the scalar entry behavior, including tol>1.
         if (threadIdx.x == 0 && state[q].active &&
             (mode != kFinalizeCheck || iteration != 0 || state[q].alpha != 0))
-            state[q] = advance(recurrence_math{bnorm.values[q]}, state[q], mode, sum, iteration, window);
+            state[q] = advance(recurrence_math{bnorm.values[q]}, state[q], mode, sum, iteration);
     }
 }
 
@@ -253,10 +252,10 @@ void step(cudaStream_t stream, operation op, std::int64_t n, workspace v,
 
 template<unsigned Columns>
 void finalize(cudaStream_t stream, const double* part, int blocks, solve_state* state,
-              unsigned mode, unsigned iteration, std::array<double, Columns> bnorm, unsigned window) {
+              unsigned mode, unsigned iteration, std::array<double, Columns> bnorm) {
     column_sums<double, Columns> norms{};
     for (unsigned q = 0; q < Columns; ++q) norms.values[q] = bnorm[q];
-    finalize_kernel<Columns><<<1, kBlockThreads, 0, stream>>>(part, blocks, state, mode, iteration, norms, window);
+    finalize_kernel<Columns><<<1, kBlockThreads, 0, stream>>>(part, blocks, state, mode, iteration, norms);
 }
 
 template<unsigned Columns>
@@ -286,9 +285,9 @@ template void initialize<4>(cudaStream_t, std::int64_t, workspace, std::array<do
 template void step<1>(cudaStream_t, operation, std::int64_t, workspace, const operator_csr&, int);
 template void step<2>(cudaStream_t, operation, std::int64_t, workspace, const operator_csr&, int);
 template void step<4>(cudaStream_t, operation, std::int64_t, workspace, const operator_csr&, int);
-template void finalize<1>(cudaStream_t, const double*, int, solve_state*, unsigned, unsigned, std::array<double, 1>, unsigned);
-template void finalize<2>(cudaStream_t, const double*, int, solve_state*, unsigned, unsigned, std::array<double, 2>, unsigned);
-template void finalize<4>(cudaStream_t, const double*, int, solve_state*, unsigned, unsigned, std::array<double, 4>, unsigned);
+template void finalize<1>(cudaStream_t, const double*, int, solve_state*, unsigned, unsigned, std::array<double, 1>);
+template void finalize<2>(cudaStream_t, const double*, int, solve_state*, unsigned, unsigned, std::array<double, 2>);
+template void finalize<4>(cudaStream_t, const double*, int, solve_state*, unsigned, unsigned, std::array<double, 4>);
 template void finish<1>(cudaStream_t, std::int64_t, workspace, const operator_csr&, int, bool, std::array<double, 1>, std::array<double, 1>);
 template void finish<2>(cudaStream_t, std::int64_t, workspace, const operator_csr&, int, bool, std::array<double, 2>, std::array<double, 2>);
 template void finish<4>(cudaStream_t, std::int64_t, workspace, const operator_csr&, int, bool, std::array<double, 4>, std::array<double, 4>);

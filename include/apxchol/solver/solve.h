@@ -16,9 +16,6 @@ enum class solve_backend { automatic, cpu, gpu };
 struct solve_options {
     double tol       = default_tol;
     int    max_iter  = default_max_iter;
-    /// Check every N iterations whether residual improved by ≥50%.
-    /// If not, declare stagnation and stop early.  0 = disabled.
-    int    stagnation_window = 50;
     /// Keep the factor's row/value arrays alive after SpTRSV setup so
     /// solver::factor().L stays readable (costs one extra host factor copy;
     /// the bindings' L/D/P export needs it, including in CUDA builds).

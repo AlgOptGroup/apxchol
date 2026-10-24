@@ -35,6 +35,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 ## Determinism and numerical invariants
 
 - Public preconditioner application centers Laplacian input/output on every call; only internal PCG uses periodic centering. All backends derive `converged` from the original-system exit residual and effective tolerance, with verification included in Solve timing.
+- Solves stop on tolerance, the iteration budget or numerical breakdown. Residual growth or a temporary plateau is not a stopping condition.
 - Canonical neighbors sort by weight, then vertex. Preserve ordered duplicate sums, exact cumulative weights, `upper_bound` sampling and per-elimination random streams.
 - OpenMP work uses the actual team size, never the requested one; every logical range must execute under reduced or nested teams. Caller-operator loops split work with `detail::work_balanced_range`; reductions stay thread-ordered.
 - Partitioner conflict resolution is deterministic for a given graph, context and team size. Symmetric-input pairing shortcuts must preserve results bit for bit. Prune skipping must retain its full-walk audit for hidden eligible vertices; it need not reproduce the same factor as full pruning.
@@ -48,7 +49,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 
 ## C interface
 
-`include/apxchol/c_api.h` and `src/c_api.cpp` define the exception-safe `apxchol_c` target. Scalar and batched calls delegate to the shared CPU/CUDA/Metal owner; dense outputs must not overlap inputs. Keep defaults aligned with `solve_options` and ABI layouts aligned with `tests/test_c_header.c`. ABI 2 replaces the unreleased prototype; incompatible signatures or layouts require a version bump. `NOT_CONVERGED` writes outputs without relaxing acceptance. Factor handles own immutable FP32 values; adoption copies them and is unsupported on CUDA. Thread ceilings restore the caller's setting.
+`include/apxchol/c_api.h` and `src/c_api.cpp` define the exception-safe `apxchol_c` target. Scalar and batched calls delegate to the shared CPU/CUDA/Metal owner; dense outputs must not overlap inputs. Keep defaults aligned with `solve_options` and ABI layouts aligned with `tests/test_c_header.c`. ABI 3 replaces the unreleased prototype; incompatible signatures or layouts require a version bump. Tolerance and iteration budget are per-call arguments. `NOT_CONVERGED` writes outputs without relaxing acceptance. Factor handles own immutable FP32 values; adoption copies them and is unsupported on CUDA. Thread ceilings restore the caller's setting.
 
 ## Test map
 

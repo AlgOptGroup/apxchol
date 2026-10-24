@@ -54,7 +54,7 @@
 extern "C" {
 #endif
 
-#define APXCHOL_C_ABI_VERSION 2
+#define APXCHOL_C_ABI_VERSION 3
 
 typedef int32_t apxchol_status;
 enum {
@@ -78,16 +78,6 @@ typedef int32_t apxchol_backend;
  * stats.backend reports the route chosen, never AUTO. */
 enum { APXCHOL_BACKEND_CPU = 0, APXCHOL_BACKEND_GPU = 1, APXCHOL_BACKEND_AUTO = 2 };
 
-typedef int32_t apxchol_sampler;
-enum { APXCHOL_SAMPLER_GKS = 0, APXCHOL_SAMPLER_TRACE_CYCLE = 1 };
-
-typedef int32_t apxchol_partitioner;
-enum {
-    APXCHOL_PARTITIONER_BLOCK_GREEDY = 0,
-    APXCHOL_PARTITIONER_PRIORITY_GREEDY = 1,
-    APXCHOL_PARTITIONER_BAUMANN_KYNG = 2
-};
-
 typedef int32_t apxchol_factor_storage;
 enum {
     APXCHOL_FACTOR_STORAGE_AUTO = 0,
@@ -95,18 +85,12 @@ enum {
     APXCHOL_FACTOR_STORAGE_FLOAT32 = 32
 };
 
-/* 56 bytes. Initialize with apxchol_options_default, then override fields. */
+/* 24 bytes. Initialize with apxchol_options_default, then override fields. */
 typedef struct apxchol_options {
     uint32_t struct_size;
     apxchol_backend backend;
-    double tol;                       /* relative residual target, finite > 0 */
-    double degree_quantile;           /* -1: chosen by route; otherwise [0, 1) */
-    int32_t max_iter;                 /* >= 0 */
-    int32_t stagnation_window;        /* >= 0; 0 disables the stagnation stop */
     uint32_t seed;
     int32_t threads;                  /* > 0: call-scoped worker ceiling; 0: inherit */
-    apxchol_sampler sampler;
-    apxchol_partitioner partitioner;
     int32_t keep_factor_values;       /* 0/1; factor value export requires 1 */
     apxchol_factor_storage factor_storage; /* triangular-solve storage;
                                               AUTO uses the backend default */
@@ -161,11 +145,11 @@ APXCHOL_C_API void apxchol_solver_destroy(apxchol_solver* solver); /* NULL is a 
 /* nrhs right-hand sides, column-major n*nrhs. nrhs = 0 is a no-op requiring
  * a valid solver; dense-array and info pointers are optional and info_size is
  * ignored. Negative or overflowing dimensions are INVALID_ARGUMENT.
- * Finite tol < 0 / max_iter < 0
- * select the handle's options. x0 NULL starts from zero. info is NULL or an
- * array of nrhs structs, one per column. info_size is ignored when info is NULL.
- * Native bounded-panel solves reuse
- * the factor and workspace; one column uses the native scalar kernels.
+ * Every call requires finite tol > 0 and max_iter >= 0. The iteration budget
+ * applies independently to each column. x0 NULL starts from zero. info is NULL
+ * or an array of nrhs structs, one per column; info_size is ignored when NULL.
+ * Native bounded-panel solves reuse the factor and workspace; one column uses
+ * the native scalar kernels.
  * All b and x0 values are checked before x is written. Returns
  * NOT_CONVERGED if any column did not converge. The backend rescales extreme
  * inputs internally; CPU inputs that cannot share a usable scale are
@@ -203,10 +187,9 @@ APXCHOL_C_API apxchol_status apxchol_solver_export_factor(
  * apxchol_factor_create builds on the CPU; apxchol_solver_create builds on
  * the selected backend. */
 
-/* Factorizes A without building a solver: the same validation, lumping and
- * call-scoped threads as apxchol_solver_create, with the factorization
- * options (seed, sampler, partitioner, degree_quantile). The other options are validated
- * and unused; keep_factor_values is ignored. options NULL = defaults. */
+/* Factorizes A on the CPU without building a solver, using seed and threads.
+ * Other options are validated and unused; factor values are always retained.
+ * options NULL selects defaults. */
 APXCHOL_C_API apxchol_status apxchol_factor_create(
     int64_t n, const int64_t* colptr, const int64_t* rowval, const double* nzval,
     int32_t index_base, const apxchol_options* options,

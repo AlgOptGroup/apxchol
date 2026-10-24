@@ -6,7 +6,6 @@ struct Params {
     unsigned count;     // number of dependency words to initialize
     unsigned mode;      // finalize mode
     unsigned iter;      // 1-based PCG iteration
-    unsigned window;    // stagnation window, 0 = off
     unsigned m;         // factor dimension
     unsigned spmv_lanes; // threads per operator row, 1 or kTreeLanes
     float preconditioner_scale;

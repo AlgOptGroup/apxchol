@@ -577,7 +577,7 @@ def test_iteration_limit_requires_integer(value):
         solver.solve(np.ones(2), maxiter=value)
 
 
-@pytest.mark.parametrize("name", ["seed", "num_threads", "stagnation_window", "exact_clique_max_degree"])
+@pytest.mark.parametrize("name", ["seed", "num_threads", "exact_clique_max_degree"])
 def test_integer_setup_options_do_not_truncate(name):
     with pytest.raises(TypeError):
         apxchol.factorize(sp.eye(2, format="csc"), **{name: 1.5})
@@ -696,6 +696,11 @@ def test_unknown_option_raises():
     A = grid2d_sddm(10)
     with pytest.raises(ValueError):
         apxchol.factorize(A, no_such_option=1)
+
+
+def test_removed_stagnation_option_is_rejected():
+    with pytest.raises(ValueError, match="unknown option 'stagnation_window'"):
+        apxchol.factorize(sp.eye(2, format="csc"), stagnation_window=0)
 
 
 def test_x0_warm_start_needs_no_iterations():

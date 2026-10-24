@@ -35,8 +35,6 @@ void detail::validate_solve_parameters(double tol, int max_iter) {
 
 void detail::validate_solve_options(const solve_options& opts) {
     validate_solve_parameters(opts.tol, opts.max_iter);
-    if (opts.stagnation_window < 0)
-        throw std::invalid_argument("stagnation_window must be nonnegative");
     if (opts.num_threads < 0)
         throw std::invalid_argument("num_threads must be nonnegative");
     if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu &&
@@ -704,7 +702,7 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
     if (part_.size() < part_size) part_.resize(part_size);
     double *r = r_.data(), *z = z_.data(), *p = p_.data(), *Ap = Ap_.data(), *part = part_.data();
     const bool laplacian = !precond_.factor().sddm;
-    std::array<double, C> norm{}, rr{}, rs{}, rz{}, prev{};
+    std::array<double, C> norm{}, rr{}, rs{}, rz{};
     std::array<bool, C> active{}, warm{};
     using Input = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
     if (x0) {
@@ -776,7 +774,6 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
     for (int c = 0; c < C; c++) {
         results[c].residual = norm[c] == 0 ? 0 : (warm[c] ? std::sqrt(rr[c]) / norm[c] : 1);
         active[c] = norm[c] != 0 && !(warm[c] && results[c].residual < tol);
-        prev[c] = 1;
         if (norm[c] == 0)
             for (Eigen::Index i = 0; i < n; i++) {
                 x[i * C + c] = 0;
@@ -863,15 +860,8 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
                 continue;
             results[c].iterations = i + 1;
             results[c].residual = std::sqrt(rr[c]) / norm[c];
-            if (results[c].residual < tol) {
+            if (results[c].residual < tol)
                 active[c] = false;
-                continue;
-            }
-            if (opts_.stagnation_window > 0 && (i + 1) % opts_.stagnation_window == 0) {
-                if (results[c].residual > prev[c] * 0.5)
-                    active[c] = false;
-                prev[c] = results[c].residual;
-            }
         }
         if (!any_active())
             break;

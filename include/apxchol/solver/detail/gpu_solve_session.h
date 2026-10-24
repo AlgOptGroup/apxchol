@@ -9,7 +9,6 @@ class gpu_solve_session {
     gpu_preconditioner precond;
     cuda_pcg gpcg;
     const bool use_cp;
-    const int stagnation_window;
 public:
     gpu_solve_session(const Eigen::SparseMatrix<double>& L,
                       const solve_options& opts, solve_result& res)
@@ -18,7 +17,7 @@ public:
     }
     gpu_solve_session(const Eigen::SparseMatrix<double>& L,
                       const solve_options& opts, checkpoint* cp)
-        : use_cp(opts.collect_timings), stagnation_window(opts.stagnation_window) {
+        : use_cp(opts.collect_timings) {
         validate_solve_options(opts);
         if (opts.backend == solve_backend::cpu)
             throw std::invalid_argument("GPU session cannot execute an explicit CPU request");
@@ -66,7 +65,7 @@ public:
         gpcg.solve(precond, b, res.x,
                    tol, max_iter,
                    iters, rnorm,
-                   /*laplacian=*/ !precond.factor().sddm, x0, stagnation_window);
+                   /*laplacian=*/ !precond.factor().sddm, x0);
         if (use_cp) { res.timings("gpu_pcg_loop"); res.timings.ascend(); }
         res.iterations = iters;
         res.residual = rnorm;
@@ -92,7 +91,7 @@ public:
             std::array<int, Columns> iterations{};
             std::array<double, Columns> residuals{};
             gpcg.solve_panel<Columns>(precond, B, X, tol, max_iter, iterations, residuals,
-                                     !precond.factor().sddm, X0, stagnation_window);
+                                     !precond.factor().sddm, X0);
             for (unsigned q = 0; q < Columns; ++q) {
                 result.columns[q].iterations = iterations[q];
                 result.columns[q].residual = residuals[q];

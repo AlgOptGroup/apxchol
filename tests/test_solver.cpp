@@ -396,9 +396,6 @@ TEST(Solver, RejectsInvalidDefaultsAndResolvedOverrides) {
     invalid.max_iter = -1;
     reject(invalid);
     invalid = defaults;
-    invalid.stagnation_window = -1;
-    reject(invalid);
-    invalid = defaults;
     invalid.backend = static_cast<apxchol::solve_backend>(99);
     reject(invalid);
     const apxchol::solver owner(matrix, defaults);
@@ -664,7 +661,7 @@ TEST(Solver, CudaWarmStartsPreserveOriginalResidualAndIterationBudget) {
 #endif
 }
 
-TEST(Solver, CudaOwnerHonorsStagnationWindow) {
+TEST(Solver, CudaOwnerHonorsIterationBudgetWithPoorWarmStart) {
 #if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
     GTEST_SKIP() << "32-bit-node CUDA owner required";
 #else
@@ -679,26 +676,14 @@ TEST(Solver, CudaOwnerHonorsStagnationWindow) {
     const Eigen::VectorXd exact = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     const Eigen::VectorXd rhs = matrix * exact;
     const Eigen::VectorXd x0 = -1e6 * exact;
-    for (const int window : {1, 0}) {
-        SCOPED_TRACE(window);
-        auto options = cpu_options();
-        options.backend = apxchol::solve_backend::gpu;
-        options.stagnation_window = window;
-        apxchol::solver owner(matrix, options);
-        const auto first = owner.solve(rhs, options.tol, 1, &x0);
-        ASSERT_EQ(first.iterations, 1);
-        ASSERT_GT(first.residual, 0.5);
-        const auto next = owner.solve(rhs, options.tol, 2, &x0);
-        EXPECT_EQ(next.iterations, window > 0 ? 1 : 2);
-        if (window > 0) {
-            EXPECT_EQ(next.x, first.x);
-            EXPECT_EQ(next.residual, first.residual);
-        }
-    }
-    auto invalid = cpu_options();
-    invalid.backend = apxchol::solve_backend::gpu;
-    invalid.stagnation_window = -1;
-    EXPECT_THROW(apxchol::solver(matrix, invalid), std::invalid_argument);
+    auto options = cpu_options();
+    options.backend = apxchol::solve_backend::gpu;
+    apxchol::solver owner(matrix, options);
+    const auto first = owner.solve(rhs, options.tol, 1, &x0);
+    ASSERT_EQ(first.iterations, 1);
+    ASSERT_GT(first.residual, 0.5);
+    const auto next = owner.solve(rhs, options.tol, 2, &x0);
+    EXPECT_EQ(next.iterations, 2);
 #endif
 }
 
@@ -976,6 +961,81 @@ TEST(Solver, CpuMatrixRhsRejectsAliasingAndAcceptsEmptyBatches) {
     EXPECT_TRUE(result.columns.empty());
     EXPECT_DOUBLE_EQ(result.timings.total("pcg"), 0.0);
     EXPECT_NO_THROW(owner.apply(empty, output));
+}
+
+namespace {
+void check_slow_progress(apxchol::solve_backend backend) {
+    const scoped_omp_threads threads(1);
+    constexpr int n = 256;
+    Sparse identity(n, n);
+    identity.setIdentity();
+    std::vector<Eigen::Triplet<double>> entries;
+    for (int i = 0; i < n; ++i) {
+        entries.emplace_back(i, i, 2.0);
+        if (i) {
+            entries.emplace_back(i, i - 1, -1.0);
+            entries.emplace_back(i - 1, i, -1.0);
+        }
+    }
+    Sparse matrix(n, n);
+    matrix.setFromTriplets(entries.begin(), entries.end());
+    auto options = cpu_options();
+    options.backend = backend;
+    const apxchol::solver owner(matrix, apxchol::factorize(identity), options);
+    const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(n);
+    // With an identity preconditioner this SPD problem initially grows the
+    // residual, so the former 50-iteration progress test stopped it early.
+    const auto limited = owner.solve(rhs, 1e-8, 50);
+    ASSERT_EQ(limited.iterations, 50);
+    EXPECT_GT(limited.residual, 0.5);
+    EXPECT_FALSE(limited.converged);
+    const auto continued = owner.solve(rhs, 1e-8, 51);
+    EXPECT_EQ(continued.iterations, 51);
+    const auto solved = owner.solve(rhs, 1e-8, 512);
+    EXPECT_GT(solved.iterations, 50);
+    EXPECT_LE(solved.iterations, 512);
+    EXPECT_TRUE(solved.converged);
+    expect_solution(matrix, rhs, solved.x, 1e-8);
+
+    Eigen::MatrixXd B(n, 4), X(n, 4);
+    B.col(0) = rhs;
+    B.col(1).setZero();
+    B.col(2) = -2 * rhs;
+    B.col(3) = 0.5 * rhs;
+    for (const int budget : {50, 51, 512}) {
+        SCOPED_TRACE(budget);
+        const auto batch = owner.solve(B, X, 1e-8, budget);
+        ASSERT_EQ(batch.columns.size(), 4u);
+        EXPECT_EQ(batch.columns[1].iterations, 0);
+        EXPECT_TRUE(X.col(1).isZero(0.0));
+        for (const int c : {0, 2, 3}) {
+            const auto& result = batch.columns[c];
+            if (budget < 512) {
+                EXPECT_EQ(result.iterations, budget);
+                EXPECT_GT(result.residual, 0.5);
+                EXPECT_FALSE(result.converged);
+            } else {
+                EXPECT_GT(result.iterations, 50);
+                EXPECT_LE(result.iterations, budget);
+                EXPECT_TRUE(result.converged);
+                expect_solution(matrix, B.col(c), X.col(c), 1e-8);
+            }
+        }
+    }
+}
+}
+
+TEST(Solver, CpuScalarAndBatchContinueAfterSlowProgress) {
+    check_slow_progress(apxchol::solve_backend::cpu);
+}
+
+TEST(Solver, MetalScalarAndBatchContinueAfterSlowProgress) {
+#ifdef APXCHOL_USE_METAL
+    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "Metal unavailable";
+    check_slow_progress(apxchol::solve_backend::gpu);
+#else
+    GTEST_SKIP() << "Metal build required";
+#endif
 }
 
 TEST(Solver, CpuMatrixRhsKeepsConvergedColumnsWhileOtherColumnsContinue) {
