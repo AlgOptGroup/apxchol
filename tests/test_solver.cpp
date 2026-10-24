@@ -1068,6 +1068,45 @@ TEST(Solver, CpuMatrixRhsRejectsAliasingAndAcceptsEmptyBatches) {
 }
 
 namespace {
+template<class Owner>
+void check_nonfinite_apply(const Owner& owner) {
+    const Eigen::VectorXd finite = Eigen::VectorXd::Ones(owner.rows());
+    for (const double value : {std::numeric_limits<double>::quiet_NaN(),
+                               std::numeric_limits<double>::infinity(),
+                               -std::numeric_limits<double>::infinity()}) {
+        SCOPED_TRACE(value);
+        Eigen::VectorXd invalid = finite;
+        invalid[owner.rows() / 2] = value;
+        EXPECT_THROW(owner.apply(invalid), std::invalid_argument);
+        Eigen::MatrixXd input = finite.replicate(1, 4), output(owner.rows(), 4);
+        input.col(3) = invalid;
+        EXPECT_THROW(owner.apply(input, output), std::invalid_argument);
+    }
+    EXPECT_TRUE(owner.apply(finite).allFinite());
+}
+} // namespace
+
+TEST(Solver, CpuApplyRejectsNonFiniteInputs) {
+    const scoped_omp_threads threads(1);
+    const auto matrix = operator_matrix();
+    check_nonfinite_apply(apxchol::cpu_solver(matrix, cpu_options()));
+    check_nonfinite_apply(apxchol::solver(matrix, cpu_options()));
+}
+
+TEST(Solver, GpuApplyRejectsNonFiniteInputs) {
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA owner required";
+#else
+    if (!apxchol::backend_available(apxchol::solve_backend::gpu))
+        GTEST_SKIP() << "GPU unavailable";
+    const scoped_omp_threads threads(1);
+    auto options = cpu_options();
+    options.backend = apxchol::solve_backend::gpu;
+    check_nonfinite_apply(apxchol::solver(operator_matrix(), options));
+#endif
+}
+
+namespace {
 void check_slow_progress(apxchol::solve_backend backend) {
     const scoped_omp_threads threads(1);
     constexpr int n = 256;

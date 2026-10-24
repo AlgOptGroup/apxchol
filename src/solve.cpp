@@ -923,6 +923,8 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
 
 Eigen::VectorXd cpu_solver::apply(const Eigen::VectorXd& r) const {
     const detail::thread_budget threads(opts_.num_threads);
+    if (r.size() != n_ || !r.allFinite())
+        throw std::invalid_argument("cpu_solver::apply: RHS must be finite and match the operator size");
     return precond_.solve(r);
 }
 
@@ -978,6 +980,8 @@ batch_solve_result cpu_solver::solve_batch(const_matrix_view B, matrix_view X, d
 void cpu_solver::apply(const_matrix_view R, matrix_view Z) const {
     const detail::thread_budget threads(opts_.num_threads);
     detail::check_matrix_views(R, Z, n_);
+    if (!R.allFinite())
+        throw std::invalid_argument("cpu_solver::apply: RHS must be finite");
     for_rhs_panels(R, Z, nullptr, z_, panel_x_,
                    [&]<int C>(Eigen::Index, const double *r, double *z, const double *) {
                        precond_.apply_columns<C>(r, z);

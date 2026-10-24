@@ -134,6 +134,7 @@ public:
                        const Eigen::VectorXd* x0 = nullptr) const;
 
     /// One preconditioner application: z = M^{-1} r (forward+back SpTRSV).
+    /// Inputs must be finite, for both scalar and matrix application.
     Eigen::VectorXd apply(const Eigen::VectorXd& r) const;
 
     const apx_cholesky& preconditioner() const { return precond_; }
@@ -201,7 +202,8 @@ class solver {
 public:
     explicit solver(const Eigen::SparseMatrix<double>& A,
                     const solve_options& opts = {}, checkpoint* cp = nullptr);
-    /// Adopt F without reapplying factor-construction options, as cpu_solver does.
+    /// Adopt F without rebuilding or regularizing it. lump_max_mass still bounds
+    /// operator validation; factor storage, dropping and solve options apply.
     solver(const Eigen::SparseMatrix<double>& A, factorization F,
            const solve_options& opts = {}, checkpoint* cp = nullptr);
     ~solver();
@@ -218,6 +220,7 @@ public:
     solve_result solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
                        double tol = -1.0, int max_iter = -1,
                        const Eigen::VectorXd* x0 = nullptr) const;
+    /// Apply the preconditioner to finite scalar or matrix input.
     Eigen::VectorXd apply(const Eigen::VectorXd& r) const;
     /// Independent RHS columns, with bounded panel workspace. Output must not
     /// overlap the RHS or warm start. tol/max_iter apply to each column.
