@@ -307,17 +307,15 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
     Parameters
     ----------
     A : scipy.sparse matrix
-        Square graph Laplacian (rank n−k for k connected components) or SDDM
-        matrix; the two cases are auto-detected. This is the ASSEMBLED operator,
-        not the adjacency matrix of a graph. The operator contract — symmetric,
-        positive diagonal, non-positive off-diagonals — is ASSERTED: a
-        violation raises `ValueError` naming which condition failed, and an
-        adjacency matrix (no positive diagonal anywhere) is caught by the
-        diagonal condition with :func:`laplacian` named as the fix. Diagonal
-        dominance is reported but not required. Positive off-diagonals on an
-        otherwise valid operator are repaired by M-matrix lumping when the
-        PRECONDITIONER is built (see :attr:`Solver.lumped`); the PCG still
-        applies `A` itself, so the residual is for the system you passed.
+        Square, real symmetric assembled operator, typically a graph Laplacian
+        or SDDM matrix. Nonempty rows must have positive diagonals. Use
+        :func:`laplacian` to convert an adjacency matrix first. A Laplacian with
+        k connected components has rank n−k; its RHS must sum to zero within
+        each component.
+
+        Positive off-diagonal pairs are lumped onto the diagonal for
+        preconditioning, subject to `lump_max_mass` (see :attr:`Solver.lumped`).
+        PCG and residual checks still use the original `A`.
     backend : {"auto", "cpu", "gpu"}
         Auto may prefer CPU for small systems when it supports the requested storage;
         otherwise it checks GPU compatibility. Read the resolved choice from
