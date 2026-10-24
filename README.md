@@ -74,12 +74,18 @@ or `apxchol_laplacian(Adj)` in Octave for adjacency input. See the
 
 ### Use from CMake
 
-Link `apxchol_core` rather than copying its compiler flags:
+Build the core in your project and link its target:
 
 ```cmake
-add_subdirectory(path/to/apxchol)
-target_link_libraries(my_program PRIVATE apxchol_core)
+include(path/to/apxchol/cmake/apxchol_core.cmake)
+apxchol_add_core()
+target_link_libraries(my_program PRIVATE apxchol::core)
 ```
+
+For an installed library, replace the first two lines with
+`find_package(apxchol CONFIG REQUIRED)`. A standalone library build uses
+`cmake -S cmake/core -B build`, followed by `cmake --build build` and
+`cmake --install build --prefix /path/to/prefix`.
 
 The target supplies C++23 and the architecture flag used by the library.
 Matching architecture settings matter because Eigen objects cross the library

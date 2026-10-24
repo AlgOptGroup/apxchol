@@ -4,6 +4,14 @@ project(apxchol_consumer_regression LANGUAGES CXX)
 # Deliberately older than the public headers: the linked target must upgrade it.
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS ON)
+set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
+include(../../cmake/apxchol_core.cmake)
+apxchol_add_core()
+if (NOT CMAKE_CXX_STANDARD EQUAL 14 OR NOT CMAKE_CXX_EXTENSIONS
+    OR NOT CMAKE_CUDA_RUNTIME_LIBRARY STREQUAL "Shared")
+    message(FATAL_ERROR "apxchol changed the consuming project's compiler defaults")
+endif()
 enable_testing()
 add_subdirectory(../.. apxchol)
 

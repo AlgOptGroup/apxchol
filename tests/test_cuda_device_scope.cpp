@@ -42,6 +42,7 @@ static_assert(!std::is_copy_constructible_v<Scope>);
 static_assert(!std::is_move_constructible_v<Scope>);
 static_assert(std::is_nothrow_constructible_v<Scope, int, bool>);
 static_assert(std::is_nothrow_destructible_v<Scope>);
+static_assert(!std::is_nothrow_constructible_v<Scope, int, Scope::checked>);
 
 class CudaDeviceScope : public ::testing::Test {
     void SetUp() override { calls = {}; }
@@ -88,6 +89,27 @@ TEST_F(CudaDeviceScope, NestedScopesRestoreTheirCallers) {
 TEST_F(CudaDeviceScope, CapturesDeviceBeforeOwnerStateChanges) {
     int owner_device = 3;
     { Scope scope(owner_device); owner_device = -1; }
+    EXPECT_EQ(calls.sets, (std::vector<int>{3, 2}));
+}
+TEST_F(CudaDeviceScope, CheckedQueryFailureThrowsBeforeSwitching) {
+    calls.get_status = cudaErrorUnknown;
+    EXPECT_THROW((Scope{3, Scope::checked{}}), std::runtime_error);
+    EXPECT_EQ(calls.gets, 1);
+    EXPECT_TRUE(calls.sets.empty());
+}
+TEST_F(CudaDeviceScope, CheckedSwitchFailureThrowsWithoutRestoring) {
+    calls.set_status = cudaErrorInvalidDevice;
+    EXPECT_THROW((Scope{3, Scope::checked{}}), std::runtime_error);
+    EXPECT_EQ(calls.current, 2);
+    EXPECT_EQ(calls.sets, (std::vector<int>{3}));
+}
+TEST_F(CudaDeviceScope, CheckedScopeRestoresAfterException) {
+    EXPECT_THROW(([] {
+        Scope scope(3, Scope::checked{});
+        EXPECT_EQ(calls.current, 3);
+        throw std::runtime_error("operation failed");
+    }()), std::runtime_error);
+    EXPECT_EQ(calls.current, 2);
     EXPECT_EQ(calls.sets, (std::vector<int>{3, 2}));
 }
 #endif

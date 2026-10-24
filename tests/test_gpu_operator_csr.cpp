@@ -7,11 +7,14 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 #if defined(APXCHOL_USE_CUDA)
@@ -798,6 +801,72 @@ TEST(GpuSolveHonesty, ZeroIterationSessionReportsRelativeResidualOnReuse) {
         EXPECT_NEAR(result.residual, scale == 0.0 ? 0.0 : 1.0, 2e-15);
         const double denominator = b.norm() > 0.0 ? b.norm() : 1.0;
         EXPECT_DOUBLE_EQ((A * result.x - b).norm() / denominator, result.residual);
+    }
+#endif
+}
+
+TEST(GpuOperatorCsr, ReusableOwnersFollowTheirSetupDeviceAcrossThreads) {
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA solve required";
+#else
+    int count = 0;
+    if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0)
+        GTEST_SKIP() << "CUDA unavailable";
+    // On multi-GPU hosts the new thread starts on a different device. The
+    // single-GPU case still checks cross-thread reuse and destruction.
+    const apxchol::detail::cuda_device_scope setup_device(
+        count - 1, apxchol::detail::cuda_device_scope::checked{});
+    scoped_omp_threads serial(1);
+    constexpr int n = 65;
+    Eigen::SparseMatrix<double> A(n, n);
+    for (int j = 0; j < n; ++j) {
+        if (j) A.insert(j - 1, j) = -1;
+        A.insert(j, j) = 3;
+        if (j + 1 < n) A.insert(j + 1, j) = -1;
+    }
+    A.makeCompressed();
+    const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(n, 1, 2);
+    apxchol::solve_options options;
+    options.backend = apxchol::solve_backend::gpu;
+    options.num_threads = 1;
+    options.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
+    options.keep_factor_values = true;
+    options.collect_timings = false;
+    const auto host_factor = apxchol::factorize(A);
+    for (const bool adopt : {false, true}) {
+        SCOPED_TRACE(adopt);
+        auto owner = adopt ? std::make_unique<apxchol::solver>(A, host_factor, options)
+                           : std::make_unique<apxchol::solver>(A, options);
+        const Eigen::VectorXd applied = owner->apply(rhs);
+        std::exception_ptr failure;
+        std::thread worker([&, owner = std::move(owner)]() mutable {
+            try {
+                apxchol::detail::check_cuda(cudaSetDevice(0), "cudaSetDevice");
+                const auto expect_caller_device = [] {
+                    int current = -1;
+                    apxchol::detail::check_cuda(cudaGetDevice(&current), "cudaGetDevice");
+                    EXPECT_EQ(current, 0);
+                };
+                const auto scalar = owner->solve(rhs, 1e-8, 200);
+                EXPECT_TRUE(scalar.converged);
+                EXPECT_LT(independent_residual(A, rhs, scalar.x), 1e-8);
+                expect_caller_device();
+                Eigen::MatrixXd B(n, 4), X(n, 4);
+                for (int c = 0; c < 4; ++c) B.col(c) = (c + 1.0) * rhs;
+                const auto batch = owner->solve(B, X, 1e-8, 200);
+                for (int c = 0; c < 4; ++c) {
+                    EXPECT_TRUE(batch.columns[c].converged);
+                    EXPECT_LT(independent_residual(A, B.col(c), X.col(c)), 1e-8);
+                }
+                expect_caller_device();
+                EXPECT_EQ((owner->apply(rhs) - applied).norm(), 0);
+                expect_caller_device();
+                owner.reset();
+                expect_caller_device();
+            } catch (...) { failure = std::current_exception(); }
+        });
+        worker.join();
+        if (failure) std::rethrow_exception(failure);
     }
 #endif
 }

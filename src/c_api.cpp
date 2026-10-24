@@ -12,11 +12,6 @@
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/sptrsv/omp.h"
 #include "apxchol/version.h"
-#if defined(APXCHOL_USE_CUDA)
-#include "apxchol/solver/elimination/gpu_round_shadow.h"
-#elif defined(APXCHOL_USE_METAL)
-#include "apxchol/solver/metal_solver.h"
-#endif
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
@@ -159,16 +154,6 @@ apxchol::solve_options to_solve_options(const apxchol_options& o) {
     return so;
 }
 
-bool gpu_available() {
-#if defined(APXCHOL_USE_CUDA)
-    return apxchol::detail::gpu_round_shadow_runtime_available();
-#elif defined(APXCHOL_USE_METAL)
-    return apxchol::metal_solver::available();
-#else
-    return false;
-#endif
-}
-
 /// Follow native routing, translating unsupported explicit requests to C statuses.
 apxchol::solve_backend resolve_route(const apxchol::solve_options& so,
                                      const Eigen::SparseMatrix<double>& A, bool adopt) {
@@ -176,7 +161,7 @@ apxchol::solve_backend resolve_route(const apxchol::solve_options& so,
         (adopt && so.backend == apxchol::solve_backend::automatic))
         return apxchol::solve_backend::cpu;
     if (so.backend == apxchol::solve_backend::gpu) {
-        if (!gpu_available())
+        if (!apxchol::backend_available(apxchol::solve_backend::gpu))
             fail(APXCHOL_STATUS_UNSUPPORTED, "no usable GPU backend in this build");
         if (adopt) return apxchol::solve_backend::gpu;
     }
@@ -441,12 +426,8 @@ int32_t apxchol_c_abi_version(void) { return APXCHOL_C_ABI_VERSION; }
 
 int32_t apxchol_backend_available(apxchol_backend backend) {
     if (backend == APXCHOL_BACKEND_CPU || backend == APXCHOL_BACKEND_AUTO) return 1;
-    try {
-        if (backend == APXCHOL_BACKEND_GPU) return gpu_available() ? 1 : 0;
-    } catch (...) {
-        return 0;
-    }
-    return 0;
+    return backend == APXCHOL_BACKEND_GPU &&
+        apxchol::backend_available(apxchol::solve_backend::gpu);
 }
 
 apxchol_status apxchol_options_default(apxchol_options* options, size_t struct_size) {
