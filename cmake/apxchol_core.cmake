@@ -104,7 +104,8 @@ function(apxchol_configure_core target)
     endif()
 endfunction()
 
-# A reusable library target; bindings link this instead of compiling core sources.
+# Include this module in the consuming project's scope before calling this
+# helper, so GPU languages are enabled for both the core and its consumers.
 function(apxchol_add_core)
     if (TARGET apxchol::core)
         return()
