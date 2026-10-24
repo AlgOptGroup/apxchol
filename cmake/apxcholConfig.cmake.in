@@ -1,7 +1,9 @@
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
-find_dependency(Eigen3 3.3 CONFIG)
+if (NOT @APXCHOL_BUNDLED_EIGEN@)
+    find_dependency(Eigen3 3.3 CONFIG)
+endif()
 include("${CMAKE_CURRENT_LIST_DIR}/apxchol_openmp.cmake")
 find_dependency(OpenMP COMPONENTS CXX)
 apxchol_openmp_runtime(consumer_openmp_runtime)
