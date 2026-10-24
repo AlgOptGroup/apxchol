@@ -3,6 +3,7 @@
 #include "apxchol/solver/gpu_block_frontend.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"
 #include "apxchol/solver/detail/cuda_device_scope.h"
+#include "apxchol/solver/detail/cuda_error.h"
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 
 #include <cub/cub.cuh>
@@ -27,14 +28,9 @@ namespace {
 
 using clock_type = gpu_setup_diagnostic_clock;
 
-[[noreturn]] void cuda_failure(cudaError_t err, const char *what) {
-    throw std::runtime_error(std::string("GPU block front-end: ") + what + ": " +
-                             cudaGetErrorString(err));
-}
-
 void cuda_check(cudaError_t err, const char *what) {
     if (err != cudaSuccess)
-        cuda_failure(err, what);
+        check_cuda(err, (std::string("GPU block front-end: ") + what).c_str());
 }
 
 template<class T> using device_buffer = cuda_buffer<T, cuda_check>;

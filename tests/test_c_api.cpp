@@ -4,6 +4,9 @@
 
 #include "apxchol/c_api.h"
 #include "apxchol/solver/solve.h"
+#if defined(APXCHOL_USE_CUDA)
+#include "apxchol/solver/detail/cuda_error.h"
+#endif
 
 #include <Eigen/Sparse>
 #include <algorithm>
@@ -12,7 +15,9 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <numeric>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -904,6 +909,24 @@ TEST(CApi, EmptyNegativeAndOverflowingBatchDimensions) {
         EXPECT_EQ(apxchol_solver_apply(h.s, k, &b, &x, nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
         EXPECT_EQ(x, 7);
     }
+
+    // A scalar's dense array fits while its larger info array overflows.
+    const csc64 scalar{1, {0, 1}, {0}, {2}};
+    handle one;
+    ASSERT_EQ(create(scalar, nullptr, one), APXCHOL_STATUS_SUCCESS);
+    const std::int64_t info_overflow = std::numeric_limits<std::ptrdiff_t>::max() /
+        static_cast<std::int64_t>(sizeof(apxchol_solve_info)) + 1;
+    ASSERT_LE(info_overflow, std::numeric_limits<std::ptrdiff_t>::max() /
+        static_cast<std::int64_t>(sizeof(double)));
+    apxchol_solve_info info{17, 0.25, 1};
+    const auto before = info;
+    std::array<char, 256> error{};
+    EXPECT_EQ(apxchol_solver_solve(one.s, info_overflow, &b, nullptr, &x, -1, -1,
+        &info, sizeof(info), error.data(), error.size()), APXCHOL_STATUS_INVALID_ARGUMENT);
+    EXPECT_NE(std::string(error.data()).find("nrhs * sizeof(apxchol_solve_info)"),
+              std::string::npos) << error.data();
+    EXPECT_TRUE(same_bytes(&info, &before, 1));
+    EXPECT_EQ(x, 7);
 }
 
 TEST(CApi, ExtremeScaleRightHandSidesAreSolvedAsTheirScaledProblem) {
@@ -1151,6 +1174,22 @@ TEST(CApi, AdjacencyIsAnOperatorError) {
 }
 
 TEST(CApi, BackendAndEnumValidation) {
+#if defined(APXCHOL_USE_CUDA)
+    using apxchol::detail::check_cuda;
+    EXPECT_NO_THROW(check_cuda(cudaSuccess, "probe"));
+    try {
+        check_cuda(cudaErrorMemoryAllocation, "probe");
+        FAIL() << "CUDA memory exhaustion did not throw";
+    } catch (const std::bad_alloc& error) {
+        EXPECT_EQ(error.what(), std::string("probe: ") + cudaGetErrorString(cudaErrorMemoryAllocation));
+    }
+    try {
+        check_cuda(cudaErrorInvalidValue, "probe");
+        FAIL() << "CUDA invalid argument did not throw";
+    } catch (const std::runtime_error& error) {
+        EXPECT_EQ(error.what(), std::string("probe: ") + cudaGetErrorString(cudaErrorInvalidValue));
+    }
+#endif
     const csc64 c = to_csc64(grid_laplacian(4, 4));
     EXPECT_EQ(apxchol_backend_available(APXCHOL_BACKEND_CPU), 1);
     EXPECT_EQ(apxchol_backend_available(APXCHOL_BACKEND_AUTO), 1);
@@ -1687,6 +1726,36 @@ TEST(CApi, GpuFactorExportAndCopyCanBeReusedOnCpu) {
                                           nullptr, 0), APXCHOL_STATUS_SUCCESS);
     std::sort(perm.begin(), perm.end());
     for (std::int64_t i = 0; i < c.n; ++i) EXPECT_EQ(perm[i], i);
+}
+
+TEST(CApi, GpuDistinguishesUnsupportedStoredLayoutFromInvalidOperator) {
+    if (!apxchol_backend_available(APXCHOL_BACKEND_GPU)) GTEST_SKIP() << "no usable GPU backend";
+    // Numerically diagonal and positive definite, but the stored zero has no mate.
+    const csc64 unpaired_zero{2, {0, 2, 3}, {0, 1, 1}, {2.0, 0.0, 3.0}};
+    for (const auto backend : {APXCHOL_BACKEND_CPU, APXCHOL_BACKEND_AUTO}) {
+        auto o = defaults();
+        o.backend = backend;
+        handle h;
+        ASSERT_EQ(create(unpaired_zero, &o, h), APXCHOL_STATUS_SUCCESS);
+        EXPECT_EQ(stats_of(h.s).backend, APXCHOL_BACKEND_CPU);
+        const std::array<double, 2> b{2, 6};
+        std::array<double, 2> x{};
+        ASSERT_EQ(solve_one(h.s, b.data(), nullptr, x.data(), -1, -1, nullptr, nullptr, 0),
+                  APXCHOL_STATUS_SUCCESS);
+        EXPECT_NEAR(x[0], 1, 1e-8);
+        EXPECT_NEAR(x[1], 2, 1e-8);
+    }
+    auto o = defaults();
+    o.backend = APXCHOL_BACKEND_GPU;
+    handle refused;
+    EXPECT_EQ(create(unpaired_zero, &o, refused), APXCHOL_STATUS_UNSUPPORTED);
+    EXPECT_EQ(refused.s, nullptr);
+
+    const csc64 asymmetric{2, {0, 2, 4}, {0, 1, 0, 1}, {2.0, -1.0, -0.5, 2.0}};
+    std::string message;
+    EXPECT_EQ(create(asymmetric, &o, refused, 0, &message), APXCHOL_STATUS_INVALID_OPERATOR);
+    EXPECT_EQ(refused.s, nullptr);
+    EXPECT_NE(message.find("symmetry"), std::string::npos) << message;
 }
 
 TEST(CApi, GpuRejectsUnsupportedSetupOptionsWithoutChangingRoute) {

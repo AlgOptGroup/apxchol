@@ -8,18 +8,18 @@
 #include <stdio.h>
 
 _Static_assert(APXCHOL_C_ABI_VERSION == 2, "C ABI version");
-_Static_assert(sizeof(apxchol_options) == 64, "apxchol_options layout");
+_Static_assert(sizeof(apxchol_options) == 56, "apxchol_options layout");
 _Static_assert(offsetof(apxchol_options, backend) == 4, "apxchol_options layout");
 _Static_assert(offsetof(apxchol_options, tol) == 8, "apxchol_options layout");
-_Static_assert(offsetof(apxchol_options, max_iter) == 16, "apxchol_options layout");
-_Static_assert(offsetof(apxchol_options, stagnation_window) == 20, "apxchol_options layout");
-_Static_assert(offsetof(apxchol_options, seed) == 24, "apxchol_options layout");
-_Static_assert(offsetof(apxchol_options, threads) == 28, "apxchol_options layout");
-_Static_assert(offsetof(apxchol_options, sampler) == 32, "apxchol_options layout");
-_Static_assert(offsetof(apxchol_options, partitioner) == 36, "apxchol_options layout");
-_Static_assert(offsetof(apxchol_options, keep_factor_values) == 40, "apxchol_options layout");
-_Static_assert(offsetof(apxchol_options, degree_quantile) == 48, "apxchol_options layout");
-_Static_assert(offsetof(apxchol_options, factor_storage) == 56, "apxchol_options layout");
+_Static_assert(offsetof(apxchol_options, degree_quantile) == 16, "apxchol_options layout");
+_Static_assert(offsetof(apxchol_options, max_iter) == 24, "apxchol_options layout");
+_Static_assert(offsetof(apxchol_options, stagnation_window) == 28, "apxchol_options layout");
+_Static_assert(offsetof(apxchol_options, seed) == 32, "apxchol_options layout");
+_Static_assert(offsetof(apxchol_options, threads) == 36, "apxchol_options layout");
+_Static_assert(offsetof(apxchol_options, sampler) == 40, "apxchol_options layout");
+_Static_assert(offsetof(apxchol_options, partitioner) == 44, "apxchol_options layout");
+_Static_assert(offsetof(apxchol_options, keep_factor_values) == 48, "apxchol_options layout");
+_Static_assert(offsetof(apxchol_options, factor_storage) == 52, "apxchol_options layout");
 _Static_assert(APXCHOL_BACKEND_CPU == 0 && APXCHOL_BACKEND_GPU == 1 && APXCHOL_BACKEND_AUTO == 2,
                "backend values");
 _Static_assert(APXCHOL_FACTOR_STORAGE_AUTO == 0, "automatic factor storage value");

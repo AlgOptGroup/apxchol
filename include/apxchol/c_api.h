@@ -34,6 +34,7 @@
  * calls that read it may overlap, but destroy must not overlap any of them.
  * For solve, x must not overlap b or x0; for apply, z must not overlap r.
  * Exact and partial overlap both return INVALID_ARGUMENT. b and x0 may overlap.
+ * info must not overlap any dense input or output buffer.
  *
  * Versioning: options and stats carry struct_size; solve takes info_size.
  * The caller supplies sizeof(struct) from its header. This library accepts
@@ -72,8 +73,8 @@ enum {
 typedef int32_t apxchol_backend;
 /* GPU means the device backend compiled into the library (CUDA or Metal).
  * AUTO follows apxchol::solver's input, option and device compatibility policy;
- * adopting a factor with AUTO selects CPU. Explicit GPU requests never retry
- * on CPU. CUDA cannot adopt a host factor and returns UNSUPPORTED.
+ * adopting a factor with AUTO selects CPU. Once selected, a route never retries
+ * on another backend. CUDA cannot adopt a host factor and returns UNSUPPORTED.
  * stats.backend reports the route chosen, never AUTO. */
 enum { APXCHOL_BACKEND_CPU = 0, APXCHOL_BACKEND_GPU = 1, APXCHOL_BACKEND_AUTO = 2 };
 
@@ -94,11 +95,12 @@ enum {
     APXCHOL_FACTOR_STORAGE_FLOAT32 = 32
 };
 
-/* 64 bytes. Initialize with apxchol_options_default, then override fields. */
+/* 56 bytes. Initialize with apxchol_options_default, then override fields. */
 typedef struct apxchol_options {
     uint32_t struct_size;
     apxchol_backend backend;
     double tol;                       /* relative residual target, finite > 0 */
+    double degree_quantile;           /* -1: chosen by route; otherwise [0, 1) */
     int32_t max_iter;                 /* >= 0 */
     int32_t stagnation_window;        /* >= 0; 0 disables the stagnation stop */
     uint32_t seed;
@@ -106,7 +108,6 @@ typedef struct apxchol_options {
     apxchol_sampler sampler;
     apxchol_partitioner partitioner;
     int32_t keep_factor_values;       /* 0/1; factor value export requires 1 */
-    double degree_quantile;           /* -1: chosen by route; otherwise [0, 1) */
     apxchol_factor_storage factor_storage; /* triangular-solve storage;
                                               AUTO uses the backend default */
 } apxchol_options;
@@ -176,7 +177,8 @@ APXCHOL_C_API apxchol_status apxchol_solver_solve(
 
 /* Apply z = M^{-1} r to nrhs columns, with the same layout and dimension rules
  * as solve. All r values are checked before any output is written. It is a
- * fixed linear map; Laplacian input and output are centred on every call. */
+ * fixed linear map; input and output are centred on every call when the
+ * factor is Laplacian (stats.sddm == 0). */
 APXCHOL_C_API apxchol_status apxchol_solver_apply(
     apxchol_solver* solver, int64_t nrhs, const double* r, double* z,
     char* error_message, size_t error_capacity);

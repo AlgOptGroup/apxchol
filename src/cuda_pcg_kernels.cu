@@ -1,6 +1,7 @@
 #include "cuda_buffer.cuh"
 #include "apxchol/solver/pcg_cuda_kernels.h"
 #include "apxchol/solver/detail/gpu_pcg.h"
+#include "apxchol/solver/detail/cuda_error.h"
 #include "apxchol/csc_work.h"
 
 #include <cub/cub.cuh>
@@ -295,8 +296,7 @@ template void finish<4>(cudaStream_t, std::int64_t, workspace, const operator_cs
 namespace {
 
 void operator_check(cudaError_t status, const char* = nullptr) {
-    if (status != cudaSuccess)
-        throw std::runtime_error(std::string("GPU operator CSR: ") + cudaGetErrorString(status));
+    detail::check_cuda(status, "GPU operator CSR");
 }
 
 struct operator_allocation : detail::cuda_untracked_allocation {

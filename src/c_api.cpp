@@ -140,7 +140,6 @@ apxchol_options read_options(const apxchol_options* options) {
 /// Validates every option before any work, so a later std::invalid_argument
 /// during create can only come from the operator contract.
 apxchol::solve_options to_solve_options(const apxchol_options& o) {
-    require_struct_size(o.struct_size, sizeof(apxchol_options), "options");
     require(o.backend == APXCHOL_BACKEND_CPU || o.backend == APXCHOL_BACKEND_GPU ||
                 o.backend == APXCHOL_BACKEND_AUTO,
             "options.backend must be APXCHOL_BACKEND_CPU, GPU or AUTO");
@@ -371,6 +370,7 @@ apxchol_status apxchol_solver_create(int64_t n, const int64_t* colptr, const int
         require(out_solver != nullptr, "out_solver is NULL");
         const apxchol_options opt = read_options(options);
         apxchol::solve_options so = to_solve_options(opt);
+        const apxchol::detail::thread_budget scope(opt.threads);
         const Eigen::SparseMatrix<double> A = import_csc(n, colptr, rowval, nzval, index_base);
         if (factor != nullptr)
             require(static_cast<std::size_t>(A.rows()) == factor->F.perm.size(),
@@ -384,10 +384,21 @@ apxchol_status apxchol_solver_create(int64_t n, const int64_t* colptr, const int
         try {
             solver = std::make_unique<apxchol_solver>(factor ? apxchol::solver(A, factor->F, so)
                                                             : apxchol::solver(A, so));
+        } catch (const std::invalid_argument& e) {
+            if (gpu) {
+                // Distinguish an invalid operator from a valid but unsupported
+                // GPU input, without repeating validation on successful setup.
+                apxchol::require_operator(A, so.factor_opts.lump_max_mass);
+                fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
+            }
+            throw;
         } catch (const std::domain_error& e) {
             if (gpu) fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
             throw;
         } catch (const std::length_error& e) {
+            if (gpu) fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
+            throw;
+        } catch (const std::overflow_error& e) {
             if (gpu) fail(APXCHOL_STATUS_UNSUPPORTED, e.what());
             throw;
         }

@@ -1,4 +1,5 @@
 #include "apxchol/solver/sptrsv/cuda_dataflow.h"
+#include "apxchol/solver/detail/cuda_error.h"
 #include "cuda_buffer.cuh"
 #include <algorithm>
 #include <climits>
@@ -13,8 +14,7 @@ namespace apxchol {
 namespace {
 void dataflow_check(cudaError_t status, const char *operation) {
     if (status != cudaSuccess)
-        throw std::runtime_error(std::string("GPU dataflow: ") + operation + ": " +
-                                 cudaGetErrorString(status));
+        detail::check_cuda(status, (std::string("GPU dataflow: ") + operation).c_str());
 }
 __device__ __forceinline__ float dataflow_accumulate(__half *values, float *x, float sum) {
     float a = 0, b = 0;

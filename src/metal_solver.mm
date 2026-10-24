@@ -5,6 +5,7 @@
 #include "apxchol/solver/detail/metal_host.h"
 #include "apxchol/solver/detail/factor_validation.h"
 #include "apxchol/solver/detail/thread_budget.h"
+#include "apxchol/solver/detail/device_memory_error.h"
 #include "apxchol/solver/detail/gpu_pcg.h"
 #include "apxchol/solver/detail/metal_schedule.h"
 #include "apxchol/solver/detail/permuted_operator.h"
@@ -53,17 +54,6 @@ static_assert(sizeof(solve_state) == 48);
 static_assert(offsetof(solve_state, thr) == 16);
 static_assert(offsetof(solve_state, alpha) == 32);
 static_assert(offsetof(solve_state, active) == 40);
-
-/// The device cannot hold a buffer. A std::bad_alloc, so callers that map
-/// out-of-memory report it as one; what() names the buffer.
-class device_memory_error : public std::bad_alloc {
-public:
-    explicit device_memory_error(std::string what) : what_(std::move(what)) {}
-    const char* what() const noexcept override { return what_.c_str(); }
-
-private:
-    std::string what_;
-};
 
 const char kKernelSource[] =
     "\n#include <metal_stdlib>\nusing namespace metal;\n"
