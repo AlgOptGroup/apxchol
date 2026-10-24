@@ -1076,16 +1076,15 @@ struct solver::impl {
         if (F) {
             if (A.rows() != A.cols() || static_cast<Eigen::Index>(F->L.rows()) != A.rows())
                 throw std::invalid_argument("solver: factorization dimension mismatch");
-            if (F->sddm) {
-                require_operator(A, opts.factor_opts.lump_max_mass);
-            } else {
-                const operator_view op(A, opts.factor_opts.lump_max_mass);
-                const auto& matrix = op.matrix();
-                for (Eigen::Index col = 0; col < matrix.cols(); ++col) {
-                    double diagonal = 0, degree = 0;
-                    for (Eigen::SparseMatrix<double>::InnerIterator entry(matrix, col); entry; ++entry)
+            require_operator(A, opts.factor_opts.lump_max_mass);
+            if (!F->sddm) {
+                for (Eigen::Index col = 0; col < A.cols(); ++col) {
+                    double diagonal = 0, positive = 0, degree = 0;
+                    for (Eigen::SparseMatrix<double>::InnerIterator entry(A, col); entry; ++entry)
                         if (entry.row() == entry.col()) diagonal = entry.value();
+                        else if (entry.value() > 0) positive += entry.value();
                         else degree -= entry.value();
+                    diagonal += positive; // Match lumping without copying the operator.
                     if (diagonal - degree > diagonal * 1e-12)
                         throw std::invalid_argument("a Laplacian factor cannot precondition an SDDM operator");
                 }

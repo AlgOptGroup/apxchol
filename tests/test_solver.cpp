@@ -162,16 +162,21 @@ TEST(Solver, CpuOwnerAdoptsAnIndependentFactorAndAppliesIt) {
 
 TEST(Solver, AdoptedLaplacianFactorRejectsPositiveExcessBeforeBackendSetup) {
     const scoped_omp_threads threads(1);
-    Sparse laplacian(2, 2);
-    const std::vector<Eigen::Triplet<double>> entries{{0, 0, 1}, {0, 1, -1},
-                                                    {1, 0, -1}, {1, 1, 1}};
+    Sparse laplacian(3, 3);
+    const std::vector<Eigen::Triplet<double>> entries{{0, 0, 1}, {0, 2, -1},
+        {1, 1, 1}, {1, 2, -1}, {2, 0, -1}, {2, 1, -1}, {2, 2, 2}};
     laplacian.setFromTriplets(entries.begin(), entries.end());
     const auto factor = apxchol::factorize(laplacian);
     ASSERT_FALSE(factor.sddm);
+    for (const double positive : {0.0, 0.125})
     for (const double scale : {1e-6, 1.0, 1e6}) {
-        SCOPED_TRACE(scale);
+        SCOPED_TRACE(::testing::Message() << positive << ' ' << scale);
         Sparse matrix = scale * laplacian;
-        matrix.coeffRef(0, 0) = scale * (1 + 4e-12);
+        matrix.coeffRef(0, 1) = scale * positive;
+        matrix.coeffRef(1, 0) = scale * positive;
+        matrix.coeffRef(0, 0) = matrix.coeffRef(1, 1) = scale * (1 - positive);
+        EXPECT_NO_THROW(apxchol::solver(matrix, factor, cpu_options()));
+        matrix.coeffRef(0, 0) = scale * (1 - positive + 4e-12);
         for (const auto backend : {apxchol::solve_backend::cpu,
                                    apxchol::solve_backend::automatic,
                                    apxchol::solve_backend::gpu}) {
@@ -185,7 +190,7 @@ TEST(Solver, AdoptedLaplacianFactorRejectsPositiveExcessBeforeBackendSetup) {
                 EXPECT_NE(std::string(error.what()).find("Laplacian factor"), std::string::npos);
             }
         }
-        matrix.coeffRef(0, 0) = scale * (1 + 0.25e-12);
+        matrix.coeffRef(0, 0) = scale * (1 - positive + 0.25e-12);
         EXPECT_NO_THROW(apxchol::solver(matrix, factor, cpu_options()));
     }
 }
