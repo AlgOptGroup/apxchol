@@ -18,7 +18,7 @@ Supply an assembled operator. For adjacency input, explicitly use
 `apxchol_laplacian(Adj)` to form `D - Adj` with self-loops removed.
 Validation is shared with C++; positive off-diagonal pairs are lumped onto
 the diagonal for preconditioning, while PCG and residual checks retain the
-original operator. Laplacian nullspaces are handled componentwise.
+original operator. A Laplacian RHS must sum to zero within each connected component.
 Omitted solve arguments use the C++ defaults (relative tolerance 1e-8 and
 200 iterations). Tolerance must be finite and positive; the iteration limit
 must be a nonnegative integer. `[]` selects either default.

@@ -7,8 +7,8 @@ classdef apxchol_solver < handle
   %   z   = s.apply(r);                   % one preconditioner application, z = M\r
   %
   % Laplacian vs SDDM is auto-detected. A Laplacian with k connected components
-  % has rank n-k and uses componentwise centering. The constructor builds the
-  % factor once; clearing the object frees it automatically.
+  % has rank n-k; its RHS must sum to zero within each component. The constructor
+  % builds the factor once; clearing the object frees it automatically.
   %
   % Omitted or [] solve options use the C++ defaults. rtol must be finite
   % and positive; maxiter must be an integer in [0, 2^31-1].

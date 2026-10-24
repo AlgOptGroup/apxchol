@@ -11,9 +11,6 @@ function L = apxchol_laplacian(A)
   % `--input-kind adjacency` and the benchmark suite's reading of a .mtx file,
   % so a graph stored with negative weights is read as an undirected graph
   % rather than silently made indefinite.
-  %
-  % Handing an adjacency matrix straight to APXCHOL_SOLVER raises
-  % `apxchol:badInput` rather than returning a wrong answer quietly.
   if ~issparse(A)
     error('apxchol:badMatrix', 'A must be sparse (use sparse(A))');
   end
