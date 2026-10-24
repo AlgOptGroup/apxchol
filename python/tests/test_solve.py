@@ -594,6 +594,19 @@ def test_omitted_solver_defaults_match_compiled_defaults():
     assert (implicit.iters, implicit.residual, implicit.converged) == (explicit.iters, explicit.residual, explicit.converged)
 
 
+@pytest.mark.parametrize("construct", [apxchol.Solver, apxchol.factorize])
+@pytest.mark.parametrize("options", [{}, {"seed": np.int64(7), "partitioner": "priority_greedy"}])
+def test_factor_settings_match_native_options(construct, options):
+    A = grid2d_sddm(8).tocsc()
+    solver = construct(A, backend="cpu", num_threads=1, **options)
+    native = apxchol._apxchol.Solver(A.indptr, A.indices, A.data,
+                                   dict(backend="cpu", num_threads=1, keep_factor=True, **options))
+    G = solver.chol()
+    np.testing.assert_array_equal(solver.P, native.perm())
+    for actual, expected in zip((G.indptr, G.indices, G.data), native.factor_csc()):
+        np.testing.assert_array_equal(actual, expected)
+
+
 @pytest.mark.parametrize("cpu_schedule", ["auto", "levels"])
 def test_explicit_factor_settings(cpu_schedule):
     A = grid2d_sddm(6)
