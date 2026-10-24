@@ -78,6 +78,8 @@ For an installed library, replace the first two lines with
 `find_package(apxchol CONFIG REQUIRED)`. A standalone library build uses
 `cmake -S cmake/core -B build`, followed by `cmake --build build` and
 `cmake --install build --prefix /path/to/prefix`.
+If Eigen was fetched during configuration, its headers are installed with the
+library; otherwise consumers need the Eigen package used for the build.
 
 The target supplies C++23 and the architecture flag used by the library.
 Matching architecture settings matter because Eigen objects cross the library
