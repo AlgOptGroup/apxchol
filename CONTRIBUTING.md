@@ -26,6 +26,10 @@ pytest python/tests
 ./octave/build.sh
 ```
 
+The release version is set in `cmake/apxchol_version.cmake`; native builds and
+Python packages share it. PyPI publication requires a matching `v<version>`
+GitHub release tag. Manually running the publish workflow only builds the wheels.
+
 ## Code conventions
 
 Use C++23, `snake_case`, namespace `apxchol`, and trailing underscores for
