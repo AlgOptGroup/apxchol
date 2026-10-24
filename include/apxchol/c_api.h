@@ -76,7 +76,7 @@ typedef int32_t apxchol_backend;
 /* GPU means the device backend compiled into the library (CUDA or Metal).
  * AUTO follows apxchol::solver's input, option and device compatibility policy;
  * adopting a factor with AUTO selects CPU. Once selected, a route never retries
- * on another backend. CUDA cannot adopt a host factor and returns UNSUPPORTED.
+ * on another backend. Explicit GPU selection also supports host-factor adoption.
  * stats.backend reports the route chosen, never AUTO. */
 enum { APXCHOL_BACKEND_CPU = 0, APXCHOL_BACKEND_GPU = 1, APXCHOL_BACKEND_AUTO = 2 };
 

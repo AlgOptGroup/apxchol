@@ -1055,16 +1055,14 @@ struct solver::impl {
         if (cp) { cp->descend("setup"); cp->tick(); }
         const auto route = F && opts.backend == solve_backend::automatic
             ? solve_backend::cpu
-#if defined(APXCHOL_USE_METAL)
+#if defined(APXCHOL_USE_CUDA) || defined(APXCHOL_USE_METAL)
             : F && opts.backend == solve_backend::gpu ? solve_backend::gpu
 #endif
             : detail::select_solve_backend(opts, &A);
         if (cp) { (*cp)("backend_selection"); cp->ascend(); }
 #if defined(APXCHOL_USE_CUDA)
-        if (route == solve_backend::gpu) {
-            if (F) throw std::invalid_argument("CUDA solver cannot adopt a host factor; request CPU explicitly");
-            return owner_type(std::in_place_type<detail::gpu_solve_session>, A, opts, cp);
-        }
+        if (route == solve_backend::gpu)
+            return owner_type(std::in_place_type<detail::gpu_solve_session>, A, opts, cp, F);
 #elif defined(APXCHOL_USE_METAL)
         if (route == solve_backend::gpu) {
             if (F) return owner_type(std::in_place_type<metal_solver>, A, std::move(*F), opts, cp);

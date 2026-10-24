@@ -126,14 +126,6 @@ std::vector<apxchol_backend> available_backends() {
     return backends;
 }
 
-std::vector<apxchol_backend> adoption_backends() {
-#if defined(APXCHOL_USE_METAL)
-    return available_backends();
-#else
-    return {APXCHOL_BACKEND_CPU};
-#endif
-}
-
 struct handle {
     apxchol_solver* s = nullptr;
     ~handle() { apxchol_solver_destroy(s); }
@@ -480,51 +472,59 @@ struct strided_array {
 TEST(CApi, StridedScalarAndBatchSolveWarmStartAndApplyMatchContiguousViews) {
     const Sparse A = grid_laplacian(4, 4, 0.2);
     const auto c = to_csc64(A);
+    factor_handle factor;
+    ASSERT_EQ(create_factor(c, nullptr, factor), APXCHOL_STATUS_SUCCESS);
+    const auto retained = export_of(factor.f);
     for (const auto backend : available_backends()) {
-        auto options = cpu_options();
-        options.backend = backend;
-        handle h;
-        ASSERT_EQ(create(c, &options, h), APXCHOL_STATUS_SUCCESS);
-        for (const std::int64_t k : {1, 5}) {
-            Eigen::MatrixXd B(c.n, k), expected(c.n, k), applied(c.n, k);
-            for (int j = 0; j < k; ++j) B.col(j) = compatible_rhs(c.n, j + 1);
-            const apxchol_const_dense_view rhs{B.data(), 1, c.n};
-            const apxchol_dense_view solution{expected.data(), 1, c.n}, preconditioned{applied.data(), 1, c.n};
-            ASSERT_EQ(apxchol_solver_solve(h.s, k, &rhs, nullptr, &solution, tolerance,
-                                          max_iterations, nullptr, 0, nullptr, 0), APXCHOL_STATUS_SUCCESS);
-            ASSERT_EQ(apxchol_solver_apply(h.s, k, &rhs, &preconditioned, nullptr, 0), APXCHOL_STATUS_SUCCESS);
-            const std::array<std::array<std::int64_t, 2>, 7> layouts{{
-                {1, c.n}, {k, 1}, {2, 2 * c.n + 3}, {-1, c.n + 2},
-                {1, -c.n - 2}, {-2, -2 * c.n - 3}, {5, 3}}};
-            for (std::size_t l = 0; l < layouts.size(); ++l) {
-                SCOPED_TRACE(::testing::Message() << "backend=" << backend << " columns=" << k << " layout=" << l);
-                const auto bs = layouts[l], gs = layouts[(l + 1) % layouts.size()], xs = layouts[(l + 2) % layouts.size()];
-                strided_array b(c.n, k, bs[0], bs[1]), guess(c.n, k, gs[0], gs[1]), x(c.n, k, xs[0], xs[1]);
-                b.assign(B);
-                guess.assign(0.25 * B);
-                const auto input = b.input(), initial = guess.input();
-                const auto output = x.output();
-                std::vector<apxchol_solve_info> info(k);
-                for (const bool warm : {false, true}) {
-                    ASSERT_EQ(apxchol_solver_solve(h.s, k, &input, warm ? &initial : nullptr,
-                        &output, tolerance, max_iterations, info.data(), sizeof(info[0]), nullptr, 0),
-                        APXCHOL_STATUS_SUCCESS);
-                    const auto actual = x.values();
-                    EXPECT_TRUE(actual.isApprox(expected, 1e-6));
-                    for (int j = 0; j < k; ++j) {
-                        EXPECT_LT(true_residual(A, B.col(j), actual.col(j)), tolerance);
-                        EXPECT_EQ(info[j].converged, 1);
+        for (const bool supplied : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "supplied factor=" << supplied);
+            auto options = cpu_options();
+            options.backend = backend;
+            handle h;
+            ASSERT_EQ(supplied ? adopt(c, factor.f, &options, h) : create(c, &options, h),
+                      APXCHOL_STATUS_SUCCESS);
+            for (const std::int64_t k : {1, 5}) {
+                Eigen::MatrixXd B(c.n, k), expected(c.n, k), applied(c.n, k);
+                for (int j = 0; j < k; ++j) B.col(j) = compatible_rhs(c.n, j + 1);
+                const apxchol_const_dense_view rhs{B.data(), 1, c.n};
+                const apxchol_dense_view solution{expected.data(), 1, c.n}, preconditioned{applied.data(), 1, c.n};
+                ASSERT_EQ(apxchol_solver_solve(h.s, k, &rhs, nullptr, &solution, tolerance,
+                                              max_iterations, nullptr, 0, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+                ASSERT_EQ(apxchol_solver_apply(h.s, k, &rhs, &preconditioned, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+                const std::array<std::array<std::int64_t, 2>, 7> layouts{{
+                    {1, c.n}, {k, 1}, {2, 2 * c.n + 3}, {-1, c.n + 2},
+                    {1, -c.n - 2}, {-2, -2 * c.n - 3}, {5, 3}}};
+                for (std::size_t l = 0; l < layouts.size(); ++l) {
+                    SCOPED_TRACE(::testing::Message() << "backend=" << backend << " columns=" << k << " layout=" << l);
+                    const auto bs = layouts[l], gs = layouts[(l + 1) % layouts.size()], xs = layouts[(l + 2) % layouts.size()];
+                    strided_array b(c.n, k, bs[0], bs[1]), guess(c.n, k, gs[0], gs[1]), x(c.n, k, xs[0], xs[1]);
+                    b.assign(B);
+                    guess.assign(0.25 * B);
+                    const auto input = b.input(), initial = guess.input();
+                    const auto output = x.output();
+                    std::vector<apxchol_solve_info> info(k);
+                    for (const bool warm : {false, true}) {
+                        ASSERT_EQ(apxchol_solver_solve(h.s, k, &input, warm ? &initial : nullptr,
+                            &output, tolerance, max_iterations, info.data(), sizeof(info[0]), nullptr, 0),
+                            APXCHOL_STATUS_SUCCESS);
+                        const auto actual = x.values();
+                        EXPECT_TRUE(actual.isApprox(expected, 1e-6));
+                        for (int j = 0; j < k; ++j) {
+                            EXPECT_LT(true_residual(A, B.col(j), actual.col(j)), tolerance);
+                            EXPECT_EQ(info[j].converged, 1);
+                        }
+                        x.expect_padding_unchanged();
                     }
+                    ASSERT_EQ(apxchol_solver_apply(h.s, k, &input, &output, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+                    EXPECT_TRUE(x.values().isApprox(applied, 1e-12));
+                    b.expect_padding_unchanged();
+                    guess.expect_padding_unchanged();
                     x.expect_padding_unchanged();
                 }
-                ASSERT_EQ(apxchol_solver_apply(h.s, k, &input, &output, nullptr, 0), APXCHOL_STATUS_SUCCESS);
-                EXPECT_TRUE(x.values().isApprox(applied, 1e-12));
-                b.expect_padding_unchanged();
-                guess.expect_padding_unchanged();
-                x.expect_padding_unchanged();
             }
         }
     }
+    EXPECT_TRUE(export_of(factor.f) == retained);
 }
 
 TEST(CApi, InvalidDenseViewsAreRejectedBeforeAccessOrOutputWrites) {
@@ -859,9 +859,6 @@ TEST(CApi, FactorStorageReportsResolvedSolverStorageAndNativeFactorExport) {
             ASSERT_EQ(solve_one(explicit_storage.s, b.data(), nullptr, x.data(), tolerance, max_iterations,
                                &info, nullptr, 0), APXCHOL_STATUS_SUCCESS);
             EXPECT_LT(true_residual(A, b, x), tolerance);
-#if defined(APXCHOL_USE_CUDA)
-            if (backend == APXCHOL_BACKEND_GPU) continue;
-#endif
             handle adopted;
             ASSERT_EQ(adopt(c, factor.f, &o, adopted), APXCHOL_STATUS_SUCCESS);
             EXPECT_EQ(stats_of(adopted.s).factor_storage, storage);
@@ -871,13 +868,16 @@ TEST(CApi, FactorStorageReportsResolvedSolverStorageAndNativeFactorExport) {
                       APXCHOL_STATUS_SUCCESS);
             EXPECT_LT(true_residual(A, b, x), tolerance);
         }
-#if defined(APXCHOL_USE_CUDA)
-        if (backend == APXCHOL_BACKEND_GPU) continue;
-#endif
         o.factor_storage = APXCHOL_FACTOR_STORAGE_AUTO;
         handle automatic;
         ASSERT_EQ(adopt(c, factor.f, &o, automatic), APXCHOL_STATUS_SUCCESS);
-        EXPECT_EQ(stats_of(automatic.s).factor_storage, APXCHOL_FACTOR_STORAGE_FLOAT32);
+#if defined(APXCHOL_USE_CUDA)
+        const auto expected_storage = backend == APXCHOL_BACKEND_GPU
+            ? APXCHOL_FACTOR_STORAGE_FLOAT16 : APXCHOL_FACTOR_STORAGE_FLOAT32;
+#else
+        const auto expected_storage = APXCHOL_FACTOR_STORAGE_FLOAT32;
+#endif
+        EXPECT_EQ(stats_of(automatic.s).factor_storage, expected_storage);
         EXPECT_TRUE(export_of(automatic.s) == native);
     }
 }
@@ -1496,12 +1496,23 @@ TEST(CApi, AutomaticScalarAndHostFactorAdoptionSelectCpu) {
     handle automatic;
     ASSERT_EQ(adopt(c, f.f, &o, automatic), APXCHOL_STATUS_SUCCESS);
     EXPECT_EQ(stats_of(automatic.s).backend, APXCHOL_BACKEND_CPU);
-#if defined(APXCHOL_USE_CUDA)
-    o.backend = APXCHOL_BACKEND_GPU;
-    handle refused;
-    EXPECT_EQ(adopt(c, f.f, &o, refused), APXCHOL_STATUS_UNSUPPORTED);
-    EXPECT_EQ(refused.s, nullptr);
-#endif
+    if (apxchol_backend_available(APXCHOL_BACKEND_GPU)) {
+        o.backend = APXCHOL_BACKEND_GPU;
+        handle gpu;
+        ASSERT_EQ(adopt(c, f.f, &o, gpu), APXCHOL_STATUS_SUCCESS);
+        EXPECT_EQ(stats_of(gpu.s).backend, APXCHOL_BACKEND_GPU);
+        factor_handle scalar_factor;
+        ASSERT_EQ(create_factor(scalar, &o, scalar_factor), APXCHOL_STATUS_SUCCESS);
+        handle scalar_gpu;
+        ASSERT_EQ(adopt(scalar, scalar_factor.f, &o, scalar_gpu), APXCHOL_STATUS_SUCCESS);
+        const double b = 6;
+        double x = 0;
+        ASSERT_EQ(solve_one(scalar_gpu.s, &b, nullptr, &x, tolerance, max_iterations,
+                            nullptr, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+        EXPECT_NEAR(x, 3, 1e-8);
+        ASSERT_EQ(apply_one(scalar_gpu.s, &b, &x, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+        EXPECT_NEAR(x, 3, 1e-6);
+    }
 }
 
 TEST(CApi, FactorHandleExportEqualsTheSolversBytewise) {
@@ -1577,7 +1588,7 @@ TEST(CApi, SolverFromFactorIsBitIdenticalOnItsOwnMatrix) {
 TEST(CApi, SolverFromFactorPreconditionsANearbyOperator) {
     constexpr double strict_tolerance = 1e-10;
     constexpr int large_budget = 1000;
-    for (const auto backend : adoption_backends()) {
+    for (const auto backend : available_backends()) {
         for (const double shift : {0.0, 0.05}) {
             SCOPED_TRACE(::testing::Message() << "backend=" << backend << " shift=" << shift);
             const Sparse A = grid_laplacian(26, 20, shift);
@@ -1630,23 +1641,27 @@ TEST(CApi, SddmFactorMayPreconditionALaplacianButNotConversely) {
     ASSERT_EQ(stats_of(lap_factor.f).sddm, 0);
     ASSERT_EQ(stats_of(sddm_factor.f).sddm, 1);
 
-    handle refused;
-    std::string message;
-    EXPECT_EQ(adopt(to_csc64(sddm), lap_factor.f, &o, refused, 0, &message),
-              APXCHOL_STATUS_INVALID_ARGUMENT);
-    EXPECT_EQ(refused.s, nullptr);
-    EXPECT_NE(message.find("Laplacian factor"), std::string::npos) << message;
+    for (const auto backend : available_backends()) {
+        SCOPED_TRACE(backend);
+        o.backend = backend;
+        handle refused;
+        std::string message;
+        EXPECT_EQ(adopt(to_csc64(sddm), lap_factor.f, &o, refused, 0, &message),
+                  APXCHOL_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(refused.s, nullptr);
+        EXPECT_NE(message.find("Laplacian factor"), std::string::npos) << message;
 
-    // A full-rank factor on a singular operator: a solution, not centred.
-    handle h;
-    ASSERT_EQ(adopt(to_csc64(lap), sddm_factor.f, &o, h, 0, &message), APXCHOL_STATUS_SUCCESS)
-        << message;
-    EXPECT_EQ(stats_of(h.s).sddm, 1);
-    const Eigen::VectorXd b = compatible_rhs(lap.rows(), 2);
-    Eigen::VectorXd x(lap.rows());
-    ASSERT_EQ(solve_one(h.s, b.data(), nullptr, x.data(), strict_tolerance, large_budget, nullptr, nullptr, 0),
-              APXCHOL_STATUS_SUCCESS);
-    EXPECT_LT(true_residual(lap, b, x), strict_tolerance);
+        // A full-rank factor on a singular operator: a solution, not centred.
+        handle h;
+        ASSERT_EQ(adopt(to_csc64(lap), sddm_factor.f, &o, h, 0, &message), APXCHOL_STATUS_SUCCESS)
+            << message;
+        EXPECT_EQ(stats_of(h.s).sddm, 1);
+        const Eigen::VectorXd b = compatible_rhs(lap.rows(), 2);
+        Eigen::VectorXd x(lap.rows());
+        ASSERT_EQ(solve_one(h.s, b.data(), nullptr, x.data(), strict_tolerance, large_budget, nullptr, nullptr, 0),
+                  APXCHOL_STATUS_SUCCESS);
+        EXPECT_LT(true_residual(lap, b, x), strict_tolerance);
+    }
 }
 
 TEST(CApi, FactorHandleArgumentErrors) {
@@ -1757,47 +1772,50 @@ TEST(CApi, FactorHandleArgumentErrors) {
 TEST(CApi, FactorHandleOutlivesAndIsUnchangedByItsSolvers) {
     const Sparse A = grid_laplacian(20, 20);
     const csc64 c = to_csc64(A);
-    auto o = cpu_options();
-    o.threads = 1;
-    o.keep_factor_values = 1;
-    const Eigen::VectorXd b = compatible_rhs(c.n, 6);
+    for (const auto backend : available_backends()) {
+        auto o = cpu_options();
+        o.backend = backend;
+        o.threads = 1;
+        o.keep_factor_values = 1;
+        const Eigen::VectorXd b = compatible_rhs(c.n, 6);
 
-    factor_handle f;
-    ASSERT_EQ(create_factor(c, &o, f), APXCHOL_STATUS_SUCCESS);
-    const exported before = export_of(f.f);
-    const apxchol_stats fs = stats_of(f.f);
-    Eigen::VectorXd x_first(c.n);
-    {
-        handle s;
-        ASSERT_EQ(adopt(c, f.f, &o, s), APXCHOL_STATUS_SUCCESS);
-        ASSERT_EQ(solve_one(s.s, b.data(), nullptr, x_first.data(), tolerance, max_iterations, nullptr,
-                                       nullptr, 0),
-                  APXCHOL_STATUS_SUCCESS);
-    }  // the solver is gone; the factor is as it was
-    EXPECT_TRUE(export_of(f.f) == before);
-    const apxchol_stats again = stats_of(f.f);
-    expect_same_factor_stats(again, fs);
+        factor_handle f;
+        ASSERT_EQ(create_factor(c, &o, f), APXCHOL_STATUS_SUCCESS);
+        const exported before = export_of(f.f);
+        const apxchol_stats fs = stats_of(f.f);
+        Eigen::VectorXd x_first(c.n);
+        {
+            handle s;
+            ASSERT_EQ(adopt(c, f.f, &o, s), APXCHOL_STATUS_SUCCESS);
+            ASSERT_EQ(solve_one(s.s, b.data(), nullptr, x_first.data(), tolerance, max_iterations, nullptr,
+                                           nullptr, 0),
+                      APXCHOL_STATUS_SUCCESS);
+        }  // the solver is gone; the factor is as it was
+        EXPECT_TRUE(export_of(f.f) == before);
+        const apxchol_stats again = stats_of(f.f);
+        expect_same_factor_stats(again, fs);
 
-    // Two solvers adopt it concurrently, then outlive it.
-    std::array<handle, 2> solvers;
-    std::array<apxchol_status, 2> statuses{-1, -1};
-    {
-        std::thread t0([&] { statuses[0] = adopt(c, f.f, &o, solvers[0]); });
-        std::thread t1([&] { statuses[1] = adopt(c, f.f, &o, solvers[1]); });
-        t0.join();
-        t1.join();
-    }
-    ASSERT_EQ(statuses[0], APXCHOL_STATUS_SUCCESS);
-    ASSERT_EQ(statuses[1], APXCHOL_STATUS_SUCCESS);
-    apxchol_factor_destroy(f.f);
-    f.f = nullptr;
-    for (handle& s : solvers) {
-        Eigen::VectorXd x(c.n);
-        ASSERT_EQ(solve_one(s.s, b.data(), nullptr, x.data(), tolerance, max_iterations, nullptr,
-                                       nullptr, 0),
-                  APXCHOL_STATUS_SUCCESS);
-        EXPECT_TRUE(same_bytes(x.data(), x_first.data(), x.size()));
-        EXPECT_TRUE(export_of(s.s) == before);
+        // Two solvers adopt it concurrently, then outlive it.
+        std::array<handle, 2> solvers;
+        std::array<apxchol_status, 2> statuses{-1, -1};
+        {
+            std::thread t0([&] { statuses[0] = adopt(c, f.f, &o, solvers[0]); });
+            std::thread t1([&] { statuses[1] = adopt(c, f.f, &o, solvers[1]); });
+            t0.join();
+            t1.join();
+        }
+        ASSERT_EQ(statuses[0], APXCHOL_STATUS_SUCCESS);
+        ASSERT_EQ(statuses[1], APXCHOL_STATUS_SUCCESS);
+        apxchol_factor_destroy(f.f);
+        f.f = nullptr;
+        for (handle& s : solvers) {
+            Eigen::VectorXd x(c.n);
+            ASSERT_EQ(solve_one(s.s, b.data(), nullptr, x.data(), tolerance, max_iterations, nullptr,
+                                           nullptr, 0),
+                      APXCHOL_STATUS_SUCCESS);
+            EXPECT_TRUE(same_bytes(x.data(), x_first.data(), x.size()));
+            EXPECT_TRUE(export_of(s.s) == before);
+        }
     }
 }
 
@@ -1931,7 +1949,6 @@ TEST(CApi, GpuFactorExportAndCopyCanBeReusedOnCpu) {
     ASSERT_EQ(solve_one(cpu.s, b.data(), nullptr, x.data(), tolerance, max_iterations, nullptr, nullptr, 0),
               APXCHOL_STATUS_SUCCESS);
     EXPECT_LT(true_residual(A, b, x), tolerance);
-#if defined(APXCHOL_USE_METAL)
     o.backend = APXCHOL_BACKEND_GPU;
     handle gpu_again;
     ASSERT_EQ(adopt(c, copy.f, &o, gpu_again), APXCHOL_STATUS_SUCCESS);
@@ -1961,7 +1978,6 @@ TEST(CApi, GpuFactorExportAndCopyCanBeReusedOnCpu) {
     ASSERT_EQ(apxchol_solver_apply(peer.s, 5, &rhs, &second_out, nullptr, 0),
               APXCHOL_STATUS_SUCCESS);
     EXPECT_TRUE(same_bytes(X.data(), Y.data(), X.size()));
-#endif
     o.backend = APXCHOL_BACKEND_GPU;
     o.keep_factor_values = 0;
     handle released;

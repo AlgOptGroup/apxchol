@@ -325,6 +325,22 @@ TEST(GpuFactorFinalize, SharedCapsulesAndExplicitHostImportsPreserveOwnership) {
     const std::vector<edge> edges = {{1, 0, 2.0}, {1, 3, 3.0}};
     const std::vector<node_index> order = {1, 3, 0, 2};
     complete_factor fixture(4, edges, order);
+    auto public_factor = fixture.reference;
+    public_factor.sddm = true;
+    public_factor.research_device_factor = fixture.state.finalize_device_factor(
+        public_factor.perm, 4, options.factor_storage, options.drop_tolerance);
+    ASSERT_FALSE(public_factor.research_device_factor->empty());
+    ASSERT_EQ(public_factor.research_device_factor.use_count(), 1);
+    apxchol::solve_options public_options;
+    public_options.backend = apxchol::solve_backend::gpu;
+    public_options.factor_opts = options;
+    try {
+        apxchol::solver rejected(solve_matrix(4, 1.0), std::move(public_factor), public_options);
+        FAIL() << "public factor adoption must not consume a device capsule";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find("host factor without a device capsule"),
+                  std::string::npos);
+    }
     for (bool sddm : {false, true}) {
         const node_index m = sddm ? 4 : 3;
         auto reference = fixture.reference;

@@ -533,7 +533,7 @@ TEST(Solver, CudaOwnerReusesOwnedInputAndAppliesFactor) {
 #endif
 }
 
-TEST(Solver, CudaOwnerRejectsHostFactorsAndInvalidWarmStarts) {
+TEST(Solver, CudaOwnerAdoptsHostFactorsAndRejectsInvalidWarmStarts) {
 #if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
     GTEST_SKIP() << "32-bit-node CUDA owner required";
 #else
@@ -541,14 +541,15 @@ TEST(Solver, CudaOwnerRejectsHostFactorsAndInvalidWarmStarts) {
     auto options = cpu_options();
     const auto host_factor = apxchol::factorize(matrix, options.factor_opts);
     options.backend = apxchol::solve_backend::gpu;
-    EXPECT_THROW(apxchol::solver(matrix, host_factor, options), std::invalid_argument);
     int count = 0;
     const auto status = cudaGetDeviceCount(&count);
     if (status == cudaErrorNoDevice || status == cudaErrorInsufficientDriver)
         GTEST_SKIP() << "CUDA unavailable: " << cudaGetErrorString(status);
     ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
     if (count == 0) GTEST_SKIP() << "No CUDA devices";
-    apxchol::solver owner(matrix, options);
+    options.factor_opts.is_select = "priority_greedy";
+    EXPECT_THROW(apxchol::solver(matrix, options), std::invalid_argument);
+    apxchol::solver owner(matrix, host_factor, options);
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     Eigen::VectorXd x0 = Eigen::VectorXd::Zero(matrix.rows() - 1);
     EXPECT_THROW(owner.solve(rhs, -1.0, -1, &x0), std::invalid_argument);
@@ -736,9 +737,21 @@ TEST(Solver, CudaScalesRhsAndWarmStartsForFloatPreconditioner) {
 #endif
 }
 
-#if defined(APXCHOL_USE_METAL)
-TEST(Solver, MetalOwnerPreservesStorageAndAdoptsItsFactor) {
+#if defined(APXCHOL_USE_CUDA) || defined(APXCHOL_USE_METAL)
+TEST(Solver, GpuOwnerPreservesStorageAndAdoptsItsFactor) {
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA owner required";
+#else
+#ifdef APXCHOL_USE_CUDA
+    int count = 0;
+    const auto status = cudaGetDeviceCount(&count);
+    if (status == cudaErrorNoDevice || status == cudaErrorInsufficientDriver)
+        GTEST_SKIP() << "CUDA unavailable: " << cudaGetErrorString(status);
+    ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
+    if (count == 0) GTEST_SKIP() << "No CUDA devices";
+#else
     if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
+#endif
     const scoped_omp_threads threads(1);
     const Sparse matrix = operator_matrix();
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
@@ -759,6 +772,8 @@ TEST(Solver, MetalOwnerPreservesStorageAndAdoptsItsFactor) {
         EXPECT_EQ(owner->rows(), matrix.rows());
         EXPECT_EQ(owner->factor_storage(), storage);
         const auto& exported = owner->factor();
+        options.factor_opts.is_select = "priority_greedy";
+        EXPECT_THROW(apxchol::solver(matrix, options), std::invalid_argument);
         apxchol::solver adopted(matrix, exported, options);
         EXPECT_EQ(adopted.backend(), apxchol::solve_backend::gpu);
         EXPECT_EQ(adopted.factor_storage(), storage);
@@ -793,6 +808,7 @@ TEST(Solver, MetalOwnerPreservesStorageAndAdoptsItsFactor) {
         expect_solution(matrix, rhs, output);
         expect_solution(matrix, -rhs, owner->solve(-rhs).x);
     }
+#endif
 }
 #endif
 

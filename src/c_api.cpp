@@ -176,15 +176,9 @@ apxchol::solve_backend resolve_route(const apxchol::solve_options& so,
         (adopt && so.backend == apxchol::solve_backend::automatic))
         return apxchol::solve_backend::cpu;
     if (so.backend == apxchol::solve_backend::gpu) {
-#if defined(APXCHOL_USE_CUDA)
-        if (adopt)
-            fail(APXCHOL_STATUS_UNSUPPORTED, "CUDA cannot adopt a host factor; request CPU");
-#endif
         if (!gpu_available())
             fail(APXCHOL_STATUS_UNSUPPORTED, "no usable GPU backend in this build");
-#if defined(APXCHOL_USE_METAL)
         if (adopt) return apxchol::solve_backend::gpu;
-#endif
     }
     try {
         return apxchol::detail::select_solve_backend(so, &A);

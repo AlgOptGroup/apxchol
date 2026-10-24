@@ -30,7 +30,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 - Solver controls are typed per-instance options, not environment variables. Validate them before setup; bindings share compiled defaults. Libraries are quiet by default, and `collect_timings` controls optional checkpoints. Standard OpenMP/CUDA runtime and build controls remain external; reference-only tuning stays internal to tests.
 - `solve_backend` (`automatic`, `cpu`, `gpu`) fixes one complete setup/solve route before setup. Explicit GPU requests fail for unsupported options, input or devices. Once selected, errors never retry on another route. Report the selected route in results and CLI output.
 - `cpu_solver`, public `factorize()` and Eigen preconditioning stay on CPU in GPU builds and must not initialize CUDA. Disabled or pristine GPU lifetimes must not initialize CUDA either.
-- CUDA and Metal own factorization, finalization, operator preparation and PCG on device. They require compressed, sorted, unique, fully paired CSC input; automatic selection uses CPU otherwise. They report a recomputed FP64 residual against the original operator, with verification inside Solve timing.
+- CUDA and Metal construct new factors on device or upload an explicitly supplied host factor. Operator preparation and PCG remain on device. They require compressed, sorted, unique, fully paired CSC input; automatic selection uses CPU otherwise. They report a recomputed FP64 residual against the original operator, with verification inside Solve timing.
 
 ## Determinism and numerical invariants
 
@@ -49,7 +49,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 
 ## C interface
 
-`include/apxchol/c_api.h` and `src/c_api.cpp` define the exception-safe `apxchol_c` target. Scalar and batched calls delegate to the shared CPU/CUDA/Metal owner; dense outputs must not overlap inputs. CSC views accept independent 32/64-bit index types; dense views use signed element strides. Keep defaults aligned with `solve_options` and ABI layouts aligned with `tests/test_c_header.c`. ABI 3 is under review: PR revisions do not bump it, and consumers must use matching headers and library. After release, incompatible changes require a version bump. Tolerance and iteration budget are per-call arguments. `NOT_CONVERGED` writes outputs without relaxing acceptance. Factor handles own immutable FP32 values; adoption copies them and is unsupported on CUDA. Thread ceilings restore the caller's setting.
+`include/apxchol/c_api.h` and `src/c_api.cpp` define the exception-safe `apxchol_c` target. Scalar and batched calls delegate to the shared CPU/CUDA/Metal owner; dense outputs must not overlap inputs. CSC views accept independent 32/64-bit index types; dense views use signed element strides. Keep defaults aligned with `solve_options` and ABI layouts aligned with `tests/test_c_header.c`. ABI 3 is under review: PR revisions do not bump it, and consumers must use matching headers and library. After release, incompatible changes require a version bump. Tolerance and iteration budget are per-call arguments. `NOT_CONVERGED` writes outputs without relaxing acceptance. Factor handles own immutable FP32 values; CPU, CUDA and Metal adoption copy them. Automatic host-factor adoption stays on CPU; an explicit GPU request uploads the supplied factor without factorizing again. Thread ceilings restore the caller's setting.
 
 ## Test map
 

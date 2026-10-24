@@ -192,7 +192,7 @@ private:
 
 /// Reusable solver owning one CPU or GPU backend, selected once at setup.
 /// Owns its input data; movable, noncopyable, and not safe for concurrent calls.
-/// CUDA uses device-owned setup and does not accept supplied host factors.
+/// Supplied factors use CPU in automatic mode; an explicit GPU request uploads them.
 class solver {
 public:
     explicit solver(const Eigen::SparseMatrix<double>& A,
