@@ -18,7 +18,7 @@ Supply an assembled operator. For adjacency input, explicitly use
 `apxchol_laplacian(Adj)` to form `D - Adj` with self-loops removed.
 Validation is shared with C++; positive off-diagonal pairs are lumped onto
 the diagonal for preconditioning, while PCG and residual checks retain the
-original operator. Laplacian nullspaces are handled componentwise.
+original operator. A Laplacian RHS must sum to zero within each connected component.
 Omitted solve arguments use the C++ defaults (relative tolerance 1e-8 and
 200 iterations). Tolerance must be finite and positive; the iteration limit
 must be a nonnegative integer. `[]` selects either default.
@@ -29,7 +29,8 @@ The optional setup struct accepts `num_threads`, `seed`, `factor_storage`
 diagonal fraction; 0 disables), `lump_max_mass` (fraction in [0, 1]; 0
 rejects positive off-diagonals), and
 `verbose` (logical). Unspecified fields use C++ defaults. GPU and wide
-indices are unavailable in this binding.
+indices are unavailable in this binding. Solve and apply accept one RHS vector
+at a time; warm starts and factor export are not exposed.
 
 ## Octave build
 

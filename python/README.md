@@ -44,8 +44,8 @@ are zero.
 ## Options and reuse
 
 `factorize` builds once; subsequent solves reuse the factor
-and workspace. `backend="auto"` selects a usable GPU when the build, input and options
-support it, otherwise CPU. Selection belongs to the common C++ solver;
+and workspace. `backend="auto"` uses the common C++ selection policy: it may
+prefer CPU for small systems, then checks GPU availability and compatibility.
 `"cpu"` and `"gpu"` request a specific backend. GPU use requires CUDA or Metal
 support in the installed build and a usable device. Explicit GPU requests fail
 when unavailable or unsupported; execution errors do not trigger a CPU retry.
@@ -54,8 +54,9 @@ See [backend capabilities](../README.md#backend-capabilities) for GPU option res
 `num_threads=4` bounds CPU parallelism for setup and each solve/apply, overriding the calling OpenMP task's setting. The default `0` inherits that setting, normally initialized by `OMP_NUM_THREADS`; small workloads may use fewer threads. A solver cannot
 serve concurrent `solve`/`apply` calls; use separate instances or serialize.
 
-`solve` accepts `rtol`, `maxiter`, `x0`, and `out`. Omitted tolerance and
-iteration limits use the C++ defaults (`1e-8` and `200`). Tolerance must be
+`Solver.solve` accepts `rtol`, `maxiter`, `x0`, and `out`; the one-shot
+`apxchol.solve` accepts `rtol` and `maxiter` plus factorization options.
+Omitted tolerance and iteration limits use the C++ defaults (`1e-8` and `200`). Tolerance must be
 finite and positive; the iteration limit must be a nonnegative integer.
 Right-hand sides may have shape `(n,)` or `(n, nrhs)`;
 `solve` and `apply` preserve that shape. For matrix inputs, `iters`, `residual`
@@ -71,6 +72,7 @@ solver = apxchol.factorize(A, seed=42, partitioner="block_greedy",
 ```
 
 Partitioners: `block_greedy`, `priority_greedy`, `baumann_kyng`.
+Omitting `seed` or `partitioner` (or passing `None`) uses the C++ default.
 `keep_factor=True` is the reusable API default and retains an extra factor
 copy (~8 bytes/nonzero in default builds). `False` disables factor export,
 but preserves `P`, `factor_nnz`, `fill_ratio`; one-shot `solve` uses `False`.

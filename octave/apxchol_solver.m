@@ -6,9 +6,9 @@ classdef apxchol_solver < handle
   %   res = s.solve(b2, 1e-10, 1000);     % per-solve tol / maxiter
   %   z   = s.apply(r);                   % one preconditioner application, z = M\r
   %
-  % Laplacian vs SDDM is auto-detected (singular Laplacians get a rank-(n-1)
-  % factor with null-space centering). The factor is built once in the
-  % constructor and freed automatically when the object is cleared.
+  % Laplacian vs SDDM is auto-detected. A Laplacian with k connected components
+  % has rank n-k; its RHS must sum to zero within each component. The constructor
+  % builds the factor once; clearing the object frees it automatically.
   %
   % Omitted or [] solve options use the C++ defaults. rtol must be finite
   % and positive; maxiter must be an integer in [0, 2^31-1].
