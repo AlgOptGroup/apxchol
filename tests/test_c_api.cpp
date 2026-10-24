@@ -1644,7 +1644,7 @@ TEST(CApi, GpuBatchWidthsReportOriginalResidualsAndIndependentConvergence) {
                 const bool zero = k > 1 && col == 0;
                 EXPECT_EQ(info[col].iterations, 0);
                 EXPECT_EQ(info[col].converged, zero);
-                EXPECT_EQ(info[col].relative_residual, zero ? 0 : 1);
+                EXPECT_DOUBLE_EQ(info[col].relative_residual, zero ? 0 : 1);
             }
         }
         const Eigen::VectorXd b = compatible_rhs(c.n, 2);
