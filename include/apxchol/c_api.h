@@ -18,7 +18,7 @@
  * edge_index (2^32-1 by default; rebuild with APXCHOL_64BIT_EDGE_INDICES=ON)
  * aborts, and an exception escaping an OpenMP region calls std::terminate.
  *
- * Input: a square CSC matrix with int64 colptr[n+1] and rowval/nzval[nnz],
+ * Input: a square CSC matrix with colptr[n+1] and rowval/nzval[nnz],
  * nnz = colptr[n] - index_base, index_base 0 or 1 for both index arrays. Rows
  * may be unsorted; duplicates are summed. The matrix must satisfy the
  * operator contract of apxchol/operator_class.h (Laplacian, SDDM or a
@@ -34,7 +34,7 @@
  * calls that read it may overlap, but destroy must not overlap any of them.
  * For solve, x must not overlap b or x0; for apply, z must not overlap r.
  * Exact and partial overlap both return INVALID_ARGUMENT. b and x0 may overlap.
- * info must not overlap any dense input or output buffer.
+ * The caller must keep info disjoint from all dense input and output buffers.
  *
  * Versioning: options and stats carry struct_size; solve takes info_size.
  * The caller supplies sizeof(struct) from its header. This library accepts
@@ -54,6 +54,8 @@
 extern "C" {
 #endif
 
+/* Unreleased: signatures and layouts may change without a version increment.
+ * Build consumers with the matching header and library. */
 #define APXCHOL_C_ABI_VERSION 3
 
 typedef int32_t apxchol_status;
@@ -84,6 +86,38 @@ enum {
     APXCHOL_FACTOR_STORAGE_FLOAT16 = 16,
     APXCHOL_FACTOR_STORAGE_FLOAT32 = 32
 };
+
+typedef int32_t apxchol_index_type;
+enum { APXCHOL_INDEX_INT32 = 32, APXCHOL_INDEX_INT64 = 64 };
+
+/* The two index arrays independently use signed int32_t or int64_t elements.
+ * The caller retains all arrays; create copies the matrix. */
+typedef struct apxchol_csc_view {
+    int64_t n;
+    const void* colptr;
+    const void* rowval;
+    const double* nzval;
+    apxchol_index_type colptr_type;
+    apxchol_index_type rowval_type;
+    int32_t index_base;
+} apxchol_csc_view;
+
+/* Dense views have solver dimension rows and nrhs columns. Strides count
+ * double elements: data[row * row_stride + column * column_stride]. They may
+ * be negative, padded or interleaved; a dimension greater than one requires
+ * a nonzero stride. Output elements must have distinct addresses. Input and
+ * output memory ranges must not overlap, including gaps between elements. */
+typedef struct apxchol_const_dense_view {
+    const double* data;
+    int64_t row_stride;
+    int64_t column_stride;
+} apxchol_const_dense_view;
+
+typedef struct apxchol_dense_view {
+    double* data;
+    int64_t row_stride;
+    int64_t column_stride;
+} apxchol_dense_view;
 
 /* 24 bytes. Initialize with apxchol_options_default, then override fields. */
 typedef struct apxchol_options {
@@ -137,12 +171,11 @@ APXCHOL_C_API apxchol_status apxchol_options_default(apxchol_options* options,
  * whose solution is then not centred. Adopted factorization options are
  * validated but unused. options NULL selects defaults. */
 APXCHOL_C_API apxchol_status apxchol_solver_create(
-    int64_t n, const int64_t* colptr, const int64_t* rowval, const double* nzval,
-    int32_t index_base, const apxchol_factor* factor, const apxchol_options* options,
+    const apxchol_csc_view* A, const apxchol_factor* factor, const apxchol_options* options,
     apxchol_solver** out_solver, char* error_message, size_t error_capacity);
 APXCHOL_C_API void apxchol_solver_destroy(apxchol_solver* solver); /* NULL is a no-op */
 
-/* nrhs right-hand sides, column-major n*nrhs. nrhs = 0 is a no-op requiring
+/* nrhs right-hand sides, addressed through dense views. nrhs = 0 is a no-op requiring
  * a valid solver; dense-array and info pointers are optional and info_size is
  * ignored. Negative or overflowing dimensions are INVALID_ARGUMENT.
  * Every call requires finite tol > 0 and max_iter >= 0. The iteration budget
@@ -155,7 +188,8 @@ APXCHOL_C_API void apxchol_solver_destroy(apxchol_solver* solver); /* NULL is a 
  * inputs internally; CPU inputs that cannot share a usable scale are
  * INVALID_ARGUMENT. A solution outside the representable range is UNSUPPORTED. */
 APXCHOL_C_API apxchol_status apxchol_solver_solve(
-    apxchol_solver* solver, int64_t nrhs, const double* b, const double* x0, double* x,
+    apxchol_solver* solver, int64_t nrhs, const apxchol_const_dense_view* b,
+    const apxchol_const_dense_view* x0, const apxchol_dense_view* x,
     double tol, int32_t max_iter, apxchol_solve_info* info, size_t info_size,
     char* error_message, size_t error_capacity);
 
@@ -164,7 +198,8 @@ APXCHOL_C_API apxchol_status apxchol_solver_solve(
  * fixed linear map; input and output are centred on every call when the
  * factor is Laplacian (stats.sddm == 0). */
 APXCHOL_C_API apxchol_status apxchol_solver_apply(
-    apxchol_solver* solver, int64_t nrhs, const double* r, double* z,
+    apxchol_solver* solver, int64_t nrhs, const apxchol_const_dense_view* r,
+    const apxchol_dense_view* z,
     char* error_message, size_t error_capacity);
 
 APXCHOL_C_API apxchol_status apxchol_solver_stats(const apxchol_solver* solver,
@@ -191,8 +226,7 @@ APXCHOL_C_API apxchol_status apxchol_solver_export_factor(
  * Other options are validated and unused; factor values are always retained.
  * options NULL selects defaults. */
 APXCHOL_C_API apxchol_status apxchol_factor_create(
-    int64_t n, const int64_t* colptr, const int64_t* rowval, const double* nzval,
-    int32_t index_base, const apxchol_options* options,
+    const apxchol_csc_view* A, const apxchol_options* options,
     apxchol_factor** out_factor, char* error_message, size_t error_capacity);
 APXCHOL_C_API void apxchol_factor_destroy(apxchol_factor* factor); /* NULL is a no-op */
 

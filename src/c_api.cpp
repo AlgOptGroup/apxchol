@@ -27,8 +27,10 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <numeric>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <typeinfo>
 #include <utility>
 
@@ -202,29 +204,85 @@ void require_storage(const apxchol::solve_options& so, apxchol::solve_backend ro
              "FP16 factor storage on the CPU route requires AVX/F16C or Apple ARM64");
 }
 
-Eigen::SparseMatrix<double> import_csc(std::int64_t n, const std::int64_t* colptr,
-                                       const std::int64_t* rowval, const double* nzval,
-                                       std::int32_t base) {
-    require(n >= 1, "n must be in [1, 2^31-1]");
+template<class Function>
+auto with_indices(const void* data, apxchol_index_type type, Function&& function) {
+    switch (type) {
+        case APXCHOL_INDEX_INT32: return function(static_cast<const std::int32_t*>(data));
+        case APXCHOL_INDEX_INT64: return function(static_cast<const std::int64_t*>(data));
+        default: fail(APXCHOL_STATUS_INVALID_ARGUMENT, "index type must be INT32 or INT64");
+    }
+}
+
+Eigen::SparseMatrix<double> import_csc(const apxchol_csc_view* view) {
+    require(view != nullptr, "A is NULL");
+    require(view->n >= 1, "n must be in [1, 2^31-1]");
     try {
-        return apxchol::detail::import_csc(n, colptr, rowval, nzval, base);
+        return with_indices(view->colptr, view->colptr_type, [&](const auto* colptr) {
+            return with_indices(view->rowval, view->rowval_type, [&](const auto* rowval) {
+                return apxchol::detail::import_csc(view->n, colptr, rowval, view->nzval,
+                                                  view->index_base);
+            });
+        });
     } catch (const std::invalid_argument& error) {
         fail(APXCHOL_STATUS_INVALID_ARGUMENT, error.what());
     }
 }
 
-/// Rejects non-finite entries of a caller array of `count` values.
-void require_finite(const double* source, Eigen::Index count, const char* what) {
-    if (!Eigen::Map<const Eigen::VectorXd>(source, count).allFinite())
+void require_finite(apxchol::const_matrix_view source, const char* what) {
+    if (!source.allFinite())
         fail(APXCHOL_STATUS_INVALID_ARGUMENT, std::string(what) + " contains a non-finite value");
 }
 
-Eigen::Index block_size(Eigen::Index n, std::int64_t nrhs) {
+void require_block_size(Eigen::Index n, std::int64_t nrhs) {
     require(nrhs >= 0, "nrhs must be non-negative");
     require(nrhs <= std::numeric_limits<std::ptrdiff_t>::max() /
                         static_cast<std::int64_t>(sizeof(double)) / n,
             "n * nrhs * sizeof(double) overflows");
-    return n * static_cast<Eigen::Index>(nrhs);
+}
+
+template<class View>
+auto dense_map(const View* view, Eigen::Index rows, Eigen::Index columns) {
+    require(view != nullptr && view->data != nullptr, "dense view or data is NULL");
+    // Eigen treats a zero Ref stride as a default; inactive axes need no stride.
+    const auto row_stride = rows > 1 ? view->row_stride : 1;
+    const auto column_stride = columns > 1 ? view->column_stride : 1;
+    require(row_stride != 0 && column_stride != 0, "active dense strides must be nonzero");
+    const auto magnitude = [](std::int64_t value) -> std::uint64_t {
+        return value < 0 ? std::uint64_t(-(value + 1)) + 1 : std::uint64_t(value);
+    };
+    constexpr auto limit = std::uint64_t(std::numeric_limits<std::ptrdiff_t>::max()) /
+                           sizeof(double);
+    const auto extent = [&](Eigen::Index size, std::int64_t stride) {
+        const auto step = magnitude(stride);
+        require(std::uint64_t(size - 1) <= limit / step, "dense stride extent overflows");
+        return std::uint64_t(size - 1) * step;
+    };
+    const auto row_extent = extent(rows, row_stride);
+    const auto column_extent = extent(columns, column_stride);
+    require(row_extent < limit && column_extent < limit - row_extent,
+            "dense address extent overflows");
+    const auto before = (row_stride < 0 ? row_extent : 0) +
+                        (column_stride < 0 ? column_extent : 0);
+    const auto after = row_extent + column_extent - before + 1;
+    const auto address = reinterpret_cast<std::uintptr_t>(view->data);
+    require(address >= before * sizeof(double) &&
+                address <= std::numeric_limits<std::uintptr_t>::max() - after * sizeof(double),
+            "dense address extent wraps");
+    using Scalar = std::remove_pointer_t<decltype(view->data)>;
+    if constexpr (!std::is_const_v<Scalar>) {
+        if (rows > 1 && columns > 1) {
+            const auto r = magnitude(row_stride), c = magnitude(column_stride);
+            const auto divisor = std::gcd(r, c);
+            require(std::uint64_t(rows) <= c / divisor ||
+                        std::uint64_t(columns) <= r / divisor,
+                    "dense output elements overlap");
+        }
+    }
+    using Matrix = std::conditional_t<std::is_const_v<Scalar>, const Eigen::MatrixXd,
+                                      Eigen::MatrixXd>;
+    using Stride = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
+    return Eigen::Map<Matrix, 0, Stride>(view->data, rows, columns,
+                                        Stride(column_stride, row_stride));
 }
 
 /// The factorization's own SDDM test (make_graph in graph/conversions.h): a
@@ -337,8 +395,7 @@ struct apxchol_solver {
 
 extern "C" {
 
-apxchol_status apxchol_solver_create(int64_t n, const int64_t* colptr, const int64_t* rowval,
-                             const double* nzval, int32_t index_base,
+apxchol_status apxchol_solver_create(const apxchol_csc_view* matrix,
                              const apxchol_factor* factor,
                              const apxchol_options* options, apxchol_solver** out_solver,
                              char* error_message, size_t error_capacity) {
@@ -348,7 +405,7 @@ apxchol_status apxchol_solver_create(int64_t n, const int64_t* colptr, const int
         const apxchol_options opt = read_options(options);
         apxchol::solve_options so = to_solve_options(opt);
         const apxchol::detail::thread_budget scope(opt.threads);
-        const Eigen::SparseMatrix<double> A = import_csc(n, colptr, rowval, nzval, index_base);
+        const Eigen::SparseMatrix<double> A = import_csc(matrix);
         if (factor != nullptr)
             require(static_cast<std::size_t>(A.rows()) == factor->F.perm.size(),
                     "the factor's dimension differs from the operator's");
@@ -412,14 +469,16 @@ apxchol_status apxchol_options_default(apxchol_options* options, size_t struct_s
 
 void apxchol_solver_destroy(apxchol_solver* solver) { delete solver; }
 
-apxchol_status apxchol_solver_solve(apxchol_solver* solver, int64_t nrhs, const double* b,
-                                    const double* x0, double* x, double tol, int32_t max_iter,
+apxchol_status apxchol_solver_solve(apxchol_solver* solver, int64_t nrhs,
+                                    const apxchol_const_dense_view* b,
+                                    const apxchol_const_dense_view* x0,
+                                    const apxchol_dense_view* x, double tol, int32_t max_iter,
                                     apxchol_solve_info* info, size_t info_size,
                                     char* error_message, size_t error_capacity) {
     return guarded(error_message, error_capacity, false, [&]() -> apxchol_status {
         require(solver != nullptr, "solver is NULL");
         apxchol::detail::validate_solve_parameters(tol, max_iter);
-        const Eigen::Index count = block_size(solver->n(), nrhs);
+        require_block_size(solver->n(), nrhs);
         if (nrhs == 0) return APXCHOL_STATUS_SUCCESS;
         if (info != nullptr) {
             const apxchol_status s = check_struct_size(info_size, sizeof(apxchol_solve_info));
@@ -430,14 +489,13 @@ apxchol_status apxchol_solver_solve(apxchol_solver* solver, int64_t nrhs, const 
                     "nrhs * sizeof(apxchol_solve_info) overflows");
             std::memset(info, 0, static_cast<std::size_t>(nrhs) * sizeof(*info));
         }
-        require(b != nullptr && x != nullptr, "b or x is NULL");
+        const auto rhs = dense_map(b, solver->n(), nrhs);
+        const auto initial = x0 ? dense_map(x0, solver->n(), nrhs) : rhs;
+        auto out = dense_map(x, solver->n(), nrhs);
         // Validate every column before native panel execution can write outputs.
-        require_finite(b, count, "b");
-        if (x0 != nullptr) require_finite(x0, count, "x0");
-        const Eigen::Map<const Eigen::MatrixXd> rhs(b, solver->n(), nrhs);
-        const Eigen::Map<const Eigen::MatrixXd> initial(x0 ? x0 : b, solver->n(), nrhs);
+        require_finite(rhs, "b");
+        if (x0 != nullptr) require_finite(initial, "x0");
         const apxchol::const_matrix_view initial_view(initial);
-        Eigen::Map<Eigen::MatrixXd> out(x, solver->n(), nrhs);
         apxchol::batch_solve_result result;
         try {
             result = solver->owner.solve(rhs, out, tol, max_iter,
@@ -465,16 +523,16 @@ apxchol_status apxchol_solver_solve(apxchol_solver* solver, int64_t nrhs, const 
 }
 
 apxchol_status apxchol_solver_apply(apxchol_solver* solver, int64_t nrhs,
-                                    const double* r, double* z,
+                                    const apxchol_const_dense_view* r,
+                                    const apxchol_dense_view* z,
                                     char* error_message, size_t error_capacity) {
     return guarded(error_message, error_capacity, false, [&]() -> apxchol_status {
         require(solver != nullptr, "solver is NULL");
-        const Eigen::Index count = block_size(solver->n(), nrhs);
+        require_block_size(solver->n(), nrhs);
         if (nrhs == 0) return APXCHOL_STATUS_SUCCESS;
-        require(r != nullptr && z != nullptr, "r or z is NULL");
-        require_finite(r, count, "r");
-        const Eigen::Map<const Eigen::MatrixXd> rhs(r, solver->n(), nrhs);
-        Eigen::Map<Eigen::MatrixXd> out(z, solver->n(), nrhs);
+        const auto rhs = dense_map(r, solver->n(), nrhs);
+        auto out = dense_map(z, solver->n(), nrhs);
+        require_finite(rhs, "r");
         solver->owner.apply(rhs, out);
         return APXCHOL_STATUS_SUCCESS;
     });
@@ -520,8 +578,7 @@ apxchol_status apxchol_solver_copy_factor(const apxchol_solver* solver,
     });
 }
 
-apxchol_status apxchol_factor_create(int64_t n, const int64_t* colptr, const int64_t* rowval,
-                                     const double* nzval, int32_t index_base,
+apxchol_status apxchol_factor_create(const apxchol_csc_view* matrix,
                                      const apxchol_options* options,
                                      apxchol_factor** out_factor, char* error_message,
                                      size_t error_capacity) {
@@ -531,7 +588,7 @@ apxchol_status apxchol_factor_create(int64_t n, const int64_t* colptr, const int
         const apxchol_options opt = read_options(options);
         const apxchol::solve_options so = to_solve_options(opt);
         const apxchol::detail::thread_budget scope(opt.threads);
-        const Eigen::SparseMatrix<double> A = import_csc(n, colptr, rowval, nzval, index_base);
+        const Eigen::SparseMatrix<double> A = import_csc(matrix);
         auto factor = std::make_unique<apxchol_factor>();
         // Public factorization retains native FP32 values on every build.
         factor->F = apxchol::factorize(A, so.factor_opts);

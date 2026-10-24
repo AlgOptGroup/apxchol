@@ -49,7 +49,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 
 ## C interface
 
-`include/apxchol/c_api.h` and `src/c_api.cpp` define the exception-safe `apxchol_c` target. Scalar and batched calls delegate to the shared CPU/CUDA/Metal owner; dense outputs must not overlap inputs. Keep defaults aligned with `solve_options` and ABI layouts aligned with `tests/test_c_header.c`. ABI 3 replaces the unreleased prototype; incompatible signatures or layouts require a version bump. Tolerance and iteration budget are per-call arguments. `NOT_CONVERGED` writes outputs without relaxing acceptance. Factor handles own immutable FP32 values; adoption copies them and is unsupported on CUDA. Thread ceilings restore the caller's setting.
+`include/apxchol/c_api.h` and `src/c_api.cpp` define the exception-safe `apxchol_c` target. Scalar and batched calls delegate to the shared CPU/CUDA/Metal owner; dense outputs must not overlap inputs. CSC views accept independent 32/64-bit index types; dense views use signed element strides. Keep defaults aligned with `solve_options` and ABI layouts aligned with `tests/test_c_header.c`. ABI 3 is under review: PR revisions do not bump it, and consumers must use matching headers and library. After release, incompatible changes require a version bump. Tolerance and iteration budget are per-call arguments. `NOT_CONVERGED` writes outputs without relaxing acceptance. Factor handles own immutable FP32 values; adoption copies them and is unsupported on CUDA. Thread ceilings restore the caller's setting.
 
 ## Test map
 

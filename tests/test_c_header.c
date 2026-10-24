@@ -33,24 +33,40 @@ _Static_assert(offsetof(apxchol_stats, lumped_offdiag) == 24, "apxchol_stats lay
 _Static_assert(offsetof(apxchol_stats, sddm) == 32, "apxchol_stats layout");
 _Static_assert(offsetof(apxchol_stats, factor_storage) == 36, "apxchol_stats layout");
 
-/* Two column-major RHSs, with distinct warm-start and output buffers. */
+_Static_assert(APXCHOL_INDEX_INT32 == 32 && APXCHOL_INDEX_INT64 == 64, "index types");
+_Static_assert(sizeof(apxchol_csc_view) == 48, "apxchol_csc_view layout");
+_Static_assert(offsetof(apxchol_csc_view, n) == 0, "apxchol_csc_view layout");
+_Static_assert(offsetof(apxchol_csc_view, colptr) == 8, "apxchol_csc_view layout");
+_Static_assert(offsetof(apxchol_csc_view, rowval) == 16, "apxchol_csc_view layout");
+_Static_assert(offsetof(apxchol_csc_view, nzval) == 24, "apxchol_csc_view layout");
+_Static_assert(offsetof(apxchol_csc_view, colptr_type) == 32, "apxchol_csc_view layout");
+_Static_assert(offsetof(apxchol_csc_view, rowval_type) == 36, "apxchol_csc_view layout");
+_Static_assert(offsetof(apxchol_csc_view, index_base) == 40, "apxchol_csc_view layout");
+_Static_assert(sizeof(apxchol_const_dense_view) == 24, "const dense view layout");
+_Static_assert(sizeof(apxchol_dense_view) == 24, "dense view layout");
+_Static_assert(offsetof(apxchol_dense_view, row_stride) == 8, "dense view layout");
+_Static_assert(offsetof(apxchol_dense_view, column_stride) == 16, "dense view layout");
+
+/* Two RHSs with padded/reversed views and distinct warm-start/output buffers. */
 static int solve_path(apxchol_solver* solver, const char* what) {
-    const double b[] = {1.0, 0.0, -1.0, 2.0, -3.0, 1.0};
-    const double x0[] = {0.25, 0.25, 0.25, 0.5, -0.25, 0.25};
+    const double b[] = {1.0, 2.0, NAN, NAN, 0.0, -3.0, NAN, NAN, -1.0, 1.0, NAN, NAN};
+    const double x0[] = {0.25, 0.25, 0.25, 0.25, -0.25, 0.5};
     const double expected[] = {1.0, 0.0, -1.0, 1.0, -1.0, 0.0};
     const double r[] = {2.0, 1.0, 0.0, 4.0, 0.0, 2.0};
-    double x[6] = {NAN, NAN, NAN, NAN, NAN, NAN};
-    double z[6] = {NAN, NAN, NAN, NAN, NAN, NAN};
+    double x[12], z[12];
+    for (size_t i = 0; i < 12; ++i) x[i] = z[i] = NAN;
+    const apxchol_const_dense_view rhs = {b, 4, 1}, initial = {x0 + 2, -1, 3}, residual = {r, 1, 3};
+    const apxchol_dense_view solution = {x + 8, -4, 1}, applied = {z + 1, 1, 6};
     char error[256];
     apxchol_solve_info info[2] = {{-1, NAN, -1}, {-1, NAN, -1}};
     const apxchol_status status =
-        apxchol_solver_solve(solver, 2, b, x0, x, 1e-10, 200, info, sizeof info[0],
+        apxchol_solver_solve(solver, 2, &rhs, &initial, &solution, 1e-10, 200, info, sizeof info[0],
                              error, sizeof error);
     if (status != APXCHOL_STATUS_SUCCESS) {
         fprintf(stderr, "%s solve: %d %s\n", what, (int)status, error);
         return 1;
     }
-    if (apxchol_solver_apply(solver, 2, r, z, error, sizeof error) !=
+    if (apxchol_solver_apply(solver, 2, &residual, &applied, error, sizeof error) !=
             APXCHOL_STATUS_SUCCESS) {
         fprintf(stderr, "%s apply: %s\n", what, error);
         return 1;
@@ -64,27 +80,35 @@ static int solve_path(apxchol_solver* solver, const char* what) {
         }
         for (size_t row = 0; row < 3; ++row) {
             const size_t i = 3 * col + row;
-            if (!isfinite(x[i]) || fabs(x[i] - expected[i]) > 1e-8 || !isfinite(z[i])) {
-                fprintf(stderr, "%s column %zu row %zu: x=%g z=%g\n", what, col, row, x[i], z[i]);
+            const size_t xi = 8 - 4 * row + col, zi = 1 + row + 6 * col;
+            if (!isfinite(x[xi]) || fabs(x[xi] - expected[i]) > 1e-8 || !isfinite(z[zi])) {
+                fprintf(stderr, "%s column %zu row %zu: x=%g z=%g\n", what, col, row, x[xi], z[zi]);
                 return 1;
             }
-            x_sum += x[i];
-            z_sum += z[i];
+            x_sum += x[xi];
+            z_sum += z[zi];
         }
         if (fabs(x_sum) > 1e-8 || fabs(z_sum) > 1e-8) {
             fprintf(stderr, "%s column %zu is not centered\n", what, col);
             return 1;
         }
     }
+    for (size_t i = 0; i < 12; ++i) {
+        if (i % 4 >= 2 && !isnan(x[i])) return 1;
+        if ((i % 6 == 0 || i % 6 >= 4) && !isnan(z[i])) return 1;
+    }
     return 0;
 }
 
 int main(void) {
     /* Path Laplacian on 3 vertices, 1-based CSC. */
-    const int64_t colptr[] = {1, 3, 6, 8};
+    const int32_t colptr[] = {1, 3, 6, 8};
+    const int64_t wide_colptr[] = {1, 3, 6, 8};
+    const int32_t narrow_rowval[] = {1, 2, 1, 2, 3, 2, 3};
     const int64_t rowval[] = {1, 2, 1, 2, 3, 2, 3};
     const double nzval[] = {1.0, -1.0, -1.0, 2.0, -1.0, -1.0, 1.0};
     char error[256];
+    apxchol_csc_view matrix = {3, colptr, rowval, nzval, APXCHOL_INDEX_INT32, APXCHOL_INDEX_INT64, 1};
 
     apxchol_options options;
     if (apxchol_c_abi_version() != APXCHOL_C_ABI_VERSION) return 1;
@@ -96,7 +120,7 @@ int main(void) {
     options.factor_storage = APXCHOL_FACTOR_STORAGE_FLOAT32;
 
     apxchol_solver* solver = NULL;
-    if (apxchol_solver_create(3, colptr, rowval, nzval, 1, NULL, &options, &solver, error,
+    if (apxchol_solver_create(&matrix, NULL, &options, &solver, error,
                               sizeof error) != APXCHOL_STATUS_SUCCESS) {
         fprintf(stderr, "create: %s\n", error);
         return 1;
@@ -107,7 +131,11 @@ int main(void) {
 
     /* A factor handle: its stats size the export, and a solver adopts it. */
     apxchol_factor* factor = NULL;
-    if (apxchol_factor_create(3, colptr, rowval, nzval, 1, &options, &factor, error,
+    matrix.colptr = wide_colptr;
+    matrix.colptr_type = APXCHOL_INDEX_INT64;
+    matrix.rowval = narrow_rowval;
+    matrix.rowval_type = APXCHOL_INDEX_INT32;
+    if (apxchol_factor_create(&matrix, &options, &factor, error,
                               sizeof error) != APXCHOL_STATUS_SUCCESS) {
         fprintf(stderr, "factor_create: %s\n", error);
         return 1;
@@ -129,7 +157,7 @@ int main(void) {
     solver = NULL;
     options.keep_factor_values = 1;
     const apxchol_status adopted = apxchol_solver_create(
-        3, colptr, rowval, nzval, 1, factor, &options, &solver, error, sizeof error);
+        &matrix, factor, &options, &solver, error, sizeof error);
     apxchol_factor_destroy(factor); /* the solver holds its own copy */
     if (adopted != APXCHOL_STATUS_SUCCESS) {
         fprintf(stderr, "create with factor: %s\n", error);

@@ -42,6 +42,11 @@ struct csc64 {
     std::int64_t n = 0;
     std::vector<std::int64_t> colptr, rowval;
     std::vector<double> nzval;
+
+    apxchol_csc_view view(std::int32_t base = 0) const {
+        return {n, colptr.data(), rowval.data(), nzval.data(),
+                APXCHOL_INDEX_INT64, APXCHOL_INDEX_INT64, base};
+    }
 };
 
 csc64 to_csc64(const Sparse& A, std::int64_t base = 0) {
@@ -102,12 +107,17 @@ apxchol_options cpu_options() {
 apxchol_status solve_one(apxchol_solver* s, const double* b, const double* x0, double* x,
                          double tol, std::int32_t max_iter, apxchol_solve_info* info,
                          char* error, std::size_t capacity) {
-    return apxchol_solver_solve(s, 1, b, x0, x, tol, max_iter, info, sizeof(*info), error, capacity);
+    const apxchol_const_dense_view rhs{b, 1, 0}, guess{x0, 1, 0};
+    const apxchol_dense_view out{x, 1, 0};
+    return apxchol_solver_solve(s, 1, &rhs, x0 ? &guess : nullptr, &out, tol, max_iter,
+                               info, sizeof(*info), error, capacity);
 }
 
 apxchol_status apply_one(apxchol_solver* s, const double* r, double* z,
                          char* error, std::size_t capacity) {
-    return apxchol_solver_apply(s, 1, r, z, error, capacity);
+    const apxchol_const_dense_view rhs{r, 1, 0};
+    const apxchol_dense_view out{z, 1, 0};
+    return apxchol_solver_apply(s, 1, &rhs, &out, error, capacity);
 }
 
 std::vector<apxchol_backend> available_backends() {
@@ -134,9 +144,8 @@ apxchol_status create(const csc64& c, const apxchol_options* o, handle& h, std::
     const auto fallback = cpu_options();
     if (o == nullptr) o = &fallback;
     std::array<char, 1024> err{};
-    const apxchol_status s = apxchol_solver_create(c.n, c.colptr.data(), c.rowval.data(),
-                                                   c.nzval.data(), base, nullptr, o, &h.s, err.data(),
-                                                   err.size());
+    const auto matrix = c.view(base);
+    const apxchol_status s = apxchol_solver_create(&matrix, nullptr, o, &h.s, err.data(), err.size());
     if (message != nullptr) *message = err.data();
     return s;
 }
@@ -159,9 +168,8 @@ struct factor_handle {
 apxchol_status create_factor(const csc64& c, const apxchol_options* o, factor_handle& h,
                              std::int32_t base = 0, std::string* message = nullptr) {
     std::array<char, 1024> err{};
-    const apxchol_status s = apxchol_factor_create(c.n, c.colptr.data(), c.rowval.data(),
-                                                   c.nzval.data(), base, o, &h.f, err.data(),
-                                                   err.size());
+    const auto matrix = c.view(base);
+    const apxchol_status s = apxchol_factor_create(&matrix, o, &h.f, err.data(), err.size());
     if (message != nullptr) *message = err.data();
     return s;
 }
@@ -171,9 +179,8 @@ apxchol_status adopt(const csc64& c, const apxchol_factor* f, const apxchol_opti
     const auto fallback = cpu_options();
     if (o == nullptr) o = &fallback;
     std::array<char, 1024> err{};
-    const apxchol_status s = apxchol_solver_create(
-        c.n, c.colptr.data(), c.rowval.data(), c.nzval.data(), base, f, o, &h.s, err.data(),
-        err.size());
+    const auto matrix = c.view(base);
+    const apxchol_status s = apxchol_solver_create(&matrix, f, o, &h.s, err.data(), err.size());
     if (message != nullptr) *message = err.data();
     return s;
 }
@@ -316,21 +323,279 @@ TEST(CApi, SolveAndApplyRejectAllInputOutputOverlap) {
             SCOPED_TRACE(::testing::Message() << "backend=" << backend << " nrhs=" << k);
             Eigen::VectorXd storage = Eigen::VectorXd::Ones(c.n * k + 1);
             Eigen::MatrixXd other = Eigen::MatrixXd::Ones(c.n, k), out(c.n, k);
+            const apxchol_const_dense_view rhs{storage.data(), 1, c.n}, other_view{other.data(), 1, c.n};
+            const apxchol_dense_view out_view{out.data(), 1, c.n};
             for (const int offset : {0, 1}) {
-                EXPECT_EQ(apxchol_solver_solve(h.s, k, storage.data(), nullptr,
-                    storage.data() + offset, tolerance, max_iterations, nullptr, 0, nullptr, 0),
+                const apxchol_dense_view overlap{storage.data() + offset, 1, c.n};
+                EXPECT_EQ(apxchol_solver_solve(h.s, k, &rhs, nullptr, &overlap, tolerance, max_iterations, nullptr, 0, nullptr, 0),
                     APXCHOL_STATUS_INVALID_ARGUMENT);
-                EXPECT_EQ(apxchol_solver_solve(h.s, k, other.data(), storage.data(),
-                    storage.data() + offset, tolerance, max_iterations, nullptr, 0, nullptr, 0),
+                EXPECT_EQ(apxchol_solver_solve(h.s, k, &other_view, &rhs, &overlap, tolerance, max_iterations, nullptr, 0, nullptr, 0),
                     APXCHOL_STATUS_INVALID_ARGUMENT);
-                EXPECT_EQ(apxchol_solver_apply(h.s, k, storage.data(), storage.data() + offset,
+                EXPECT_EQ(apxchol_solver_apply(h.s, k, &rhs, &overlap,
                     nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
             }
             // Inputs may alias one another when the output is separate.
-            EXPECT_EQ(apxchol_solver_solve(h.s, k, other.data(), other.data(), out.data(),
+            EXPECT_EQ(apxchol_solver_solve(h.s, k, &other_view, &other_view, &out_view,
                 tolerance, max_iterations, nullptr, 0, nullptr, 0), APXCHOL_STATUS_SUCCESS);
         }
     }
+}
+
+TEST(CApi, CscIndexWidthsAndBasesShareTheNativeImporter) {
+    const Sparse A = grid_laplacian(4, 3, 0.25);
+    auto options = cpu_options();
+    options.threads = 1;
+    options.keep_factor_values = 1;
+    factor_handle reference;
+    ASSERT_EQ(create_factor(to_csc64(A), &options, reference), APXCHOL_STATUS_SUCCESS);
+    const auto expected = export_of(reference.f);
+    for (const int base : {0, 1}) {
+        const auto c = to_csc64(A, base);
+        const std::vector<std::int32_t> ptr32(c.colptr.begin(), c.colptr.end());
+        const std::vector<std::int32_t> row32(c.rowval.begin(), c.rowval.end());
+        for (const auto ptr_type : {APXCHOL_INDEX_INT32, APXCHOL_INDEX_INT64}) {
+            for (const auto row_type : {APXCHOL_INDEX_INT32, APXCHOL_INDEX_INT64}) {
+                SCOPED_TRACE(::testing::Message() << "base=" << base << " ptr=" << ptr_type
+                                                  << " row=" << row_type);
+                const apxchol_csc_view matrix{c.n,
+                    ptr_type == APXCHOL_INDEX_INT32 ? static_cast<const void*>(ptr32.data()) : c.colptr.data(),
+                    row_type == APXCHOL_INDEX_INT32 ? static_cast<const void*>(row32.data()) : c.rowval.data(),
+                    c.nzval.data(), ptr_type, row_type, base};
+                factor_handle factor;
+                ASSERT_EQ(apxchol_factor_create(&matrix, &options, &factor.f, nullptr, 0),
+                          APXCHOL_STATUS_SUCCESS);
+                EXPECT_TRUE(export_of(factor.f) == expected);
+                for (const auto backend : available_backends()) {
+                    auto selected = options;
+                    selected.backend = backend;
+                    handle h;
+                    ASSERT_EQ(apxchol_solver_create(&matrix, nullptr, &selected, &h.s, nullptr, 0),
+                              APXCHOL_STATUS_SUCCESS) << backend;
+                    const Eigen::VectorXd b = compatible_rhs(c.n);
+                    Eigen::VectorXd x(c.n);
+                    ASSERT_EQ(solve_one(h.s, b.data(), nullptr, x.data(), tolerance, max_iterations,
+                                        nullptr, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+                    EXPECT_LT(true_residual(A, b, x), tolerance);
+                }
+            }
+        }
+    }
+}
+
+TEST(CApi, InvalidCscViewsFailBeforeReadingTheirArrays) {
+    const csc64 c{1, {0, 1}, {0}, {2.0}};
+    const auto good = c.view();
+    auto reject = [](const apxchol_csc_view* matrix) {
+        handle h;
+        factor_handle f;
+        EXPECT_EQ(apxchol_solver_create(matrix, nullptr, nullptr, &h.s, nullptr, 0),
+                  APXCHOL_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(apxchol_factor_create(matrix, nullptr, &f.f, nullptr, 0),
+                  APXCHOL_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(h.s, nullptr);
+        EXPECT_EQ(f.f, nullptr);
+    };
+    reject(nullptr);
+    for (const int tag : {0, 16, -32, 65}) {
+        auto bad = good;
+        bad.colptr_type = tag;
+        reject(&bad);
+        bad = good;
+        bad.rowval_type = tag;
+        reject(&bad);
+    }
+    for (const auto n : {std::int64_t{-1}, std::int64_t{0},
+                         std::int64_t{1} + std::numeric_limits<std::int32_t>::max(),
+                         std::numeric_limits<std::int64_t>::max()}) {
+        auto bad = good;
+        bad.n = n;
+        reject(&bad);
+    }
+    for (int field = 0; field < 3; ++field) {
+        auto bad = good;
+        if (field == 0) bad.colptr = nullptr;
+        if (field == 1) bad.rowval = nullptr;
+        if (field == 2) bad.nzval = nullptr;
+        reject(&bad);
+    }
+    const std::int32_t ptr32[]{0, std::numeric_limits<std::int32_t>::min()};
+    const apxchol_csc_view negative_nnz{1, ptr32, c.rowval.data(), c.nzval.data(),
+                                      APXCHOL_INDEX_INT32, APXCHOL_INDEX_INT64, 0};
+    reject(&negative_nnz);
+    const std::int32_t row32[]{std::numeric_limits<std::int32_t>::max()};
+    const apxchol_csc_view out_of_range{1, c.colptr.data(), row32, c.nzval.data(),
+                                      APXCHOL_INDEX_INT64, APXCHOL_INDEX_INT32, 0};
+    reject(&out_of_range);
+}
+
+namespace {
+
+// Padding is NaN so accidentally reading or writing a gap is observable.
+struct strided_array {
+    std::int64_t rows, columns, row_stride, column_stride, origin;
+    std::vector<double> storage;
+
+    strided_array(std::int64_t n, std::int64_t k, std::int64_t rs, std::int64_t cs)
+        : rows(n), columns(k), row_stride(rs), column_stride(cs) {
+        const auto row_end = (n - 1) * rs, column_end = (k - 1) * cs;
+        const auto first = std::min(std::int64_t{0}, row_end) + std::min(std::int64_t{0}, column_end);
+        const auto last = std::max(std::int64_t{0}, row_end) + std::max(std::int64_t{0}, column_end);
+        origin = 1 - first;
+        storage.assign(static_cast<std::size_t>(last - first + 3),
+                       std::numeric_limits<double>::quiet_NaN());
+    }
+    apxchol_const_dense_view input() const {
+        return {storage.data() + origin, row_stride, column_stride};
+    }
+    apxchol_dense_view output() {
+        return {storage.data() + origin, row_stride, column_stride};
+    }
+    void assign(const Eigen::MatrixXd& values) {
+        for (std::int64_t j = 0; j < columns; ++j)
+            for (std::int64_t i = 0; i < rows; ++i)
+                storage[origin + i * row_stride + j * column_stride] = values(i, j);
+    }
+    Eigen::MatrixXd values() const {
+        Eigen::MatrixXd result(rows, columns);
+        for (std::int64_t j = 0; j < columns; ++j)
+            for (std::int64_t i = 0; i < rows; ++i)
+                result(i, j) = storage[origin + i * row_stride + j * column_stride];
+        return result;
+    }
+    void expect_padding_unchanged() const {
+        std::vector<bool> used(storage.size(), false);
+        for (std::int64_t j = 0; j < columns; ++j)
+            for (std::int64_t i = 0; i < rows; ++i)
+                used[origin + i * row_stride + j * column_stride] = true;
+        for (std::size_t i = 0; i < storage.size(); ++i)
+            if (!used[i]) EXPECT_TRUE(std::isnan(storage[i])) << i;
+    }
+};
+
+} // namespace
+
+TEST(CApi, StridedScalarAndBatchSolveWarmStartAndApplyMatchContiguousViews) {
+    const Sparse A = grid_laplacian(4, 4, 0.2);
+    const auto c = to_csc64(A);
+    for (const auto backend : available_backends()) {
+        auto options = cpu_options();
+        options.backend = backend;
+        handle h;
+        ASSERT_EQ(create(c, &options, h), APXCHOL_STATUS_SUCCESS);
+        for (const std::int64_t k : {1, 5}) {
+            Eigen::MatrixXd B(c.n, k), expected(c.n, k), applied(c.n, k);
+            for (int j = 0; j < k; ++j) B.col(j) = compatible_rhs(c.n, j + 1);
+            const apxchol_const_dense_view rhs{B.data(), 1, c.n};
+            const apxchol_dense_view solution{expected.data(), 1, c.n}, preconditioned{applied.data(), 1, c.n};
+            ASSERT_EQ(apxchol_solver_solve(h.s, k, &rhs, nullptr, &solution, tolerance,
+                                          max_iterations, nullptr, 0, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+            ASSERT_EQ(apxchol_solver_apply(h.s, k, &rhs, &preconditioned, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+            const std::array<std::array<std::int64_t, 2>, 7> layouts{{
+                {1, c.n}, {k, 1}, {2, 2 * c.n + 3}, {-1, c.n + 2},
+                {1, -c.n - 2}, {-2, -2 * c.n - 3}, {5, 3}}};
+            for (std::size_t l = 0; l < layouts.size(); ++l) {
+                SCOPED_TRACE(::testing::Message() << "backend=" << backend << " columns=" << k << " layout=" << l);
+                const auto bs = layouts[l], gs = layouts[(l + 1) % layouts.size()], xs = layouts[(l + 2) % layouts.size()];
+                strided_array b(c.n, k, bs[0], bs[1]), guess(c.n, k, gs[0], gs[1]), x(c.n, k, xs[0], xs[1]);
+                b.assign(B);
+                guess.assign(0.25 * B);
+                const auto input = b.input(), initial = guess.input();
+                const auto output = x.output();
+                std::vector<apxchol_solve_info> info(k);
+                for (const bool warm : {false, true}) {
+                    ASSERT_EQ(apxchol_solver_solve(h.s, k, &input, warm ? &initial : nullptr,
+                        &output, tolerance, max_iterations, info.data(), sizeof(info[0]), nullptr, 0),
+                        APXCHOL_STATUS_SUCCESS);
+                    const auto actual = x.values();
+                    EXPECT_TRUE(actual.isApprox(expected, 1e-6));
+                    for (int j = 0; j < k; ++j) {
+                        EXPECT_LT(true_residual(A, B.col(j), actual.col(j)), tolerance);
+                        EXPECT_EQ(info[j].converged, 1);
+                    }
+                    x.expect_padding_unchanged();
+                }
+                ASSERT_EQ(apxchol_solver_apply(h.s, k, &input, &output, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+                EXPECT_TRUE(x.values().isApprox(applied, 1e-12));
+                b.expect_padding_unchanged();
+                guess.expect_padding_unchanged();
+                x.expect_padding_unchanged();
+            }
+        }
+    }
+}
+
+TEST(CApi, InvalidDenseViewsAreRejectedBeforeAccessOrOutputWrites) {
+    const auto c = to_csc64(grid_laplacian(2, 2, 0.2));
+    handle h;
+    ASSERT_EQ(create(c, nullptr, h), APXCHOL_STATUS_SUCCESS);
+    std::array<double, 12> b{}, x{};
+    x.fill(7);
+    const apxchol_const_dense_view rhs{b.data(), 1, c.n};
+    const apxchol_dense_view out{x.data(), 1, c.n};
+    constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+    constexpr auto minimum = std::numeric_limits<std::int64_t>::min();
+    const auto high = reinterpret_cast<double*>(std::numeric_limits<std::uintptr_t>::max() - 7);
+    const auto low = reinterpret_cast<double*>(std::uintptr_t{8});
+    const std::array<apxchol_const_dense_view, 9> invalid{{
+        {nullptr, 1, c.n}, {b.data(), 0, c.n}, {b.data(), 1, 0},
+        {b.data(), minimum, 1}, {b.data(), maximum, 1}, {b.data(), 1, maximum},
+        {high, 1, c.n}, {low, -1, -c.n}, {b.data(), maximum / 2, maximum / 2}}};
+    for (const auto& bad : invalid) {
+        EXPECT_EQ(apxchol_solver_solve(h.s, 3, &bad, nullptr, &out, tolerance,
+            max_iterations, nullptr, 0, nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(apxchol_solver_solve(h.s, 3, &rhs, &bad, &out, tolerance,
+            max_iterations, nullptr, 0, nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(apxchol_solver_apply(h.s, 3, &bad, &out, nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
+        const apxchol_dense_view bad_out{const_cast<double*>(bad.data), bad.row_stride, bad.column_stride};
+        EXPECT_EQ(apxchol_solver_solve(h.s, 3, &rhs, nullptr, &bad_out, tolerance,
+            max_iterations, nullptr, 0, nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(apxchol_solver_apply(h.s, 3, &rhs, &bad_out, nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
+        EXPECT_TRUE(std::all_of(x.begin(), x.end(), [](double v) { return v == 7; }));
+    }
+    for (const auto strides : {std::array<std::int64_t, 2>{1, 1}, {2, 4}, {-2, -4}}) {
+        const apxchol_dense_view collision{x.data() + 8, strides[0], strides[1]};
+        EXPECT_EQ(apxchol_solver_solve(h.s, 3, &rhs, nullptr, &collision, tolerance,
+            max_iterations, nullptr, 0, nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(apxchol_solver_apply(h.s, 3, &rhs, &collision, nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
+    }
+    EXPECT_EQ(apxchol_solver_solve(h.s, 3, nullptr, nullptr, &out, tolerance,
+        max_iterations, nullptr, 0, nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
+    EXPECT_EQ(apxchol_solver_solve(h.s, 3, &rhs, nullptr, nullptr, tolerance,
+        max_iterations, nullptr, 0, nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
+    EXPECT_EQ(apxchol_solver_apply(h.s, 3, nullptr, &out, nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
+    EXPECT_EQ(apxchol_solver_apply(h.s, 3, &rhs, nullptr, nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
+}
+
+TEST(CApi, InactiveDenseStridesAreIgnoredAndStridedOverlapIsRejected) {
+    const auto c = to_csc64(grid_laplacian(2, 2, 0.2));
+    handle h;
+    ASSERT_EQ(create(c, nullptr, h), APXCHOL_STATUS_SUCCESS);
+    std::array<double, 4> b{1, 2, 3, 4}, x{};
+    constexpr auto ignored = std::numeric_limits<std::int64_t>::min();
+    const apxchol_const_dense_view rhs{b.data(), 1, ignored}, empty{nullptr, ignored, ignored};
+    const apxchol_dense_view out{x.data(), 1, ignored}, empty_out{nullptr, ignored, ignored};
+    EXPECT_EQ(apxchol_solver_solve(h.s, 1, &rhs, nullptr, &out, tolerance,
+        max_iterations, nullptr, 0, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+    EXPECT_EQ(apxchol_solver_apply(h.s, 1, &rhs, &out, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+    EXPECT_EQ(apxchol_solver_solve(h.s, 0, &empty, &empty, &empty_out, tolerance,
+        max_iterations, nullptr, 0, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+    EXPECT_EQ(apxchol_solver_apply(h.s, 0, &empty, &empty_out, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+    const csc64 scalar{1, {0, 1}, {0}, {2}};
+    handle one;
+    ASSERT_EQ(create(scalar, nullptr, one), APXCHOL_STATUS_SUCCESS);
+    const apxchol_const_dense_view scalar_rhs{b.data(), ignored, 1};
+    const apxchol_dense_view scalar_out{x.data(), ignored, 1};
+    EXPECT_EQ(apxchol_solver_solve(one.s, 4, &scalar_rhs, nullptr, &scalar_out, tolerance,
+        max_iterations, nullptr, 0, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+    EXPECT_EQ(apxchol_solver_apply(one.s, 4, &scalar_rhs, &scalar_out, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+
+    std::array<double, 16> interleaved{};
+    const apxchol_const_dense_view evens{interleaved.data(), 2, 8};
+    const apxchol_dense_view odds{interleaved.data() + 1, 2, 8};
+    // The contract rejects overlapping bounding ranges, including disjoint gaps.
+    EXPECT_EQ(apxchol_solver_solve(h.s, 2, &evens, nullptr, &odds, tolerance,
+        max_iterations, nullptr, 0, nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
+    EXPECT_EQ(apxchol_solver_apply(h.s, 2, &evens, &odds, nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
 }
 
 TEST(CApi, ExhaustionIsNotConvergedAndWritesTheSolution) {
@@ -385,7 +650,9 @@ TEST(CApi, ExtremeColumnPointersDoNotOverflow) {
         int sentinel = 0;
         apxchol_solver* s = reinterpret_cast<apxchol_solver*>(&sentinel);  // must be reset
         std::array<char, 256> err{};
-        EXPECT_EQ(apxchol_solver_create(1, colptr.data(), r.data(), v.data(), 0, nullptr, nullptr, &s,
+        const apxchol_csc_view matrix{1, colptr.data(), r.data(), v.data(),
+                                      APXCHOL_INDEX_INT64, APXCHOL_INDEX_INT64, 0};
+        EXPECT_EQ(apxchol_solver_create(&matrix, nullptr, nullptr, &s,
                                         err.data(), err.size()),
                   APXCHOL_STATUS_INVALID_ARGUMENT);
         EXPECT_EQ(s, nullptr);
@@ -402,7 +669,9 @@ TEST(CApi, ExtremeRowIndicesDoNotOverflow) {
         const std::array<std::int64_t, 1> r{row};
         apxchol_solver* s = nullptr;
         std::array<char, 256> err{};
-        EXPECT_EQ(apxchol_solver_create(1, colptr.data(), r.data(), v.data(), 1, nullptr, nullptr, &s,
+        const apxchol_csc_view matrix{1, colptr.data(), r.data(), v.data(),
+                                      APXCHOL_INDEX_INT64, APXCHOL_INDEX_INT64, 1};
+        EXPECT_EQ(apxchol_solver_create(&matrix, nullptr, nullptr, &s,
                                         err.data(), err.size()),
                   APXCHOL_STATUS_INVALID_ARGUMENT);
         EXPECT_NE(std::string(err.data()).find("row index"), std::string::npos);
@@ -522,11 +791,13 @@ TEST(CApi, InfoArraySizeIsCheckedBeforeWritesAndLaterErrorsZeroEveryColumn) {
     handle h;
     ASSERT_EQ(create(c, nullptr, h), APXCHOL_STATUS_SUCCESS);
     Eigen::MatrixXd b = Eigen::MatrixXd::Zero(c.n, 5), x = Eigen::MatrixXd::Constant(c.n, 5, 7);
+    const apxchol_const_dense_view rhs{b.data(), 1, c.n};
+    const apxchol_dense_view out{x.data(), 1, c.n};
     std::array<apxchol_solve_info, 5> info;
     for (const std::size_t size : {sizeof(info[0]) - 1, sizeof(info[0]) + 1}) {
         std::memset(info.data(), 0xA5, sizeof info);
         const auto before = info;
-        EXPECT_EQ(apxchol_solver_solve(h.s, 5, b.data(), nullptr, x.data(), tolerance, max_iterations,
+        EXPECT_EQ(apxchol_solver_solve(h.s, 5, &rhs, nullptr, &out, tolerance, max_iterations,
             info.data(), size, nullptr, 0), size < sizeof(info[0])
                 ? APXCHOL_STATUS_INVALID_ARGUMENT : APXCHOL_STATUS_UNSUPPORTED);
         EXPECT_TRUE(same_bytes(info.data(), before.data(), info.size()));
@@ -534,7 +805,7 @@ TEST(CApi, InfoArraySizeIsCheckedBeforeWritesAndLaterErrorsZeroEveryColumn) {
     }
     b(c.n - 1, 4) = std::numeric_limits<double>::quiet_NaN();
     std::memset(info.data(), 0xA5, sizeof info);
-    EXPECT_EQ(apxchol_solver_solve(h.s, 5, b.data(), nullptr, x.data(), tolerance, max_iterations,
+    EXPECT_EQ(apxchol_solver_solve(h.s, 5, &rhs, nullptr, &out, tolerance, max_iterations,
         info.data(), sizeof(info[0]), nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
     for (const auto& entry : info) {
         EXPECT_EQ(entry.iterations, 0);
@@ -543,7 +814,7 @@ TEST(CApi, InfoArraySizeIsCheckedBeforeWritesAndLaterErrorsZeroEveryColumn) {
     }
     EXPECT_TRUE((x.array() == 7).all());
     b.setZero();
-    EXPECT_EQ(apxchol_solver_solve(h.s, 5, b.data(), nullptr, x.data(), tolerance, max_iterations,
+    EXPECT_EQ(apxchol_solver_solve(h.s, 5, &rhs, nullptr, &out, tolerance, max_iterations,
         nullptr, 999, nullptr, 0), APXCHOL_STATUS_SUCCESS);
 }
 
@@ -745,6 +1016,8 @@ TEST(CApi, CpuBatchMatchesNativeOwnerUsingTheExportedFactor) {
             if (k > 1) B.col(0).setZero();
             const Eigen::MatrixXd guess = 0.25 * B;
             const apxchol::const_matrix_view guess_view(guess);
+            const apxchol_const_dense_view rhs{B.data(), 1, c.n}, initial{guess.data(), 1, c.n};
+            const apxchol_dense_view out{X.data(), 1, c.n};
             for (const bool warm : {false, true}) {
                 for (const int budget : {max_iterations, 0, 1}) {
                     SCOPED_TRACE(::testing::Message() << "shift=" << shift << " nrhs=" << k
@@ -754,8 +1027,7 @@ TEST(CApi, CpuBatchMatchesNativeOwnerUsingTheExportedFactor) {
                     std::vector<apxchol_solve_info> info(k);
                     const bool converged = std::all_of(reference.columns.begin(),
                         reference.columns.end(), [](const auto& r) { return r.converged; });
-                    ASSERT_EQ(apxchol_solver_solve(h.s, k, B.data(), warm ? guess.data() : nullptr,
-                        X.data(), tolerance, budget, info.data(), sizeof(info[0]), nullptr, 0),
+                    ASSERT_EQ(apxchol_solver_solve(h.s, k, &rhs, warm ? &initial : nullptr, &out, tolerance, budget, info.data(), sizeof(info[0]), nullptr, 0),
                         converged ? APXCHOL_STATUS_SUCCESS : APXCHOL_STATUS_NOT_CONVERGED);
                     EXPECT_TRUE(same_bytes(X.data(), expected.data(), X.size()));
                     for (int col = 0; col < k; ++col) {
@@ -766,7 +1038,7 @@ TEST(CApi, CpuBatchMatchesNativeOwnerUsingTheExportedFactor) {
                 }
             }
             native.apply(B, expected);
-            ASSERT_EQ(apxchol_solver_apply(h.s, k, B.data(), X.data(), nullptr, 0),
+            ASSERT_EQ(apxchol_solver_apply(h.s, k, &rhs, &out, nullptr, 0),
                       APXCHOL_STATUS_SUCCESS);
             EXPECT_TRUE(same_bytes(X.data(), expected.data(), X.size()));
         }
@@ -866,11 +1138,13 @@ TEST(CApi, BatchValidatesEveryInputColumnBeforeWritingSolutionsOrApplications) {
             Eigen::MatrixXd b = B, x0 = Eigen::MatrixXd::Zero(c.n, 5);
             (in_guess ? x0 : b)(c.n - 1, 4) = std::numeric_limits<double>::quiet_NaN();
             Eigen::MatrixXd x = Eigen::MatrixXd::Constant(c.n, 5, 7);
-            EXPECT_EQ(apxchol_solver_solve(h.s, 5, b.data(), x0.data(), x.data(), tolerance, max_iterations,
+            const apxchol_const_dense_view rhs{b.data(), 1, c.n}, initial{x0.data(), 1, c.n};
+            const apxchol_dense_view out{x.data(), 1, c.n};
+            EXPECT_EQ(apxchol_solver_solve(h.s, 5, &rhs, &initial, &out, tolerance, max_iterations,
                 nullptr, 0, nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
             EXPECT_TRUE((x.array() == 7).all());
             if (!in_guess) {
-                EXPECT_EQ(apxchol_solver_apply(h.s, 5, b.data(), x.data(), nullptr, 0),
+                EXPECT_EQ(apxchol_solver_apply(h.s, 5, &rhs, &out, nullptr, 0),
                           APXCHOL_STATUS_INVALID_ARGUMENT);
                 EXPECT_TRUE((x.array() == 7).all());
             }
@@ -888,10 +1162,12 @@ TEST(CApi, EmptyNegativeAndOverflowingBatchDimensions) {
     const auto overflow = std::numeric_limits<std::ptrdiff_t>::max() /
         static_cast<std::int64_t>(sizeof(double)) / c.n + 1;
     double b = 1, x = 7;
+    apxchol_const_dense_view rhs{&b, 1, c.n};
+    apxchol_dense_view out{&x, 1, c.n};
     for (const std::int64_t k : {std::int64_t{-1}, overflow}) {
-        EXPECT_EQ(apxchol_solver_solve(h.s, k, &b, nullptr, &x, tolerance, max_iterations, nullptr, 0, nullptr, 0),
+        EXPECT_EQ(apxchol_solver_solve(h.s, k, &rhs, nullptr, &out, tolerance, max_iterations, nullptr, 0, nullptr, 0),
                   APXCHOL_STATUS_INVALID_ARGUMENT);
-        EXPECT_EQ(apxchol_solver_apply(h.s, k, &b, &x, nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(apxchol_solver_apply(h.s, k, &rhs, &out, nullptr, 0), APXCHOL_STATUS_INVALID_ARGUMENT);
         EXPECT_EQ(x, 7);
     }
 
@@ -903,10 +1179,11 @@ TEST(CApi, EmptyNegativeAndOverflowingBatchDimensions) {
         static_cast<std::int64_t>(sizeof(apxchol_solve_info)) + 1;
     ASSERT_LE(info_overflow, std::numeric_limits<std::ptrdiff_t>::max() /
         static_cast<std::int64_t>(sizeof(double)));
+    rhs.column_stride = out.column_stride = 1;
     apxchol_solve_info info{17, 0.25, 1};
     const auto before = info;
     std::array<char, 256> error{};
-    EXPECT_EQ(apxchol_solver_solve(one.s, info_overflow, &b, nullptr, &x, tolerance, max_iterations,
+    EXPECT_EQ(apxchol_solver_solve(one.s, info_overflow, &rhs, nullptr, &out, tolerance, max_iterations,
         &info, sizeof(info), error.data(), error.size()), APXCHOL_STATUS_INVALID_ARGUMENT);
     EXPECT_NE(std::string(error.data()).find("nrhs * sizeof(apxchol_solve_info)"),
               std::string::npos) << error.data();
@@ -958,7 +1235,9 @@ TEST(CApi, ExtremeScaleRightHandSidesAreSolvedAsTheirScaledProblem) {
         B.col(0) = b.unaryExpr([](double v) { return std::ldexp(v, -700); });
         B.col(1) = b;
         B.col(2) = b.unaryExpr([](double v) { return std::ldexp(v, 700); });
-        ASSERT_EQ(apxchol_solver_solve(h.s, 3, B.data(), nullptr, X.data(), tolerance, max_iterations,
+        const apxchol_const_dense_view rhs{B.data(), 1, B.rows()};
+        const apxchol_dense_view out{X.data(), 1, X.rows()};
+        ASSERT_EQ(apxchol_solver_solve(h.s, 3, &rhs, nullptr, &out, tolerance, max_iterations,
                                       nullptr, 0, nullptr, 0),
                   APXCHOL_STATUS_SUCCESS);
         for (int col = 0; col < 3; ++col) {
@@ -1037,7 +1316,9 @@ TEST(CApi, UnrepresentableSolutionsAreUnsupported) {
         Eigen::MatrixXd B(4, 2), X(4, 2);
         B.col(0).setConstant(diagonal);
         B.col(1) = b;
-        EXPECT_EQ(apxchol_solver_solve(h.s, 2, B.data(), nullptr, X.data(), tolerance, max_iterations,
+        const apxchol_const_dense_view rhs{B.data(), 1, B.rows()};
+        const apxchol_dense_view out{X.data(), 1, X.rows()};
+        EXPECT_EQ(apxchol_solver_solve(h.s, 2, &rhs, nullptr, &out, tolerance, max_iterations,
                                       nullptr, 0, err.data(), err.size()),
                   APXCHOL_STATUS_UNSUPPORTED);
         EXPECT_GT(std::strlen(err.data()), 0u);
@@ -1203,8 +1484,8 @@ TEST(CApi, AutomaticScalarAndHostFactorAdoptionSelectCpu) {
     const csc64 scalar{1, {0, 1}, {0}, {2}};
     auto o = defaults();
     handle tiny;
-    ASSERT_EQ(apxchol_solver_create(scalar.n, scalar.colptr.data(), scalar.rowval.data(),
-        scalar.nzval.data(), 0, nullptr, nullptr, &tiny.s, nullptr, 0), APXCHOL_STATUS_SUCCESS);
+    const auto matrix = scalar.view();
+    ASSERT_EQ(apxchol_solver_create(&matrix, nullptr, nullptr, &tiny.s, nullptr, 0), APXCHOL_STATUS_SUCCESS);
     EXPECT_EQ(stats_of(tiny.s).backend, APXCHOL_BACKEND_CPU);
     const csc64 c = to_csc64(grid_laplacian(12, 11, 0.05));
     factor_handle f;
@@ -1370,8 +1651,9 @@ TEST(CApi, FactorHandleArgumentErrors) {
     std::string message;
     apxchol_factor_destroy(nullptr);
 
+    const auto matrix = c.view();
     // Creation: NULL outputs, CSC, options and the operator contract.
-    EXPECT_EQ(apxchol_factor_create(c.n, c.colptr.data(), c.rowval.data(), c.nzval.data(), 0,
+    EXPECT_EQ(apxchol_factor_create(&matrix,
                                     nullptr, nullptr, nullptr, 0),
               APXCHOL_STATUS_INVALID_ARGUMENT);
     {
@@ -1424,8 +1706,7 @@ TEST(CApi, FactorHandleArgumentErrors) {
 
     // Adoption: NULL output, the dimension, the operator contract.
     handle h;
-    EXPECT_EQ(apxchol_solver_create(c.n, c.colptr.data(), c.rowval.data(),
-                                                c.nzval.data(), 0, f.f, nullptr, nullptr,
+    EXPECT_EQ(apxchol_solver_create(&matrix, f.f, nullptr, nullptr,
                                                 nullptr, 0),
               APXCHOL_STATUS_INVALID_ARGUMENT);
     EXPECT_EQ(adopt(to_csc64(grid_laplacian(5, 5)), f.f, nullptr, h, 0, &message),
@@ -1574,7 +1855,10 @@ TEST(CApi, GpuBatchWidthsReportOriginalResidualsAndIndependentConvergence) {
             for (int col = 0; col < k; ++col) B.col(col) = compatible_rhs(c.n, col + 2);
             if (k > 1) B.col(0).setZero();
             std::vector<apxchol_solve_info> info(k);
-            ASSERT_EQ(apxchol_solver_solve(h.s, k, B.data(), nullptr, X.data(), tolerance, max_iterations,
+            const apxchol_const_dense_view rhs{B.data(), 1, c.n}, initial{X.data(), 1, c.n};
+            const apxchol_dense_view out{X.data(), 1, c.n}, warm_view{warm.data(), 1, c.n},
+                applied{Z.data(), 1, c.n}, repeated{repeat.data(), 1, c.n};
+            ASSERT_EQ(apxchol_solver_solve(h.s, k, &rhs, nullptr, &out, tolerance, max_iterations,
                 info.data(), sizeof(info[0]), nullptr, 0), APXCHOL_STATUS_SUCCESS);
             for (int col = 0; col < k; ++col) {
                 const double norm = B.col(col).stableNorm();
@@ -1588,16 +1872,16 @@ TEST(CApi, GpuBatchWidthsReportOriginalResidualsAndIndependentConvergence) {
                     EXPECT_LE(std::fabs(X.col(col).mean()), 1e-12 * X.col(col).norm());
                 }
             }
-            ASSERT_EQ(apxchol_solver_solve(h.s, k, B.data(), X.data(), warm.data(), 1e-6, max_iterations,
+            ASSERT_EQ(apxchol_solver_solve(h.s, k, &rhs, &initial, &warm_view, 1e-6, max_iterations,
                 info.data(), sizeof(info[0]), nullptr, 0), APXCHOL_STATUS_SUCCESS);
             for (const auto& result : info) EXPECT_EQ(result.iterations, 0);
-            ASSERT_EQ(apxchol_solver_apply(h.s, k, B.data(), Z.data(), nullptr, 0),
+            ASSERT_EQ(apxchol_solver_apply(h.s, k, &rhs, &applied, nullptr, 0),
                       APXCHOL_STATUS_SUCCESS);
-            ASSERT_EQ(apxchol_solver_apply(h.s, k, B.data(), repeat.data(), nullptr, 0),
+            ASSERT_EQ(apxchol_solver_apply(h.s, k, &rhs, &repeated, nullptr, 0),
                       APXCHOL_STATUS_SUCCESS);
             EXPECT_TRUE(Z.allFinite());
             EXPECT_TRUE(same_bytes(Z.data(), repeat.data(), Z.size()));
-            ASSERT_EQ(apxchol_solver_solve(h.s, k, B.data(), nullptr, X.data(), tolerance, 0,
+            ASSERT_EQ(apxchol_solver_solve(h.s, k, &rhs, nullptr, &out, tolerance, 0,
                 info.data(), sizeof(info[0]), nullptr, 0), APXCHOL_STATUS_NOT_CONVERGED);
             for (int col = 0; col < k; ++col) {
                 const bool zero = k > 1 && col == 0;
@@ -1657,9 +1941,11 @@ TEST(CApi, GpuFactorExportAndCopyCanBeReusedOnCpu) {
     Eigen::MatrixXd B(c.n, 5), X(c.n, 5), Y(c.n, 5);
     for (int col = 0; col < 5; ++col) B.col(col) = compatible_rhs(c.n, col + 1);
     std::array<apxchol_solve_info, 5> first{}, second{};
-    ASSERT_EQ(apxchol_solver_solve(gpu_again.s, 5, B.data(), nullptr, X.data(), tolerance, max_iterations,
+    const apxchol_const_dense_view rhs{B.data(), 1, c.n};
+    const apxchol_dense_view first_out{X.data(), 1, c.n}, second_out{Y.data(), 1, c.n};
+    ASSERT_EQ(apxchol_solver_solve(gpu_again.s, 5, &rhs, nullptr, &first_out, tolerance, max_iterations,
         first.data(), sizeof(first[0]), nullptr, 0), APXCHOL_STATUS_SUCCESS);
-    ASSERT_EQ(apxchol_solver_solve(peer.s, 5, B.data(), nullptr, Y.data(), tolerance, max_iterations,
+    ASSERT_EQ(apxchol_solver_solve(peer.s, 5, &rhs, nullptr, &second_out, tolerance, max_iterations,
         second.data(), sizeof(second[0]), nullptr, 0), APXCHOL_STATUS_SUCCESS);
     EXPECT_TRUE(same_bytes(X.data(), Y.data(), X.size()));
     for (int col = 0; col < 5; ++col) {
@@ -1667,9 +1953,9 @@ TEST(CApi, GpuFactorExportAndCopyCanBeReusedOnCpu) {
         EXPECT_EQ(first[col].relative_residual, second[col].relative_residual);
         EXPECT_EQ(first[col].converged, second[col].converged);
     }
-    ASSERT_EQ(apxchol_solver_apply(gpu_again.s, 5, B.data(), X.data(), nullptr, 0),
+    ASSERT_EQ(apxchol_solver_apply(gpu_again.s, 5, &rhs, &first_out, nullptr, 0),
               APXCHOL_STATUS_SUCCESS);
-    ASSERT_EQ(apxchol_solver_apply(peer.s, 5, B.data(), Y.data(), nullptr, 0),
+    ASSERT_EQ(apxchol_solver_apply(peer.s, 5, &rhs, &second_out, nullptr, 0),
               APXCHOL_STATUS_SUCCESS);
     EXPECT_TRUE(same_bytes(X.data(), Y.data(), X.size()));
 #endif
@@ -1749,14 +2035,18 @@ TEST(CApi, VersionAndAbi) {
 TEST(CApi, NullArgumentsAreErrorsAndDestroyNullIsANoOp) {
     apxchol_solver_destroy(nullptr);
     const csc64 c = to_csc64(grid_laplacian(3, 3));
-    EXPECT_EQ(apxchol_solver_create(c.n, c.colptr.data(), c.rowval.data(), c.nzval.data(), 0, nullptr,
+    auto matrix = c.view();
+    EXPECT_EQ(apxchol_solver_create(&matrix, nullptr,
                                     nullptr, nullptr, nullptr, 0),
               APXCHOL_STATUS_INVALID_ARGUMENT);
     apxchol_solver* s = nullptr;
-    EXPECT_EQ(apxchol_solver_create(c.n, nullptr, c.rowval.data(), c.nzval.data(), 0, nullptr, nullptr, &s,
+    matrix.colptr = nullptr;
+    EXPECT_EQ(apxchol_solver_create(&matrix, nullptr, nullptr, &s,
                                     nullptr, 0),
               APXCHOL_STATUS_INVALID_ARGUMENT);
-    EXPECT_EQ(apxchol_solver_create(0, c.colptr.data(), c.rowval.data(), c.nzval.data(), 0, nullptr,
+    matrix = c.view();
+    matrix.n = 0;
+    EXPECT_EQ(apxchol_solver_create(&matrix, nullptr,
                                     nullptr, &s, nullptr, 0),
               APXCHOL_STATUS_INVALID_ARGUMENT);
     std::vector<double> v(c.n, 0.0), out(c.n, 0.0);
