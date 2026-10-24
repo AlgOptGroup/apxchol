@@ -17,6 +17,7 @@ function(apxchol_install_core)
         FILES_MATCHING PATTERN "*.h" PATTERN "*.inc")
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/include/apxchol/version.h"
         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/apxchol")
+    install(FILES "${root}/LICENSE" DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/apxchol")
     install(EXPORT apxcholTargets NAMESPACE apxchol:: DESTINATION "${package_dir}")
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/apxcholConfig.cmake"
         "${CMAKE_CURRENT_BINARY_DIR}/apxcholConfigVersion.cmake"
