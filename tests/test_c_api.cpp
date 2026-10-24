@@ -467,8 +467,11 @@ struct strided_array {
         for (std::int64_t j = 0; j < columns; ++j)
             for (std::int64_t i = 0; i < rows; ++i)
                 used[origin + i * row_stride + j * column_stride] = true;
-        for (std::size_t i = 0; i < storage.size(); ++i)
-            if (!used[i]) EXPECT_TRUE(std::isnan(storage[i])) << i;
+        for (std::size_t i = 0; i < storage.size(); ++i) {
+            if (!used[i]) {
+                EXPECT_TRUE(std::isnan(storage[i])) << i;
+            }
+        }
     }
 };
 
