@@ -16,8 +16,6 @@
 #include <string>
 #include <vector>
 
-// check_cuda lives in apxchol/solver/sptrsv/cuda.h (already included
-// transitively via preconditioner.h).
 #include "apxchol/solver/pcg_cuda_kernels.h"
 #include "apxchol/solver/detail/gpu_pcg.h"
 #include "apxchol/solver/detail/gpu_scaling.h"
@@ -60,6 +58,7 @@ public:
         // Allocate the permutation before accepting device ownership. The
         // factor supplied this validated bijection; the builder checks the CSC.
         h_perm_.assign(perm.begin(), perm.begin() + n_);
+        APXCHOL_PCG_CUDA_CHECK(cudaGetDevice(&device_));
         if (!pcg_cuda::try_build_permuted_operator_csr(
                 static_cast<int>(n_), static_cast<int>(L.nonZeros()),
                 L.outerIndexPtr(), L.innerIndexPtr(), L.valuePtr(),
@@ -121,6 +120,12 @@ public:
     bool fp32_operator() const { return matrix_.fp32; }
     /// Threads per row of the SpMV resolved from the average row length.
     int spmv_lanes() const { return spmv_lanes_; }
+    double device_memory_used_mb() const {
+        const detail::cuda_device_scope device(device_, detail::cuda_device_scope::checked{});
+        size_t free = 0, total = 0;
+        return cudaMemGetInfo(&free, &total) == cudaSuccess && total >= free
+            ? (total - free) / (1024.0 * 1024.0) : -1;
+    }
 
 private:
     template<unsigned Columns, class Precond, class Input, class Output>
@@ -136,6 +141,7 @@ private:
             x_host.rows() != n_ || x_host.cols() != Columns ||
             (x0 && (x0->rows() != n_ || x0->cols() != Columns)))
             throw std::invalid_argument("cuda_pcg::solve: dimensions mismatch");
+        const detail::cuda_device_scope device(device_, detail::cuda_device_scope::checked{});
         reserve_columns(Columns);
         using host_panel = Eigen::Matrix<double, Eigen::Dynamic, Columns,
             Columns == 1 ? Eigen::ColMajor : Eigen::RowMajor>;
@@ -287,8 +293,9 @@ private:
         capacity_ = columns;
     }
 
-    void destroy() {
+    void destroy() noexcept {
         // A failed setup may own arrays before ready_ becomes true.
+        const detail::cuda_device_scope device(device_, device_ >= 0);
         release_workspace(vectors_, h_state_);
         for (void* pointer : std::initializer_list<void*>{matrix_.row_ptr, matrix_.col_idx,
                 matrix_.values_f64, matrix_.values_f32, matrix_.row_map})
@@ -297,9 +304,11 @@ private:
         capacity_ = 0;
         spmv_lanes_ = 1;
         ready_ = false;
+        device_ = -1;
     }
 
     int64_t n_ = 0;
+    int device_ = -1;
     bool ready_ = false;
     unsigned capacity_ = 0;
     pcg_cuda::operator_csr matrix_;

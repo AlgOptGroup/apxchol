@@ -79,9 +79,7 @@ public:
         res.converged = rnorm < tol;
         // Solve-held device VRAM (gpcg's operator+vectors + the SpTRSV factor are
         // still resident here; everything is freed when gpcg/precond destruct).
-        { size_t mf = 0, mt = 0;
-          if (cudaMemGetInfo(&mf, &mt) == cudaSuccess && mt >= mf)
-              res.solve_vram_mb = (mt - mf) / (1024.0 * 1024.0); }
+        res.solve_vram_mb = gpcg.device_memory_used_mb();
     }
 
     batch_solve_result solve_panel(const_matrix_view B, matrix_view X, double tol,
@@ -108,10 +106,7 @@ public:
         if (B.cols() == 4) run.template operator()<4>();
         else run.template operator()<2>();
         if (use_cp) { result.timings("gpu_pcg_loop"); result.timings.ascend(); }
-        double vram_mb = -1;
-        size_t free = 0, total = 0;
-        if (cudaMemGetInfo(&free, &total) == cudaSuccess && total >= free)
-            vram_mb = (total - free) / (1024.0 * 1024.0);
+        const double vram_mb = gpcg.device_memory_used_mb();
         for (auto& column : result.columns) {
             column.backend = solve_backend::gpu;
             column.lumped_offdiag = precond.factor().lumped_offdiag;

@@ -374,6 +374,7 @@ public:
         mark("col_scale+drop");
 
         size_t free_before = 0, total = 0;
+        APXCHOL_CUDA_CHECK(cudaGetDevice(&data_.cuda_device));
         APXCHOL_CUDA_CHECK(cudaMemGetInfo(&free_before, &total));
         data_.cleanup_needed = true;
         data_.factor_bytes = 0;
@@ -610,7 +611,7 @@ public:
             data_.nnz = factor.data_.nnz;
             data_.fp16 = factor_fp16;
             data_.adopted_device_factor = true;
-            data_.adopted_cuda_device = current_device;
+            data_.cuda_device = current_device;
             data_.adoption_host_download_bytes = adoption_download_bytes;
             data_.factor_bytes = adopted_bytes;
 
@@ -657,6 +658,7 @@ public:
     /// Reads x_in[0..m-1] from host, writes result to x_out[0..m-1] on host.
     /// x_in and x_out may alias (ping-pong stays on GPU).
     void solve_LLt(const double* x_in, double* x_out) const {
+        const detail::cuda_device_scope device(data_.cuda_device, detail::cuda_device_scope::checked{});
         double max_abs = 0;
         for (int64_t i = 0; i < data_.m; ++i) {
             if (!std::isfinite(x_in[i]))
@@ -676,6 +678,7 @@ public:
     /// the two host↔device transfers per call. Used by GPU-resident PCG
     /// loops so vectors stay on device between iterations. Narrowing input and
     /// widening output are fused into the sweeps; dependencies remain FP32.
+    /// The caller keeps this factor's device current throughout its GPU loop.
     void solve_LLt_dev(const double* d_in, double* d_out, const unsigned* active = nullptr) const {
         solve_LLt_dev_impl<1>(active, d_in, d_out);
     }
@@ -928,8 +931,7 @@ private:
     void destroy() noexcept {
         // Pristine and pre-allocation lifetimes must not initialize CUDA.
         if (!data_.cleanup_needed) return;
-        const detail::cuda_device_scope device(
-            data_.adopted_cuda_device, data_.adopted_device_factor && data_.adopted_cuda_device >= 0);
+        const detail::cuda_device_scope device(data_.cuda_device, data_.cuda_device >= 0);
         data_.reset_factor();
         void* const allocations[] = {
             data_.d_df_tag, data_.d_df_ticket, data_.d_fwd_words, data_.d_bck_words,
@@ -951,7 +953,7 @@ private:
         std::size_t factor_bytes = 0;         // cudaMalloc'd factor arrays (see factor_device_bytes)
         std::size_t device_delta_bytes = 0;   // cudaMemGetInfo free delta over setup
         bool adopted_device_factor = false;
-        int adopted_cuda_device = -1;
+        int cuda_device = -1;
         std::size_t adoption_host_download_bytes = 0;
 
         // Device memory (values + solve vectors at cuda_value_t width).
