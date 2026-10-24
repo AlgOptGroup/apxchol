@@ -12,6 +12,7 @@
 
 #include "apxchol.h"
 #include "apxchol/detail/csc_import.h"
+#include "apxchol/version.h"
 
 namespace py = pybind11;
 
@@ -322,6 +323,7 @@ PYBIND11_MODULE(_apxchol, m) {
     }
 #endif
     m.doc() = "apxchol approximate-Cholesky preconditioner (pybind11 binding)";
+    m.attr("__version__") = APXCHOL_VERSION;
     m.attr("DEFAULT_TOL") = apxchol::default_tol;
     m.attr("DEFAULT_MAXITER") = apxchol::default_max_iter;
     py::class_<Solver>(m, "Solver")

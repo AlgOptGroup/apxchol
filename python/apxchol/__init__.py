@@ -31,12 +31,7 @@ __all__ = [
 DEFAULT_TOL = _apxchol.DEFAULT_TOL
 DEFAULT_MAXITER = _apxchol.DEFAULT_MAXITER
 
-try:
-    from importlib.metadata import version as _pkg_version
-
-    __version__ = _pkg_version("apxchol")
-except Exception:                      # not installed as a distribution
-    __version__ = "0.3.0+local"
+__version__ = _apxchol.__version__
 
 
 @dataclass(frozen=True)
