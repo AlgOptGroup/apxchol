@@ -3259,9 +3259,16 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     apxchol::apx_cholesky host;
     host.set_options(factor_options);
     ASSERT_NO_THROW(host.set_factor(exported));
+    ASSERT_TRUE(exported.sddm);
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(A.rows(), 1.0, 2.0);
-    const Eigen::VectorXd expected = host.solve(rhs), actual = owner.solve(rhs);
-    EXPECT_LT((actual - expected).norm() / expected.norm(), 1e-10);
+    Eigen::VectorXd permuted(A.rows()), expected(A.rows());
+    for (Eigen::Index v = 0; v < A.rows(); ++v) permuted[exported.perm[v]] = rhs[v];
+    // The direct CUDA reference uses the same FP32 arithmetic as the owner.
+    apxchol::cuda_sptrsv uploaded;
+    uploaded.setup(exported.L, static_cast<node_index>(A.rows()), factor_options);
+    uploaded.solve_LLt(permuted.data(), expected.data());
+    const Eigen::VectorXd actual = owner.solve(rhs);
+    for (Eigen::Index v = 0; v < A.rows(); ++v) EXPECT_EQ(actual[v], expected[exported.perm[v]]) << v;
 #endif
 }
 
