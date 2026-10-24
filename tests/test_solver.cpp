@@ -81,8 +81,9 @@ TEST(Solver, BackendAvailabilityKeepsHostQueriesOnHost) {
 #if defined(APXCHOL_USE_CUDA)
     EXPECT_EQ(apxchol::cuda_ctx::detail::state().started, started);
     if (const char* visible = std::getenv("CUDA_VISIBLE_DEVICES");
-        visible && (std::string(visible).empty() || std::string(visible) == "-1"))
+        visible && (std::string(visible).empty() || std::string(visible) == "-1")) {
         EXPECT_FALSE(apxchol::backend_available(apxchol::solve_backend::gpu));
+    }
 #elif defined(APXCHOL_USE_METAL)
     EXPECT_EQ(apxchol::backend_available(apxchol::solve_backend::gpu),
               apxchol::metal_solver::available());
