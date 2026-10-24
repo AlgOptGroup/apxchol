@@ -13,7 +13,7 @@ function L = apxchol_laplacian(A)
   % rather than silently made indefinite.
   %
   % Handing an adjacency matrix straight to APXCHOL_SOLVER raises
-  % `apxchol:adjacencyInput` rather than returning a wrong answer quietly.
+  % `apxchol:badInput` rather than returning a wrong answer quietly.
   if ~issparse(A)
     error('apxchol:badMatrix', 'A must be sparse (use sparse(A))');
   end

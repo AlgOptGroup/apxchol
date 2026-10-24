@@ -29,7 +29,8 @@ The optional setup struct accepts `num_threads`, `seed`, `factor_storage`
 diagonal fraction; 0 disables), `lump_max_mass` (fraction in [0, 1]; 0
 rejects positive off-diagonals), and
 `verbose` (logical). Unspecified fields use C++ defaults. GPU and wide
-indices are unavailable in this binding.
+indices are unavailable in this binding. Solve and apply accept one RHS vector
+at a time; warm starts and factor export are not exposed.
 
 ## Octave build
 

@@ -116,7 +116,7 @@ class Solver:
     Options (all keyword-only) are documented on :func:`factorize`.
     """
 
-    def __init__(self, A, *, backend="auto", num_threads=0, seed=42, partitioner="block_greedy",
+    def __init__(self, A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
                  keep_factor=True,
                  factor_storage_dtype=None, **advanced):
         csc = _to_csc(A)
@@ -124,8 +124,12 @@ class Solver:
         self._nnz_A = int(csc.nnz)
         self._keep_factor = bool(keep_factor)
         data = np.ascontiguousarray(csc.data, dtype=np.float64)
-        options = dict(backend=backend, num_threads=index(num_threads), seed=index(seed), partitioner=partitioner,
+        options = dict(backend=backend, num_threads=index(num_threads),
                        keep_factor=self._keep_factor)
+        if seed is not None:
+            options["seed"] = index(seed)
+        if partitioner is not None:
+            options["partitioner"] = partitioner
         options.update(advanced)
         if "exact_clique_max_degree" in options:
             options["exact_clique_max_degree"] = index(options["exact_clique_max_degree"])
@@ -296,16 +300,16 @@ class Solver:
         return (2 * self.factor_nnz - self._n) / self._nnz_A
 
 
-def factorize(A, *, backend="auto", num_threads=0, seed=42, partitioner="block_greedy",
+def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
               keep_factor=True, factor_storage_dtype=None, **advanced) -> Solver:
     """Build the reusable approximate-Cholesky factor of A.
 
     Parameters
     ----------
     A : scipy.sparse matrix
-        Square graph Laplacian (singular, rank n−1) or SDDM matrix; the two
-        cases are auto-detected. This is the ASSEMBLED operator, not the
-        adjacency matrix of a graph. The operator contract — symmetric,
+        Square graph Laplacian (rank n−k for k connected components) or SDDM
+        matrix; the two cases are auto-detected. This is the ASSEMBLED operator,
+        not the adjacency matrix of a graph. The operator contract — symmetric,
         positive diagonal, non-positive off-diagonals — is ASSERTED: a
         violation raises `ValueError` naming which condition failed, and an
         adjacency matrix (no positive diagonal anywhere) is caught by the
@@ -323,12 +327,12 @@ def factorize(A, *, backend="auto", num_threads=0, seed=42, partitioner="block_g
         CPU thread ceiling for setup and every solve/apply. Positive values
         override the calling OpenMP task's setting; zero inherits it. Small
         workloads may use fewer threads. Each operation restores the setting.
-    seed : int
+    seed : int or None
         RNG seed for the randomized clique sampling (factorization is
-        deterministic per seed at one thread only).
-    partitioner : str
-        Independent-set selector: "block_greedy" (default),
-        "priority_greedy", or "baumann_kyng". Unknown names raise at
+        deterministic per seed at one thread only). None uses the C++ default.
+    partitioner : str or None
+        Independent-set selector: "block_greedy", "priority_greedy", or
+        "baumann_kyng". None uses the C++ default. Unknown names raise at
         factorization time.
     keep_factor : bool
         Keep the factor's row/value arrays alive so `chol()`/`L`/`D` can be
