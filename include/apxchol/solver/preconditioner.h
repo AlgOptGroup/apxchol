@@ -185,6 +185,12 @@ public:
         if constexpr (on_gpu) cuda_ctx::prewarm();
         n_ = A.rows();
         F_ = detail::factorize_for_solver(A, opts_, cp_, Route, keep_factor_);
+#if defined(APXCHOL_USE_CUDA)
+        if constexpr (on_gpu) {
+            if (!F_.research_device_factor)
+                throw std::invalid_argument("GPU route requires a unique nonempty device-owned factor");
+        }
+#endif
         install_factor();
 #if defined(APXCHOL_USE_CUDA)
         if constexpr (on_gpu) {
@@ -226,6 +232,13 @@ public:
     /// set_keep_factor); pass a freshly computed factorization instead.
     basic_apx_cholesky& set_factor(factorization F) {
         if constexpr (!on_gpu) detail::validate_adopted_factor(F);
+#if defined(APXCHOL_USE_CUDA)
+        else if (!F.research_device_factor) {
+            detail::validate_adopted_factor(F);
+            if (!F.sddm && F.L.rows() == 1)
+                throw std::invalid_argument("CUDA cannot adopt a scalar Laplacian factor");
+        }
+#endif
         else if (F.L.nonZeros() > 0 && F.L.vals_.empty())
             throw std::invalid_argument("apx_cholesky::set_factor: factorization values were released");
         n_ = static_cast<Eigen::Index>(F.L.rows());
@@ -243,9 +256,9 @@ private:
         if constexpr (Route == setup_route::gpu) {
             // Reject inadmissible factors before installation can initialize
             // CUDA or upload host arrays.
-            if (!F_.research_device_factor ||
-                F_.research_device_factor.use_count() != 1 ||
-                F_.research_device_factor->empty())
+            if (F_.research_device_factor &&
+                (F_.research_device_factor.use_count() != 1 ||
+                 F_.research_device_factor->empty()))
                 throw std::invalid_argument(
                     "GPU route requires a unique nonempty device-owned factor");
         }
@@ -302,9 +315,13 @@ private:
             if (opts_.verbose)
                 std::fprintf(stderr, "[sptrsv-setup gpu] %-22s %8.2f ms  (context creation %.2f ms)\n",
                              "cuda_init", cuda_init_s * 1e3, cuda_ctx::context_seconds() * 1e3);
-            trsv_.setup_adopting_device_factor_for_research(
-                std::move(*F_.research_device_factor), opts_);
-            F_.research_device_factor.reset();
+            if (F_.research_device_factor) {
+                trsv_.setup_adopting_device_factor_for_research(
+                    std::move(*F_.research_device_factor), opts_);
+                F_.research_device_factor.reset();
+            } else {
+                trsv_.setup(F_.L, static_cast<node_index>(F_.sddm ? n_ : n_ - 1), opts_);
+            }
         }
 #endif
         if (cp_) { (*cp_)("sptrsv_setup"); cp_->ascend(); }

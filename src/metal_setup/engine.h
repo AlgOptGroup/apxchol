@@ -2,6 +2,7 @@
 #include "source.h"
 #include "sparsify.h"
 #include "apxchol/solver/detail/residual_policy.h"
+#include "apxchol/solver/detail/device_memory_error.h"
 #include "../metal_setup_options.h"
 #include <cstdlib>
 #include "../metal_compile.h"
@@ -81,7 +82,7 @@ class Engine {
             auto allocate = [&](std::size_t size) {
                 auto b = [device newBufferWithLength:std::max(size, std::size_t(16))
                                              options:MTLResourceStorageModeShared];
-                require(b != nil, "Metal setup buffer allocation failed");
+                if (b == nil) throw device_memory_error("Metal setup buffer allocation failed");
                 return b;
             };
             auto arena = allocate(l.bytes);

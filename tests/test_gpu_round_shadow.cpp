@@ -3252,10 +3252,23 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     EXPECT_FALSE(exported.research_device_factor);
     apxchol::detail::gpu_preconditioner owner;
     owner.set_options(factor_options);
-    EXPECT_THROW(owner.set_factor(exported), std::invalid_argument);
+    ASSERT_NO_THROW(owner.set_factor(exported));
+    EXPECT_FALSE(owner.trsv().adopted_device_factor());
+    EXPECT_TRUE(owner.factor().L.vals_.empty());
+    EXPECT_EQ(exported.L.vals_.size(), exported.L.nonZeros());
     apxchol::apx_cholesky host;
     host.set_options(factor_options);
-    EXPECT_NO_THROW(host.set_factor(exported));
+    ASSERT_NO_THROW(host.set_factor(exported));
+    ASSERT_TRUE(exported.sddm);
+    const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(A.rows(), 1.0, 2.0);
+    Eigen::VectorXd permuted(A.rows()), expected(A.rows());
+    for (Eigen::Index v = 0; v < A.rows(); ++v) permuted[exported.perm[v]] = rhs[v];
+    // The direct CUDA reference uses the same FP32 arithmetic as the owner.
+    apxchol::cuda_sptrsv uploaded;
+    uploaded.setup(exported.L, static_cast<node_index>(A.rows()), factor_options);
+    uploaded.solve_LLt(permuted.data(), expected.data());
+    const Eigen::VectorXd actual = owner.solve(rhs);
+    for (Eigen::Index v = 0; v < A.rows(); ++v) EXPECT_EQ(actual[v], expected[exported.perm[v]]) << v;
 #endif
 }
 

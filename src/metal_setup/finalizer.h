@@ -277,7 +277,7 @@ class Finalizer {
     id<MTLBuffer> allocate(std::size_t bytes) {
         auto result = [device newBufferWithLength:std::max(bytes, std::size_t(16))
                                           options:MTLResourceStorageModeShared];
-        require(result != nil, "Metal factor preparation buffer allocation failed");
+        if (result == nil) throw device_memory_error("Metal factor preparation buffer allocation failed");
         return result;
     }
     void finish(id<MTLCommandBuffer> cb, id<MTLBuffer> status = nil) {

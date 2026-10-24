@@ -127,9 +127,8 @@ class Solver:
         options = dict(backend=backend, num_threads=index(num_threads), seed=index(seed), partitioner=partitioner,
                        keep_factor=self._keep_factor)
         options.update(advanced)
-        for key in ("stagnation_window", "exact_clique_max_degree"):
-            if key in options:
-                options[key] = index(options[key])
+        if "exact_clique_max_degree" in options:
+            options["exact_clique_max_degree"] = index(options["exact_clique_max_degree"])
         if factor_storage_dtype is not None:
             options["factor_storage_dtype"] = np.dtype(factor_storage_dtype).name
         self._impl = _apxchol.Solver(csc.indptr, csc.indices, data, options)
@@ -350,7 +349,7 @@ def factorize(A, *, backend="auto", num_threads=0, seed=42, partitioner="block_g
         Passed straight through to the core options: `degree_quantile`,
         `degree_multiplier`, `degree_tiebreak`, `exact_clique_max_degree`,
         `residual_peel` ("natural" | "min_degree" | "bk_serial"),
-        `stagnation_window`, `cpu_schedule` ("auto" | "levels"),
+        `cpu_schedule` ("auto" | "levels"),
         `drop_tolerance` (nonnegative; 0 disables dropping),
         `regularization` (nonnegative diagonal fraction; 0 disables),
         `lump_max_mass` (fraction in [0, 1]; 0 rejects positive off-diagonals),

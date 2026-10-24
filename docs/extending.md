@@ -110,15 +110,15 @@ complete integration.
 ## Reusing a custom factor
 
 ```cpp
-apxchol::cpu_solver solver(A, std::move(F));
+apxchol::solve_options opts;
+opts.backend = apxchol::solve_backend::gpu;
+apxchol::solver solver(A, std::move(F), opts);
 auto result = solver.solve(b);
 ```
 
-Alternatively, install a factor with `apxchol::apx_cholesky::set_factor` and
-apply it as a preconditioner. These public APIs stay entirely on CPU, including
-in CUDA builds; they do not silently upload the factor. Explicit low-level
-`cuda_sptrsv::setup` can install a separately supplied host factor for device
-triangular solves, independently of the end-to-end GPU setup route. This is an
+An explicit GPU request uploads the factor for CUDA or Metal solves, without
+factorizing again. Automatic adoption stays on CPU. `cpu_solver` and
+`apxchol::apx_cholesky::set_factor` remain CPU-only alternatives. This is an
 in-memory handoff, not a serialized-factor API.
 
 A `factorization` holds CSC factor columns

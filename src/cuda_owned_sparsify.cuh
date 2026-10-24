@@ -312,7 +312,7 @@ gpu_owned_sparsify_stats sparsify_owned_residual_device(
     std::size_t free_bytes = 0, total_bytes = 0;
     cuda_check(cudaMemGetInfo(&free_bytes, &total_bytes), "query sparsification workspace fit");
     if (required > free_bytes || total_bytes / 10 > free_bytes - required)
-        throw std::runtime_error("GPU owned sparsification workspace does not fit with device margin");
+        throw device_memory_error("GPU owned sparsification workspace does not fit with device margin");
     canonical.allocate(edges, "allocate sparsification canonical edges");
     scratch.allocate(edges, "allocate sparsification coalescing scratch");
     flags.allocate(live, "allocate sparsification flags");

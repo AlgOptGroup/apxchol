@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
-project(apxchol VERSION 0.3.0 LANGUAGES CXX)
+include(cmake/apxchol_version.cmake)
+project(apxchol VERSION ${APXCHOL_VERSION} LANGUAGES CXX)
 
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -40,27 +41,8 @@ FetchContent_MakeAvailable(fast_matrix_market)
 option(APXCHOL_BUILD_EXAMPLES "Build the examples/ programs" ON)
 option(APXCHOL_BUILD_TESTS "Build the unit tests (fetches GoogleTest)" ON)
 
-# ── Git SHA (for --version) ──────────────────────────
-execute_process(
-    COMMAND git -C "${CMAKE_CURRENT_SOURCE_DIR}" rev-parse --short HEAD
-    OUTPUT_VARIABLE APXCHOL_GIT_SHA
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-)
-if (NOT APXCHOL_GIT_SHA)
-    set(APXCHOL_GIT_SHA "unknown")
-endif()
-set(APXCHOL_VERSION "${PROJECT_VERSION}")
-
-configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/include/apxchol/version.h.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/include/apxchol/version.h"
-    @ONLY
-)
-
 # ── Core library: ApxChol preconditioner ─────────────
-add_library(apxchol_core)
-apxchol_configure_core(apxchol_core)
+apxchol_add_core()
 if (APXCHOL_BUILD_TESTS AND APXCHOL_DEVICE STREQUAL "CUDA")
     # Test-only declarations must agree across the whole core and its consumers.
     add_library(apxchol_test_core STATIC)

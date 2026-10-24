@@ -2,6 +2,7 @@
 #include "apxchol/solver/detail/gpu_diagnostics.h"
 #include "apxchol/solver/detail/gpu_scaling.h"
 #include "apxchol/solver/detail/cuda_device_scope.h"
+#include "apxchol/solver/detail/cuda_error.h"
 #include "apxchol/sparse_csc.h"
 #include "apxchol/solver/sptrsv/cuda_dataflow.h"
 #include "apxchol/solver/sptrsv/cuda_host.h"
@@ -252,15 +253,6 @@ private:
     } data_;
 };
 
-
-namespace detail {
-
-inline void check_cuda(cudaError_t err, const char* msg) {
-    if (err != cudaSuccess)
-        throw std::runtime_error(std::string(msg) + ": " + cudaGetErrorString(err));
-}
-
-} // namespace detail
 
 #define APXCHOL_CUDA_CHECK(call)    apxchol::detail::check_cuda(call, #call)
 

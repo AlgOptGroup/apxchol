@@ -52,7 +52,7 @@ const char* const kValidKeys[] = {
     "backend", "num_threads", "seed", "partitioner", "keep_factor", "factor_storage_dtype",
     "degree_quantile", "degree_multiplier", "degree_tiebreak",
     "exact_clique_max_degree",
-    "residual_peel", "stagnation_window", "cpu_schedule", "drop_tolerance",
+    "residual_peel", "cpu_schedule", "drop_tolerance",
     "regularization", "lump_max_mass", "verbose",
 };
 
@@ -91,7 +91,6 @@ apxchol::solve_options parse_options(const py::dict& d) {
         if      (key == "backend")           so.backend = parse_backend(v.cast<std::string>());
         else if (key == "num_threads")       so.num_threads = v.cast<int>();
         else if (key == "keep_factor")       so.keep_factor_values = v.cast<bool>();
-        else if (key == "stagnation_window") so.stagnation_window = v.cast<int>();
         // factor_options
         else if (key == "seed")               so.factor_opts.seed = v.cast<unsigned>();
         else if (key == "partitioner")        so.factor_opts.is_select = v.cast<std::string>();

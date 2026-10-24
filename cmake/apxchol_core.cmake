@@ -1,4 +1,6 @@
 include_guard(GLOBAL)
+include(GNUInstallDirs)
+include(${CMAKE_CURRENT_LIST_DIR}/apxchol_version.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_device.cmake)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -43,9 +45,26 @@ function(apxchol_configure_core target)
         target_compile_options(${target} PUBLIC "${APXCHOL_ARCH_FLAG}")
     endif()
 
+    set(APXCHOL_GIT_SHA "unknown")
+    execute_process(COMMAND git -C "${root}" rev-parse --show-toplevel
+        OUTPUT_VARIABLE git_root OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if (git_root)
+        file(REAL_PATH "${root}" native_root)
+        file(REAL_PATH "${git_root}" git_root)
+        if (git_root STREQUAL native_root)
+            execute_process(COMMAND git -C "${root}" rev-parse --short HEAD
+                OUTPUT_VARIABLE APXCHOL_GIT_SHA OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+            if (NOT APXCHOL_GIT_SHA)
+                set(APXCHOL_GIT_SHA "unknown")
+            endif()
+        endif()
+    endif()
+    configure_file("${root}/include/apxchol/version.h.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/include/apxchol/version.h" @ONLY)
     target_include_directories(${target} PUBLIC
-        ${root}/include
-        ${CMAKE_CURRENT_BINARY_DIR}/include
+        "$<BUILD_INTERFACE:${root}/include>"
+        "$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>"
+        "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
     )
 
     if (APXCHOL_DEVICE STREQUAL "CUDA")
@@ -83,4 +102,17 @@ function(apxchol_configure_core target)
     if (APXCHOL_POOL_FP32)
         target_compile_definitions(${target} PUBLIC APXCHOL_POOL_FP32)
     endif()
+endfunction()
+
+# A reusable library target; bindings link this instead of compiling core sources.
+function(apxchol_add_core)
+    if (TARGET apxchol::core)
+        return()
+    endif()
+    add_library(apxchol_core)
+    add_library(apxchol::core ALIAS apxchol_core)
+    set_target_properties(apxchol_core PROPERTIES EXPORT_NAME core POSITION_INDEPENDENT_CODE ON)
+    apxchol_configure_core(apxchol_core)
+    include(${CMAKE_CURRENT_FUNCTION_LIST_DIR}/apxchol_install.cmake)
+    apxchol_install_core()
 endfunction()

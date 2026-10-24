@@ -224,7 +224,6 @@ TEST_F(MetalDevice, UniformOperatorScalingPreservesConvergence) {
             apxchol::solve_options options;
             options.factor_opts.seed = 17;
             options.factor_opts.factor_storage = storage;
-            options.stagnation_window = 0;
             const apxchol::metal_solver solver(A, options);
             for (unsigned salt : {1u, 4u}) {
                 const auto b = rhs(A.rows(), salt, false);
@@ -244,7 +243,6 @@ TEST_F(MetalDevice, ScaledMatrixSolvesMatchScalarColumns) {
             options.backend = apxchol::solve_backend::gpu;
             options.factor_opts.seed = 17;
             options.factor_opts.factor_storage = storage;
-            options.stagnation_window = 0;
             const apxchol::solver owner(A, options);
             Eigen::MatrixXd exact(A.rows(), 7);
             for (int q = 0; q < 7; ++q)
@@ -421,7 +419,6 @@ TEST_F(MetalDevice, LongRowMatrixSolvesMatchScalarColumns) {
         options.backend = apxchol::solve_backend::gpu;
         options.factor_opts.seed = 17;
         options.factor_opts.factor_storage = storage;
-        options.stagnation_window = 0;
         const apxchol::solver owner(A, options);
         std::vector<unsigned> row_sizes(A.rows());
         for (auto row : owner.factor().L.inner_)
@@ -645,7 +642,6 @@ TEST_F(MetalDevice, LongOperatorRowAndPartialTile) {
             apxchol::solve_options options;
             options.factor_opts.factor_storage = storage;
             options.factor_opts.seed = 42;
-            options.stagnation_window = 0;
             const apxchol::metal_solver solver(A, options);
             ASSERT_EQ(solver.stats().operator_double_float, inexact);
             Eigen::VectorXd guess;

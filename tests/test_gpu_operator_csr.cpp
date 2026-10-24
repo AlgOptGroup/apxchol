@@ -420,6 +420,65 @@ TEST(GpuOperatorCsr, ConsumingSolveKeepsDefaultStorageAndOriginalResidual) {
 #endif
 }
 
+TEST(GpuSolveHonesty, ScalarAndBatchContinueAfterSlowProgress) {
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA solve required";
+#else
+    if (!runtime_available()) GTEST_SKIP() << "CUDA unavailable";
+    constexpr int n = 256;
+    std::vector<Eigen::Triplet<double>> entries;
+    for (int i = 0; i < n; ++i) {
+        entries.emplace_back(i, i, 2.0);
+        if (i) {
+            entries.emplace_back(i, i - 1, -1.0);
+            entries.emplace_back(i - 1, i, -1.0);
+        }
+    }
+    Eigen::SparseMatrix<double> matrix(n, n);
+    matrix.setFromTriplets(entries.begin(), entries.end());
+    std::vector<apxchol::node_index> permutation(n);
+    std::iota(permutation.begin(), permutation.end(), 0);
+    apxchol::cuda_pcg solver;
+    solver.setup(matrix, permutation);
+    const TestPreconditioner identity{n};
+    const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(n);
+    Eigen::MatrixXd B(n, 4), X(n, 4);
+    B.col(0) = rhs;
+    B.col(1).setZero();
+    B.col(2) = -2 * rhs;
+    B.col(3) = 0.5 * rhs;
+    // The residual still exceeds 0.5 at the former 50-iteration stop, but
+    // CG converges when allowed to continue on this positive-definite system.
+    for (const int budget : {50, 51, 512}) {
+        SCOPED_TRACE(budget);
+        Eigen::VectorXd x;
+        int iterations = 0;
+        double residual = 0;
+        solver.solve(identity, rhs, x, 1e-8, budget, iterations, residual, false);
+        const auto check = [&](const Eigen::VectorXd& b, const Eigen::VectorXd& output,
+                               int count, double reported) {
+            EXPECT_NEAR(reported, independent_residual(matrix, b, output), 2e-13);
+            if (budget < 512) {
+                EXPECT_EQ(count, budget);
+                EXPECT_GT(reported, 0.5);
+            } else {
+                EXPECT_GT(count, 50);
+                EXPECT_LE(count, budget);
+                EXPECT_LT(reported, 1e-8);
+            }
+        };
+        check(rhs, x, iterations, residual);
+        std::array<int, 4> counts{};
+        std::array<double, 4> residuals{};
+        solver.solve_panel<4>(identity, B, X, 1e-8, budget, counts, residuals, false);
+        EXPECT_EQ(counts[1], 0);
+        EXPECT_EQ(residuals[1], 0.0);
+        EXPECT_TRUE(X.col(1).isZero(0.0));
+        for (const int c : {0, 2, 3}) check(B.col(c), X.col(c), counts[c], residuals[c]);
+    }
+#endif
+}
+
 TEST(GpuSolveHonesty, FinalResidualChecksReturnedScalarAndPairOnReuse) {
 #if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
     GTEST_SKIP() << "CUDA solve required";
