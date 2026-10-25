@@ -27,6 +27,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 - Public API scope and compatibility: `docs/api.md`. Precision and storage: `docs/precision.md`. Extension seams: `docs/extending.md`.
 - Operator validation and M-matrix lumping: `operator_class`. Adjacency detection belongs to the CLI (`src/mtx_input.h`); bindings accept assembled operators only.
 - Measurement contracts: `benchmarks/README.md`.
+- Documentation: `python docs/build.py` reuses the guides, public C++ comments, Python docstrings and CLI help. Build instructions are in `CONTRIBUTING.md`; generated HTML goes to `build/docs`.
 
 ## Route invariants
 

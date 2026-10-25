@@ -36,6 +36,12 @@ __version__ = _apxchol.__version__
 
 @dataclass(frozen=True)
 class SolveResult:
+    """Solution and convergence information.
+
+    For a matrix RHS, ``iters``, ``residual`` and ``converged`` contain one
+    entry per column; for a vector RHS they are scalars.
+    """
+
     x: np.ndarray
     iters: int | np.ndarray
     residual: float | np.ndarray
@@ -137,6 +143,7 @@ class Solver:
 
     @property
     def shape(self):
+        """Shape of the square operator, as ``(n, n)``."""
         return (self._n, self._n)
 
     @property
@@ -146,6 +153,7 @@ class Solver:
 
     @property
     def sddm(self) -> bool:
+        """Whether the solver uses SDDM rather than Laplacian handling."""
         return self._impl.sddm()
 
     @property
@@ -213,6 +221,7 @@ class Solver:
         return self._impl.apply(self._rhs(r, "r"))
 
     def aslinearoperator(self) -> LinearOperator:
+        """Expose preconditioner application as a SciPy ``LinearOperator``."""
         return LinearOperator(shape=self.shape, matvec=self.apply, matmat=self.apply,
                               dtype=np.float64)
 

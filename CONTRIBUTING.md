@@ -30,6 +30,21 @@ The release version is set in `cmake/apxchol_version.cmake`; native builds and
 Python packages share it. PyPI publication requires a matching `v<version>`
 GitHub release tag. Manually running the publish workflow only builds the wheels.
 
+## Documentation
+
+Install Doxygen, build the CLI as above, then run:
+
+```bash
+python -m pip install -r docs/requirements.txt -e ./python
+python docs/build.py
+python -m http.server 8000 --directory build/docs
+```
+
+The site reuses the repository guides, selected C++ comments, Python docstrings
+and the CLI's `--help`. Generated files stay in `build/docs`. To use another
+CLI or output directory, pass them as positional arguments to `docs/build.py`.
+Documentation CI builds the site and uploads an HTML preview; it does not deploy it.
+
 ## Code conventions
 
 Use C++23, `snake_case`, namespace `apxchol`, and trailing underscores for
