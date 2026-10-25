@@ -4,6 +4,7 @@
 /// Included from factorization.h for custom partitioners and eliminators.
 
 #include "apxchol/solver/factorization.h"
+#include "apxchol/detail/parallel_exception.h"
 #include "apxchol/solver/elimination/elimination.h"
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 #include "apxchol/solver/partitioner_helpers.h"
@@ -386,6 +387,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
                     static_cast<std::size_t>(num_threads));
             }
 
+            parallel_exception error;
             #pragma omp parallel num_threads(num_threads)
             {
                 int tid = omp_get_thread_num();
@@ -395,12 +397,13 @@ void eliminate_partition_singleton(const Eliminator& elim,
 
                 #pragma omp for schedule(dynamic, compute_chunk)
                 for (size_t k = 0; k < n_verts; ++k)
-                    process_vertex(elim, G, part.data[k], opts.seed, output_col(k),
-                                   ws.threads[tid],
-                                   decrement_slice(k));
+                    error.run([&] {
+                        process_vertex(elim, G, part.data[k], opts.seed, output_col(k),
+                                       ws.threads[tid], decrement_slice(k));
+                    });
                 // implicit barrier — edge_buffers populated before pre-pass
 
-                if (live_degrees) {
+                if (!error.failed() && live_degrees) {
                     auto& decrements = ws.degree_decrements;
                     // Radix histogram rows belong to workers that actually
                     // joined this region. Unused requested-worker rows can
@@ -449,7 +452,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
                 // slot without a second pair of atomics. On first bump from
                 // 0→1 we push the vertex onto touched_buffer, so reserve_for
                 // skips the full O(G.n()) scan.
-                {
+                if (!error.failed()) error.run([&] {
                     auto& my_touched = ws.threads[tid].touched_buffer;
                     my_touched.clear();
                     const auto& my_buf = ws.threads[tid].edge_buffer;
@@ -468,30 +471,32 @@ void eliminate_partition_singleton(const Eliminator& elim,
                                 my_touched.push_back(e.v);
                         }
                     }
-                }
+                });
                 #pragma omp barrier  // incoming[] complete before reserve_for
 
                 // Account for appended edges and concatenate touched buffers for
                 // the adjacency bulk reserve below.
                 #pragma omp single
                 {
-                    const int actual_threads = omp_get_num_threads();
-                    edge_count = 0;
-                    for (int t = 0; t < actual_threads; ++t)
-                        edge_count += ws.threads[t].edge_buffer.size();
-                    const size_t N_edges = edge_count;
-                    if (live_degrees) ws.degree_fill_edges = N_edges;
-                    if (N_edges > 0) {
-                        G.record_edges_added(static_cast<edge_index>(N_edges));
-                    }
-                    ws.touched_concat.clear();
-                    for (int t = 0; t < actual_threads; ++t)
-                        ws.touched_concat.insert(
-                            ws.touched_concat.end(),
-                            ws.threads[t].touched_buffer.begin(),
-                            ws.threads[t].touched_buffer.end());
-                    if (N_edges > 0)
-                        G.adj_compact_for_round_if_needed(incoming);
+                    if (!error.failed()) error.run([&] {
+                        const int actual_threads = omp_get_num_threads();
+                        edge_count = 0;
+                        for (int t = 0; t < actual_threads; ++t)
+                            edge_count += ws.threads[t].edge_buffer.size();
+                        const size_t N_edges = edge_count;
+                        if (live_degrees) ws.degree_fill_edges = N_edges;
+                        if (N_edges > 0) {
+                            G.record_edges_added(static_cast<edge_index>(N_edges));
+                        }
+                        ws.touched_concat.clear();
+                        for (int t = 0; t < actual_threads; ++t)
+                            ws.touched_concat.insert(
+                                ws.touched_concat.end(),
+                                ws.threads[t].touched_buffer.begin(),
+                                ws.threads[t].touched_buffer.end());
+                        if (N_edges > 0)
+                            G.adj_compact_for_round_if_needed(incoming);
+                    });
                 }
                 // The implicit barrier after single publishes the edge count,
                 // touched_concat, and any rebuilt adjacency pool. Keeping the
@@ -502,50 +507,54 @@ void eliminate_partition_singleton(const Eliminator& elim,
                 // per-vertex slab copies dominate a serial reserve loop on
                 // dense rounds.
                 if (edge_count > 0) {
-                    G.adj_bulk_reserve_parallel(
-                        ws.touched_concat.begin(),
-                        ws.touched_concat.end(),
-                        incoming);
+                    if (!error.failed()) error.run([&] {
+                        G.adj_bulk_reserve_parallel(
+                            ws.touched_concat.begin(), ws.touched_concat.end(), incoming);
+                    });
+                    #pragma omp barrier  // all reserve attempts finish before publication
                 }
 
-                // Apply edges into histogram-assigned endpoint slots.
-                {
-                    const auto& ebuf = ws.threads[tid].edge_buffer;
+                if (!error.failed()) {
+                    // Apply edges into histogram-assigned endpoint slots.
                     {
-                        const auto& offsets = ws.threads[tid].endpoint_offsets;
-                        for (size_t i = 0; i < ebuf.size(); ++i) {
-                            const auto& [u, v, w] = ebuf[i];
-                            G.adj_write_reserved_directed_at(
-                                u, offsets[2 * i], v, w);
-                            G.adj_write_reserved_directed_at(
-                                v, offsets[2 * i + 1], u, w);
+                        const auto& ebuf = ws.threads[tid].edge_buffer;
+                        {
+                            const auto& offsets = ws.threads[tid].endpoint_offsets;
+                            for (size_t i = 0; i < ebuf.size(); ++i) {
+                                const auto& [u, v, w] = ebuf[i];
+                                G.adj_write_reserved_directed_at(
+                                    u, offsets[2 * i], v, w);
+                                G.adj_write_reserved_directed_at(
+                                    v, offsets[2 * i + 1], u, w);
+                            }
+                        }
+                        ws.threads[tid].edge_buffer.clear();
+                        // Apply excess atomically (each thread's own buffer).
+                        for (auto [u, delta] : ws.threads[tid].excess_buffer)
+                            G.atomic_add_excess(u, delta);
+                        ws.threads[tid].excess_buffer.clear();
+                    }
+
+                    {
+                        // Direct writers left count_[v] unchanged. Publish each
+                        // completed suffix once, after every writer is done.
+                        #pragma omp barrier
+                        #pragma omp for schedule(static) nowait
+                        for (size_t i = 0; i < ws.touched_concat.size(); ++i) {
+                            const node_index v = ws.touched_concat[i];
+                            if (live_degrees)
+                                (*live_degrees)[v] += incoming[v];
+                            G.adj_commit_reserved_directed(v, incoming[v]);
+                            incoming[v] = 0;
                         }
                     }
-                    ws.threads[tid].edge_buffer.clear();
-                    // Apply excess atomically (each thread's own buffer).
-                    for (auto [u, delta] : ws.threads[tid].excess_buffer)
-                        G.atomic_add_excess(u, delta);
-                    ws.threads[tid].excess_buffer.clear();
-                }
 
-                {
-                    // Direct writers left count_[v] unchanged. Publish each
-                    // completed suffix once, after every writer is done.
-                    #pragma omp barrier
                     #pragma omp for schedule(static) nowait
-                    for (size_t i = 0; i < ws.touched_concat.size(); ++i) {
-                        const node_index v = ws.touched_concat[i];
-                        if (live_degrees)
-                            (*live_degrees)[v] += incoming[v];
-                        G.adj_commit_reserved_directed(v, incoming[v]);
-                        incoming[v] = 0;
-                    }
+                    for (size_t k = 0; k < n_verts; ++k)
+                        G.set_inactive_unchecked(part.data[k]);
                 }
-
-#pragma omp for schedule(static) nowait
-                for (size_t k = 0; k < n_verts; ++k)
-                    G.set_inactive_unchecked(part.data[k]);
             }
+            error.rethrow();
             G.bulk_decrement_active(static_cast<node_index>(n_verts));
 
             if (cp) (*cp)("compute+apply_fused");

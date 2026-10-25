@@ -470,6 +470,62 @@ void expect_same_graph_selection(
 }
 } // namespace
 
+namespace {
+struct eliminator_failure {};
+struct throwing_eliminator {
+    void sample_clique(std::span<apxchol::weighted_neighbor>, double,
+                       std::uint64_t, apxchol::edge_emitter) const {
+        throw eliminator_failure{};
+    }
+};
+
+apxchol::graph failure_test_graph() {
+    apxchol::graph graph(16);
+    for (apxchol::node_index i = 0; i + 1 < graph.n(); ++i)
+        graph.add_edge(i, i + 1, 1.0);
+    return graph;
+}
+} // namespace
+
+TEST_F(FactorizeTest, ParallelEliminatorFailureReachesCaller) {
+    const scoped_threads team(2);
+    apxchol::factor_options options;
+    options.omp_threshold = 0;
+    options.parallel_residual_threshold = 0;
+    EXPECT_THROW(apxchol::factorize(failure_test_graph(), throwing_eliminator{}, options),
+                 eliminator_failure);
+}
+
+TEST_F(FactorizeTest, ParallelFactorAllocationFailureReachesCaller) {
+    const scoped_threads team(2);
+    auto graph = failure_test_graph();
+    apxchol::factor_options options;
+    options.omp_threshold = 0;
+    options.parallel_residual_threshold = 0;
+    auto* previous = std::pmr::set_default_resource(std::pmr::null_memory_resource());
+    EXPECT_THROW(apxchol::factorize(std::move(graph), options), std::bad_alloc);
+    std::pmr::set_default_resource(previous);
+}
+
+TEST(VecPoolAos, ReserveFailureReachesCallerAfterTeamJoin) {
+    const scoped_threads team(2);
+    apxchol::basic_vec_pool_incidence<unsigned> pool;
+    pool.init(2);
+    const std::array<apxchol::node_index, 2> touched{0, 1};
+    std::vector<apxchol::node_index> incoming(2, 0);
+    // Reject a single oversized slab before allocating its storage.
+    incoming[0] = apxchol::segmented_pool<unsigned>::max_claim_slots() + 1;
+    apxchol::detail::parallel_exception error;
+#pragma omp parallel num_threads(2)
+    {
+        error.run([&] {
+            pool.bulk_reserve_parallel(touched.begin(), touched.end(), incoming);
+        });
+#pragma omp barrier
+    }
+    EXPECT_THROW(error.rethrow(), std::bad_alloc);
+}
+
 TEST(VecPoolAos, ReserveAccommodatesALargerTeamThanGraphConstruction) {
     const scoped_threads team(4);
     apxchol::basic_vec_pool_incidence<unsigned> pool;
@@ -488,6 +544,7 @@ TEST(VecPoolAos, ReserveAccommodatesALargerTeamThanGraphConstruction) {
             pool.compact_for_round_if_needed(incoming);
         }
         pool.bulk_reserve_parallel(touched.begin(), touched.end(), incoming);
+#pragma omp barrier
 #pragma omp for
         for (unsigned v = 0; v < 8; ++v) {
             pool.write_reserved_at(v, 0, 100 + v);
@@ -522,8 +579,8 @@ TEST(VecPoolAos, ReducedEliminationTeamIgnoresInactiveWorkerScratch) {
     options.omp_threshold = 1;
     const int previous_levels = omp_get_max_active_levels();
     omp_set_max_active_levels(0);
-    apxchol::detail::eliminate_partition_singleton(
-        apxchol::tree_elimination{}, graph, part, columns, workspace, options);
+    EXPECT_NO_THROW(apxchol::detail::eliminate_partition_singleton(
+        apxchol::tree_elimination{}, graph, part, columns, workspace, options));
     omp_set_max_active_levels(previous_levels);
     EXPECT_EQ(columns.size(), 4u);
     EXPECT_EQ(workspace.touched_concat, (std::vector<apxchol::node_index>{4, 5}));

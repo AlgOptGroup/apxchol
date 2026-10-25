@@ -61,7 +61,7 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
     std::vector<double> diag(n, 0.0);
 
     // This builder owns a fresh graph. A caller may already be in an unrelated
-    // OpenMP team; do not join that team's collective reserve or its barrier.
+    // OpenMP team; do not partition this private graph across that team.
     const auto reserve_initial = [&](auto begin, auto end, const auto& incoming) {
         if (omp_in_parallel()) {
             for (auto it = begin; it != end; ++it)
@@ -191,10 +191,11 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
         edge_index total_inc = 0;   // sum of incoming = 2 * #edges (edge-scale)
         {
             std::vector<std::vector<node_index>> tt(nt);
+            parallel_exception error;
             // These are logical ranges, not runtime worker IDs. OpenMP may
             // provide fewer workers (thread limits or a nested region).
             #pragma omp parallel for num_threads(nt) schedule(static) reduction(+:total_inc)
-            for (int t = 0; t < nt; ++t) {
+            for (int t = 0; t < nt; ++t) error.run([&] {
                 const node_index vb = static_cast<node_index>(int64_t(n) * t / nt);
                 const node_index ve = static_cast<node_index>(int64_t(n) * (t + 1) / nt);
                 auto& mine = tt[t];
@@ -203,7 +204,8 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
                     total_inc += incoming[v];
                     if (incoming[v] > 0) mine.push_back(v);
                 }
-            }
+            });
+            error.rethrow();
             size_t total = 0;
             for (auto& l : tt) total += l.size();
             touched.reserve(total);
