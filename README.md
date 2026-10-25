@@ -146,6 +146,7 @@ testing one socket or NUMA node.
 
 ## Further reading
 
+- [API scope and compatibility](docs/api.md).
 - [Benchmark protocol and reproduction](benchmarks/README.md).
 - [Examples](examples/), [extending the algorithm](docs/extending.md), and [contributing](CONTRIBUTING.md).
 - Kyng–Sachdeva ([2016](https://arxiv.org/abs/1605.02353)),
