@@ -43,7 +43,8 @@ python -m http.server 8000 --directory build/docs
 The site reuses the repository guides, selected C++ comments, Python docstrings
 and the CLI's `--help`. Generated files stay in `build/docs`. To use another
 CLI or output directory, pass them as positional arguments to `docs/build.py`.
-Documentation CI builds the site and uploads an HTML preview; it does not deploy it.
+Documentation CI uploads an HTML preview for review. Successful main builds
+publish the same site to GitHub Pages.
 
 ## Code conventions
 
