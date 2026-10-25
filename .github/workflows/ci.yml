@@ -261,6 +261,5 @@ jobs:
             compiler = mex.getCompilerConfigurations('C++', 'Selected');
             assert(isscalar(compiler) && strcmp(compiler.Manufacturer, 'GNU'));
             [status, version] = system([compiler.Details.CompilerExecutable ' -dumpversion']);
-            assert(status == 0 && sscanf(version, '%d', 1) == 13,
-              'Expected GCC 13 for this job');
+            assert(status == 0 && sscanf(version, '%d', 1) == 13, 'Expected GCC 13 for this job');
             run('octave/build_and_test.m');
