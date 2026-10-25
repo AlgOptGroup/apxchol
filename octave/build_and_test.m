@@ -3,7 +3,7 @@
 %
 %   matlab -batch "run('/abs/path/to/octave/build_and_test.m')"
 %
-% Linux x86-64 recipe: GCC >= 14, OpenMP and Eigen headers are required.
+% Tested on Linux x86-64 with MATLAB R2026b, GCC 13, OpenMP and Eigen.
 here = fileparts(mfilename('fullpath'));
 cd(here);
 try

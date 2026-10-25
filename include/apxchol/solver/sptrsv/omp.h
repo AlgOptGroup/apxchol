@@ -273,8 +273,7 @@ public:
     // s_j, computed by setup() from the factor column [first, last) whose
     // FIRST entry is the diagonal: max |off-diagonal|, or 1.0f if the column
     // has no nonzero off-diagonal (so v / s_j is always defined). Also the
-    // reference of the compacting drop's threshold (computed BEFORE the drop;
-    // the drop never removes the column max, so it is the same after).
+    // reference of the compacting drop's threshold, computed before dropping.
     // Computed in double, stored fp32 (the factor is fp32, so this is exact).
     static float column_scale(const factor_value_t* vals, edge_index first, edge_index last) {
         return factor_column_scale(vals, first, last);   // factor_drop.h (shared with the GPU backend)
@@ -472,7 +471,7 @@ private:
         }
         mark("L11_alias_or_copy");
 
-        // Both formats preserve column sums after threshold dropping.
+        // Compensate dropped mass when off-diagonals remain.
         const double factor_drop_rel = options.drop_tolerance;
         stats_ = lowprec_statistics{};
         stats_.rel        = factor_drop_rel;
@@ -653,7 +652,7 @@ private:
                     const std::uint64_t off0 = n_off + stats_.dropped;
                     const double den0 = off0 ? static_cast<double>(off0) : 1.0;
                     std::fprintf(stderr,
-                        "[apxchol] factor drop (drop_tolerance=%g, column sums preserved): dropped=%llu"
+                        "[apxchol] factor drop (drop_tolerance=%g): dropped=%llu"
                         " (%.4f%% of %llu off-diagonals; threshold=%llu, format_zero=%llu)"
                         " stored_nnz %llu -> %llu (%.4f%% of factor)\n",
                         factor_drop_rel,

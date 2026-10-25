@@ -15,7 +15,7 @@
 // fp16 STORAGE CONTRACT (mirrors omp.h's FP16_SCALED, "FOLDED INTO THE
 // VECTORS"): what is stored is the column-scaled factor L~ = L D^-1, D =
 // diag(s_j), s_j = factor_column_scale (max |off-diagonal| of column j, 1.0f
-// if none; the PRE-drop max, which the drop never removes): off-diagonal
+// if none), computed before dropping: off-diagonal
 // slots hold fp16(fp32(L_ij) / s_j) (native conversion; fp16 subnormals flushed
 // to signed zero), the
 // diagonal is NOT read from its (still present, fp16) slot but from a

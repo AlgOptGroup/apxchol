@@ -41,8 +41,10 @@ CUDA retains one extra FP64 RHS vector per allocated panel column for this check
 
 For each column, let `s_j` be the maximum absolute off-diagonal factor value,
 or one for an empty/zero off-diagonal column. The factor-drop threshold uses
-this scale before dropping. Drop compensation runs on FP32 values before
-narrowing; the retained values preserve the column sum up to rounding.
+this scale before dropping. Compensation redistributes dropped mass among
+retained off-diagonals before narrowing. If none remain, the diagonal is kept
+without compensation; tolerances above one intentionally produce this
+diagonal-only case.
 
 An off-diagonal is stored by native conversion of `L_ij / s_j` to FP16.
 Under the normal floating-point environment this rounds to nearest, ties to even.

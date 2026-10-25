@@ -1,0 +1,26 @@
+# API and compatibility
+
+Starting with v1.0, apxchol preserves documented source-level use of these
+interfaces throughout the 1.x series:
+
+- C++ solver and factorization operations, options and results, including the
+  [partitioner and eliminator contracts](extending.md) and the graph/context
+  operations those contracts require.
+- [Python](../python/README.md) names exported through `__all__` and their
+  documented methods and arguments.
+- Documented [MATLAB/Octave wrappers](../octave/README.md) and CLI options.
+- `apxchol::core` and the [documented CMake integration](../README.md#use-from-cmake).
+
+Numerical results and performance may change within the documented
+[precision and convergence contracts](precision.md). This compatibility
+policy begins with v1.0; it does not apply to earlier prereleases.
+
+Some implementation headers must be installed for C++ templates. Installation
+alone does not make every declaration public. Outside the documented contracts
+above, `detail` namespaces, device kernels and capsules, `research_*` members,
+internal mutators, benchmark scripts and diagnostic output are implementation
+details.
+
+There is no stable C++ binary ABI. Rebuild compiled C++ consumers with
+compatible apxchol headers, compiler and standard library, OpenMP runtime,
+and architecture options when updating the library.
