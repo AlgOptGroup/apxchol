@@ -75,7 +75,7 @@ struct batch_solve_result {
     checkpoint timings;
 };
 
-/// Generate a random zero-mean unit RHS vector.
+/// Generate a random zero-mean unit RHS vector using Eigen's global std::rand state.
 Eigen::VectorXd generate_test_rhs(Eigen::Index n);
 
 /// Reusable CPU solver: factor + SpMV operator built ONCE, then PCG-solve any
@@ -103,6 +103,8 @@ public:
     /// internally.  L is still required — it is the PCG operator.
     /// Construction options (including regularization/lumping) are not reapplied;
     /// factor storage, dropping, scheduling and solve options still apply.
+    /// L is interpreted through its lower triangle. The caller must ensure it
+    /// is a valid operator compatible with F; use solver(L, F) for validation.
     cpu_solver(const Eigen::SparseMatrix<double>& L,
                factorization F,
                const solve_options& opts = {},

@@ -33,8 +33,9 @@ GitHub release tag. Manually running the publish workflow only builds the wheels
 ## Code conventions
 
 Use C++23, `snake_case`, namespace `apxchol`, and trailing underscores for
-private members. Public headers are under `include/apxchol/`; the CPU compiled
-core is `factorization.cpp`, `operator_class.cpp` and `solve.cpp` in `src/`.
+private members. C++ headers are under `include/`; [API scope](docs/api.md)
+defines the public interface. The CPU compiled core is `factorization.cpp`,
+`operator_class.cpp` and `solve.cpp` in `src/`.
 
 Register new partitioners in `partitioner_list.h`. The working graph uses
 directed AoS adjacency. Preserve deterministic neighbor ordering, sampling
