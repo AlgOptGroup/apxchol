@@ -1029,7 +1029,7 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
         if (compatible && zeros) compatible = detail::gpu_owned_csc_paired(*A);
     }
     if (compatible && (opts.backend == solve_backend::gpu ||
-                       detail::gpu_round_shadow_runtime_available()))
+                       backend_available(solve_backend::gpu)))
         return solve_backend::gpu;
     if (opts.backend == solve_backend::gpu)
         throw std::invalid_argument("GPU route requires 32-bit nodes, block_greedy, vec_pool_aos, "
