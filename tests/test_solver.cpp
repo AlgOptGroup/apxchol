@@ -92,6 +92,57 @@ TEST(Solver, BackendAvailabilityKeepsHostQueriesOnHost) {
 #endif
 }
 
+TEST(Solver, CpuInterfacesRejectEmptyOperator) {
+    const Sparse empty(0, 0);
+    EXPECT_THROW(apxchol::cpu_solver(empty, cpu_options()), std::invalid_argument);
+    apxchol::apx_cholesky preconditioner;
+    EXPECT_THROW(preconditioner.compute(empty), std::invalid_argument);
+}
+
+TEST(Solver, CpuBreakdownPreservesFiniteSolution) {
+    const scoped_omp_threads threads(1);
+    Sparse identity(2, 2);
+    identity.setIdentity();
+    const auto factor = apxchol::factorize(identity);
+    for (const auto& [diagonal, rhs_value] : {std::pair{1e308, 1e150}, std::pair{1e-320, 1.0}}) {
+        SCOPED_TRACE(diagonal);
+        const Sparse matrix = diagonal * identity;
+        const apxchol::cpu_solver owner(matrix, factor, cpu_options());
+        const Eigen::VectorXd rhs = Eigen::VectorXd::Constant(2, rhs_value);
+        const auto result = owner.solve(rhs, 1e-8, 12);
+        EXPECT_EQ(result.iterations, 0);
+        EXPECT_FALSE(result.converged);
+        EXPECT_TRUE(result.x.isZero(0.0));
+        EXPECT_EQ(result.residual, 1.0);
+        EXPECT_EQ((matrix * result.x - rhs).stableNorm() / rhs.stableNorm(), result.residual);
+    }
+}
+
+TEST(Solver, CpuBatchBreakdownDoesNotStopOtherColumns) {
+    const scoped_omp_threads threads(1);
+    Sparse identity(2, 2);
+    identity.setIdentity();
+    const Sparse matrix = 1e308 * identity;
+    const apxchol::cpu_solver owner(matrix, apxchol::factorize(identity), cpu_options());
+    for (const int columns : {2, 4, 8}) {
+        SCOPED_TRACE(columns);
+        Eigen::MatrixXd rhs = Eigen::MatrixXd::Zero(2, columns), output(2, columns);
+        rhs.col(0).setConstant(1e150);
+        for (int c = 2; c < columns; ++c) rhs(c % 2, c) = 1;
+        const auto result = owner.solve(rhs, output, 1e-8, 12);
+        EXPECT_TRUE(output.allFinite());
+        EXPECT_TRUE(output.leftCols(2).isZero(0.0));
+        for (int c = 0; c < columns; ++c) {
+            SCOPED_TRACE(c);
+            EXPECT_EQ(result.columns[c].iterations, c < 2 ? 0 : 1);
+            EXPECT_EQ(result.columns[c].converged, c != 0);
+            const double residual = rhs.col(c).isZero(0.0) ? 0
+                : (matrix * output.col(c) - rhs.col(c)).stableNorm() / rhs.col(c).stableNorm();
+            EXPECT_DOUBLE_EQ(result.columns[c].residual, residual);
+        }
+    }
+}
+
 TEST(Solver, CpuOwnerSurvivesInputsAndMovesAndReusesItsFactor) {
     const scoped_omp_threads threads(1);
     const Sparse matrix = operator_matrix();

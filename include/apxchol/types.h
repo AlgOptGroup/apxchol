@@ -29,8 +29,8 @@
 ///     never `(lo+hi)/2` (use `lo + (hi-lo)/2`) and never a diff that can go < 0.
 
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
+#include <stdexcept>
+#include <string>
 
 // A 64-bit node index forces 64-bit edges.
 #if defined(APXCHOL_64BIT_NODE_INDICES) && !defined(APXCHOL_64BIT_EDGE_INDICES)
@@ -86,18 +86,12 @@ inline constexpr std::uint64_t splitmix64_mix(std::uint64_t z) noexcept {
 // (No `index_t` alias: every use is now explicitly node_index or edge_index so
 //  the node/edge width distinction is type-checked, not by-convention.)
 
-/// Abort with a clear, actionable message when an edge_index counter (a factor
-/// column offset or an incidence-pool offset) would overflow its capacity.
-/// Turns a potential wrap into a clean, fix-it error. The move from signed to
-/// unsigned 32-bit already fixed com-Orkut's old signed-int wrap; this guard is
-/// for counts that exceed uint32 as well. Always on; the call sites are
-/// O(1)-per-grow, never per-edge.
+/// Reject factor or incidence-pool offsets that exceed edge_index capacity.
 [[noreturn]] inline void edge_index_overflow(const char* where) {
-    std::fprintf(stderr,
-        "apxchol: %s: an edge_index counter exceeded its %zu-bit capacity. "
-        "Rebuild with -DAPXCHOL_64BIT_EDGE_INDICES=ON (or _64BIT_NODE_INDICES).\n",
-        where, sizeof(edge_index) * 8);
-    std::abort();
+    throw std::length_error(std::string("apxchol: ") + where
+        + ": an edge_index counter exceeded its "
+        + std::to_string(sizeof(edge_index) * 8) + "-bit capacity. "
+          "Rebuild with -DAPXCHOL_64BIT_EDGE_INDICES=ON.");
 }
 
 } // namespace apxchol
