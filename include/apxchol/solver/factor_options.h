@@ -88,7 +88,7 @@ struct factor_options {
     /// automatic uses the backend default (CPU/Metal fp32, CUDA fp16).
     factor_storage_type factor_storage = factor_storage_type::automatic;
     cpu_sptrsv_schedule cpu_schedule = cpu_sptrsv_schedule::automatic;
-    /// Relative off-diagonal drop threshold; zero disables threshold dropping.
+    /// Relative off-diagonal drop threshold in [0, 1]; zero disables dropping.
     double drop_tolerance = 1e-4;
     bool verbose = false;
     partition_options partition{};   // selection options (see above)
@@ -137,11 +137,15 @@ struct factor_options {
 };
 
 namespace detail {
+inline void validate_drop_tolerance(double value) {
+    if (!(value >= 0 && value <= 1))
+        throw std::invalid_argument("drop_tolerance must be in [0, 1]");
+}
+
 inline void validate_factor_options(const factor_options& options) {
     validate_regularization(options.regularization);
     validate_lump_max_mass(options.lump_max_mass);
-    if (!std::isfinite(options.drop_tolerance) || options.drop_tolerance < 0)
-        throw std::invalid_argument("drop_tolerance must be finite and nonnegative");
+    validate_drop_tolerance(options.drop_tolerance);
     const double quantile = options.partition.degree_quantile;
     if (!std::isfinite(quantile) ||
         (quantile != degree_quantile_by_route && !(quantile >= 0 && quantile < 1)))

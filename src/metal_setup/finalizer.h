@@ -442,15 +442,13 @@ class Finalizer {
         finish(cb);
     }
     Finalized run(Factor &input, bool laplacian, bool half, double drop) {
-        require(std::isfinite(drop) && drop >= 0, "Metal factor drop tolerance must be finite and nonnegative");
+        validate_drop_tolerance(drop);
         const auto state = *input.data().state;
         require(state.status == 0 && state.columns == state.nodes && state.nodes > 0,
                 "Metal factor preparation requires a completed factor");
         require(state.nodes + std::uint64_t(state.entries) < gd::special_bit,
                 "Metal factor exceeds 31-bit offsets");
         const unsigned n = state.nodes, m = n - unsigned(laplacian), capacity = state.entries + n;
-        // Every ratio above one drops all off-diagonals; use a finite representative.
-        drop = drop > 1.0 ? 2.0 : drop;
         const rf::Shape shape{n, m, float(drop), float(drop - double(float(drop)))};
         Finalized out;
         out.permutation = allocate(n * sizeof(unsigned));

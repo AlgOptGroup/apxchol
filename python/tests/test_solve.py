@@ -608,10 +608,11 @@ def test_factor_settings_match_native_options(construct, options):
 
 
 @pytest.mark.parametrize("cpu_schedule", ["auto", "levels"])
-def test_explicit_factor_settings(cpu_schedule):
+@pytest.mark.parametrize("drop_tolerance", [0, 1])
+def test_explicit_factor_settings(cpu_schedule, drop_tolerance):
     A = grid2d_sddm(6)
     solver = apxchol.factorize(A, backend="cpu", num_threads=1, cpu_schedule=cpu_schedule,
-                               drop_tolerance=0, regularization=0, lump_max_mass=0.25,
+                               drop_tolerance=drop_tolerance, regularization=0, lump_max_mass=0.25,
                                verbose=False)
     b = np.ones(A.shape[0])
     result = solver.solve(b)
@@ -619,9 +620,11 @@ def test_explicit_factor_settings(cpu_schedule):
     assert np.linalg.norm(A @ result.x - b) / np.linalg.norm(b) < 1e-8
 
 
-@pytest.mark.parametrize("option,value", [("cpu_schedule", "unknown"), ("drop_tolerance", -1),
+@pytest.mark.parametrize("option,value", [("cpu_schedule", "unknown"),
                                          ("regularization", -1), ("lump_max_mass", -0.1),
-                                         ("lump_max_mass", 1.1)])
+                                         ("lump_max_mass", 1.1)] +
+                         [("drop_tolerance", value) for value in
+                          [-1, np.nextafter(1.0, np.inf), 2, np.nan, np.inf, -np.inf]])
 def test_invalid_factor_settings_rejected(option, value):
     with pytest.raises(ValueError):
         apxchol.factorize(sp.eye(2, format="csc"), **{option: value})

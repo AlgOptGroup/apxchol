@@ -131,7 +131,7 @@ run_config parse_args(int argc, char* argv[]) {
             {"auto", cpu_sptrsv_schedule::automatic},
             {"levels", cpu_sptrsv_schedule::levels}}));
     app.add_option("--factor-drop", cfg.solve_opts.factor_opts.drop_tolerance,
-                   "Relative factor-entry dropping threshold (0 disables dropping)")
+                   "Relative factor-entry dropping threshold in [0, 1] (0 disables dropping)")
         ->capture_default_str();
     app.add_option("--regularization", cfg.solve_opts.factor_opts.regularization,
                    "Minimum preconditioner diagonal excess relative to the diagonal")

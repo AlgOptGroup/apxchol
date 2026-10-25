@@ -30,7 +30,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 
 ## Route invariants
 
-- Solver controls are typed per-instance options, not environment variables. Validate them before setup; bindings share compiled defaults. Libraries are quiet by default, and `collect_timings` controls optional checkpoints. Standard OpenMP/CUDA runtime and build controls remain external; reference-only tuning stays internal to tests.
+- Solver controls are typed per-instance options, not environment variables. Validate them before setup; `drop_tolerance` is in `[0, 1]`. Bindings share compiled defaults. Libraries are quiet by default, and `collect_timings` controls optional checkpoints. Standard OpenMP/CUDA runtime and build controls remain external; reference-only tuning stays internal to tests.
 - `solve_backend` (`automatic`, `cpu`, `gpu`) fixes one complete setup/solve route before setup. Explicit GPU requests fail for unsupported options, input or devices. Once selected, errors never retry on another route. Report the selected route in results and CLI output.
 - `cpu_solver`, public `factorize()` and Eigen preconditioning stay on CPU in GPU builds and must not initialize CUDA. Disabled or pristine GPU lifetimes must not initialize CUDA either.
 - `backend_available()` checks build/device availability, not compatibility with every solver option. CPU and automatic queries never initialize a GPU.

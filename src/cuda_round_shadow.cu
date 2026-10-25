@@ -3192,8 +3192,7 @@ std::shared_ptr<cuda_sptrsv_device_factor>
 gpu_round_shadow_device_state::finalize_device_factor(
         std::span<const node_index> permutation, node_index factor_dim,
         factor_storage_type storage, double drop_rel, bool consume_factor_log) {
-    if (!std::isfinite(drop_rel) || drop_rel < 0.0)
-        throw std::invalid_argument("factor drop tolerance must be finite and nonnegative");
+    validate_drop_tolerance(drop_rel);
     impl_->require_current_device("factor finalization");
     if (impl_->poisoned || !impl_->has_state || !impl_->generation_accepted ||
         !impl_->owned_prefix_materialized || impl_->factor_log_consumed)

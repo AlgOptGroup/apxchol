@@ -39,12 +39,11 @@ CUDA retains one extra FP64 RHS vector per allocated panel column for this check
 
 ## Scaled FP16 contract
 
-For each column, let `s_j` be the maximum absolute off-diagonal factor value,
-or one for an empty/zero off-diagonal column. The factor-drop threshold uses
-this scale before dropping. Compensation redistributes dropped mass among
-retained off-diagonals before narrowing. If none remain, the diagonal is kept
-without compensation; tolerances above one intentionally produce this
-diagonal-only case.
+`drop_tolerance` must be in [0, 1]; zero disables threshold dropping. For each
+column, let `s_j` be the maximum absolute off-diagonal factor value, or one
+for an empty/zero off-diagonal column. The threshold uses this scale before
+dropping. Compensation redistributes dropped mass among retained
+off-diagonals before narrowing, when any remain.
 
 An off-diagonal is stored by native conversion of `L_ij / s_j` to FP16.
 Under the normal floating-point environment this rounds to nearest, ties to even.
