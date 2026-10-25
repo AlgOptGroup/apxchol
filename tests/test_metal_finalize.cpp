@@ -4,6 +4,7 @@
 #include "apxchol/solver/detail/metal_host.h"
 
 #include <array>
+#include <cmath>
 #include <span>
 #include <type_traits>
 
@@ -30,6 +31,8 @@ template<class Value> struct Math {
     bool finite_float(float x) const { return std::isfinite(x); }
     bool flushes(float x) const { return apxchol::detail::fp16_flushes(x); }
     wide drop(rf::Shape shape) const { return {shape.drop_hi, shape.drop_lo}; }
+    float fraction(float x, int& exponent) const { return std::frexp(x, &exponent); }
+    float scale_float(float x, int exponent) const { return std::ldexp(x, exponent); }
     Value store(float x, float scale, bool fp16) const {
         return fp16 ? Value(apxchol::detail::narrow_scaled_fp16(x, scale)) : Value(x);
     }
@@ -62,7 +65,7 @@ template<class Value> struct Fixture {
     std::array<Value, 9> val{};
     std::array<rf::Metadata, 4> metadata{};
     unsigned status = 0;
-    rf::Shape shape{5, 4, .25f, 0};
+    rf::Shape shape{5, 4, .25f, 0, 0};
 
     Memory<Value> memory() {
         Memory<Value> s{shape, std::is_same_v<Value, _Float16>, columns, raw.data() + 1,

@@ -1100,6 +1100,41 @@ TEST_F(MetalDevice, ResidentDropToleranceMatchesHostReference) {
     }
 }
 
+TEST_F(MetalDevice, TinyPositiveDropMatchesHostReference) {
+    // Every first pivot has these three ratios, independent of its vertex ID.
+    constexpr double weights[]{1.0, 0.4998778998851776, 0x1p-16};
+    std::vector<Eigen::Triplet<double>> entries;
+    for (int i = 0; i < 4; ++i) {
+        entries.emplace_back(i, i, 4.0);
+        for (int j = i + 1; j < 4; ++j) {
+            const double weight = weights[(i ^ j) - 1];
+            entries.emplace_back(i, j, -weight);
+            entries.emplace_back(j, i, -weight);
+        }
+    }
+    Sparse A(4, 4);
+    A.setFromTriplets(entries.begin(), entries.end());
+    A.makeCompressed();
+    for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
+        for (double drop : {0.0, 1e-300, 1e-46, 0.1}) {
+            SCOPED_TRACE(static_cast<int>(storage));
+            SCOPED_TRACE(drop);
+            auto options = keep_opts();
+            options.factor_opts.factor_storage = storage;
+            options.factor_opts.drop_tolerance = drop;
+            const apxchol::metal_solver solver(A, options);
+            for (int i = 0; i < 4; ++i) {
+                SCOPED_TRACE(i);
+                const Eigen::VectorXd b = Eigen::VectorXd::Unit(4, i);
+                const auto expected = emulate_apply(solver.factor(), b, options.factor_opts);
+                const auto actual = solver.apply(b);
+                EXPECT_TRUE(actual.allFinite());
+                EXPECT_LT((actual - expected).norm() / expected.norm(), 2e-6);
+            }
+        }
+    }
+}
+
 TEST_F(MetalDevice, VerbosityAndTimingsArePerSolver) {
     const Sparse A = grid(7, 9, 0.25);
     const auto b = rhs(A.rows(), 4, false);
