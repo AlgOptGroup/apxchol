@@ -18,9 +18,8 @@ namespace apxchol {
 // Per-column scale contract: s_j of the factor column [first, last) whose
 // FIRST entry is the diagonal: max |off-diagonal|, or 1.0f if the column has
 // no nonzero off-diagonal (so v / s_j is always defined). The reference of the
-// compacting drop's threshold (computed BEFORE the drop; the drop never
-// removes the column max, so it is the same after) and the *_SCALED storage
-// variants' scale (CPU: omp_sptrsv::column_scale; GPU fp16: cuda_host).
+// compacting drop's threshold is computed before dropping; the same scale is
+// used for normalized FP16 storage.
 // Computed in double, stored fp32 (the factor is fp32 on every build that
 // uses it, so this is exact).
 template <class Val, class Off>
