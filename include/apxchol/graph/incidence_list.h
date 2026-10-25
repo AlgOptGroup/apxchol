@@ -500,15 +500,20 @@ template<typename Value> struct basic_vec_pool_incidence {
     /// bulk_reserve_parallel starts.
     void compact_for_round_if_needed(
             const std::vector<node_index>& incoming) {
+#ifdef _OPENMP
+        // Graph construction and factorization can use different team sizes.
+        const auto team = static_cast<size_t>(omp_get_num_threads());
+        if (bulk_thread_grows_.size() < team)
+            bulk_thread_grows_.resize(team);
+#endif
         if (abandoned_ > pool_.size() / 2)
             compact(&incoming);
     }
 
     /// Bulk parallel reserve_for. Caller is inside an OpenMP parallel region.
     /// Each thread computes and copies the grows for a stable slice of touched
-    /// vertices. Atomic segment claims replace the old team prefix sum and
-    /// whole-pool resize; the trailing barrier publishes every new slab before
-    /// the caller's apply phase.
+    /// vertices. The caller must catch failures and synchronize the team before
+    /// publishing or accessing the reserved slabs.
     template<typename TouchedIter>
     void bulk_reserve_parallel(TouchedIter touched_begin, TouchedIter touched_end,
                                const std::vector<node_index>& incoming) {
@@ -579,10 +584,6 @@ template<typename Value> struct basic_vec_pool_incidence {
 #pragma omp atomic update
 #endif
         grow_count_ += grows.size();
-#ifdef _OPENMP
-#pragma omp barrier
-#endif
-        return;
     }
 
 private:
