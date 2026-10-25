@@ -472,7 +472,7 @@ private:
         }
         mark("L11_alias_or_copy");
 
-        // Both formats preserve column sums after threshold dropping.
+        // Compensate dropped mass when off-diagonals remain.
         const double factor_drop_rel = options.drop_tolerance;
         stats_ = lowprec_statistics{};
         stats_.rel        = factor_drop_rel;
@@ -653,7 +653,7 @@ private:
                     const std::uint64_t off0 = n_off + stats_.dropped;
                     const double den0 = off0 ? static_cast<double>(off0) : 1.0;
                     std::fprintf(stderr,
-                        "[apxchol] factor drop (drop_tolerance=%g, column sums preserved): dropped=%llu"
+                        "[apxchol] factor drop (drop_tolerance=%g): dropped=%llu"
                         " (%.4f%% of %llu off-diagonals; threshold=%llu, format_zero=%llu)"
                         " stored_nnz %llu -> %llu (%.4f%% of factor)\n",
                         factor_drop_rel,

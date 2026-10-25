@@ -1,9 +1,9 @@
 #pragma once
 // Compact host factor columns before storage conversion. Keep the diagonal and
 // off-diagonals accepted by the threshold/format predicate. Redistribute dropped
-// mass among retained off-diagonals to preserve each column sum; plain removal
-// can damage Laplacian grounding. Preserve entry order and ordered per-column
-// compensation. See docs/precision.md for the storage contract.
+// mass among retained off-diagonals when any remain; otherwise keep the diagonal
+// alone. Preserve entry order and ordered per-column compensation.
+// See docs/precision.md for the storage contract.
 #include "apxchol/csc_work.h"
 #include "apxchol/types.h"
 #include <algorithm>
