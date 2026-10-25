@@ -26,92 +26,55 @@ inline cpu_sptrsv_schedule parse_cpu_schedule(std::string_view value) {
 
 } // namespace detail
 
-/// Strategy for the serial residual peel that runs after the main parallel
-/// IS-finding loop bails out.  All strategies are serial; they differ only
-/// in pivot order.
+/// Pivot order for the serial tail after parallel elimination and BK handoff.
 enum class residual_peel_strategy {
     natural,     // peel in original active-list order (default)
     min_degree,  // lazy degree-heap heuristic; not exact current minimum degree
     bk_serial    // sample √|active| vertices and peel the min-degree one
 };
 
-/// `exact_core_max_h` sentinel: resolve from the elimination route, because the
-/// GPU-owned setup rejects the core rules outright rather than ignoring them.
+/// Resolve `exact_core_max_h` to 4 on CPU or 0 for GPU-owned setup.
 inline constexpr std::size_t exact_core_by_route =
     std::numeric_limits<std::size_t>::max();
 
-/// The host-route exact-core cap the sentinel resolves to. See the knob below.
+/// Default CPU exact-core cap; see `exact_core_max_h`.
 inline constexpr std::size_t exact_core_host_default = 4;
 
-/// `degree_quantile` sentinel: resolve the cap from the elimination route at
-/// factorization time rather than pinning one number for both routes.
+/// Resolve `degree_quantile` from the factorization route.
 inline constexpr double degree_quantile_by_route = -1.0;
 
-/// The host-route cap, and the value the sentinel falls back to for callers
-/// that read `partition_options` directly instead of going through
-/// `factorize()` (a partitioner invoked on its own cannot know the route).
+/// CPU default, also used by partitioners invoked without a factorization route.
 inline constexpr double degree_quantile_host_default = 0.2;
 
-/// The CUDA-owned setup cap. Metal defaults to 0.2. See `degree_quantile`.
+/// CUDA default; Metal uses the CPU default.
 inline constexpr double degree_quantile_device_default = 0.5;
 
-/// Concrete exact-core cap for a possibly-unresolved `exact_core_max_h`, for
-/// the readers that see the options before factorization resolves them. The
-/// device gate in factorization.cpp is one: it tests the knob against 0 to
-/// decide whether the GPU may own the CSC, and an unresolved sentinel would
-/// silently drop every run onto the host import path.
+/// Treat the unresolved core cap as off when checking GPU compatibility.
 inline constexpr std::size_t exact_core_or_off(std::size_t h) noexcept {
     return h == exact_core_by_route ? 0u : h;
 }
 
-/// Concrete cap for a possibly-unresolved `degree_quantile`. Non-negative
-/// values pass through untouched so an explicit 0.2 stays 0.2 on the device.
+/// Resolve an unset quantile to the CPU default, preserving explicit values.
 inline constexpr double degree_quantile_or_host_default(double q) noexcept {
     return q < 0.0 ? degree_quantile_host_default : q;
 }
 
-/// Selection knobs consulted by the built-in partitioners — the only part of
-/// the options a partitioner should normally read (as opts.partition).
+/// Selection options for built-in partitioners, passed as opts.partition.
 struct partition_options {
-    /// Quantile-based IS degree cap. When in (0,1), each round admits only the
-    /// lowest `degree_quantile` fraction of active vertices by CURRENT degree
-    /// (threshold found via nth_element, O(active)), instead of the
-    /// `degree_multiplier × avg_degree` cap. Robust to the degree distribution:
-    /// a multiplier cap below 1 can exclude *every* vertex on near-uniform-degree
-    /// graphs (→ empty IS, round explosion), whereas a quantile always admits a
-    /// fixed fraction. Eliminating the low-degree quantile first approximates
-    /// adaptive min-degree in parallel. 0 = disabled (use the multiplier).
-    /// DEFAULT 0.2: chosen by a q∈{0.1..0.5} sweep over grids/FEM/IPM/social
-    /// — best all-around on iters AND total time. Fewer PCG iters on
-    /// every tested matrix vs the multiplier cap, no convergence regressions;
-    /// closes the adaptive-min-degree iteration gap on hub graphs (com-Amazon
-    /// 58→35, coAuthors 81→25, kron 27→15) while staying parallel. Lower q (0.1)
-    /// trims a touch more on uniform grids but adds rounds (worse total); higher
-    /// q (0.3) helps com-Amazon slightly but is worse on the grid/FEM/IPM bulk.
-    ///
-    /// DEFAULT `degree_quantile_by_route` (-1): resolve from the
-    /// elimination route — 0.2 on CPU/Metal, 0.5 on CUDA.
-    /// CUDA uses a wider cap because it pays a fixed per-round cost that
-    /// the host does not, so fewer, fatter rounds win there. Measured on two
-    /// GPU generations (Turing 36-62 C, Ada 68-84 C), 264 paired runs each,
-    /// all caps adjacent in time: against the best cap per matrix, 0.2 costs
-    /// 1.20-1.32 while 0.5 costs 1.02-1.11. 0.8 ties 0.5 on the mean but is
-    /// 2.1-2.5x worse on kron_g500-logn16, so 0.5 is the bounded-risk choice.
-    /// CPU/CUDA honor explicit values, including 0 (= disabled). Metal supports
-    /// values in (0,1), rounding the cutoff up to its degree bucket's upper bound.
+    /// Admit the lowest-degree quantile of active vertices as IS candidates,
+    /// including ties at the cutoff. Values in (0,1) replace degree_multiplier;
+    /// 0 uses that multiplier instead. The -1 sentinel selects 0.2 on CPU/Metal
+    /// or 0.5 on CUDA, whose wider rounds amortize device launch overhead.
+    /// Metal requires a quantile in (0,1) and rounds the cutoff up to its
+    /// degree bucket's upper bound. CPU/CUDA preserve explicit values.
     double degree_quantile = degree_quantile_by_route;
 
     /// Fallback IS degree cap when degree_quantile == 0:
     /// threshold = degree_multiplier × avg_degree.
     double degree_multiplier = 2.0;
 
-    /// Conflict resolution / greedy tie-break by (degree, index) instead of index
-    /// alone: when two adjacent candidates compete, the LOWER-degree one wins
-    /// (index breaks ties). Biases the IS toward low-degree vertices with no
-    /// per-block sort. block_greedy uses the (degree,index) resolution;
-    /// priority_greedy folds degree into its selection priority (degree-major,
-    /// hash tie-break). DEFAULT on — pairs with degree_quantile; small consistent
-    /// iteration win, O(1) per conflict (no sort).
+    /// Prefer lower-degree candidates in conflicts. block_greedy breaks degree
+    /// ties by index; priority_greedy uses its hashed priority to break ties.
     bool degree_tiebreak = true;
 };
 
@@ -128,112 +91,43 @@ struct factor_options {
     /// Relative off-diagonal drop threshold; zero disables threshold dropping.
     double drop_tolerance = 1e-4;
     bool verbose = false;
-    partition_options partition{};   // selection knobs (see above)
-    /// Minimum selector yield before handing a large residual to the BK path:
-    /// selected regions / vertices ELIGIBLE under the degree cap. Relative to
-    /// the candidate pool, not to all active vertices. A non-empty selection is
-    /// always accepted once active <= 2 × parallel_residual_threshold (or the
-    /// partitioner's default threshold): near that boundary a bail leaves too
-    /// little BK runway and turns almost the whole tail into singleton peel
-    /// levels. Zero progress always bails. This is an algorithmic yield knob;
-    /// omp_threshold is also the absolute safeguard: a selection already that
-    /// large is retained regardless of relative yield. On a residual with more
-    /// than four handoff-sized chunks and average degree at least the handoff
-    /// threshold, the effective yield is max(base, min(0.15, 3*base)); sparse,
-    /// small and no-handoff partitioners use the base exactly. Set zero to
-    /// disable yield-based handoff, including the dense-residual adaptation.
+    partition_options partition{};   // selection options (see above)
+    /// Minimum yield for scan-based selectors (selected regions / degree-eligible
+    /// vertices) before BK handoff; 0 disables yield-based handoff.
+    /// Zero progress always hands off.
+    /// Nonempty selections are retained within twice the handoff threshold, or
+    /// when their size reaches omp_threshold. For residuals larger than four
+    /// handoff thresholds with average degree at least that threshold, use
+    /// max(base, min(0.15, 3*base)); sparse/small residuals use the base value.
     double min_is_fraction = 0.05;
-    size_t omp_threshold = 2000;     // min active/IS vertices before engaging OpenMP;
-                                     // smaller elimination rounds size their team from
-                                     // selected pivots and live-degree work (4096
-                                     // adjacency slots per additional worker).
-                                     // Also gates the partitioners' parallel paths;
-                                     // lowering it engages parallel selection earlier
-                                     // and can change the factor across thread counts.
+    /// OpenMP work threshold for selection and elimination. Smaller rounds size
+    /// their team from selected pivots and live-degree work. Changing this may
+    /// change selection order and the factor across thread counts.
+    size_t omp_threshold = 2000;
     std::string is_select = "block_greedy";  // Partitioner name (runtime dispatch via dispatch_partitioner)
 
-    // When the main IS-finding loop bails out
-    // (IS < a residual-size/density-adapted min_is_fraction · degree-eligible
-    // candidates; exactly min_is_fraction near the handoff and on small
-    // residuals),
-    // the residual is worked down by BK rounds until active falls below this
-    // threshold; the serial peel then takes the tail.
-    //
-    // SIZE_MAX here does NOT mean "serial peel": it means "defer to the
-    // partitioner", and every shipped partitioner that can bail out
-    // (block_greedy, priority_greedy) declares residual_handoff_threshold = 500,
-    // so the BK residual loop IS on by default.  Set an explicit value to
-    // override the trait; the serial peel is only reached for the last
-    // `residual_handoff_threshold` vertices.
-    //
-    // Do NOT raise it to hand the peel more of the residual.  BK's per-round
-    // yield does collapse on a dense residual (as-Skitter, T=16: ~80
-    // vertices/round at the handoff, ~0.4/round by the time active reaches 600),
-    // but the rounds still win: they buy the elimination ORDER, and the peel's
-    // `natural` order is dearer per column than a BK round is per vertex.
-    // Measured on as-Skitter (T=16, vec_pool, bg+tree, deterministic counters)
-    // by forcing the handoff at a larger active and reading nnz(L) and
-    // `elim_remaining` off the checkpoint:
-    //     handoff at   500    1000    2000    3000    5325 (a first-whiff bail)
-    //     nnz(L) M   18.48   18.51   18.63   18.83   19.43   (+5.1% at 5325)
-    //     elim_rem ms   26      65     172     285     421
-    //     BK find_partition saved by stopping there: 0 / 31 / 92 / 136 ms
-    // i.e. every column moved to the peel costs both fill AND time.  The same
-    // shape on com-LiveJournal (handoff at 500 / 2000 / 5000 / 10000 / 20000:
-    // nnz 120.6 / 120.7 / 121.3 / 123.4 / 128.8 M, elim_rem 49 / 362 / 1326 /
-    // 4829 / 5302 ms), coAuthorsDBLP and com-Amazon (setup lowest at 500 on
-    // both, nnz +18% / +5% at a 15000 handoff).  A yield-triggered early stop
-    // was implemented and measured against the same frontier and is dominated —
-    // see the residual-loop comment in factorization_impl.h.
+    /// After the main selector hands off, run BK rounds until the residual
+    /// reaches this size, then use residual_peel. SIZE_MAX selects the
+    /// partitioner's default: 500 for block_greedy and priority_greedy.
+    /// Keeping the default natural-order serial tail small limits fill.
     size_t parallel_residual_threshold = std::numeric_limits<size_t>::max();
 
-    // Pivot ordering strategy for the serial residual peel (eliminate_remaining).
-    // - natural (default): visits the supplied order without ordering scans.
-    // - min_degree: lazy degree heap; revalidates only the popped vertex.
-    //   Decreased degrees can remain hidden under stale larger keys, so this
-    //   does not guarantee the current minimum degree or minimum fill.
-    //   Cost includes degree recounts and repeated heap updates.
-    // - bk_serial: sample √|active| vertices with replacement and pivot on
-    //   the lowest live degree observed in that sample.
+    /// Serial pivot order: natural visits the supplied order; min_degree uses
+    /// a lazy heap (not exact current minimum degree); bk_serial samples
+    /// sqrt(active) vertices with replacement and picks the lowest live degree.
     residual_peel_strategy residual_peel = residual_peel_strategy::natural;
-    /// Exact-clique-at-low-degree: when the eliminated vertex's degree is at
-    /// most this value, emit the FULL exact Schur-complement clique
-    /// (all d(d-1)/2 edges, weight w_i·w_j/deg) instead of the d-1 sampled
-    /// edges. This is zero-variance (exact) elimination where it is cheap
-    /// (quadratic in d, so only worth it for small d). Sampling resumes above
-    /// the threshold. 0 = disabled (always sample). Targets preconditioner
-    /// quality: most eliminated vertices are low-degree, so exact handling of
-    /// them removes the bulk of the sampling variance at modest fill cost.
+    /// Emit the exact Schur clique for degrees at most this value; 0 disables
+    /// it. This removes sampling variance at the cost of d(d-1)/2 fill edges,
+    /// so it is intended for small degrees. GPU-owned setup requires 0.
     size_t exact_clique_max_degree = 0;
 
-    /// Trace-cycle heavy-core rules (both 0 = off; ignored by the other
-    /// samplers). The trace-cycle sampler splits a star into a heavy core of
-    /// h near-equal weights, which gets one uniform cycle, and lighter
-    /// neighbours, which each attach upward. A cycle is a poor stand-in for
-    /// the exact clique at both ends of the core-size scale:
-    /// * exact_core_max_h: when h <= this, emit the exact core clique
-    ///   (h(h-1)/2 edges instead of h). Measured 2026-09-18: at 5, IPM
-    ///   iterations -11..-20 % for +1..+7 % fill (real cores have median h=4).
-    /// * double_cycle_min_h: when h >= this, emit two independent uniform
-    ///   cycles with halved weights (a random 4-regular core; kappa stays ~10
-    ///   instead of ~h^2/20). Fires only on large near-uniform cores (hub and
-    ///   Sachdeva stars); at 32 it is free on star_k100 and inert elsewhere.
-    /// Both keep every pair's expected weight exact (unbiased).
-    ///
-    /// HOST PATH ONLY. The GPU-owned setup REJECTS either knob outright (see
-    /// make_gpu_round_shadow_session), so `exact_core_max_h` defaults to the
-    /// by-route sentinel below: 4 on the host, 0 when the device owns the
-    /// rounds. A blanket default would turn every GPU-owned run into an
-    /// invalid_argument.
-    ///
-    /// Why 4 and not the 5 first tried: the cap trades fill for iterations and
-    /// 5 sits past the one-RHS optimum. Swept 2026-09-19 over 21 matrices,
-    /// against no exact core: h=4 gives iterations 0.942, fill 1.038, setup
-    /// 1.052, solve 0.947, one RHS 1.009, where h=5 gives one RHS 1.051. So 4
-    /// is a wash on a single solve and repays after roughly one more, which is
-    /// why it ships on rather than off. An exact clique emits h(h-1)/2 core
-    /// edges against a cycle's h, so the cost is fill, not arithmetic; h=3
-    /// would be a no-op because on three vertices the cycle IS the clique.
+    /// Trace-cycle core rules for h near-equal heavy neighbors. For
+    /// h <= exact_core_max_h, emit the exact core clique; otherwise, when
+    /// h >= double_cycle_min_h > 0, emit two independent cycles at half weight.
+    /// Both preserve expected pair weights; 0 disables the corresponding rule.
+    /// The exact-core sentinel resolves to 4 on CPU, balancing fill against
+    /// solve cost, or 0 for GPU-owned setup. Other host samplers ignore these
+    /// rules, but GPU-owned setup requires them off regardless of sampler.
     size_t exact_core_max_h = exact_core_by_route;
     size_t double_cycle_min_h = 0;
 
