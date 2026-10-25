@@ -22,7 +22,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 
 - Algorithm defaults and their rationale: `include/apxchol/solver/factor_options.h`. Build options: root `CMakeLists.txt` and `cmake/apxchol_core.cmake`, which the root, Python and benchmark projects share.
 - `cmake/apxchol_version.cmake` is the version source for native builds and Python packages. Release tags must be `v` followed by that version.
-- `cmake/core` builds just the native library. Source consumers include `cmake/apxchol_core.cmake` and call `apxchol_add_core()` at their top level; installed consumers use `find_package(apxchol CONFIG)`. Both link `apxchol::core`. Distributable builds use `APXCHOL_NATIVE_ARCH=OFF`; installed consumers must use the same OpenMP runtime family.
+- `cmake/core` builds just the native library and defaults to portable code (`APXCHOL_NATIVE_ARCH=OFF`); root and local Python builds default to native tuning. Source consumers include `cmake/apxchol_core.cmake` and call `apxchol_add_core()` at their top level; installed consumers use `find_package(apxchol CONFIG)`. Both link `apxchol::core`; installed consumers must use the same OpenMP runtime family.
 - Native SDK installs include Eigen headers when apxchol fetched them; builds using an existing Eigen package retain that dependency. Python wheels do not install the SDK.
 - Precision and storage contract: `docs/precision.md`. Extension seams: `docs/extending.md`.
 - Operator validation and M-matrix lumping: `operator_class`. Adjacency detection belongs to the CLI (`src/mtx_input.h`); bindings accept assembled operators only.

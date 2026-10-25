@@ -78,7 +78,7 @@ std::string string_option(const mxArray* value, const char* name) {
 }
 
 apxchol::solve_options setup_options(const mxArray* options) {
-    apxchol::solve_options result{.backend = apxchol::solve_backend::cpu};
+    apxchol::solve_options result{.backend = apxchol::solve_backend::cpu, .collect_timings = false};
     if (options != nullptr) {
         if (!mxIsStruct(options) || mxGetNumberOfElements(options) != 1)
             fail("apxchol:badInput", "options must be a scalar struct");
