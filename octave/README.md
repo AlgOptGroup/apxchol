@@ -50,16 +50,10 @@ require a root CMake build.
 ## MATLAB build
 
 The wrappers/tests are shared, but MATLAB and Octave MEX binaries are
-ABI-incompatible. From `octave/`, this GCC/OpenMP command requires GCC ≥14:
+ABI-incompatible. On Linux x86-64 with GCC ≥14, OpenMP and Eigen installed:
 
-```matlab
-mex -R2018a apxchol_mex.cpp ../src/factorization.cpp ...
-    ../src/operator_class.cpp ../src/solve.cpp ...
-    -I../include -I../src -I/usr/include/eigen3 ...
-    -DAPXCHOL_POOL_FP32 ...
-    CXXFLAGS='$CXXFLAGS -std=c++23 -fopenmp -O3 -fPIC' ...
-    LDFLAGS='$LDFLAGS -fopenmp' -lgomp
-addpath(pwd); run('tests/test_apxchol.m')
+```bash
+matlab -batch "run('/path/to/apxchol/octave/build_and_test.m')"
 ```
 
 MATLAB's selected compiler and C++ runtime must support the required language
