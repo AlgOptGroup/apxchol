@@ -83,7 +83,7 @@ apxchol::residual_peel_strategy parse_peel(const std::string& name) {
 }
 
 apxchol::solve_options parse_options(const py::dict& d) {
-    apxchol::solve_options so;
+    apxchol::solve_options so{.collect_timings = false};
     for (auto item : d) {
         const std::string key = py::str(item.first).cast<std::string>();
         const py::handle v = item.second;
