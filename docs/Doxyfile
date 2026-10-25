@@ -1,0 +1,16 @@
+PROJECT_NAME           = apxchol
+OUTPUT_DIRECTORY       = $(APXCHOL_DOCS_BUILD)/doxygen
+INPUT                  = include/apxchol/solver/solve.h \
+                         include/apxchol/solver/factor_options.h \
+                         include/apxchol/solver/elimination/sampler.h \
+                         include/apxchol/lowprec.h
+GENERATE_HTML          = NO
+GENERATE_LATEX         = NO
+GENERATE_XML           = YES
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = NO
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_AS_ERROR          = FAIL_ON_WARNINGS
+HAVE_DOT               = NO
