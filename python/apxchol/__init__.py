@@ -347,7 +347,7 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
         `degree_multiplier`, `degree_tiebreak`, `exact_clique_max_degree`,
         `residual_peel` ("natural" | "min_degree" | "bk_serial"),
         `cpu_schedule` ("auto" | "levels"),
-        `drop_tolerance` (nonnegative; 0 disables dropping),
+        `drop_tolerance` (in [0, 1]; 0 disables dropping),
         `regularization` (nonnegative diagonal fraction; 0 disables),
         `lump_max_mass` (fraction in [0, 1]; 0 rejects positive off-diagonals),
         and `verbose` (default False).

@@ -83,7 +83,7 @@ FP16 stores scaled off-diagonals with FP32 diagonals and scales. CPU conversion 
 
 Advanced keywords: `degree_quantile`, `degree_multiplier`, `degree_tiebreak`,
 `exact_clique_max_degree`, `residual_peel`,
-`cpu_schedule` (`"auto"` or `"levels"`), `drop_tolerance` (nonnegative;
+`cpu_schedule` (`"auto"` or `"levels"`), `drop_tolerance` (in [0, 1];
 0 disables), `regularization` (nonnegative diagonal fraction; 0 disables),
 `lump_max_mass` (fraction in [0, 1]; 0 rejects positive off-diagonals), and
 `verbose` (default False).

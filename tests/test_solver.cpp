@@ -521,6 +521,31 @@ TEST(Solver, CpuExitCheckReducesStridedPanelsAcrossWorkerTeams) {
     }
 }
 
+TEST(Solver, InvalidDropTolerancePrecedesBackendSelection) {
+    const Sparse matrix = operator_matrix();
+    const auto factor = apxchol::factorize(matrix);
+    const auto reject = [](auto&& construct) {
+        try {
+            construct();
+            FAIL() << "accepted invalid drop tolerance";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_STREQ(error.what(), "drop_tolerance must be in [0, 1]");
+        }
+    };
+    for (auto backend : {apxchol::solve_backend::automatic, apxchol::solve_backend::cpu,
+                         apxchol::solve_backend::gpu}) {
+        for (double drop : {-1.0, std::nextafter(1.0, 2.0), 2.0,
+                            std::numeric_limits<double>::infinity(),
+                            std::numeric_limits<double>::quiet_NaN()}) {
+            auto options = cpu_options();
+            options.backend = backend;
+            options.factor_opts.drop_tolerance = drop;
+            reject([&] { apxchol::solver owner(matrix, options); });
+            reject([&] { apxchol::solver owner(matrix, factor, options); });
+        }
+    }
+}
+
 TEST(Solver, RejectsInvalidDefaultsAndResolvedOverrides) {
     const scoped_omp_threads threads(1);
     const Sparse matrix = operator_matrix();

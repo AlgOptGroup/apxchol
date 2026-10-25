@@ -11,8 +11,7 @@
 //     (the column-sum compensation is unconditional; the reference is the
 //     zeroed factor (a stored zero and an absent entry solve identically);
 //   * the CSR/CSC the drop produces are byte-identical across thread counts;
-//   * zero disables threshold dropping; negative or nonfinite values are invalid;
-//     rel > 1 keeps only the diagonal.
+//   * zero disables threshold dropping; values outside [0, 1] or NaN are invalid.
 // Under APXCHOL_SPTRSV_LOWPREC=FP16_SCALED (sptrsv_value_t narrower than the
 // factor's factor_value_t; it stores L_ij / s_j with s_j the PRE-drop column
 // max) the drop and the compensation run on the fp32 factor
@@ -367,12 +366,12 @@ TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
 TEST(SpTRSVDrop, ExplicitThresholdValidation) {
     const auto L = make_random_lower(3, 1, 3);
     EXPECT_EQ(apxchol::factor_options{}.drop_tolerance, 1e-4);
-    for (double rel : {0.0, 3e-4, 2.0}) {
+    for (double rel : {0.0, 3e-4, 1.0}) {
         apxchol::omp_sptrsv trsv;
         trsv.setup(L, L.rows(), {.drop_tolerance = rel});
         EXPECT_EQ(trsv.drop_stats().rel, rel);
     }
-    for (double rel : {-1.0, std::numeric_limits<double>::infinity(),
+    for (double rel : {-1.0, std::nextafter(1.0, 2.0), 2.0, std::numeric_limits<double>::infinity(),
                        std::numeric_limits<double>::quiet_NaN()}) {
         apxchol::omp_sptrsv trsv;
         EXPECT_THROW(trsv.setup(L, L.rows(), {.drop_tolerance = rel}),
@@ -381,17 +380,13 @@ TEST(SpTRSVDrop, ExplicitThresholdValidation) {
 }
 
 // rel = 0 disables threshold dropping; a rel below every entry drops nothing (and
-// makes no copy: stored nnz == factor nnz); the diagonal survives ANY rel
-// (even > 1, which drops every off-diagonal); the compacted factor solves as
-// a diagonal one then (y = x / diag).
+// makes no copy: stored nnz == factor nnz).
 TEST(SpTRSVDrop, EdgeCases) {
 
     const node_index m = 2000;
     sparse_csc L = make_random_lower(m, 4.0, 31, 0.0, 1.0);
     for (edge_index p = 0; p < L.nonZeros(); ++p)
         if ((p % 5) == 2) L.vals_[p] = static_cast<factor_value_t>(L.vals_[p] * 1e-9);   // far below 1e-4 * s_j
-    std::uint64_t offdiag = 0;
-    for (node_index j = 0; j < m; ++j) offdiag += L.outer_[j + 1] - L.outer_[j] - 1;
     const std::uint64_t nnz = static_cast<std::uint64_t>(L.nonZeros());
     ASSERT_GT(reference_dense_drop(L, m, 1e-4).zeroed, 100u);   // the default would remove plenty here
     // What the storage format alone would store as zero (the drop's second
@@ -433,32 +428,24 @@ TEST(SpTRSVDrop, EdgeCases) {
             EXPECT_EQ(mismatches, 0u);
         }
     }
-    {
-        // Above one: every off-diagonal goes, the diagonal stays.
-        apxchol::omp_sptrsv t; t.setup(L, m, {.drop_tolerance = 2});
-        EXPECT_EQ(t.drop_stats().dropped, offdiag);
-        EXPECT_EQ(t.stored_nnz(), static_cast<std::uint64_t>(m));
-        for (node_index j = 0; j < m; ++j) {
-            ASSERT_EQ(t.csc_col_ptr()[j], static_cast<edge_index>(j));
-            ASSERT_EQ(t.csc_row_idx()[j], j);
-            ASSERT_EQ(t.csr_row_ptr()[j], static_cast<edge_index>(j));
-            ASSERT_EQ(t.csr_col_idx()[j], j);
-        }
-        // Solving with a diagonal factor: the forward sweep divides by the
-        // stored diagonal (L_jj; L_jj / s_j under *_SCALED, where it returns
-        // y' = D y and the PRE-drop s_j is still the scale) and the pair
-        // (forward, then back on the forward's output) applies (L L^T)^-1 =
-        // 1 / L_jj^2 -- exactly on fp32/fp64, to fp32(1/s_j)'s 2^-23 under
-        // *_SCALED.
-        std::vector<double> x(m, 1.0), y(m), z(m);
-        t.forward_solve(x.data(), y.data());
-        t.transpose_solve(y.data(), z.data());
-        for (node_index j = 0; j < m; ++j) {
-            const double L_jj = static_cast<double>(L.vals_[L.outer_[j]]);
-            const double d    = apxchol::omp_sptrsv::stored_diag(L.vals_[L.outer_[j]], static_cast<float>(pair_scale(s_pre[j])));
-            ASSERT_NEAR(y[j], 1.0 / d, 1e-15 / d) << j;
-            ASSERT_NEAR(z[j], 1.0 / (L_jj * L_jj), 4e-15 / (L_jj * L_jj)) << j;
-        }
+}
+
+TEST(SpTRSVDrop, DiagonalFactorsWorkAtRangeEndpoints) {
+    sparse_csc L;
+    L.n_ = 3;
+    L.outer_ = {0, 1, 2, 3};
+    L.inner_ = {0, 1, 2};
+    L.vals_ = {1, 2, 4};
+    for (double rel : {0.0, 1.0}) {
+        apxchol::omp_sptrsv trsv;
+        trsv.setup(L, 3, {.drop_tolerance = rel});
+        EXPECT_EQ(trsv.drop_stats().dropped, 0u);
+        EXPECT_EQ(trsv.stored_nnz(), 3u);
+        std::vector<double> x(3, 1.0), y(3), z(3);
+        trsv.forward_solve(x.data(), y.data());
+        trsv.transpose_solve(y.data(), z.data());
+        EXPECT_EQ(y, (std::vector<double>{1, 0.5, 0.25}));
+        EXPECT_EQ(z, (std::vector<double>{1, 0.25, 0.0625}));
     }
 }
 

@@ -25,7 +25,7 @@ must be a nonnegative integer. `[]` selects either default.
 
 The optional setup struct accepts `num_threads`, `seed`, `factor_storage`
 (`auto`, `float16`, `float32`), `cpu_schedule` (`auto`, `levels`),
-`drop_tolerance` (nonnegative; 0 disables), `regularization` (nonnegative
+`drop_tolerance` (in [0, 1]; 0 disables), `regularization` (nonnegative
 diagonal fraction; 0 disables), `lump_max_mass` (fraction in [0, 1]; 0
 rejects positive off-diagonals), and
 `verbose` (logical). Unspecified fields use C++ defaults. GPU and wide

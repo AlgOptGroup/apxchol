@@ -1051,7 +1051,7 @@ TEST_F(MetalDevice, PerSolverStorageAndDropMatchTheReference) {
     const auto factor = apxchol::factorize(A);
     const auto b = rhs(A.rows(), 3, false);
     for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
-        for (double drop : {0.0, 0.1, 0.0}) {
+        for (double drop : {0.0, 0.1, 1.0, 0.0}) {
             auto options = keep_opts();
             options.factor_opts.factor_storage = storage;
             options.factor_opts.drop_tolerance = drop;
@@ -1062,13 +1062,25 @@ TEST_F(MetalDevice, PerSolverStorageAndDropMatchTheReference) {
     }
 }
 
+TEST(MetalOptions, InvalidDropToleranceFailsBeforeDeviceSetup) {
+    const Sparse A = grid(4, 4, 0.25);
+    const auto factor = apxchol::factorize(A);
+    auto options = keep_opts();
+    for (double drop : {-1.0, std::nextafter(1.0, 2.0), 2.0,
+                        std::numeric_limits<double>::infinity(),
+                        std::numeric_limits<double>::quiet_NaN()}) {
+        options.factor_opts.drop_tolerance = drop;
+        EXPECT_THROW(apxchol::metal_solver(A, options), std::invalid_argument);
+        EXPECT_THROW(apxchol::metal_solver(A, factor, options), std::invalid_argument);
+    }
+}
+
 TEST_F(MetalDevice, ResidentDropToleranceMatchesHostReference) {
     for (bool laplacian : {false, true}) {
         const Sparse A = grid(7, 9, laplacian ? 0.0 : 0.25, true);
         const auto b = rhs(A.rows(), 3, laplacian);
         for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
-            for (double drop : {0.0, 1.0, std::nextafter(1.0, 2.0), 2.0,
-                                1e300, std::numeric_limits<double>::max()}) {
+            for (double drop : {0.0, 0.1, 1.0}) {
                 SCOPED_TRACE(laplacian);
                 SCOPED_TRACE(static_cast<int>(storage));
                 SCOPED_TRACE(drop);

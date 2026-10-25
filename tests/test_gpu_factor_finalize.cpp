@@ -166,7 +166,7 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
         ASSERT_EQ(std::bit_cast<std::uint32_t>(retained.exported.L.vals_[i]),
                   std::bit_cast<std::uint32_t>(export_reference.L.vals_[i]));
     for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
-        for (double rel : {0.0, 0.00001, 0.0001, 0.2}) {
+        for (double rel : {0.0, 0.00001, 0.0001, 0.2, 1.0}) {
             const apxchol::factor_options options{.factor_storage = storage, .drop_tolerance = rel};
             for (node_index m : {n - 1, n}) {
                 SCOPED_TRACE((storage == apxchol::factor_storage_type::fp16 ? "float16/" : "float32/")
@@ -252,6 +252,11 @@ TEST(GpuFactorFinalize, InvalidPermutationAndExtentFailClosed) {
     complete_factor fixture(3, edges, order);
     auto& state = fixture.state;
     const auto& perm = fixture.reference.perm;
+    for (double drop : {-1.0, std::nextafter(1.0, 2.0), 2.0,
+                        std::numeric_limits<double>::infinity(),
+                        std::numeric_limits<double>::quiet_NaN()})
+        EXPECT_THROW(state.finalize_device_factor(perm, 3, options.factor_storage, drop),
+                     std::invalid_argument);
     EXPECT_THROW(state.finalize_device_factor(std::vector<node_index>{0, 1, 1}, 3, options.factor_storage, options.drop_tolerance), std::invalid_argument);
     EXPECT_THROW(state.finalize_device_factor(std::vector<node_index>{0, 1}, 3, options.factor_storage, options.drop_tolerance), std::invalid_argument);
     EXPECT_THROW(state.finalize_device_factor(std::vector<node_index>{0, 1, 3}, 3, options.factor_storage, options.drop_tolerance), std::invalid_argument);
