@@ -273,8 +273,7 @@ public:
     // s_j, computed by setup() from the factor column [first, last) whose
     // FIRST entry is the diagonal: max |off-diagonal|, or 1.0f if the column
     // has no nonzero off-diagonal (so v / s_j is always defined). Also the
-    // reference of the compacting drop's threshold (computed BEFORE the drop;
-    // the drop never removes the column max, so it is the same after).
+    // reference of the compacting drop's threshold, computed before dropping.
     // Computed in double, stored fp32 (the factor is fp32, so this is exact).
     static float column_scale(const factor_value_t* vals, edge_index first, edge_index last) {
         return factor_column_scale(vals, first, last);   // factor_drop.h (shared with the GPU backend)

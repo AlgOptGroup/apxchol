@@ -450,7 +450,7 @@ public:
                 data_.factor_bytes / 1e6, data_.device_delta_bytes / 1e6, free_before / 1e9, free_after / 1e9, total / 1e9);
             if (data_.stats.rel > 0.0)
                 std::fprintf(stderr,
-                    "[apxchol] factor drop (drop_tolerance=%g, column sums preserved): dropped=%llu"
+                    "[apxchol] factor drop (drop_tolerance=%g): dropped=%llu"
                     " (%.4f%% of %llu off-diagonals; threshold=%llu, format_zero=%llu)"
                     " stored_nnz %llu -> %llu (%.4f%% of factor)\n",
                     data_.stats.rel,
