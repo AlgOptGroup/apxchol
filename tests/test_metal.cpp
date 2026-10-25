@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <stdexcept>
@@ -1057,6 +1058,32 @@ TEST_F(MetalDevice, PerSolverStorageAndDropMatchTheReference) {
             const apxchol::metal_solver solver(A, factor, options);
             const auto expected = emulate_apply(factor, b, options.factor_opts);
             EXPECT_LT((solver.apply(b) - expected).norm() / expected.norm(), 2e-5);
+        }
+    }
+}
+
+TEST_F(MetalDevice, ResidentDropToleranceMatchesHostReference) {
+    for (bool laplacian : {false, true}) {
+        const Sparse A = grid(7, 9, laplacian ? 0.0 : 0.25, true);
+        const auto b = rhs(A.rows(), 3, laplacian);
+        for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
+            for (double drop : {0.0, 1.0, std::nextafter(1.0, 2.0), 2.0,
+                                1e300, std::numeric_limits<double>::max()}) {
+                SCOPED_TRACE(laplacian);
+                SCOPED_TRACE(static_cast<int>(storage));
+                SCOPED_TRACE(drop);
+                auto options = keep_opts();
+                options.factor_opts.factor_storage = storage;
+                options.factor_opts.drop_tolerance = drop;
+                const apxchol::metal_solver solver(A, options);
+                const auto expected = emulate_apply(solver.factor(), b, options.factor_opts);
+                const auto actual = solver.apply(b);
+                EXPECT_TRUE(actual.allFinite());
+                EXPECT_LT((actual - expected).norm() / expected.norm(), 2e-5);
+                const auto result = solver.solve(b, 1e-8, 1000);
+                EXPECT_TRUE(result.converged);
+                EXPECT_LE(true_residual(A, b, result.x), 1e-8);
+            }
         }
     }
 }

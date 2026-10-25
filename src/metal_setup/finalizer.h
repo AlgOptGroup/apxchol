@@ -449,6 +449,8 @@ class Finalizer {
         require(state.nodes + std::uint64_t(state.entries) < gd::special_bit,
                 "Metal factor exceeds 31-bit offsets");
         const unsigned n = state.nodes, m = n - unsigned(laplacian), capacity = state.entries + n;
+        // Every ratio above one drops all off-diagonals; use a finite representative.
+        drop = drop > 1.0 ? 2.0 : drop;
         const rf::Shape shape{n, m, float(drop), float(drop - double(float(drop)))};
         Finalized out;
         out.permutation = allocate(n * sizeof(unsigned));
