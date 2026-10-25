@@ -3,6 +3,7 @@
 #include "engine.h"
 #include "../metal_setup.h"
 #include <array>
+#include <cmath>
 #include <mutex>
 #define APXCHOL_GPU_CODE(...) __VA_ARGS__
 #define APXCHOL_GPU_FUNCTION inline
@@ -46,6 +47,8 @@ template<class Value> struct StorageMath {
     bool finite_float(float a) const {return isfinite(a);}
     bool flushes(float a) const {return abs(a)<0x1p-14f-0x1p-25f;}
     wide drop(rf::Shape shape) const {return {shape.drop_hi,shape.drop_lo};}
+    float fraction(float x,thread int& exponent) const {return frexp(x,exponent);}
+    float scale_float(float x,int exponent) const {return ldexp(x,exponent);}
     Value store(float a,float scale,bool half_storage) const {
         if(!half_storage)return Value(a);
         a/=scale;return Value(flushes(a)?copysign(0.0f,a):a);
@@ -449,7 +452,11 @@ class Finalizer {
         require(state.nodes + std::uint64_t(state.entries) < gd::special_bit,
                 "Metal factor exceeds 31-bit offsets");
         const unsigned n = state.nodes, m = n - unsigned(laplacian), capacity = state.entries + n;
-        const rf::Shape shape{n, m, float(drop), float(drop - double(float(drop)))};
+        // Keep the exponent separate: a positive tolerance must not underflow
+        // before it is combined with a column's scale.
+        int exponent;
+        const double mantissa = std::frexp(drop, &exponent);
+        const rf::Shape shape{n, m, float(mantissa), float(mantissa - float(mantissa)), exponent};
         Finalized out;
         out.permutation = allocate(n * sizeof(unsigned));
         if (half) out.metadata = allocate(m * sizeof(rf::Metadata));
