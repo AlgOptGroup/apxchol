@@ -3,8 +3,7 @@
 %
 %   matlab -batch "run('/abs/path/to/octave/build_and_test.m')"
 %
-% Needs GCC >= 14 (the core uses C++23 "deducing this"). On a modern Linux where MATLAB won't
-% launch or the MEX won't load, run inside mathworks/matlab-deps (see README).
+% Linux x86-64 recipe: GCC >= 14, OpenMP and Eigen headers are required.
 here = fileparts(mfilename('fullpath'));
 cd(here);
 try
@@ -12,7 +11,7 @@ try
       '../src/operator_class.cpp', '../src/solve.cpp', ...
       '-I../include', '-I../src', '-I/usr/include/eigen3', ...
       '-DAPXCHOL_POOL_FP32', ...
-      'CXXFLAGS=$CXXFLAGS -std=c++23 -fopenmp -O3 -fPIC', ...
+      'CXXFLAGS=$CXXFLAGS -std=c++23 -march=x86-64-v2 -fopenmp -O3 -fPIC', ...
       'LDFLAGS=$LDFLAGS -fopenmp', '-lgomp');
   disp('=== MEX BUILT ===');
   addpath(here);

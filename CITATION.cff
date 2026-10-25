@@ -18,7 +18,6 @@ authors:
     given-names: Rasmus
     affiliation: "ETH Zürich"
 repository-code: "https://github.com/AlgOptGroup/apxchol"
-version: "0.3.0"
 license: BSD-4-Clause
 keywords:
   - Laplacian solver
