@@ -1032,8 +1032,8 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
                        backend_available(solve_backend::gpu)))
         return solve_backend::gpu;
     if (opts.backend == solve_backend::gpu)
-        throw std::invalid_argument("GPU route requires 32-bit nodes, block_greedy, vec_pool_aos, "
-            "natural residual peeling and supported sampler options; request CPU explicitly");
+        throw std::invalid_argument("GPU setup does not support the requested factor options "
+            "or node-index width; request CPU explicitly");
     return solve_backend::cpu;
 #elif defined(APXCHOL_USE_METAL)
     bool compatible = detail::metal_setup_options_supported(opts.factor_opts);

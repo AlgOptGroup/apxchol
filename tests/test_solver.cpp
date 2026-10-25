@@ -4,6 +4,7 @@
 #include "apxchol/solver/detail/thread_budget.h"
 #include "scoped_omp_threads.h"
 
+#include <Eigen/IterativeLinearSolvers>
 #include <Eigen/Sparse>
 #include <cmath>
 #include <future>
@@ -97,6 +98,29 @@ TEST(Solver, CpuInterfacesRejectEmptyOperator) {
     EXPECT_THROW(apxchol::cpu_solver(empty, cpu_options()), std::invalid_argument);
     apxchol::apx_cholesky preconditioner;
     EXPECT_THROW(preconditioner.compute(empty), std::invalid_argument);
+}
+
+TEST(Solver, EigenConjugateGradientUsesPreconditioner) {
+    const scoped_omp_threads threads(1);
+    const auto options = cpu_options();
+    for (const bool laplacian : {false, true}) {
+        SCOPED_TRACE(laplacian ? "Laplacian" : "SDDM");
+        Sparse matrix = operator_matrix();
+        if (laplacian)
+            for (int i = 0; i < matrix.rows(); ++i) matrix.coeffRef(i, i) -= 1.0;
+        Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
+        if (laplacian) rhs.array() -= rhs.mean();
+
+        Eigen::ConjugateGradient<Sparse, Eigen::Lower, apxchol::apx_cholesky> cg;
+        cg.preconditioner().set_options(options.factor_opts);
+        cg.setTolerance(options.tol);
+        cg.setMaxIterations(options.max_iter);
+        cg.compute(matrix);
+        ASSERT_EQ(cg.info(), Eigen::Success);
+        const Eigen::VectorXd x = cg.solve(rhs);
+        EXPECT_EQ(cg.info(), Eigen::Success);
+        expect_solution(matrix, rhs, x);
+    }
 }
 
 TEST(Solver, CpuBreakdownPreservesFiniteSolution) {

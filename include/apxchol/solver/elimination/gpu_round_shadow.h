@@ -1574,7 +1574,7 @@ gpu_round_shadow_session make_gpu_round_shadow_session(
 #else
     if constexpr (!std::is_same_v<std::remove_cvref_t<Eliminator>, tree_elimination>) {
         (void)eliminator;
-        throw std::invalid_argument("GPU factorization requires vec_pool_aos and the built-in eliminator");
+        throw std::invalid_argument("GPU factorization requires the built-in eliminator");
     } else {
         if (eliminator.exact_clique_max_degree != 0 || eliminator.exact_core_max_h != 0 ||
             eliminator.double_cycle_min_h != 0)
