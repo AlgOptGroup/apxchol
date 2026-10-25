@@ -176,6 +176,8 @@ public:
     /// Compute the approximate Cholesky factorization of A.
     basic_apx_cholesky& factorize(const auto& A) {
         eigen_assert(m_analysisIsOk && "analyzePattern() should be called first");
+        if (A.rows() == 0)
+            throw std::invalid_argument("apx_cholesky: empty operator");
         // Only the internal device specialization may initialize CUDA. CPU
         // factorization and Eigen/CPU callers never touch its context, even in
         // a CUDA-enabled build. Preserve the device setup's existing prewarm.

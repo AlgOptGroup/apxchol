@@ -858,10 +858,12 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
             timings("spmv+pAp");
         std::array<double, C> alpha{};
         for (int c = 0; c < C; c++) {
-            if (active[c] && pap[c] <= 0)
-                active[c] = false;
-            if (active[c])
+            active[c] = active[c] && rz[c] > 0 && std::isfinite(rz[c])
+                && pap[c] > 0 && std::isfinite(pap[c]);
+            if (active[c]) {
                 alpha[c] = rz[c] / pap[c];
+                active[c] = std::isfinite(alpha[c]);
+            }
         }
         if (!any_active())
             break;
@@ -877,7 +879,7 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
                 continue;
             results[c].iterations = i + 1;
             results[c].residual = std::sqrt(rr[c]) / norm[c];
-            if (results[c].residual < tol)
+            if (!std::isfinite(results[c].residual) || results[c].residual < tol)
                 active[c] = false;
         }
         if (!any_active())
@@ -887,9 +889,15 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
         if (trace)
             t_precond += now() - t;
         std::array<double, C> beta{};
-        for (int c = 0; c < C; c++)
-            if (active[c])
+        for (int c = 0; c < C; c++) {
+            active[c] = active[c] && next[c] > 0 && std::isfinite(next[c]);
+            if (active[c]) {
                 beta[c] = next[c] / rz[c];
+                active[c] = std::isfinite(beta[c]);
+            }
+        }
+        if (!any_active())
+            break;
         t = trace ? now() : 0;
         panel_update_p<C>(p, z, beta, active, n);
         if (trace)
