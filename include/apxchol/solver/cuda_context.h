@@ -75,9 +75,10 @@ inline prewarm_state& state() { static prewarm_state s; return s; }
 /// CUDA call reports it through APXCHOL_CUDA_CHECK, with a proper message --
 /// this helper must not turn a device problem into a mystery exception thrown
 /// from a background thread.
-inline double force_context() {
+inline double force_context(int device = -1) {
     const auto t0 = std::chrono::steady_clock::now();
-    (void)cudaFree(nullptr);
+    if (device < 0 || cudaSetDevice(device) == cudaSuccess)
+        (void)cudaFree(nullptr);
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 }
 
@@ -85,14 +86,16 @@ inline double force_context() {
 
 /// Start CUDA context creation on a helper thread, once per process. Safe from
 /// any thread, any number of times, from any number of solver instances: later
-/// calls are no-ops. Never blocks.
+/// calls are no-ops.
 inline void prewarm() {
     auto& s = detail::state();
     std::lock_guard<std::mutex> lk(s.mu);
     if (s.started) return;
+    int device;
+    if (cudaGetDevice(&device) != cudaSuccess) return;
     s.started = true;
     try {
-        s.worker = std::thread([&s] { s.ctx_seconds = detail::force_context(); });
+        s.worker = std::thread([&s, device] { s.ctx_seconds = detail::force_context(device); });
     } catch (...) {
         // Out of threads: fall back to lazy creation. ensure_context() still
         // establishes the context (and still reports its cost); we just do not
