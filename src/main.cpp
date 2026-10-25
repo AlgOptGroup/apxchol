@@ -72,7 +72,8 @@ int main(int argc, char* argv[]) try {
     spdlog::info("backend:    {}", res.backend == solve_backend::gpu ? "gpu" : "cpu");
     spdlog::info("iterations: {}", res.iterations);
     spdlog::info("residual:   {}", res.residual);
-    spdlog::info("timings:\n{}", res.timings.report());
+    if (cfg.solve_opts.collect_timings)
+        spdlog::info("timings:\n{}", res.timings.report());
 
     if (cfg.output_path) {
         std::ofstream f(*cfg.output_path, std::ios_base::binary);

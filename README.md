@@ -2,14 +2,66 @@
 
 Parallel approximate-Cholesky preconditioning and PCG for sparse Laplacian
 and SDDM systems, with OpenMP CPU, CUDA and Apple Metal backends.
-C++, Python and Octave/MATLAB interfaces are included.
+
+- Factor once and reuse it for individual or batched right-hand sides.
+- Use the built-in solver or apply the preconditioner through Eigen or SciPy.
+- Check convergence against the original operator and right-hand side.
+
+## Interfaces
+
+```bash
+pip install apxchol                 # or: pip install -e python
+```
+
+```python
+import apxchol
+import numpy as np
+from scipy.sparse import diags
+
+n = 1000
+A = diags([-np.ones(n-1), 3*np.ones(n), -np.ones(n-1)],
+          [-1, 0, 1], format="csc")   # assembled SDDM operator
+solver = apxchol.factorize(A)
+result = solver.solve(np.ones(n), rtol=1e-8)
+assert result.converged
+
+B = np.column_stack((np.ones(n), np.arange(n)))
+batch = solver.solve(B)               # reuse the factor; solutions in batch.x
+assert batch.converged.all()
+```
+
+Wheels support CPython 3.10–3.14 on Linux x86-64-v2 (CUDA) and macOS 15+
+arm64 (Metal). Both retain CPU support. GPU use requires a compatible device
+and driver, but no CUDA Toolkit or Homebrew installation.
+`solver.backend` reports the selected backend.
+
+Bindings expect assembled operators. Use `apxchol.laplacian(Adj)` in Python
+or `apxchol_laplacian(Adj)` in Octave for adjacency input. A Laplacian RHS
+must sum to zero on each connected component. See the [Python](python/README.md)
+and [Octave/MATLAB](octave/README.md) guides for options and factor export.
+
+The C++ interface uses the same reusable owner:
+
+```cpp
+#include "apxchol.h"
+apxchol::solver solver(A);
+auto result = solver.solve(b, 1e-8);
+Eigen::MatrixXd X(B.rows(), B.cols());
+auto batch = solver.solve(B, X);
+Eigen::VectorXd z = solver.apply(b);
+```
+
+One-shot `apxchol::solve(A, b)` selects the same backend. `cpu_solver` and
+Eigen's `apxchol::apx_cholesky` always use CPU. The [examples](examples/)
+cover reuse and custom algorithms; [factor handoff](docs/extending.md#reusing-a-custom-factor)
+reuses a host factor on CPU, CUDA or Metal.
 
 ## Build and run
 
 Requires CMake 3.20+, GCC or Clang with C++23 and OpenMP, and Eigen (fetched if absent).
-MSVC and clang-cl are not supported.
-On x86-64, the minimum CPU requirement is x86-64-v2.
-Optional CUDA builds require CUDA Toolkit 13.3+ and CMake 4.4+ for C++23 support.
+MSVC and clang-cl are not supported. The x86-64 baseline is x86-64-v2.
+CUDA builds require CUDA Toolkit 13.3+ and CMake 4.4+ for C++23 support.
+On macOS, install Xcode Command Line Tools and `brew install cmake libomp`.
 
 ```bash
 git clone https://github.com/AlgOptGroup/apxchol
@@ -21,48 +73,9 @@ ctest --test-dir build --output-on-failure
 ./build/apxchol matrix.mtx --rhs rhs.mtx -o solution.mtx
 ```
 
-On macOS, install Xcode Command Line Tools and `brew install cmake libomp`,
-then use the same build commands above.
-
-The CLI requires an explicit RHS or `--random-rhs`. It reports whether input
-is an assembled operator or adjacency matrix, forming `L = D - A` for the
-latter. `--input-kind` overrides detection; `--help` lists options.
-
-## Interfaces
-
-```cpp
-#include "apxchol.h"
-auto result = apxchol::solve(L, b, {.tol = 1e-8});
-
-apxchol::solver solver(L);           // factor once, solve many
-auto r1 = solver.solve(b1);
-auto r2 = solver.solve(b2, 1e-10, 1000);
-Eigen::VectorXd z = solver.apply(r);
-```
-
-`solver` selects the same backend as one-shot `solve()` and owns its factor,
-operator and workspace. `cpu_solver` and Eigen's `apxchol::apx_cholesky` always
-use CPU setup and solves, including in CUDA builds. Singular
-Laplacians use their compatible subspace; SDDM operators retain a full factor.
-Passing a previously computed factor to `solver` reuses it on CPU, CUDA or
-Metal; select the GPU backend explicitly to upload it for GPU solves.
-
-```bash
-pip install apxchol                 # or: pip install -e python
-```
-
-```python
-solver = apxchol.factorize(A, backend="auto")
-result = solver.solve(b, rtol=1e-8)
-```
-
-Linux wheels include CUDA; macOS arm64 wheels include Metal. Both retain CPU
-support. GPU use requires a compatible device and driver, but no CUDA Toolkit
-installation. `solver.backend` reports the selected backend.
-
-Bindings expect assembled operators. Use `apxchol.laplacian(Adj)` in Python
-or `apxchol_laplacian(Adj)` in Octave for adjacency input. See the
-[Python](python/README.md) and [Octave/MATLAB](octave/README.md) guides.
+The CLI requires an explicit RHS or `--random-rhs`. It detects assembled
+operators versus adjacency matrices, forming `L = D - A` for the latter.
+`--input-kind` overrides detection; `--help` lists options.
 
 ### Use from CMake
 
@@ -81,9 +94,10 @@ For an installed library, replace the first two lines with
 If Eigen was fetched during configuration, its headers are installed with the
 library; otherwise consumers need the Eigen package used for the build.
 
-The target supplies C++23 and the architecture flag used by the library.
-Matching architecture settings matter because Eigen objects cross the library
-boundary. Use `-DAPXCHOL_NATIVE_ARCH=OFF` for portable builds.
+The standalone SDK defaults to portable code; root and local Python builds
+default to native tuning. Set `APXCHOL_NATIVE_ARCH=OFF` for distribution.
+The target supplies C++23 and matching architecture flags, which matter because
+Eigen objects cross the library boundary.
 
 ## Configuration
 
@@ -94,31 +108,41 @@ boundary. Use `-DAPXCHOL_NATIVE_ARCH=OFF` for portable builds.
 | `APXCHOL_64BIT_EDGE_INDICES=ON` | Wide factor/pool offsets |
 | `APXCHOL_64BIT_NODE_INDICES=ON` | Wide vertices and offsets |
 
-`cmake -LH build` lists build options. Algorithm defaults live in
-[factor_options.h](include/apxchol/solver/factor_options.h).
-`factor_options::factor_storage` selects triangular-solve storage (`automatic`, `fp16`, or `fp32`); the default is CUDA FP16 and CPU/Metal FP32.
-FP16 narrows scaled off-diagonals, retaining FP32 diagonals; it
-does not change the outer PCG to FP16. See [precision and storage](docs/precision.md).
-`--sampler gks|trace_cycle` selects the clique sampler; GKS remains
-its default. Trace-cycle supports CPU and CUDA setup.
-`solve_options.backend` (`solve_backend::automatic`, `cpu`, or `gpu`) and CLI
-`--backend auto|cpu|gpu` select a complete setup/solve route. The default `auto`
-uses CPU for scalar systems and for Metal inputs of at most 32,768 rows when CPU supports the requested storage. Otherwise selection follows device availability, input and option compatibility.
-`solve_result.backend` and the CLI report the actual route.
+`cmake -LH build` lists build options; [factor_options.h](include/apxchol/solver/factor_options.h)
+defines algorithm defaults. `factor_storage` selects triangular-solve storage:
+`automatic` uses CUDA FP16 and CPU/Metal FP32; explicit `fp16` and `fp32` are
+available. FP16 narrows scaled off-diagonals while retaining FP32 diagonals;
+outer PCG does not use FP16. See [precision and storage](docs/precision.md).
+`--sampler gks|trace_cycle` selects the sampler; GKS is the default.
 
 ### Backend capabilities
 
-CUDA uses device-owned factorization with 32-bit vertices, `block_greedy` selection and natural residual peeling. It requires compressed, sorted, unique, fully paired CSC input and supports both GKS and trace-cycle, warm starts and FP32 factor export. Exact-clique, exact-core and double-cycle overrides require CPU setup.
+GPU setup requires compressed, sorted, unique, fully paired CSC input and 32-bit vertices.
+Both GPU backends support batched solves, warm starts and optional FP32 factor export.
 
-Metal uses device-owned factorization for default `block_greedy` GKS options with FP32 graph weights and 32-bit vertices. It requires the same CSC layout as CUDA and supports FP32/FP16 solve storage, warm starts and optional FP32 factor export; see its [precision limits](docs/precision.md#apple-metal-pcg).
+| Backend | Factor construction |
+|---|---|
+| CPU | OpenMP; built-in and custom partitioners/eliminators |
+| CUDA | Device-owned, `block_greedy`, natural residual peeling, GKS or trace-cycle; exact-clique/core and double-cycle overrides require CPU setup |
+| Metal | Device-owned, default `block_greedy` GKS options, FP32 graph weights; [precision limits](docs/precision.md#apple-metal-pcg) |
 
-Automatic selection uses CPU when a configuration is incompatible with the available GPU backend. Explicit GPU requests fail if unsupported. Once selected, GPU setup or execution errors are reported without retrying on CPU. Public `factorize()` and custom CPU strategies remain available independently; see the [extension guide](docs/extending.md) for explicit factor handoff.
+Select a route with `solve_options.backend`, Python `backend`, or CLI
+`--backend auto|cpu|gpu`. `auto` uses CPU for scalar systems and for Metal inputs
+of at most 32,768 rows when CPU supports the requested storage, then checks
+device availability and compatibility. Explicit GPU requests fail if unsupported;
+execution errors never trigger a CPU retry. Results report the selected backend.
 
 ### Threads and placement
 
-Set `solve_options.num_threads`, Python `num_threads`, or CLI `--threads` to bound CPU parallelism for one solver. A positive value overrides the calling OpenMP task's setting; zero inherits it, normally from `OMP_NUM_THREADS`. Small workloads may use fewer threads; each operation restores the caller's setting. More threads are not always faster: memory bandwidth, NUMA placement and matrix structure affect scaling. Benchmark the intended workload on the target machine, including both setup and solve.
+Set `solve_options.num_threads`, Python `num_threads`, or CLI `--threads` to
+bound CPU parallelism. A positive value overrides the caller's OpenMP setting;
+zero inherits it, normally from `OMP_NUM_THREADS`. Each operation restores the
+setting. Small workloads may use fewer threads. More threads need not be faster:
+measure both setup and solve.
 
-The library does not change affinity. `OMP_PLACES=cores` and `OMP_PROC_BIND=spread` provide an explicit placement to compare with your system default; use a restricted CPU set when testing one socket or NUMA node.
+The library does not change affinity. Compare `OMP_PLACES=cores` and
+`OMP_PROC_BIND=spread` with your system default; restrict the CPU set when
+testing one socket or NUMA node.
 
 ## Further reading
 

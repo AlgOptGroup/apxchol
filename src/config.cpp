@@ -77,7 +77,7 @@ run_config parse_args(int argc, char* argv[]) {
                    "RHS vector in MatrixMarket format")
         ->check(CLI::ExistingFile);
     auto* rand_flag = rhs_group->add_flag("--random-rhs", cfg.random_rhs,
-                 "Solve against a random zero-mean unit RHS (uses --seed)");
+                 "Generate a random RHS, compatible with Laplacian components (uses --seed)");
     rhs_opt->excludes(rand_flag);
     rand_flag->excludes(rhs_opt);
     rhs_group->require_option(1);

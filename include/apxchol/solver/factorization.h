@@ -21,38 +21,29 @@ struct checkpoint;
 class cuda_sptrsv_device_factor;
 #endif
 
-/// Result of the approximate Cholesky factorization.
-///
-/// The factorization produces a sparse lower-triangular matrix L and a
-/// permutation P such that P^T L L^T P ≈ original Laplacian.
-/// Used as a preconditioner for PCG.
+/// Approximate Cholesky preconditioner: P^T L L^T P approximates the operator
+/// used for construction, including any lumping or regularization.
 struct factorization {
 #if defined(APXCHOL_USE_CUDA)
-    // Research bridge only: finalized CUDA values are consumed by install_factor.
-    // Exported factors retain host L; a consuming solve may keep only its
-    // dimensions/column pointers while this capsule supplies the device arrays.
+    // Internal CUDA ownership capsule. Exported factors retain host L values;
+    // consuming solves may retain only L's dimensions and column pointers.
     std::shared_ptr<cuda_sptrsv_device_factor> research_device_factor;
 #endif
     sparse_csc L;                                           // lower-triangular factor (owned CSC)
     // Elimination-order permutation: perm[original_vertex] = new_position.
     //   to permuted space   : x_perm[perm[v]] = b[v]   (scatter)
     //   from permuted space : x[v] = x_perm[perm[v]]    (gather)
-    // Replaces Eigen::PermutationMatrix so the factor owns no signed-int Eigen state.
     std::vector<node_index> perm;
 
-    // True when the input was SDDM (positive row sums) rather than
-    // a pure Laplacian.  Affects preconditioner rank and centering.
+    // True if any vertex has positive diagonal excess; false for a pure Laplacian.
+    // Affects preconditioner rank and centering.
     bool sddm = false;
 
     // Peak graph memory during factorization (bytes, heap only).
     std::size_t peak_graph_bytes = 0;
 
-    // Stored positive off-diagonal entries the M-matrix lumping moved onto the
-    // diagonal before this factor was built (0 = the input was already an
-    // M-matrix, the overwhelmingly common case). Two entries per pair; the
-    // rank of the perturbation is half this. See operator_class.h. The
-    // OPERATOR is untouched — only the matrix the preconditioner was built
-    // from carries the lumping.
+    // Stored positive off-diagonal entries removed by M-matrix lumping (two
+    // per pair). Only the preconditioner changes; the solve operator is untouched.
     Eigen::Index lumped_offdiag = 0;
 
     // Per-round statistics. active/is_size are always populated; Metal leaves
@@ -81,14 +72,8 @@ factorization factorize(graph G,
 
 namespace detail {
 
-/// The prologue EVERY matrix-level factorize() shares, so that no surface can
-/// drift from another: assert the operator contract (operator_class.h), apply
-/// M-matrix lumping if the matrix needs and permits it, build the graph from
-/// the result, and record what was lumped on the returned factorization.
-///
-/// `L` itself is never modified — a lumped input is factorized from a private
-/// copy — which is what keeps the operator PCG applies bit-identical to the
-/// one the caller passed.
+/// Shared matrix-input path: validate, lump if needed, and build the graph with
+/// regularization. The caller's operator remains unchanged for PCG.
 template<typename Build>
 factorization factorize_operator(const Eigen::SparseMatrix<double>& L,
                                  const factor_options& options, Build&& build) {
@@ -130,9 +115,8 @@ factorization factorize(graph G, P part, const E& elim,
                         const factor_options& opts = {},
                         checkpoint* cp = nullptr);
 
-/// Matrix-level conveniences for the custom seams: build the graph internally
-/// (default storage) and forward. Equivalent to
-/// factorize(make_graph(L), ...).
+/// Matrix overloads validate the operator, apply permitted lumping and
+/// regularization, then forward the graph to the chosen partitioner/eliminator.
 template<typename Partitioner = block_greedy_partitioner, eliminator E>
 factorization factorize(const Eigen::SparseMatrix<double>& L, const E& elim,
                         const factor_options& opts = {},
@@ -178,17 +162,11 @@ factorization factorize_for_solver(const Eigen::SparseMatrix<double>& L,
 
 struct factor_col {
     node_index vertex;
-    // L diagonal: sqrt(total_deg) including SDDM excess. Stored at the factor's
-    // precision (factor_value_t: fp32),
-    // Like the arena entries below, it is computed in fp64 and only copied into
-    // sparse_csc::vals_ of that same type, so narrowing here is bit-identical
-    // (and keeps the per-column header compact; there are n of them).
+    // sqrt(total degree including SDDM excess), computed in FP64 and stored
+    // at the factor's precision.
     factor_value_t diag = 0;
-    // Exact-size off-diagonal ranges come from one monotonic resource per
-    // elimination thread. They remain valid until assembly and avoid both one
-    // heap allocation per vertex and geometric append-buffer growth.
-    // An audited device prefix in an internal consuming solve may omit this
-    // payload (nullptr) while retaining entry_count and a streamed CPU digest.
+    // Off-diagonal entries borrow per-thread arena storage until CSC assembly.
+    // Device-resident consuming factors may omit them while retaining entry_count.
     factor_entry* entries = nullptr;
     node_index entry_count = 0;
 };
