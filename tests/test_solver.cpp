@@ -104,7 +104,7 @@ TEST(Solver, CpuBreakdownPreservesFiniteSolution) {
     Sparse identity(2, 2);
     identity.setIdentity();
     const auto factor = apxchol::factorize(identity);
-    for (const auto [diagonal, rhs_value] : {std::pair{1e308, 1e150}, std::pair{1e-320, 1.0}}) {
+    for (const auto& [diagonal, rhs_value] : {std::pair{1e308, 1e150}, std::pair{1e-320, 1.0}}) {
         SCOPED_TRACE(diagonal);
         const Sparse matrix = diagonal * identity;
         const apxchol::cpu_solver owner(matrix, factor, cpu_options());
