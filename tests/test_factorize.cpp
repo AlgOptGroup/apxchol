@@ -470,6 +470,68 @@ void expect_same_graph_selection(
 }
 } // namespace
 
+TEST(VecPoolAos, ReserveAccommodatesALargerTeamThanGraphConstruction) {
+    const scoped_threads team(4);
+    apxchol::basic_vec_pool_incidence<unsigned> pool;
+    {
+        const scoped_threads construction(1);
+        pool.init(8);
+    }
+    std::vector<apxchol::node_index> touched(8), incoming(8, 1);
+    std::iota(touched.begin(), touched.end(), 0);
+    int actual_threads = 0;
+#pragma omp parallel num_threads(4)
+    {
+#pragma omp single
+        {
+            actual_threads = omp_get_num_threads();
+            pool.compact_for_round_if_needed(incoming);
+        }
+        pool.bulk_reserve_parallel(touched.begin(), touched.end(), incoming);
+#pragma omp for
+        for (unsigned v = 0; v < 8; ++v) {
+            pool.write_reserved_at(v, 0, 100 + v);
+            pool.commit_reserved(v, 1);
+        }
+    }
+    if (actual_threads < 2) GTEST_SKIP() << "OpenMP granted only one worker";
+    for (unsigned v = 0; v < 8; ++v) {
+        ASSERT_EQ(pool[v].size(), 1u);
+        EXPECT_EQ(pool[v][0], 100 + v);
+    }
+}
+
+TEST(VecPoolAos, ReducedEliminationTeamIgnoresInactiveWorkerScratch) {
+    const scoped_threads team(4);
+    apxchol::graph graph(6);
+    for (apxchol::node_index v = 0; v < 4; ++v) {
+        graph.add_edge(v, 4, 1.0);
+        graph.add_edge(v, 5, 1.0);
+    }
+    apxchol::factorize_workspace workspace;
+    workspace.threads.resize(4);
+    for (auto& worker : workspace.threads)
+        worker.factor_entries = std::make_unique<std::pmr::monotonic_buffer_resource>();
+    // A previous round used this worker; the next region will be serialized.
+    workspace.threads[1].touched_buffer = {4, 5};
+    workspace.reset_for_round();
+    apxchol::partition_result part;
+    part.data = {0, 1, 2, 3};
+    std::vector<apxchol::detail::factor_col> columns;
+    apxchol::factor_options options;
+    options.omp_threshold = 1;
+    const int previous_levels = omp_get_max_active_levels();
+    omp_set_max_active_levels(0);
+    apxchol::detail::eliminate_partition_singleton(
+        apxchol::tree_elimination{}, graph, part, columns, workspace, options);
+    omp_set_max_active_levels(previous_levels);
+    EXPECT_EQ(columns.size(), 4u);
+    EXPECT_EQ(workspace.touched_concat, (std::vector<apxchol::node_index>{4, 5}));
+    EXPECT_TRUE(std::ranges::all_of(workspace.incoming, [](auto count) { return count == 0; }));
+    EXPECT_EQ(graph.adj_count(4), 8u);
+    EXPECT_EQ(graph.adj_count(5), 8u);
+}
+
 TEST(FactorAssembly, SerialAndParallelInvariantScansMatchByteForByte) {
     constexpr apxchol::node_index n = 32768;
     std::vector<apxchol::detail::factor_col> cols(n);

@@ -475,8 +475,9 @@ void eliminate_partition_singleton(const Eliminator& elim,
                 // the adjacency bulk reserve below.
                 #pragma omp single
                 {
+                    const int actual_threads = omp_get_num_threads();
                     edge_count = 0;
-                    for (int t = 0; t < num_threads; ++t)
+                    for (int t = 0; t < actual_threads; ++t)
                         edge_count += ws.threads[t].edge_buffer.size();
                     const size_t N_edges = edge_count;
                     if (live_degrees) ws.degree_fill_edges = N_edges;
@@ -484,7 +485,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
                         G.record_edges_added(static_cast<edge_index>(N_edges));
                     }
                     ws.touched_concat.clear();
-                    for (int t = 0; t < num_threads; ++t)
+                    for (int t = 0; t < actual_threads; ++t)
                         ws.touched_concat.insert(
                             ws.touched_concat.end(),
                             ws.threads[t].touched_buffer.begin(),

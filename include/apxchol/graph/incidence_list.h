@@ -500,6 +500,12 @@ template<typename Value> struct basic_vec_pool_incidence {
     /// bulk_reserve_parallel starts.
     void compact_for_round_if_needed(
             const std::vector<node_index>& incoming) {
+#ifdef _OPENMP
+        // Graph construction and factorization can use different team sizes.
+        const auto team = static_cast<size_t>(omp_get_num_threads());
+        if (bulk_thread_grows_.size() < team)
+            bulk_thread_grows_.resize(team);
+#endif
         if (abandoned_ > pool_.size() / 2)
             compact(&incoming);
     }
