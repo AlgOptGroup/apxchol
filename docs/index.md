@@ -6,6 +6,8 @@
 :maxdepth: 1
 :caption: Guides
 
+Using the solver <docs/usage>
+Building and installation <docs/building>
 Python <python/README>
 MATLAB / Octave <octave/README>
 Precision and convergence <docs/precision>

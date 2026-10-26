@@ -12,6 +12,10 @@ extensions = ["myst_parser", "breathe", "sphinx.ext.autodoc", "sphinx.ext.napole
 source_suffix = {".md": "markdown"}
 exclude_patterns = ["_readme.md"]
 html_theme = "furo"
+html_theme_options = {
+    "announcement": 'Development documentation from <code>main</code>. '
+                    'See <a href="https://pypi.org/project/apxchol/">PyPI</a> for the released package.'
+}
 html_title = f"apxchol {release}"
 html_show_sourcelink = False
 html_show_copyright = False
