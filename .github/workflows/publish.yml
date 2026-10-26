@@ -1,4 +1,4 @@
-# Python wheel and standalone CLI publishing (no sdist — python/CMakeLists.txt references
+# Python wheel, standalone CLI and native SDK publishing (no sdist — python/CMakeLists.txt references
 # ../src, so the package only builds from a full checkout).
 # Trigger: publishing a GitHub release (or manual dispatch to dry-run the artifact
 # jobs). Uses PyPI Trusted Publishing (OIDC), configured on pypi.org under
@@ -37,9 +37,13 @@ jobs:
     needs: version
     uses: ./.github/workflows/cli.yml
 
+  sdk:
+    needs: version
+    uses: ./.github/workflows/sdk.yml
+
   publish:
     name: upload to PyPI (wheels only)
-    needs: [wheels, pypy, cli]
+    needs: [wheels, pypy, cli, sdk]
     # workflow_dispatch only builds artifacts; uploads happen on a release.
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
@@ -54,8 +58,8 @@ jobs:
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
 
-  publish-cli:
-    needs: [wheels, pypy, cli]
+  publish-native:
+    needs: [wheels, pypy, cli, sdk]
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions:
@@ -66,7 +70,12 @@ jobs:
           pattern: cli-*
           merge-multiple: true
           path: dist
-      - name: Attach CLI archives
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '{sdk-linux-x86_64-cpu,sdk-linux-x86_64-cuda,sdk-macos-arm64-metal}'
+          merge-multiple: true
+          path: dist
+      - name: Attach CLI and SDK archives
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
