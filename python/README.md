@@ -20,7 +20,7 @@ GPU backend; no CUDA Toolkit or Homebrew installation is needed.
 | Linux | x86-64-v2 or newer | NVIDIA CUDA |
 | macOS 15+ | Apple silicon (arm64) | Apple Metal |
 
-Wheels support CPython 3.10–3.14.
+Wheels support CPython 3.11–3.15.
 
 ```python
 import apxchol
