@@ -103,6 +103,26 @@ compiled tolerance and iteration defaults.
 Overlapping inputs are copied before writing `out`. Use separate solver
 instances for concurrent calls; each solver shares mutable workspace.
 
+## Save and reload
+
+Save a reusable solver's operator and factor, then choose the solve backend
+when loading. These methods also work without SciPy:
+
+```python
+solver.save("system.npz")
+restored = apxchol.Solver.load("system.npz", backend="cpu")
+result = restored.solve(b)
+```
+
+Saving requires `keep_factor=True`, the reusable solver's default. It creates
+a new file and refuses to replace an existing one. The archive stores the
+original operator and FP32 factor; RHSs, initial guesses and device workspace
+are not saved. Loading adopts the factor without repeating factorization.
+
+`backend="auto"` adopts on CPU; `backend="gpu"` uploads to a compatible GPU.
+Storage and preparation options use the same defaults as construction. Pass
+`lump_max_mass` again if the saved operator requires positive-entry lumping.
+
 ## Setup options
 
 Pass these keywords to `factorize` or the one-shot `solve`:

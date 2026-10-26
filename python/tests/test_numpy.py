@@ -14,11 +14,7 @@ INDICES = np.array([0, 1, 0, 1, 2, 1, 2], dtype=np.int32)
 INDPTR = np.array([0, 2, 5, 7], dtype=np.int32)
 
 
-@pytest.mark.parametrize("width", [1, 4, 16])
-@pytest.mark.parametrize("index_dtype", [np.int32, np.int64])
-def test_numpy_csc_solve_apply_and_warm_start(width, index_dtype):
-    solver = apxchol.Solver.from_csc(DATA, INDICES.astype(index_dtype),
-                                    INDPTR.astype(index_dtype), backend="cpu")
+def check_solve_and_apply(solver, width):
     exact = np.arange(3 * width, dtype=float).reshape(3, width) + 1
     if width == 1:
         exact = exact[:, 0]
@@ -31,6 +27,14 @@ def test_numpy_csc_solve_apply_and_warm_start(width, index_dtype):
     warm = solver.solve(rhs, x0=exact)
     assert np.all(warm.converged) and np.all(np.asarray(warm.iters) == 0)
     assert solver.shape == A.shape and solver.P.shape == (3,)
+
+
+@pytest.mark.parametrize("width", [1, 4, 16])
+@pytest.mark.parametrize("index_dtype", [np.int32, np.int64])
+def test_numpy_csc_solve_apply_and_warm_start(width, index_dtype):
+    solver = apxchol.Solver.from_csc(DATA, INDICES.astype(index_dtype),
+                                    INDPTR.astype(index_dtype), backend="cpu")
+    check_solve_and_apply(solver, width)
 
 
 def test_unsorted_duplicates_use_shared_canonical_import():
@@ -108,8 +112,7 @@ assert not any(n == "scipy" or n.startswith("scipy.") for n in sys.modules)
     subprocess.run([sys.executable, "-I", "-B", "-c", probe], check=True, timeout=30)
 
 
-@pytest.mark.parametrize("storage", [np.float16, np.float32])
-def test_numpy_gpu_solve_and_apply_when_available(storage):
+def gpu_solver(storage):
     import os
     try:
         solver = apxchol.Solver.from_csc(DATA, INDICES, INDPTR, backend="gpu",
@@ -124,17 +127,14 @@ def test_numpy_gpu_solve_and_apply_when_available(storage):
             raise
         pytest.skip("No usable GPU backend in this installation")
     assert solver.backend == "gpu"
+    return solver
+
+
+@pytest.mark.parametrize("storage", [np.float16, np.float32])
+def test_numpy_gpu_solve_and_apply_when_available(storage):
+    solver = gpu_solver(storage)
     for width in (1, 4, 16):
-        exact = np.arange(3 * width, dtype=float).reshape(3, width) + 1
-        if width == 1:
-            exact = exact[:, 0]
-        rhs = A @ exact
-        result = solver.solve(rhs)
-        assert np.all(result.converged)
-        np.testing.assert_allclose(A @ result.x, rhs, rtol=1e-8, atol=1e-12)
-        assert np.isfinite(solver.apply(rhs)).all()
-        warm = solver.solve(rhs, x0=exact)
-        assert np.all(warm.converged) and np.all(np.asarray(warm.iters) == 0)
+        check_solve_and_apply(solver, width)
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="CUDA visibility is a Linux-wheel test")

@@ -9,6 +9,7 @@ Public API:
                                      ->  SolveResult
     Solver.apply(r)                  ->  numpy.ndarray   (M^{-1} r)
     Solver.from_csc(data, indices, indptr, **opts) -> Solver
+    Solver.save(path) / Solver.load(path, **opts) -> portable archive / Solver
     Solver.lumped                    ->  int  (positive off-diagonals lumped)
     Solver.aslinearoperator()        ->  scipy LinearOperator
     Solver.P / Solver.chol() / Solver.L / Solver.D   ->  factor export
@@ -46,6 +47,22 @@ class SolveResult:
     iters: int | np.ndarray
     residual: float | np.ndarray
     converged: bool | np.ndarray
+
+
+def _solver_options(*, backend="auto", num_threads=0, seed=None, partitioner=None,
+                    keep_factor=True, factor_storage_dtype=None, **advanced):
+    options = dict(backend=backend, num_threads=index(num_threads),
+                   keep_factor=bool(keep_factor))
+    if seed is not None:
+        options["seed"] = index(seed)
+    if partitioner is not None:
+        options["partitioner"] = partitioner
+    options.update(advanced)
+    if "exact_clique_max_degree" in options:
+        options["exact_clique_max_degree"] = index(options["exact_clique_max_degree"])
+    if factor_storage_dtype is not None:
+        options["factor_storage_dtype"] = np.dtype(factor_storage_dtype).name
+    return options
 
 
 def _scipy_sparse():
@@ -140,26 +157,37 @@ class Solver:
         self._init_csc(data, indices, indptr, **opts)
         return self
 
-    def _init_csc(self, data, indices, indptr, *, backend="auto", num_threads=0,
-                  seed=None, partitioner=None, keep_factor=True,
-                  factor_storage_dtype=None, **advanced):
+    def save(self, path):
+        """Save the operator and retained factor to a portable NPZ file.
+
+        Requires ``keep_factor=True``. Existing destinations are rejected.
+        The file contains no RHS, solution or device-specific workspace.
+        """
+        self._impl.save(path)
+
+    @classmethod
+    def load(cls, path, **opts):
+        """Restore a solver from an archive, without requiring SciPy.
+
+        Options use the constructor's defaults. The stored factor is adopted,
+        not factorized again; backend, storage and preparation settings apply.
+        ``backend="auto"`` uses CPU for adoption; ``"gpu"`` requests upload.
+        Tolerance, iteration budget and warm starts remain solve arguments.
+        """
+        options = _solver_options(**opts)
+        self = cls.__new__(cls)
+        self._initialize(_apxchol.Solver.load(path, options), options["keep_factor"])
+        return self
+
+    def _init_csc(self, data, indices, indptr, **opts):
         data, indices, indptr = map(np.asarray, (data, indices, indptr))
         if np.iscomplexobj(data):
             raise ValueError("A must be real; apxchol solves real symmetric systems")
         if indices.dtype.kind not in "iu" or indptr.dtype.kind not in "iu":
             raise ValueError("indices and indptr must have integer dtype")
-        options = dict(backend=backend, num_threads=index(num_threads),
-                       keep_factor=bool(keep_factor))
-        if seed is not None:
-            options["seed"] = index(seed)
-        if partitioner is not None:
-            options["partitioner"] = partitioner
-        options.update(advanced)
-        if "exact_clique_max_degree" in options:
-            options["exact_clique_max_degree"] = index(options["exact_clique_max_degree"])
-        if factor_storage_dtype is not None:
-            options["factor_storage_dtype"] = np.dtype(factor_storage_dtype).name
-        self._initialize(_apxchol.Solver(indptr, indices, data, options), keep_factor)
+        options = _solver_options(**opts)
+        self._initialize(_apxchol.Solver(indptr, indices, data, options),
+                         options["keep_factor"])
 
     def _initialize(self, impl, keep_factor):
         self._impl = impl
@@ -375,8 +403,8 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
         "baumann_kyng". None uses the C++ default. Unknown names raise at
         factorization time.
     keep_factor : bool
-        Retain an extra host factor copy for ``chol()``, ``L`` and ``D``
-        export; enabled by default. ``False`` saves this memory while still
+        Retain an extra host factor copy for ``save()``, ``chol()``, ``L``
+        and ``D`` export; enabled by default. ``False`` saves this memory while still
         allowing repeated solves, ``P``, ``factor_nnz`` and ``fill_ratio``.
     factor_storage_dtype : numpy dtype, dtype name, or None
         ``np.float16`` or ``np.float32`` selects triangular-solve storage;

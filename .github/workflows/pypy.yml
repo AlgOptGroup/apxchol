@@ -30,7 +30,7 @@ jobs:
           CIBW_ENABLE: pypy
           CIBW_BUILD: pp311-*
           CIBW_TEST_EXTRAS: test
-          CIBW_TEST_COMMAND: python -m pytest {package}/tests/test_numpy.py {package}/tests/test_version.py -q
+          CIBW_TEST_COMMAND: python -m pytest {package}/tests/test_numpy.py {package}/tests/test_archive.py {package}/tests/test_version.py -q
           CCACHE_DIR: ${{ runner.os == 'Linux' && format('/host{0}/ccache', runner.temp) || format('{0}/ccache', runner.temp) }}
           CCACHE_STATSLOG: ${{ runner.os == 'Linux' && format('/host{0}/ccache-stats.log', runner.temp) || format('{0}/ccache-stats.log', runner.temp) }}
           CCACHE_BASEDIR: ${{ runner.os == 'Linux' && '/project' || github.workspace }}
