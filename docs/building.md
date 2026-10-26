@@ -103,9 +103,9 @@ cmake --install build-sdk
 
 Configure the consuming project with `-DCMAKE_PREFIX_PATH=/path/to/prefix`.
 If apxchol fetched Eigen, the install includes its headers. Otherwise, the
-consumer must also provide Eigen. The same rule applies to libzip; its fetched
-static build is installed with the SDK and needs zlib. A CUDA SDK consumer
-needs the CUDA Toolkit.
+consumer must also provide Eigen. Static SDKs also require libzip and zlib;
+a fetched static libzip is installed alongside that SDK. The prebuilt shared
+SDKs embed minimal static libzip support. CUDA SDK consumers need the CUDA Toolkit.
 Use compatible compiler, standard-library and OpenMP runtime settings.
 
 `ExternalProject_Add` builds in a separate project. Use it to build/install
