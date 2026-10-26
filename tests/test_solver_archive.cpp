@@ -286,8 +286,10 @@ TEST_F(SolverArchive, InvalidOptionsFailBeforeOpeningAnArchive) {
 }
 
 TEST_F(SolverArchive, RejectsMetadataAndIndexOverflow) {
-    for (auto [index, value] : std::array<std::pair<std::size_t, std::uint64_t>, 6>{{
+    for (const auto& entry : std::array<std::pair<std::size_t, std::uint64_t>, 6>{{
         {0, 99}, {1, UINT64_MAX}, {2, 2}, {3, UINT64_MAX}, {4, UINT64_MAX}, {6, UINT64_MAX}}}) {
+        const auto index = entry.first;
+        const auto value = entry.second;
         const auto path = change(("meta-" + std::to_string(index)).c_str(), "apxchol.npy", [&](auto& bytes) {
             std::memcpy(bytes.data() + data_offset(bytes) + index * 8, &value, 8);
         });
