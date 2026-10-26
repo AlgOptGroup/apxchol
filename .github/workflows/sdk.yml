@@ -8,6 +8,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
         include:
           - runner: ubuntu-latest
@@ -42,7 +43,7 @@ jobs:
               /opt/python/cp311-cp311/bin/python tests/check_sdk_archive.py dist/*.tar.gz tests/cmake_install cpu'
           if test "$SDK_DEVICE" = CPU; then
             docker run --rm --network=none --cpus=2 --memory=4g --read-only \
-              --tmpfs /tmp:rw,size=512m -v "$PWD/dist:/artifacts:ro" \
+              --tmpfs /tmp:rw,exec,size=512m -v "$PWD/dist:/artifacts:ro" \
               -v "$PWD/tests/check_sdk_archive.py:/check.py:ro" \
               -v "$PWD/tests/cmake_install:/consumer:ro" "$IMAGE" \
               timeout 180 bash -lc '/opt/python/cp311-cp311/bin/python /check.py /artifacts/*.tar.gz /consumer cpu'
