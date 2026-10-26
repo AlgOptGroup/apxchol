@@ -30,6 +30,8 @@ if (NOT TARGET libzip::zip)
             URL https://libzip.org/download/libzip-1.12.1.tar.xz
             URL_HASH SHA256=c40062022a1963c80573d48f6070792297cecd7c6bffe3aefcac0d8b9bee8913)
         FetchContent_MakeAvailable(apxchol_libzip)
+        set_property(TARGET zip APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES
+            $<TARGET_PROPERTY:zip,INTERFACE_INCLUDE_DIRECTORIES>)
         if (SKBUILD)
             install(FILES "${apxchol_libzip_SOURCE_DIR}/LICENSE"
                 DESTINATION "${SKBUILD_METADATA_DIR}/licenses/libzip")
