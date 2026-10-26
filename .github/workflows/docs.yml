@@ -52,7 +52,7 @@ jobs:
         with:
           key: docs-metal-portable
       - name: Install this revision
-        run: python -m pip install ./python
+        run: python -m pip install scipy ./python
       - name: Measure CPU and Metal
         run: python benchmarks/docs_benchmark.py build/performance/macos.json --metal
       - uses: actions/upload-artifact@v4
@@ -87,7 +87,7 @@ jobs:
         with:
           key: docs-gcc14
       - name: Install Python dependencies
-        run: python -m pip install -r docs/requirements.txt -e ./python
+        run: python -m pip install -r docs/requirements.txt scipy -e ./python
       - name: Build CLI
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release ${CMAKE_ARGS} \
