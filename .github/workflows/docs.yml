@@ -4,26 +4,20 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: &docs_paths
+  pull_request:
+    paths:
       - 'docs/**'
       - 'README.md'
       - 'CONTRIBUTING.md'
-      - 'python/README.md'
-      - 'python/apxchol/**'
-      - 'python/src/**'
-      - 'python/CMakeLists.txt'
-      - 'python/pyproject.toml'
+      - 'python/**'
       - 'octave/README.md'
-      - 'benchmarks/README.md'
+      - 'benchmarks/**'
       - 'include/**'
-      - 'src/config.cpp'
-      - 'src/main.cpp'
+      - 'src/**'
       - 'CMakeLists.txt'
       - 'cmake/**'
       - '.github/workflows/docs.yml'
       - '.github/actions/ccache/**'
-  pull_request:
-    paths: *docs_paths
 
 permissions:
   contents: read
@@ -32,8 +26,47 @@ concurrency:
   group: docs-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  OMP_NUM_THREADS: '2'
+  OPENBLAS_NUM_THREADS: '1'
+  MKL_NUM_THREADS: '1'
+  VECLIB_MAXIMUM_THREADS: '1'
+
 jobs:
+  metal-measurements:
+    runs-on: macos-15
+    timeout-minutes: 15
+    env:
+      CC: clang
+      CXX: clang++
+      CMAKE_ARGS: -DAPXCHOL_DEVICE=METAL -DAPXCHOL_NATIVE_ARCH=OFF
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install native dependencies
+        run: brew install libomp ninja ccache
+      - uses: ./.github/actions/ccache
+        with:
+          key: docs-metal-portable
+      - name: Install this revision
+        run: python -m pip install ./python
+      - name: Measure CPU and Metal
+        run: python benchmarks/docs_benchmark.py build/performance/macos.json --metal
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-metal
+          path: build/performance/macos.json
+          if-no-files-found: error
+      - name: Show compiler cache statistics
+        if: always()
+        run: ccache --show-log-stats
+
   build:
+    needs: metal-measurements
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -60,8 +93,20 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release ${CMAKE_ARGS} \
                 -DAPXCHOL_BUILD_TESTS=OFF -DAPXCHOL_BUILD_EXAMPLES=OFF
           cmake --build build --target apxchol
+      - name: Measure CPU
+        run: python benchmarks/docs_benchmark.py build/performance/linux.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-linux
+          path: build/performance/linux.json
+          if-no-files-found: error
+      - uses: actions/download-artifact@v4
+        with:
+          name: performance-metal
+          path: build/performance
       - name: Build documentation
-        run: python docs/build.py
+        run: python docs/build.py --benchmarks build/performance
       - uses: actions/upload-artifact@v4
         with:
           name: documentation
