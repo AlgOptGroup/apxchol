@@ -1,0 +1,389 @@
+{
+  "schema_version": 1,
+  "campaign": "Apple CPU and Metal held-out comparison",
+  "date": "2026-10-25",
+  "date_basis": "campaign records",
+  "source_commit": "871e7eeedfc70d51f3ea7fa043a5f7ca6eddeeb0",
+  "hardware": {
+    "cpu": "Apple M1 Max",
+    "gpu": "Apple M1 Max",
+    "physical_cpu_cores": 10,
+    "performance_cpu_cores": 8,
+    "efficiency_cpu_cores": 2,
+    "memory_gib": 32,
+    "thread_ceiling": 8
+  },
+  "fixture": {
+    "name": "YouTube graph Laplacian",
+    "dataset": "SNAP/com-Youtube",
+    "dataset_url": "https://sparse.tamu.edu/SNAP/com-Youtube",
+    "original_dataset_url": "https://snap.stanford.edu/data/com-Youtube.html",
+    "citation": "J. Yang and J. Leskovec. Defining and Evaluating Network Communities based on Ground-truth. ICDM, 2012.",
+    "construction": "Unweighted, unshifted Laplacian L = D - A of the full SuiteSparse graph; no additional graph trimming.",
+    "rows": 1134890,
+    "stored_nonzeros": 7110138,
+    "undirected_edges": 2987624,
+    "operator_sha256": "12d196f08ea6a9392bc19b1c200a9bbf19816edc0e3ebc4802becc824e2d33e6",
+    "matrix_market_sha256": "0fde5f10d531dabfea4de5d80fe81778ec5bd78c3ce69b67c64eff7002aa0b51",
+    "operator_digest_format": "SHA256 of little-endian uint64 rows/columns/nnz, int32 CSC offsets, int32 row indices and float64 values."
+  },
+  "settings": {
+    "factor_storage": "float32",
+    "sampling": "GKS",
+    "tolerance": 1e-08,
+    "max_iterations": 2000,
+    "keep_factor_values": false,
+    "degree_quantile": {
+      "cpu": {
+        "setup_plus_first": 0.2,
+        "scalar": 0.2,
+        "batch": 0.2
+      },
+      "metal": {
+        "setup_plus_first": 0.2,
+        "scalar": 0.2,
+        "batch": 0.2
+      }
+    },
+    "selection": "CPU and Metal settings selected separately on qualification seed 701, then frozen before held-out seeds 811/823/839. The scalar configuration minimizes setup+first; the batch configuration minimizes retained C16. C4 and retained scalar were measured at those configurations, not optimized independently.",
+    "rhs": "Normalized L*x; independent mt19937_64 streams use seed+1000+column, with x entries sampled uniformly from the 65,537-point grid [-1, 1]. Matrix and scalar-loop paths reuse identical RHS columns."
+  },
+  "metric_definitions": {
+    "setup_plus_first": "Solver construction plus the first scalar solve in that process; not a cold OS/driver-cache measurement.",
+    "retained_scalar": "Scalar API solve after the C4/C16 calls have allocated reusable workspace.",
+    "c4_matrix": "One retained native matrix API call with four RHS columns.",
+    "c16_matrix": "One retained native matrix API call with sixteen RHS columns.",
+    "scalar_loop": "Sum of separate native scalar API call times for the same columns, excluding column copies.",
+    "batching_gain": "scalar_loop divided by matrix duration at the same width.",
+    "verification": "Solver final residual verification is included in API timing. Independent FP64 CSC residual recomputation is outside timing."
+  },
+  "noise_gate": {
+    "limit": 0.05,
+    "formula": "abs(primary-control)/min(primary,control)",
+    "acceptance": "Reject a whole fixture/seed block if any preregistered metric in any selected configuration exceeds the limit.",
+    "preregistered_metrics": [
+      "setup",
+      "setup_plus_first",
+      "first_scalar",
+      "c4_matrix",
+      "c4_scalar_loop",
+      "c16_matrix",
+      "c16_scalar_loop"
+    ],
+    "retained_scalar": "Supplementary metric, not part of the preregistered block gate; its controls also passed the 5% limit in all retained YouTube blocks."
+  },
+  "campaign_checked": {
+    "artifacts": 170,
+    "outer_hashes": 169,
+    "inner_hashes": 165,
+    "owners": 54,
+    "rhs": 2592,
+    "fixture_seed_blocks": 9,
+    "accepted_blocks": 4,
+    "maximum_independent_relative_residual": 9.991580262943812e-09,
+    "source_tracked_files": 260,
+    "source_tracked_files_matched_git_blobs": 260,
+    "package_manifest_files": 274
+  },
+  "published_subset": {
+    "fixture_seed_blocks": 3,
+    "owners": 12,
+    "rhs": 768,
+    "maximum_independent_relative_residual": 9.799534135235678e-09
+  },
+  "excluded_fixtures": [
+    {
+      "name": "Amazon",
+      "accepted_blocks": 0,
+      "total_blocks": 3,
+      "reason": "Failed the preregistered control variation gate."
+    },
+    {
+      "name": "Grid5000",
+      "accepted_blocks": 1,
+      "total_blocks": 3,
+      "reason": "Only one of three seed blocks passed; excluded from fixture-wide charts."
+    }
+  ],
+  "evidence": {
+    "archive_sha256": "65db7b1157f9978c79626fa4a158f7bf282321187e9ae5833e11746f6b033a3f",
+    "outer_sha256": "3831850dd979a9810be66af758054c233880da97eff510412b46a94821e6b362",
+    "selection_sha256": "d3bf4ee77943669add4a471ddc713fa1b641e7620625c50eeaa20e4dc3b4e297"
+  },
+  "blocks": [
+    {
+      "seed": 811,
+      "noise_gate_passed": true,
+      "maximum_preregistered_control_variation": 0.010227396235057357,
+      "routes": {
+        "cpu": {
+          "primary": {
+            "seconds": {
+              "setup": 0.399170291,
+              "setup_plus_first": 0.6135292489999999,
+              "first_scalar": 0.214358958,
+              "c4_matrix": 0.397110583,
+              "c4_scalar_loop": 0.836136,
+              "c16_matrix": 1.283740292,
+              "c16_scalar_loop": 3.372344004,
+              "retained_scalar": 0.212610084
+            },
+            "batching_gain": {
+              "4": 2.1055495264904587,
+              "16": 2.6269674832329715
+            },
+            "maximum_independent_relative_residual": 9.481199856281774e-09,
+            "rhs_checks": 64,
+            "log_sha256": "c70b3b07473845fb85c675601cac562db258a036db77dad127aa97acb8e86075"
+          },
+          "control": {
+            "seconds": {
+              "setup": 0.399124958,
+              "setup_plus_first": 0.6156762499999999,
+              "first_scalar": 0.216551292,
+              "c4_matrix": 0.39408175,
+              "c4_scalar_loop": 0.838637791,
+              "c16_matrix": 1.274877208,
+              "c16_scalar_loop": 3.370298211,
+              "retained_scalar": 0.212389959
+            },
+            "batching_gain": {
+              "4": 2.128080762430638,
+              "16": 2.643625746739368
+            },
+            "maximum_independent_relative_residual": 9.481199856281774e-09,
+            "rhs_checks": 64,
+            "log_sha256": "ea85187b9ec9482698efa7017afcb6c277a5737e01ef0e05710b682b30a5a637"
+          },
+          "retained_scalar_control_variation": 0.0010364190521832317
+        },
+        "metal": {
+          "primary": {
+            "seconds": {
+              "setup": 0.379761042,
+              "setup_plus_first": 0.635246958,
+              "first_scalar": 0.255485916,
+              "c4_matrix": 0.553582792,
+              "c4_scalar_loop": 0.953027458,
+              "c16_matrix": 2.199375334,
+              "c16_scalar_loop": 3.77283775,
+              "retained_scalar": 0.234737917
+            },
+            "batching_gain": {
+              "4": 1.7215626492956448,
+              "16": 1.7154133228994375
+            },
+            "maximum_independent_relative_residual": 9.526404845617034e-09,
+            "rhs_checks": 64,
+            "log_sha256": "3c2b5a5e4b8be121594d8a36593e000b3449d6c3b8d0be662073ff1a32775ae2"
+          },
+          "control": {
+            "seconds": {
+              "setup": 0.377041792,
+              "setup_plus_first": 0.6335334589999999,
+              "first_scalar": 0.256491667,
+              "c4_matrix": 0.557263666,
+              "c4_scalar_loop": 0.9470184580000001,
+              "c16_matrix": 2.195968625,
+              "c16_scalar_loop": 3.7524622910000005,
+              "retained_scalar": 0.233491042
+            },
+            "batching_gain": {
+              "4": 1.6994082259079135,
+              "16": 1.7087959492135278
+            },
+            "maximum_independent_relative_residual": 9.52637123772049e-09,
+            "rhs_checks": 64,
+            "log_sha256": "50768135146697acdf5a1f292141dba09ed7bede2d1e0f76a5f403c8a0d7ce19"
+          },
+          "retained_scalar_control_variation": 0.005340140629463552
+        }
+      }
+    },
+    {
+      "seed": 823,
+      "noise_gate_passed": true,
+      "maximum_preregistered_control_variation": 0.019431020306991877,
+      "routes": {
+        "cpu": {
+          "primary": {
+            "seconds": {
+              "setup": 0.399828292,
+              "setup_plus_first": 0.605946501,
+              "first_scalar": 0.206118209,
+              "c4_matrix": 0.368163167,
+              "c4_scalar_loop": 0.802754751,
+              "c16_matrix": 1.216658542,
+              "c16_scalar_loop": 3.199528416,
+              "retained_scalar": 0.198832542
+            },
+            "batching_gain": {
+              "4": 2.1804320012273255,
+              "16": 2.6297669440930127
+            },
+            "maximum_independent_relative_residual": 9.753047445161661e-09,
+            "rhs_checks": 64,
+            "log_sha256": "5a36a819a9f660dc8f7c686797a5173e1eb18718d4018a1f7f0e448269f90ac7"
+          },
+          "control": {
+            "seconds": {
+              "setup": 0.403331084,
+              "setup_plus_first": 0.606952876,
+              "first_scalar": 0.203621792,
+              "c4_matrix": 0.370144583,
+              "c4_scalar_loop": 0.798564793,
+              "c16_matrix": 1.216442667,
+              "c16_scalar_loop": 3.18733625,
+              "retained_scalar": 0.19805625
+            },
+            "batching_gain": {
+              "4": 2.1574401725068606,
+              "16": 2.6202108298787583
+            },
+            "maximum_independent_relative_residual": 9.753047445161661e-09,
+            "rhs_checks": 64,
+            "log_sha256": "30fdc9a736ae962987888e6558847b081f36c6772c2dd87310fa3146463fe885"
+          },
+          "retained_scalar_control_variation": 0.003919553157247054
+        },
+        "metal": {
+          "primary": {
+            "seconds": {
+              "setup": 0.376639125,
+              "setup_plus_first": 0.616930584,
+              "first_scalar": 0.240291459,
+              "c4_matrix": 0.507129417,
+              "c4_scalar_loop": 0.866917918,
+              "c16_matrix": 2.028888625,
+              "c16_scalar_loop": 3.4585934579999997,
+              "retained_scalar": 0.219011792
+            },
+            "batching_gain": {
+              "4": 1.7094609165612649,
+              "16": 1.704673886670344
+            },
+            "maximum_independent_relative_residual": 9.799534135235678e-09,
+            "rhs_checks": 64,
+            "log_sha256": "c5582e5c73d023c81f6f6075a22ade2952fca4d3ca8b14150011e978e087c4aa"
+          },
+          "control": {
+            "seconds": {
+              "setup": 0.381427292,
+              "setup_plus_first": 0.620943333,
+              "first_scalar": 0.239516041,
+              "c4_matrix": 0.516983459,
+              "c4_scalar_loop": 0.876319499,
+              "c16_matrix": 2.057622791,
+              "c16_scalar_loop": 3.4460960430000003,
+              "retained_scalar": 0.219265041
+            },
+            "batching_gain": {
+              "4": 1.6950629343056023,
+              "16": 1.674794844843843
+            },
+            "maximum_independent_relative_residual": 9.799295243908757e-09,
+            "rhs_checks": 64,
+            "log_sha256": "4b8b0a37c11407c85e95f95f867eeb5df09480bbf912f3c17583b6a1d8d6b09e"
+          },
+          "retained_scalar_control_variation": 0.0011563258657779631
+        }
+      }
+    },
+    {
+      "seed": 839,
+      "noise_gate_passed": true,
+      "maximum_preregistered_control_variation": 0.011457930470406158,
+      "routes": {
+        "cpu": {
+          "primary": {
+            "seconds": {
+              "setup": 0.39892325,
+              "setup_plus_first": 0.6274333750000001,
+              "first_scalar": 0.228510125,
+              "c4_matrix": 0.423211458,
+              "c4_scalar_loop": 0.913022125,
+              "c16_matrix": 1.359923292,
+              "c16_scalar_loop": 3.630666749999999,
+              "retained_scalar": 0.227315833
+            },
+            "batching_gain": {
+              "4": 2.157366271023787,
+              "16": 2.6697584866426416
+            },
+            "maximum_independent_relative_residual": 9.757471448890342e-09,
+            "rhs_checks": 64,
+            "log_sha256": "c7f2b53aa6910bb42b930301bae68adbf04a16aa236a1fea19304316e166fec0"
+          },
+          "control": {
+            "seconds": {
+              "setup": 0.394531291,
+              "setup_plus_first": 0.622272499,
+              "first_scalar": 0.227741208,
+              "c4_matrix": 0.422780916,
+              "c4_scalar_loop": 0.9106234580000001,
+              "c16_matrix": 1.355444209,
+              "c16_scalar_loop": 3.6240076219999997,
+              "retained_scalar": 0.230321875
+            },
+            "batching_gain": {
+              "4": 2.153889694491319,
+              "16": 2.673667863226674
+            },
+            "maximum_independent_relative_residual": 9.757471448890342e-09,
+            "rhs_checks": 64,
+            "log_sha256": "012f60e2c01bd9e609e840367b688e7779b1f2ce4fd4dbd74f5c002576734aad"
+          },
+          "retained_scalar_control_variation": 0.013224076652856884
+        },
+        "metal": {
+          "primary": {
+            "seconds": {
+              "setup": 0.379667083,
+              "setup_plus_first": 0.617387542,
+              "first_scalar": 0.237720459,
+              "c4_matrix": 0.512179083,
+              "c4_scalar_loop": 0.875238459,
+              "c16_matrix": 2.053957167,
+              "c16_scalar_loop": 3.4386171240000003,
+              "retained_scalar": 0.218428417
+            },
+            "batching_gain": {
+              "4": 1.7088524073912639,
+              "16": 1.6741425669661982
+            },
+            "maximum_independent_relative_residual": 9.352919888354722e-09,
+            "rhs_checks": 64,
+            "log_sha256": "350b26801a4930ab8198f9aa2dc4da5d6c0927dcba4e0977017e13c22146d5bb"
+          },
+          "control": {
+            "seconds": {
+              "setup": 0.379046333,
+              "setup_plus_first": 0.614253583,
+              "first_scalar": 0.23520725,
+              "c4_matrix": 0.512118,
+              "c4_scalar_loop": 0.872700458,
+              "c16_matrix": 2.030689666,
+              "c16_scalar_loop": 3.4233261660000003,
+              "retained_scalar": 0.21616325
+            },
+            "batching_gain": {
+              "4": 1.7041003401559798,
+              "16": 1.6857948426670137
+            },
+            "maximum_independent_relative_residual": 9.353225429704513e-09,
+            "rhs_checks": 64,
+            "log_sha256": "d314be79d9dbf3e2bc7b3537dfec02b580359d3599546f0f18417610341273c9"
+          },
+          "retained_scalar_control_variation": 0.010478964393808902
+        }
+      }
+    }
+  ],
+  "limitations": [
+    "One machine and three held-out factor/RHS seeds.",
+    "Historical source revision; not a measurement of every later main commit.",
+    "Only range(L) RHS vectors generated as L*x were tested.",
+    "No factor-identity claim follows from equal settings or seeds.",
+    "Primary results and controls are separate; controls are not pooled into the reported primary medians."
+  ]
+}

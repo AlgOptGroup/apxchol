@@ -12,6 +12,7 @@ Python <python/README>
 MATLAB / Octave <octave/README>
 Precision and convergence <docs/precision>
 Extending the solver <docs/extending>
+Performance results <docs/performance>
 Benchmarking <benchmarks/README>
 Contributing <CONTRIBUTING>
 ```
