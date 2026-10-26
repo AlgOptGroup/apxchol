@@ -783,7 +783,7 @@ def test_negative_thread_budget():
 def test_archive_restores_scipy_helpers(tmp_path):
     A = grid2d_sddm(5)
     original = apxchol.factorize(A, backend="cpu", seed=2)
-    path = tmp_path / "scipy.npz"
+    path = tmp_path / "scipy.apxchol"
     original.save(path)
     restored = apxchol.Solver.load(path)
     original_factor = original.chol()

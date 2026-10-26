@@ -158,7 +158,7 @@ class Solver:
         return self
 
     def save(self, path):
-        """Save the operator and retained factor to a portable NPZ file.
+        """Save the operator and retained factor to a portable binary file.
 
         Requires ``keep_factor=True``. Existing destinations are rejected.
         The file contains no RHS, solution or device-specific workspace.
