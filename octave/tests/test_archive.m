@@ -26,7 +26,7 @@ function test_archive()
   directory = tempname();
   mkdir(directory);
   fprintf('archive test files: %s\n', directory);
-  path = fullfile(directory, 'system.npz');
+  path = fullfile(directory, 'system.apxchol');
   laplacian = sparse([2 -1 -1; -1 1 0; -1 0 1]);
   operators = {laplacian + 0.5 * speye(3), blkdiag(laplacian, laplacian)};
   checked = 0;
@@ -35,7 +35,7 @@ function test_archive()
     exact = reshape(sin(1:n*5), n, 5);
     exact(:, 2) = 0;
     B = A * exact;
-    archive = fullfile(directory, sprintf('operator-%d.npz', a));
+    archive = fullfile(directory, sprintf('operator-%d.apxchol', a));
     source = apxchol_solver(A, struct('num_threads', 1, 'keep_factor', true, ...
                                     'factor_storage', 'float32'));
     reference = source.apply(B);
@@ -81,12 +81,12 @@ function test_archive()
   result = default_loaded.solve([1; -1]);
   assert(result.converged);
   retained = apxchol_solver.load(path, struct('keep_factor', true));
-  retained.save(fullfile(directory, 'resaved.npz'));
-  again = apxchol_solver.load(fullfile(directory, 'resaved.npz'));
+  retained.save(fullfile(directory, 'resaved.apxchol'));
+  again = apxchol_solver.load(fullfile(directory, 'resaved.apxchol'));
   assert(norm(again.apply([1; -1]) - retained.apply([1; -1])) < 1e-14);
   % Include two-, three- and four-byte UTF-8 characters in the filename.
   unicode_name = native2unicode(uint8([195 169 45 230 181 139 240 159 140 141]), 'UTF-8');
-  unicode_path = fullfile(directory, [unicode_name '.npz']);
+  unicode_path = fullfile(directory, [unicode_name '.apxchol']);
   retained.save(unicode_path);
   assert(exist(unicode_path, 'file') == 2, 'non-ASCII archive filename was changed');
   unicode_loaded = apxchol_solver.load(unicode_path);
@@ -101,14 +101,14 @@ function test_archive()
   expect_error(@() retained.save(path), 'apxchol:error', 'exists');
   assert(isequal(read_bytes(path), before), 'existing archive changed after rejected save');
   no_factor = apxchol_solver(speye(2));
-  expect_error(@() no_factor.save(fullfile(directory, 'discarded.npz')), ...
+  expect_error(@() no_factor.save(fullfile(directory, 'discarded.apxchol')), ...
                'apxchol:badInput', 'released');
-  assert(exist(fullfile(directory, 'discarded.npz'), 'file') == 0);
-  expect_error(@() apxchol_solver.load(fullfile(directory, 'missing.npz')), ...
+  assert(exist(fullfile(directory, 'discarded.apxchol'), 'file') == 0);
+  expect_error(@() apxchol_solver.load(fullfile(directory, 'missing.apxchol')), ...
                'apxchol:error', 'solver archive');
-  malformed = fullfile(directory, 'malformed.npz');
+  malformed = fullfile(directory, 'malformed.apxchol');
   fid = fopen(malformed, 'wb'); fwrite(fid, 'not an archive'); fclose(fid);
-  expect_error(@() apxchol_solver.load(malformed), 'apxchol:error', 'solver archive');
+  expect_error(@() apxchol_solver.load(malformed), 'apxchol:badInput', 'solver archive');
   for value = {42, {'path'}, ['ab'; 'cd']}
     expect_error(@() apxchol_solver.load(value{1}), 'apxchol:badInput', 'path');
     expect_error(@() retained.save(value{1}), 'apxchol:badInput', 'path');

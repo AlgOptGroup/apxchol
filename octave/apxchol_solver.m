@@ -4,8 +4,8 @@ classdef apxchol_solver < handle
   %   s   = apxchol_solver(A, options);   % optional scalar options struct
   %   res = s.solve(b);                   % res.x, res.iters, res.residual, res.converged
   %   res = s.solve(b2, 1e-10, 1000);     % per-solve tol / maxiter
-  %   s.save('system.npz');            % requires options.keep_factor = true
-  %   s   = apxchol_solver.load('system.npz', options);
+  %   s.save('system.apxchol');            % requires options.keep_factor = true
+  %   s   = apxchol_solver.load('system.apxchol', options);
   %   z   = s.apply(r);                   % one preconditioner application, z = M\r
   %
   % Laplacian vs SDDM is auto-detected. A Laplacian with k connected components

@@ -75,8 +75,8 @@ matrix and factor together:
 
 ```matlab
 s = apxchol_solver(A, struct('keep_factor', true));
-s.save('system.npz');
-restored = apxchol_solver.load('system.npz');
+s.save('system.apxchol');
+restored = apxchol_solver.load('system.apxchol');
 res = restored.solve(B);  % scalar/matrix RHS and warm starts work as usual
 ```
 
@@ -113,8 +113,8 @@ cd octave
 octave --no-gui --eval "addpath(pwd); run('tests/test_apxchol.m')"
 ```
 
-The extension links the shared native CMake target. Eigen3 and libzip 1.12.1+
-are found or fetched by the native build helpers; a root build is not required.
+The extension links the shared native CMake target. Eigen3 is found or fetched
+by the native build helpers; zlib must be installed. A root build is not required.
 `CMAKE_BUILD_PARALLEL_LEVEL` sets the build worker count (default: 2).
 
 ## Build for MATLAB
