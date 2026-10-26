@@ -28,6 +28,20 @@ The default build is CPU-only. Add `-DAPXCHOL_DEVICE=CUDA` or
 `-DAPXCHOL_DEVICE=METAL` at configuration to include that GPU backend as well.
 The same executable still supports CPU solves.
 
+## CLI archives
+
+Download `cli-*` artifacts from a successful [CI run](https://github.com/AlgOptGroup/apxchol/actions/workflows/ci.yml);
+new [releases](https://github.com/AlgOptGroup/apxchol/releases) attach the archives directly.
+Linux archives require x86-64-v2, glibc 2.28+ and system C++/GCC runtimes. macOS
+archives require Apple silicon and macOS 15+, and include CPU and Metal routes.
+Verify the matching `.sha256` file with `sha256sum -c` (Linux) or `shasum -a 256 -c`
+(macOS), extract the archive, then run its `bin/apxchol --help`. Keep `bin/` and
+`lib/` together; OpenMP and redistribution notices are included. macOS binaries
+are ad-hoc signed, not notarized; Gatekeeper may require manual approval.
+
+For a source build, `cmake --install build --component cli --prefix /path/to/prefix`
+installs the executable using your system runtime libraries.
+
 ## Python source installation
 
 The [Python guide](../python/README.md#build-from-source) gives the editable
