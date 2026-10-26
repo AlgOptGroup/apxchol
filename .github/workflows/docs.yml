@@ -2,6 +2,8 @@ name: documentation
 
 on:
   workflow_dispatch:
+  release:
+    types: [published]
   push:
     branches: [main]
   pull_request:
@@ -34,6 +36,7 @@ env:
 
 jobs:
   metal-measurements:
+    if: github.event_name != 'release' || !github.event.release.prerelease
     runs-on: macos-15
     timeout-minutes: 15
     env:
@@ -66,6 +69,7 @@ jobs:
         run: ccache --show-log-stats
 
   build:
+    if: github.event_name != 'release' || !github.event.release.prerelease
     needs: metal-measurements
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -76,6 +80,11 @@ jobs:
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
     steps:
       - uses: actions/checkout@v4
+      - name: Check release tag
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: cmake -DRELEASE_TAG="$RELEASE_TAG" -P cmake/check_release_version.cmake
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -106,19 +115,45 @@ jobs:
           name: performance-metal
           path: build/performance
       - name: Build documentation
-        run: python docs/build.py --benchmarks build/performance
+        env:
+          APXCHOL_DOCS_RELEASE: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
+        run: |
+          python docs/build.py --benchmarks build/performance
+          git rev-parse HEAD > build/docs/source-revision.txt
       - uses: actions/upload-artifact@v4
         with:
           name: documentation
           path: build/docs
           if-no-files-found: error
-      - uses: actions/upload-pages-artifact@v4
-        if: github.ref == 'refs/heads/main'
-        with:
-          path: build/docs
       - name: Show compiler cache statistics
         if: always()
         run: ccache --show-log-stats
+
+  snapshot:
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: documentation
+          path: build/docs
+      - name: Preserve release documentation and refresh Pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          exists=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq 'any(.assets[]; .name == "documentation.tar.gz")')
+          if [ "$exists" = false ]; then
+            tar -czf documentation.tar.gz -C build/docs .
+            gh release upload "$RELEASE_TAG" documentation.tar.gz --repo "$GITHUB_REPOSITORY"
+          fi
+          gh workflow run docs.yml --ref main --repo "$GITHUB_REPOSITORY"
 
   deploy:
     if: github.ref == 'refs/heads/main'
@@ -126,11 +161,34 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
+      contents: read
       pages: write
       id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: documentation
+          path: build/docs
+      - name: Assemble stable and development documentation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p build/site
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases" > build/releases.json
+          tag=$(jq -r \
+            '[.[][] | select(.draft == false and .prerelease == false) | select(any(.assets[]; .name == "documentation.tar.gz"))] | max_by(.published_at) | .tag_name // empty' build/releases.json)
+          if [ -n "$tag" ]; then
+            gh release download "$tag" --pattern documentation.tar.gz --dir build --repo "$GITHUB_REPOSITORY"
+            tar -xzf build/documentation.tar.gz -C build/site
+          else
+            cp -a build/docs/. build/site/
+          fi
+          cp -a build/docs build/site/dev
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: build/site
       - uses: actions/deploy-pages@v4
         id: deployment

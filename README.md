@@ -14,7 +14,7 @@ conjugate gradients (PCG) to compute the solution.
 
 ## Quick start
 
-This page follows the development branch. Use a
+For an unreleased checkout, use a
 [source installation](docs/building.md#python-source-installation) for a matching build.
 For the latest published package and its API, see
 [PyPI](https://pypi.org/project/apxchol/).
@@ -86,7 +86,7 @@ Laplacian, four-column solves were 2.1× faster than separate calls on CPU and
 
 ![YouTube batching speedups on Apple M1 Max](docs/performance/youtube.svg)
 
-See [current CPU/Metal runner measurements and the full methodology](docs/performance.md).
+See [CPU/Metal runner measurements and the full methodology](docs/performance.md).
 The small benchmarks regenerate on each `main` commit; the larger comparison
 above is dated separately. Results depend on the matrix, hardware and settings.
 
