@@ -76,10 +76,21 @@ Integer integer_option(const mxArray* value, const char* name) {
 std::string string_option(const mxArray* value, const char* name) {
     if (!mxIsChar(value) || mxGetM(value) != 1)
         fail("apxchol:badInput", std::string(name) + " must be a character row vector");
-    std::string result(mxGetNumberOfElements(value) + 1, '\0');
-    mxGetString(value, result.data(), result.size());
-    result.resize(result.size() - 1);
-    return result;
+    const mxChar* characters = mxGetChars(value);
+    for (mwSize i = 0; i < mxGetNumberOfElements(value); ++i)
+        if (characters[i] == 0)
+            fail("apxchol:badInput", std::string(name) + " contains a null character");
+    // Octave stores character arrays as UTF-8 bytes; MATLAB stores UTF-16.
+    // An allocated conversion avoids sizing a byte buffer by character count.
+#ifdef HAVE_OCTAVE
+    char* utf8 = mxArrayToString(value);
+#else
+    char* utf8 = mxArrayToUTF8String(value);
+#endif
+    const std::unique_ptr<char, decltype(&mxFree)> converted(utf8, &mxFree);
+    if (!converted)
+        fail("apxchol:badInput", std::string(name) + " could not be converted to UTF-8");
+    return converted.get();
 }
 
 apxchol::solve_options setup_options(const mxArray* options) {

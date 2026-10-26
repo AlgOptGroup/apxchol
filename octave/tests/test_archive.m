@@ -84,6 +84,19 @@ function test_archive()
   retained.save(fullfile(directory, 'resaved.npz'));
   again = apxchol_solver.load(fullfile(directory, 'resaved.npz'));
   assert(norm(again.apply([1; -1]) - retained.apply([1; -1])) < 1e-14);
+  % Include two-, three- and four-byte UTF-8 characters in the filename.
+  unicode_name = native2unicode(uint8([195 169 45 230 181 139 240 159 140 141]), 'UTF-8');
+  unicode_path = fullfile(directory, [unicode_name '.npz']);
+  retained.save(unicode_path);
+  assert(exist(unicode_path, 'file') == 2, 'non-ASCII archive filename was changed');
+  unicode_loaded = apxchol_solver.load(unicode_path);
+  unicode_result = unicode_loaded.solve([1; -1]);
+  assert(unicode_result.converged && norm(unicode_result.x - result.x) < 1e-14);
+  expect_error(@() retained.save([unicode_path char(0) 'ignored']), ...
+               'apxchol:badInput', 'null');
+  expect_error(@() apxchol_solver.load([unicode_path char(0) 'ignored']), ...
+               'apxchol:badInput', 'null');
+  fprintf('ok non-ASCII archive filename round trip and NUL rejection\n');
   before = read_bytes(path);
   expect_error(@() retained.save(path), 'apxchol:error', 'exists');
   assert(isequal(read_bytes(path), before), 'existing archive changed after rejected save');
@@ -110,6 +123,6 @@ function test_archive()
                'apxchol:badInput', 'unknown');
   result = retained.solve([1; -1]);
   assert(result.converged, 'owner unusable after archive errors');
-  assert(rejected == 18);
-  fprintf('ok archive retention, re-save and file errors: %d/18 rejected\n', rejected);
+  assert(rejected == 20);
+  fprintf('ok archive retention, re-save and file errors: %d/20 rejected\n', rejected);
 end
