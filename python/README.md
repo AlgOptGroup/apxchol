@@ -1,12 +1,12 @@
 # apxchol for Python
 
 Solve sparse Laplacian and SDDM systems with reusable approximate-Cholesky
-factors. NumPy and SciPy are required.
+factors. NumPy is required. Install the SciPy extra for sparse-matrix helpers.
 
 ## Install and solve
 
 ```bash
-python -m pip install apxchol
+python -m pip install "apxchol[scipy]"
 ```
 
 For an unreleased checkout, use the [source installation](#build-from-source)
@@ -52,6 +52,21 @@ Any SciPy sparse format is converted to sorted, duplicate-free CSC without
 changing the input. Supply the full symmetric matrix, including both
 entries of each off-diagonal pair. Complex inputs are rejected, even with
 zero imaginary parts.
+
+### NumPy-only input
+
+`python -m pip install apxchol` installs the solver without SciPy. Supply the
+three zero-based CSC arrays directly; all usual solver options still apply:
+
+```python
+solver = apxchol.Solver.from_csc(data, indices, indptr, backend="auto")
+result = solver.solve(b)
+```
+
+The matrix is square with `len(indptr) - 1` rows. Integer indices may be 32- or
+64-bit; the native importer sorts columns and sums duplicate entries. SciPy
+is needed for `factorize(A)`, `laplacian`, `aslinearoperator`, and sparse factor
+exports. NumPy-only solves and preconditioner application do not import it.
 
 ## Reuse, batches and initial guesses
 
@@ -173,7 +188,7 @@ The native library's wide-index build options do not enlarge this binding.
 From a repository checkout, install a development build and run its tests:
 
 ```bash
-python -m pip install -e './python[test]'
+python -m pip install -e './python[test,scipy]'
 python -m pytest python/tests -v
 ```
 

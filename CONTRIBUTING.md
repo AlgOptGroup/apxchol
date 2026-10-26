@@ -21,7 +21,7 @@ tests under `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1`. Python and Octave
 compile the core sources independently; check affected binding interfaces too:
 
 ```bash
-pip install -e python
+pip install -e "python[test,scipy]"
 pytest python/tests
 ./octave/build.sh
 ```

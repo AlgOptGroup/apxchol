@@ -237,6 +237,9 @@ public:
     const factorization& factor() const;
     /// Operator dimension.
     Eigen::Index rows() const;
+    /// Stored entries in the original operator, after input canonicalization
+    /// and before preconditioner lumping or dropping.
+    Eigen::Index operator_nnz() const;
     /// Selected route: cpu or gpu, never automatic.
     solve_backend backend() const;
     /// Installed triangular-solve storage: fp16 or fp32, never automatic.

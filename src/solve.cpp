@@ -1069,6 +1069,7 @@ struct solver::impl {
 #endif
         >;
     owner_type owner;
+    Eigen::Index operator_entries;
     double tol;
     int max_iter;
     int num_threads;
@@ -1123,7 +1124,8 @@ struct solver::impl {
 
     impl(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
          checkpoint* cp, factorization* F = nullptr)
-        : owner(make_owner(A, opts, cp, F)), tol(opts.tol), max_iter(opts.max_iter),
+        : owner(make_owner(A, opts, cp, F)), operator_entries(A.nonZeros()),
+          tol(opts.tol), max_iter(opts.max_iter),
           num_threads(opts.num_threads), collect_timings(opts.collect_timings) {
 #if defined(APXCHOL_USE_CUDA)
         if (const auto* gpu = std::get_if<detail::gpu_solve_session>(&owner))
@@ -1243,6 +1245,7 @@ const factorization& solver::factor() const {
     }, impl_->owner);
 }
 Eigen::Index solver::rows() const { return static_cast<Eigen::Index>(factor().perm.size()); }
+Eigen::Index solver::operator_nnz() const { return impl_->operator_entries; }
 solve_backend solver::backend() const {
     return std::holds_alternative<cpu_solver>(impl_->owner)
         ? solve_backend::cpu : solve_backend::gpu;

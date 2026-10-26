@@ -1,0 +1,45 @@
+name: PyPy prototype
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64-cuda
+            runner: ubuntu-latest
+          - name: macos-arm64-metal
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/ccache
+        with:
+          key: pypy-${{ matrix.name }}
+      # 4.2.1 pins PyPy 7.3.23 / pp73; newer versions select the pp80 ABI.
+      - uses: pypa/cibuildwheel@v4.2.1
+        with:
+          package-dir: python
+        env:
+          CIBW_ENABLE: pypy
+          CIBW_BUILD: pp311-*
+          CIBW_TEST_EXTRAS: test
+          CIBW_TEST_COMMAND: python -m pytest {package}/tests/test_numpy.py {package}/tests/test_version.py -q
+          CCACHE_DIR: ${{ runner.os == 'Linux' && format('/host{0}/ccache', runner.temp) || format('{0}/ccache', runner.temp) }}
+          CCACHE_STATSLOG: ${{ runner.os == 'Linux' && format('/host{0}/ccache-stats.log', runner.temp) || format('{0}/ccache-stats.log', runner.temp) }}
+          CCACHE_BASEDIR: ${{ runner.os == 'Linux' && '/project' || github.workspace }}
+          CIBW_ENVIRONMENT_PASS_LINUX: >-
+            CCACHE_DIR CCACHE_BASEDIR CCACHE_MAXSIZE CCACHE_COMPILERCHECK CCACHE_STATSLOG
+            CMAKE_C_COMPILER_LAUNCHER CMAKE_CXX_COMPILER_LAUNCHER
+            CMAKE_CUDA_COMPILER_LAUNCHER CMAKE_OBJCXX_COMPILER_LAUNCHER
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pypy-${{ matrix.name }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
