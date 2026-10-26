@@ -31,23 +31,36 @@ void check_path(const std::filesystem::path& path) {
 
 struct temporary_file {
     std::string name;
+    int fd = -1;
     explicit temporary_file(const std::filesystem::path& destination)
         : name((destination.parent_path() / ".apxchol-XXXXXX").string()) {
         if (std::filesystem::exists(std::filesystem::symlink_status(destination)))
             throw std::runtime_error("solver archive: destination already exists");
-        const int fd = mkstemp(name.data());
+        fd = mkstemp(name.data());
         if (fd < 0) throw std::system_error(errno, std::generic_category(), "create archive temporary");
-        (void)close(fd);
     }
-    ~temporary_file() { (void)unlink(name.c_str()); }
+    std::FILE* open() {
+        auto* file = fdopen(fd, "wb+");
+        if (!file) throw std::system_error(errno, std::generic_category(), "open archive temporary");
+        fd = -1;
+        return file;
+    }
+    ~temporary_file() {
+        if (fd >= 0) (void)close(fd);
+        (void)unlink(name.c_str());
+    }
     temporary_file(const temporary_file&) = delete;
     temporary_file& operator=(const temporary_file&) = delete;
 };
 
-constexpr std::array<const char*, 9> names = {"apxchol.npy", "A_indptr.npy", "A_indices.npy",
-    "A_data.npy", "L_indptr.npy", "L_indices.npy", "L_data.npy", "permutation.npy", "round_sizes.npy"};
+enum class array_id : std::uint32_t {
+    metadata = 0, operator_offsets = 1, operator_indices = 2, operator_values = 3,
+    factor_offsets = 4, factor_indices = 5, factor_values = 6, permutation = 7, round_sizes = 8,
+    count = 9
+};
+constexpr auto array_count = std::to_underlying(array_id::count);
 constexpr std::size_t header_bytes = 64, descriptor_bytes = 40;
-constexpr std::size_t prefix_bytes = header_bytes + descriptor_bytes * names.size();
+constexpr std::size_t prefix_bytes = header_bytes + descriptor_bytes * array_count;
 using prefix_type = std::array<unsigned char, prefix_bytes>;
 struct close_file {
     void operator()(std::FILE* file) const noexcept { (void)std::fclose(file); }
@@ -61,7 +74,11 @@ file_owner open_file(const std::filesystem::path& path, const char* mode) {
 }
 
 void read_exact(std::FILE* file, void* output, std::size_t size) {
-    if (size && std::fread(output, 1, size, file) != size) invalid("truncated or unreadable array");
+    if (size && std::fread(output, 1, size, file) != size) {
+        const int error = errno;
+        if (std::ferror(file)) throw std::system_error(error, std::generic_category(), "read solver archive");
+        invalid("truncated array");
+    }
 }
 void write_exact(std::FILE* file, const void* input, std::size_t size) {
     if (size && std::fwrite(input, 1, size, file) != size)
@@ -69,7 +86,8 @@ void write_exact(std::FILE* file, const void* input, std::size_t size) {
 }
 void seek(std::FILE* file, std::uint64_t offset) {
     if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) invalid("file offset overflow");
-    if (fseeko(file, static_cast<off_t>(offset), SEEK_SET) != 0) invalid("cannot seek archive");
+    if (fseeko(file, static_cast<off_t>(offset), SEEK_SET) != 0)
+        throw std::system_error(errno, std::generic_category(), "seek solver archive");
 }
 std::uint64_t align_payload(std::uint64_t offset) {
     if (offset > std::numeric_limits<std::uint64_t>::max() - 63) invalid("file offset overflow");
@@ -89,10 +107,6 @@ std::uint32_t checksum(std::uint32_t crc, const void* data, std::size_t size) {
     // All callers process at most one 64 KiB chunk or the small metadata prefix.
     return static_cast<std::uint32_t>(crc32(crc, static_cast<const Bytef*>(data), static_cast<uInt>(size)));
 }
-std::size_t array_id(const char* name) {
-    for (std::size_t i = 0; i < names.size(); ++i) if (std::strcmp(name, names[i]) == 0) return i;
-    invalid("unknown array name");
-}
 
 struct array_info {
     std::uint64_t count, offset, length;
@@ -106,21 +120,21 @@ class writer {
     temporary_file temporary_;
     file_owner file_;
     prefix_type prefix_{};
-    std::array<bool, names.size()> present_{};
+    std::array<bool, array_count> present_{};
     std::size_t added_ = 0;
     std::uint64_t position_ = prefix_bytes;
 public:
     explicit writer(const std::filesystem::path& path)
         : destination_(std::filesystem::absolute(path)), temporary_(destination_),
-          file_(open_file(temporary_.name, "wb+")) {
+          file_(temporary_.open()) {
         write_exact(file_.get(), prefix_.data(), prefix_.size());
     }
 
-    template<class T> void add(const char* name, std::span<const T> values) {
+    template<class T> void add(array_id array, std::span<const T> values) {
         static_assert(std::is_integral_v<T> || std::is_floating_point_v<T>);
         static_assert(sizeof(T) == 4 || sizeof(T) == 8);
-        const auto id = array_id(name);
-        if (present_[id] || added_ == names.size()) invalid("duplicate array");
+        const auto id = std::to_underlying(array);
+        if (id >= array_count || present_[id] || added_ == array_count) invalid("duplicate or unknown array id");
         present_[id] = true;
         const auto offset = align_payload(position_);
         const auto length = values.size_bytes();
@@ -136,7 +150,7 @@ public:
             first += count;
         }
         auto* d = prefix_.data() + header_bytes + added_++ * descriptor_bytes;
-        set<std::uint32_t>(d, static_cast<std::uint32_t>(id));
+        set<std::uint32_t>(d, id);
         d[4] = std::endian::native == std::endian::little ? '<' : '>';
         d[5] = std::is_floating_point_v<T> ? 'f' : std::is_signed_v<T> ? 'i' : 'u';
         d[6] = sizeof(T);
@@ -148,10 +162,10 @@ public:
     }
 
     void finish() {
-        if (added_ != names.size()) invalid("missing array");
+        if (added_ != array_count) invalid("missing array");
         std::memcpy(prefix_.data(), "APXCHB01", 8);
         set<std::uint32_t>(prefix_.data() + 8, 1);
-        set<std::uint32_t>(prefix_.data() + 12, names.size());
+        set<std::uint32_t>(prefix_.data() + 12, array_count);
         set<std::uint32_t>(prefix_.data() + 16, descriptor_bytes);
         set<std::uint64_t>(prefix_.data() + 24, position_);
         set<std::uint32_t>(prefix_.data() + 20, checksum(0, prefix_.data(), prefix_.size()));
@@ -159,35 +173,41 @@ public:
         write_exact(file_.get(), prefix_.data(), prefix_.size());
         if (std::fclose(file_.release()) != 0)
             throw std::system_error(errno, std::generic_category(), "finish solver archive");
-        std::filesystem::create_hard_link(temporary_.name, destination_);
+        std::error_code error;
+        std::filesystem::create_hard_link(temporary_.name, destination_, error);
+        if (error == std::errc::file_exists)
+            throw std::runtime_error("solver archive: destination already exists");
+        if (error) throw std::system_error(error, "publish solver archive");
     }
 };
 
 class reader {
     file_owner file_;
-    std::array<array_info, names.size()> arrays_{};
+    std::array<array_info, array_count> arrays_{};
 public:
     explicit reader(const std::filesystem::path& path) : file_(open_file(path, "rb")) {
         prefix_type prefix;
         read_exact(file_.get(), prefix.data(), prefix.size());
         if (std::memcmp(prefix.data(), "APXCHB01", 8) || get<std::uint32_t>(prefix.data() + 8) != 1 ||
-            get<std::uint32_t>(prefix.data() + 12) != names.size() ||
+            get<std::uint32_t>(prefix.data() + 12) != array_count ||
             get<std::uint32_t>(prefix.data() + 16) != descriptor_bytes ||
             !std::all_of(prefix.begin() + 32, prefix.begin() + header_bytes, [](auto v) { return v == 0; }))
             invalid("unsupported binary header");
         const auto expected_crc = get<std::uint32_t>(prefix.data() + 20);
         set<std::uint32_t>(prefix.data() + 20, 0);
-        if (checksum(0, prefix.data(), prefix.size()) != expected_crc) invalid("metadata checksum mismatch");
-        if (fseeko(file_.get(), 0, SEEK_END) != 0) invalid("cannot seek archive");
+        if (checksum(0, prefix.data(), prefix.size()) != expected_crc) invalid("header checksum mismatch");
+        if (fseeko(file_.get(), 0, SEEK_END) != 0)
+            throw std::system_error(errno, std::generic_category(), "seek solver archive");
         const auto file_length = ftello(file_.get());
-        if (file_length < 0 || static_cast<std::uint64_t>(file_length) != get<std::uint64_t>(prefix.data() + 24))
+        if (file_length < 0) throw std::system_error(errno, std::generic_category(), "measure solver archive");
+        if (static_cast<std::uint64_t>(file_length) != get<std::uint64_t>(prefix.data() + 24))
             invalid("file length mismatch");
-        std::array<bool, names.size()> present{};
+        std::array<bool, array_count> present{};
         std::uint64_t position = prefix_bytes;
-        for (std::size_t i = 0; i < names.size(); ++i) {
+        for (std::size_t i = 0; i < array_count; ++i) {
             const auto* d = prefix.data() + header_bytes + i * descriptor_bytes;
             const auto id = get<std::uint32_t>(d);
-            if (id >= names.size() || present[id]) invalid("duplicate or unknown array id");
+            if (id >= array_count || present[id]) invalid("duplicate or unknown array id");
             present[id] = true;
             auto& a = arrays_[id];
             a = {get<std::uint64_t>(d + 8), get<std::uint64_t>(d + 16), get<std::uint64_t>(d + 24),
@@ -204,7 +224,7 @@ public:
         if (position != static_cast<std::uint64_t>(file_length)) invalid("trailing bytes");
     }
 
-    array_info inspect(const char* name) const { return arrays_[array_id(name)]; }
+    array_info inspect(array_id id) const { return arrays_[std::to_underlying(id)]; }
 
     template<class T> void read(const array_info& info, std::span<T> values) const {
         if (info.count != values.size()) invalid("array length mismatch");
@@ -317,15 +337,15 @@ void detail::save_solver_data(const std::filesystem::path& path, const Eigen::Sp
     rounds.reserve(F.rounds.size());
     for (const auto& round : F.rounds) rounds.push_back(round.is_size);
     writer archive(path);
-    archive.add("apxchol.npy", std::span<const std::uint64_t>(metadata));
-    archive.add("A_indptr.npy", std::span<const int>(op->outerIndexPtr(), n + 1));
-    archive.add("A_indices.npy", std::span<const int>(op->innerIndexPtr(), annz));
-    archive.add("A_data.npy", std::span<const double>(op->valuePtr(), annz));
-    archive.add("L_indptr.npy", std::span<const edge_index>(F.L.outer_));
-    archive.add("L_indices.npy", std::span<const node_index>(F.L.inner_));
-    archive.add("L_data.npy", std::span<const factor_value_t>(F.L.vals_));
-    archive.add("permutation.npy", std::span<const node_index>(F.perm));
-    archive.add("round_sizes.npy", std::span<const std::uint64_t>(rounds));
+    archive.add(array_id::metadata, std::span<const std::uint64_t>(metadata));
+    archive.add(array_id::operator_offsets, std::span<const int>(op->outerIndexPtr(), n + 1));
+    archive.add(array_id::operator_indices, std::span<const int>(op->innerIndexPtr(), annz));
+    archive.add(array_id::operator_values, std::span<const double>(op->valuePtr(), annz));
+    archive.add(array_id::factor_offsets, std::span<const edge_index>(F.L.outer_));
+    archive.add(array_id::factor_indices, std::span<const node_index>(F.L.inner_));
+    archive.add(array_id::factor_values, std::span<const factor_value_t>(F.L.vals_));
+    archive.add(array_id::permutation, std::span<const node_index>(F.perm));
+    archive.add(array_id::round_sizes, std::span<const std::uint64_t>(rounds));
     archive.finish();
 }
 
@@ -338,7 +358,7 @@ solver load_solver(const std::filesystem::path& path, const solve_options& optio
     detail::validate_solve_options(options);
     check_path(path);
     reader archive(path);
-    const auto metadata_info = archive.inspect("apxchol.npy");
+    const auto metadata_info = archive.inspect(array_id::metadata);
     require_extent<std::uint64_t>(metadata_info, 7);
     std::array<std::uint64_t, 7> metadata{};
     archive.read(metadata_info, std::span<std::uint64_t>(metadata));
@@ -350,9 +370,9 @@ solver load_solver(const std::filesystem::path& path, const solve_options& optio
         input_entries > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
         lnnz > std::numeric_limits<edge_index>::max() ||
         lumped > static_cast<std::uint64_t>(std::numeric_limits<Eigen::Index>::max())) invalid("dimensions do not fit this build");
-    const auto ao = archive.inspect("A_indptr.npy"), ai = archive.inspect("A_indices.npy"), av = archive.inspect("A_data.npy");
-    const auto lo = archive.inspect("L_indptr.npy"), li = archive.inspect("L_indices.npy"), lv = archive.inspect("L_data.npy");
-    const auto perm = archive.inspect("permutation.npy"), rounds = archive.inspect("round_sizes.npy");
+    const auto ao = archive.inspect(array_id::operator_offsets), ai = archive.inspect(array_id::operator_indices), av = archive.inspect(array_id::operator_values);
+    const auto lo = archive.inspect(array_id::factor_offsets), li = archive.inspect(array_id::factor_indices), lv = archive.inspect(array_id::factor_values);
+    const auto perm = archive.inspect(array_id::permutation), rounds = archive.inspect(array_id::round_sizes);
     require_extent<int>(ao, n + 1); require_extent<int>(ai, annz); require_extent<double>(av, annz);
     require_extent<edge_index>(lo, n + 1); require_extent<node_index>(li, lnnz); require_extent<float>(lv, lnnz);
     require_extent<node_index>(perm, n);
