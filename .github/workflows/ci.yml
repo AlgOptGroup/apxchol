@@ -256,6 +256,7 @@ jobs:
             g++-14 octave octave-dev libeigen3-dev libopenblas0-pthread
       - name: Build MEX + run tests
         env:
+          CC: gcc-14
           CXX: g++-14
         run: |
           cd octave
