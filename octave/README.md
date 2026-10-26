@@ -17,8 +17,13 @@ For one solve, use `apxchol_solve(A, b)`. Results contain `x`, `iters`,
 `residual` and `converged`. The built-in solver always checks the returned
 solution against the original matrix and RHS.
 
-These bindings accept one RHS vector at a time. GPU routes, matrix-RHS
-batching, warm starts, factor export and wide indices are not exposed.
+Pass an `n`-by-`k` matrix to solve or apply the preconditioner to `k` RHSs
+through the native batched path. Results have `k` columns; `iters`, `residual`
+and `converged` are `1`-by-`k` arrays. A row-vector RHS is still accepted and
+returns a column, except that a one-row system treats each column as a RHS.
+
+GPU routes, factor export and wide indices are not exposed. See the shared
+[binding capabilities](../docs/usage.md#binding-capabilities).
 
 ## Inputs and solve controls
 
@@ -26,13 +31,17 @@ Pass the sparse matrix `A` in `A * x = b`. For graph adjacency input, first
 use `A = apxchol_laplacian(Adj)`. The [input guide](../docs/usage.md) explains
 supported matrices, adjacency conversion and Laplacian RHS requirements.
 
-`solve(b, rtol, maxiter)` takes a positive, finite relative tolerance and a
+`solve(b, rtol, maxiter, x0)` takes a positive, finite relative tolerance and a
 nonnegative integer iteration budget. Omitted arguments or `[]` use native
 defaults, shown in the [native reference](../docs/reference/cpp.md#solve-defaults):
 
 ```matlab
 res = s.solve(b, [], 500);         % default tolerance, at most 500 iterations
+warm = s.solve(B, 1e-8, 200, X0);  % optional initial guess, same shape as B
 ```
+
+Omit `x0` or pass `[]` to start from zero. The one-shot form accepts it as
+`apxchol_solve(A, B, rtol, maxiter, options, X0)`.
 
 ## Setup options
 
