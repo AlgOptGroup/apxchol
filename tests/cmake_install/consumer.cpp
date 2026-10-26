@@ -33,7 +33,7 @@ int main(int argc, char** argv) {
         ("apxchol-sdk-" + std::to_string(stamp));
     if (!std::filesystem::create_directory(directory))
         throw std::runtime_error("could not create SDK test directory");
-    const auto path = directory / "solver.npz";
+    const auto path = directory / "solver.apxchol";
     {
         apxchol::solver source(A, options);
         apxchol::save_solver(path, source);

@@ -33,7 +33,7 @@ test ! -e "dist/$name.tar.gz"
 cmake -S cmake/core -B "$build" -DCMAKE_BUILD_TYPE=Release \
   -DAPXCHOL_DEVICE="$device" -DAPXCHOL_NATIVE_ARCH=OFF -DAPXCHOL_INDEX_WIDTH=32 \
   -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_INSTALL_PREFIX="$prefix" \
-  -DCMAKE_DISABLE_FIND_PACKAGE_Eigen3=ON -DCMAKE_DISABLE_FIND_PACKAGE_libzip=ON \
+  -DCMAKE_DISABLE_FIND_PACKAGE_Eigen3=ON \
   "${extra[@]}" "$@"
 cmake --build "$build" --parallel 2
 cmake --install "$build"

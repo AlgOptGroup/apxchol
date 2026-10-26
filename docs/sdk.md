@@ -18,8 +18,7 @@ cmake --build build
 ```
 
 The archive contains the shared native library, public headers, Eigen headers,
-CMake package files and bundled-code licenses. The native build embeds minimal
-static libzip support. Use the imported CMake target to retain the required
+CMake package files and bundled-code licenses. Use the imported CMake target to retain the required
 C++23 setting, index layout and backend definitions. SDKs use 32-bit indices and
 portable tuning: x86-64-v2 on Linux, arm64 on macOS.
 
