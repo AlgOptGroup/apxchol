@@ -21,6 +21,7 @@ on:
       - 'CMakeLists.txt'
       - 'cmake/**'
       - '.github/workflows/docs.yml'
+      - '.github/actions/ccache/**'
   pull_request:
     paths: *docs_paths
 
@@ -45,11 +46,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install dependencies
+      - name: Install native dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y g++-14 libeigen3-dev ninja-build doxygen
-          python -m pip install -r docs/requirements.txt -e ./python
+          sudo apt-get install -y g++-14 libeigen3-dev ninja-build doxygen ccache
+      - uses: ./.github/actions/ccache
+        with:
+          key: docs-gcc14
+      - name: Install Python dependencies
+        run: python -m pip install -r docs/requirements.txt -e ./python
       - name: Build CLI
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release ${CMAKE_ARGS} \
@@ -66,6 +71,9 @@ jobs:
         if: github.ref == 'refs/heads/main'
         with:
           path: build/docs
+      - name: Show compiler cache statistics
+        if: always()
+        run: ccache --show-log-stats
 
   deploy:
     if: github.ref == 'refs/heads/main'

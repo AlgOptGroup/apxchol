@@ -64,6 +64,10 @@ archs = ["x86_64"]
 before-all = '''
 set -eu
 dnf install -y clang libomp-devel dnf-plugins-core
+# EPEL 8's ccache predates current CUDA support and cache statistics.
+curl -fsSL https://github.com/ccache/ccache/releases/download/v4.14.2/ccache-4.14.2-linux-x86_64-musl-static.tar.gz -o /tmp/apxchol-ccache.tar.gz
+printf '%s  %s\n' d540ba01f160addbd3dd5e18eda9bd34005591b095c09ac8ae9d0a1b655e7ef5 /tmp/apxchol-ccache.tar.gz | sha256sum -c -
+tar -xzf /tmp/apxchol-ccache.tar.gz --strip-components=1 -C /usr/local/bin ccache-4.14.2-linux-x86_64-musl-static/ccache
 dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
 dnf install -y cuda-nvcc-13-4 cuda-cudart-devel-13-4
 cp /usr/share/licenses/cuda-cudart-13-4/LICENSE "{package}/LICENSE.cuda.txt"
@@ -80,7 +84,7 @@ CMAKE_ARGS = "-DAPXCHOL_DEVICE=CUDA -DCMAKE_CUDA_ARCHITECTURES=all-major"
 
 [tool.cibuildwheel.macos]
 archs = ["arm64"]
-before-all = "brew install libomp"
+before-all = "brew install libomp ccache"
 
 [tool.cibuildwheel.macos.environment]
 CMAKE_ARGS = "-DAPXCHOL_DEVICE=METAL"
