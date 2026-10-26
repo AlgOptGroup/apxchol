@@ -1,6 +1,6 @@
 # Saving a solver
 
-Save the original matrix and retained factor together, then load them on a CPU or GPU without repeating factorization:
+Save the matrix and retained factor together, then load them on a CPU or GPU without repeating factorization:
 
 ```cpp
 #include <apxchol/solver/archive.h>
@@ -8,36 +8,70 @@ Save the original matrix and retained factor together, then load them on a CPU o
 apxchol::solve_options options;
 options.keep_factor_values = true;
 apxchol::solver prepared(A, options);
-apxchol::save_solver("system.npz", prepared);
+apxchol::save_solver("system.apxchol", prepared);
 
-auto restored = apxchol::load_solver("system.npz", options);
+auto restored = apxchol::load_solver("system.apxchol", options);
 auto result = restored.solve(b);
 ```
 
-Saving requires retained canonical factor values. It creates a new file and rejects an existing destination. The original operator is reconstructed on demand from the solver’s owned data, without keeping another permanent matrix copy. CUDA saving downloads that operator to the host.
+Saving requires retained factor values. It creates a new file and rejects an existing destination. The `.apxchol` extension is a convention; loading checks the file contents.
 
-The file preserves the system used by the solver, including its canonical lower-triangle coefficients. Discarded duplicate entries or tolerated upper-triangle differences in the caller’s input are not restored.
+The original operator is reconstructed from the solver’s owned data when saving, without keeping another permanent matrix copy. CUDA saving downloads that operator to the host. The file preserves the coefficients used by the solver; duplicate entries and tolerated differences between the input’s two triangles have already been normalized.
 
-The file contains numerical data, not GPU buffers or an active iterative solve. Loading validates the data and prepares the requested backend. Automatic factor adoption selects CPU; set `options.backend = apxchol::solve_backend::gpu` to upload to the compiled GPU backend. Storage, dropping and solve options are chosen when loading, as with the existing factor-adoption constructor.
+Loading validates the data and prepares the requested backend. Automatic factor adoption selects CPU; set `options.backend = apxchol::solve_backend::gpu` to upload to the compiled GPU backend. Storage, dropping and solve options are chosen when loading, as with the factor-adoption constructor.
 
-An operator admitted with a larger `lump_max_mass` still needs that admission setting when loading. Regularization and lumping are already represented in the saved factor and are not applied again.
+An operator admitted with a larger `lump_max_mass` still needs that setting when loading. Regularization and lumping are already represented in the saved factor and are not applied again.
 
 ## File format
 
-The file is an NPZ archive of one-dimensional numeric NPY arrays. It can be inspected with NumPy using `np.load(path, allow_pickle=False)`. The writer stores entries without compression for faster saving and loading. The reader also accepts DEFLATE-compressed NPZ files.
+The uncompressed binary file stores nine typed arrays:
 
 | Array | Content |
 |---|---|
-| `apxchol` | Schema version, dimension, SDDM flag, operator entry count, factor entry count, lumped entry count, original stored entry count |
-| `A_indptr`, `A_indices`, `A_data` | Original operator in CSC, with FP64 values |
-| `L_indptr`, `L_indices`, `L_data` | Lower-triangular factor in CSC, with FP32 values |
-| `permutation` | Original vertex to elimination position |
-| `round_sizes` | Elimination-round sizes; may be empty |
+| Metadata | Schema version, dimension, SDDM flag, operator and factor entry counts, lumped entry count, original stored entry count |
+| Operator offsets, rows and values | Original matrix in CSC, with FP64 values |
+| Factor offsets, rows and values | Lower-triangular factor in CSC, with FP32 values |
+| Permutation | Original vertex to elimination position |
+| Round sizes | Elimination-round sizes; may be empty |
 
-Each NPY header specifies its integer width, floating-point width and byte order. Loading checks dimensions and narrowing against the current build. The original operator uses Eigen's signed 32-bit sparse indices; wider factor indices do not remove that operator limit.
+The header identifies format version 1. Array descriptors record the element type, 32- or 64-bit width, byte order, count, file offset and CRC32 checksum. Header fields use little-endian integers; array values use their recorded byte order. Metadata has a separate checksum, and each array starts at a 64-byte-aligned file offset.
 
-The original stored entry count is kept separately for fill-ratio reporting. It can differ from the saved matrix’s count when canonicalization reflects or removes unmatched explicit zeros.
+Loading checks file lengths, dimensions, index ranges and conversion to the current build’s index widths. The original operator uses Eigen’s signed 32-bit sparse indices; wider factor indices do not remove that limit. CRC checks detect accidental corruption but do not authenticate a file.
 
-Only canonical CSC is stored. Loading reconstructs triangular-solve layouts and backend schedules. Construction diagnostics, addresses and backend-specific FP16 representations are omitted. CRC checks detect accidental corruption, not authenticity.
+Only canonical CSC is stored. Loading copies the arrays and rebuilds triangular-solve layouts and backend schedules; it does not memory-map the file. GPU buffers, an active iterative solve, construction diagnostics and backend-specific FP16 representations are omitted.
 
-The proposed file schema is version 1, independently of the package version. Its final compatibility contract is under review before release.
+The original stored entry count is kept separately for fill-ratio reporting. It can differ from the saved matrix’s count when normalization reflects or removes unmatched explicit zeros.
+
+The file format version is independent of the package version. Its compatibility contract is under review before release.
+
+<details>
+<summary>Binary layout</summary>
+
+All offsets below are in bytes. Header and descriptor integers are unsigned little-endian. The 64-byte header is followed by nine 40-byte descriptors.
+
+| Header offset | Field |
+|---|---|
+| 0 | Eight ASCII bytes: `APXCHB01` |
+| 8, 12, 16 | Three `uint32`: format version `1`, array count `9`, descriptor size `40` |
+| 20 | `uint32`: metadata CRC32 |
+| 24 | `uint64`: exact file size |
+| 32 | 32 reserved bytes, all zero |
+
+| Descriptor offset | Field |
+|---|---|
+| 0 | `uint32`: array ID |
+| 4, 5, 6 | Three bytes: byte order (`<` little-endian or `>` big-endian), kind (`i`, `u` or `f`), element width (`4` or `8`) |
+| 7 | One reserved zero byte |
+| 8, 16, 24 | Three `uint64`: element count, absolute payload offset, payload byte length |
+| 32 | `uint32`: payload CRC32 |
+| 36 | Four reserved zero bytes |
+
+Array IDs `0` through `8` identify metadata, operator offsets, operator rows, operator values, factor offsets, factor rows, factor values, permutation and round sizes, respectively. Each ID occurs once; descriptors follow payload order. The seven metadata values are `[1, n, sddm, operator_nnz, factor_nnz, lumped_nnz, original_nnz]`, with `sddm` equal to `0` or `1`.
+
+Payloads contain contiguous numeric values in their declared byte order: `i` means two’s-complement signed integers, `u` unsigned integers, and `f` IEEE 754 floating point. Operator values are FP64 and factor values FP32. The writer uses unsigned 64-bit metadata and round sizes, signed 32-bit operator indices, and the build's factor-index widths. The reader accepts 32- or 64-bit integers when every value fits its destination.
+
+CRC32 uses zlib's CRC32 convention with initial value zero. The metadata checksum covers all 424 header/descriptor bytes with bytes 20–23 set to zero; each payload checksum covers exactly its declared bytes. Empty payloads have checksum zero.
+
+The first payload starts at byte `448`. Each later payload starts at the next multiple of 64 after the preceding payload. Payload length must equal count × width. Writers zero-fill alignment padding; readers ignore its contents and checksums exclude it. There are no trailing bytes after the final payload.
+
+</details>
