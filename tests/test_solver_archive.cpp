@@ -108,7 +108,37 @@ TEST_F(SolverArchive, ExactFactorAndScalarBatchWarmSolves) {
     }
 }
 
-TEST_F(SolverArchive, AutomaticAdoptionUsesCpuAndStorageCanChange) {
+TEST_F(SolverArchive, LaplacianFactorAndCenteredSolves) {
+    auto L = matrix();
+    for (int i = 0; i < L.rows(); ++i)
+        L.coeffRef(i, i) = (i > 0) + (i + 1 < L.rows());
+    solver before(L, options());
+    ASSERT_FALSE(before.factor().sddm);
+    const auto path = directory / "laplacian.npz";
+    save_solver(path, L, before.factor());
+    auto restored = load_solver(path, options());
+    EXPECT_FALSE(restored.factor().sddm);
+    EXPECT_EQ(restored.factor().L.outer_, before.factor().L.outer_);
+    EXPECT_EQ(restored.factor().L.inner_, before.factor().L.inner_);
+    EXPECT_EQ(restored.factor().L.vals_, before.factor().L.vals_);
+    EXPECT_EQ(restored.factor().perm, before.factor().perm);
+    const Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(L.rows(), -1.0, 1.0);
+    const auto scalar = restored.solve(b, 1e-9);
+    EXPECT_TRUE(scalar.converged);
+    EXPECT_LT((L * scalar.x - b).norm() / b.norm(), 1e-9);
+    EXPECT_NEAR(scalar.x.mean(), 0.0, 1e-12);
+    Eigen::MatrixXd B(L.rows(), 3), X(L.rows(), 3);
+    for (int col = 0; col < B.cols(); ++col) B.col(col) = (col + 1) * b;
+    const auto batch = restored.solve(B, X, 1e-9);
+    ASSERT_EQ(batch.columns.size(), 3);
+    for (int col = 0; col < B.cols(); ++col) {
+        EXPECT_TRUE(batch.columns[col].converged);
+        EXPECT_LT((L * X.col(col) - B.col(col)).norm() / B.col(col).norm(), 1e-9);
+        EXPECT_NEAR(X.col(col).mean(), 0.0, 1e-12);
+    }
+}
+
+TEST_F(SolverArchive, AutomaticAdoptionUsesCpu) {
     auto opts = options(); opts.backend = solve_backend::automatic;
     auto restored = load_solver(directory / "original.npz", opts);
     EXPECT_EQ(restored.backend(), solve_backend::cpu);
