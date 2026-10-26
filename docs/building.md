@@ -3,8 +3,7 @@
 ## Dependencies
 
 CPU builds require CMake 3.20+, GCC or Clang with C++23 and OpenMP, and zlib headers.
-CMake uses installed Eigen and libzip 1.12.1+ packages when available and fetches
-missing packages otherwise. Fetched libzip also needs a C compiler.
+CMake uses an installed Eigen package when available and fetches it otherwise.
 Windows builds with MSVC or `clang-cl` are not supported.
 On x86-64, the minimum target is x86-64-v2.
 
@@ -103,9 +102,8 @@ cmake --install build-sdk
 
 Configure the consuming project with `-DCMAKE_PREFIX_PATH=/path/to/prefix`.
 If apxchol fetched Eigen, the install includes its headers. Otherwise, the
-consumer must also provide Eigen. Static SDKs also require libzip and zlib;
-a fetched static libzip is installed alongside that SDK. The prebuilt shared
-SDKs embed minimal static libzip support. CUDA SDK consumers need the CUDA Toolkit.
+consumer must also provide Eigen. Static SDK consumers also need zlib; CUDA
+SDK consumers need the CUDA Toolkit.
 Use compatible compiler, standard-library and OpenMP runtime settings.
 
 `ExternalProject_Add` builds in a separate project. Use it to build/install

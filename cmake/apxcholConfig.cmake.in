@@ -2,7 +2,7 @@
 
 include(CMakeFindDependencyMacro)
 if ("@APXCHOL_CORE_TYPE@" STREQUAL "STATIC_LIBRARY")
-    find_dependency(libzip 1.12.1 CONFIG HINTS "${PACKAGE_PREFIX_DIR}")
+    find_dependency(ZLIB)
 endif()
 if (NOT @APXCHOL_BUNDLED_EIGEN@)
     find_dependency(Eigen3 3.3 CONFIG)

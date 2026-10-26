@@ -113,8 +113,8 @@ Save a reusable solver's operator and factor, then choose the solve backend
 when loading. These methods also work without SciPy:
 
 ```python
-solver.save("system.npz")
-restored = apxchol.Solver.load("system.npz", backend="cpu")
+solver.save("system.apxchol")
+restored = apxchol.Solver.load("system.apxchol", backend="cpu")
 result = restored.solve(b)
 ```
 

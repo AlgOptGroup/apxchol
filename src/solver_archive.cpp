@@ -1,29 +1,21 @@
 #include "solver_archive_internal.h"
 #include "apxchol/solver/detail/factor_validation.h"
 
-#include <zip.h>
+#include <zlib.h>
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <charconv>
 #include <cerrno>
-#include <cstdlib>
+#include <cstdio>
 #include <cstring>
-#include <deque>
 #include <limits>
 #include <memory>
-#include <string_view>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <unistd.h>
-
-static_assert(LIBZIP_VERSION_MAJOR > 1 ||
-    (LIBZIP_VERSION_MAJOR == 1 && (LIBZIP_VERSION_MINOR > 12 ||
-        (LIBZIP_VERSION_MINOR == 12 && LIBZIP_VERSION_MICRO >= 1))),
-    "solver archives require libzip 1.12.1 or later");
 
 namespace apxchol {
 namespace {
@@ -35,45 +27,6 @@ namespace {
 void check_path(const std::filesystem::path& path) {
     if (path.native().find('\0') != std::filesystem::path::string_type::npos)
         invalid("path contains a null character");
-}
-
-void zip_error(zip_t* file, const std::string& operation) {
-    throw std::runtime_error("solver archive: " + operation + ": " + zip_strerror(file));
-}
-
-using zip_owner = std::unique_ptr<zip_t, decltype(&zip_discard)>;
-using entry_owner = std::unique_ptr<zip_file_t, decltype(&zip_fclose)>;
-
-zip_owner open_zip(const std::filesystem::path& path, int flags) {
-    int error = 0;
-    zip_owner result(zip_open(path.c_str(), flags, &error), &zip_discard);
-    if (!result) {
-        zip_error_t detail;
-        zip_error_init_with_code(&detail, error);
-        const std::string message = zip_error_strerror(&detail);
-        zip_error_fini(&detail);
-        throw std::runtime_error("solver archive: " + message);
-    }
-    return result;
-}
-
-template<class T> std::string dtype() {
-    static_assert(std::is_integral_v<T> || std::is_floating_point_v<T>);
-    static_assert(sizeof(T) == 4 || sizeof(T) == 8);
-    return std::string(1, std::endian::native == std::endian::little ? '<' : '>')
-        + (std::is_floating_point_v<T> ? 'f' : std::is_signed_v<T> ? 'i' : 'u')
-        + std::to_string(sizeof(T));
-}
-
-std::string npy_header(const std::string& type, std::size_t count) {
-    std::string header = "{'descr': '" + type + "', 'fortran_order': False, 'shape': ("
-        + std::to_string(count) + ",), }";
-    header.append((64 - ((10 + header.size() + 1) % 64)) % 64, ' ');
-    header += '\n';
-    std::string result("\x93NUMPY\x01\x00", 8);
-    result += static_cast<char>(header.size() & 255);
-    result += static_cast<char>(header.size() >> 8);
-    return result + header;
 }
 
 struct temporary_file {
@@ -91,163 +44,167 @@ struct temporary_file {
     temporary_file& operator=(const temporary_file&) = delete;
 };
 
-class writer {
-    std::filesystem::path destination_;
-    temporary_file temporary_;
-    std::deque<std::string> headers_;
-    zip_owner file_;
-public:
-    explicit writer(const std::filesystem::path& path)
-        : destination_(std::filesystem::absolute(path)), temporary_(destination_),
-          file_(open_zip(temporary_.name, ZIP_TRUNCATE)) {}
-
-    template<class T> void add(const char* name, std::span<const T> values) {
-        headers_.push_back(npy_header(dtype<T>(), values.size()));
-        const auto& header = headers_.back();
-        const zip_buffer_fragment_t fragments[] = {
-            {const_cast<zip_uint8_t*>(reinterpret_cast<const zip_uint8_t*>(header.data())), header.size()},
-            {const_cast<zip_uint8_t*>(reinterpret_cast<const zip_uint8_t*>(values.data())), values.size_bytes()}
-        };
-        zip_source_t* source = zip_source_buffer_fragment(file_.get(), fragments, 2, 0);
-        if (!source) zip_error(file_.get(), "create array");
-        const auto index = zip_file_add(file_.get(), name, source, ZIP_FL_ENC_UTF_8);
-        if (index < 0) {
-            zip_source_free(source);
-            zip_error(file_.get(), "add array");
-        }
-        if (zip_set_file_compression(file_.get(), static_cast<zip_uint64_t>(index), ZIP_CM_STORE, 0) < 0)
-            zip_error(file_.get(), "set compression");
-    }
-
-    void finish() {
-        if (zip_close(file_.get()) != 0) zip_error(file_.get(), "finish writing");
-        (void)file_.release();
-        // Publishing a hard link fails if another writer created the destination.
-        std::filesystem::create_hard_link(temporary_.name, destination_);
-    }
+constexpr std::array<const char*, 9> names = {"apxchol.npy", "A_indptr.npy", "A_indices.npy",
+    "A_data.npy", "L_indptr.npy", "L_indices.npy", "L_data.npy", "permutation.npy", "round_sizes.npy"};
+constexpr std::size_t header_bytes = 64, descriptor_bytes = 40;
+constexpr std::size_t prefix_bytes = header_bytes + descriptor_bytes * names.size();
+using prefix_type = std::array<unsigned char, prefix_bytes>;
+struct close_file {
+    void operator()(std::FILE* file) const noexcept { (void)std::fclose(file); }
 };
+using file_owner = std::unique_ptr<std::FILE, close_file>;
 
-void read_exact(zip_file_t* file, void* destination, std::size_t size) {
-    auto* output = static_cast<std::byte*>(destination);
-    while (size) {
-        const auto got = zip_fread(file, output, size);
-        if (got < 0) invalid(std::string("cannot read array: ") + zip_file_strerror(file));
-        if (got == 0) invalid("truncated array");
-        output += got;
-        size -= static_cast<std::size_t>(got);
-    }
+file_owner open_file(const std::filesystem::path& path, const char* mode) {
+    file_owner file(std::fopen(path.c_str(), mode));
+    if (!file) throw std::system_error(errno, std::generic_category(), "open solver archive");
+    return file;
+}
+
+void read_exact(std::FILE* file, void* output, std::size_t size) {
+    if (size && std::fread(output, 1, size, file) != size) invalid("truncated or unreadable array");
+}
+void write_exact(std::FILE* file, const void* input, std::size_t size) {
+    if (size && std::fwrite(input, 1, size, file) != size)
+        throw std::system_error(errno, std::generic_category(), "write solver archive");
+}
+void seek(std::FILE* file, std::uint64_t offset) {
+    if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) invalid("file offset overflow");
+    if (fseeko(file, static_cast<off_t>(offset), SEEK_SET) != 0) invalid("cannot seek archive");
+}
+std::uint64_t align_payload(std::uint64_t offset) {
+    if (offset > std::numeric_limits<std::uint64_t>::max() - 63) invalid("file offset overflow");
+    return (offset + 63) & ~std::uint64_t(63);
+}
+template<class T> T get(const unsigned char* bytes) {
+    T value;
+    std::memcpy(&value, bytes, sizeof(T));
+    if constexpr (std::endian::native != std::endian::little) value = std::byteswap(value);
+    return value;
+}
+template<class T> void set(unsigned char* bytes, T value) {
+    if constexpr (std::endian::native != std::endian::little) value = std::byteswap(value);
+    std::memcpy(bytes, &value, sizeof(T));
+}
+std::uint32_t checksum(std::uint32_t crc, const void* data, std::size_t size) {
+    // All callers process at most one 64 KiB chunk or the small metadata prefix.
+    return static_cast<std::uint32_t>(crc32(crc, static_cast<const Bytef*>(data), static_cast<uInt>(size)));
+}
+std::size_t array_id(const char* name) {
+    for (std::size_t i = 0; i < names.size(); ++i) if (std::strcmp(name, names[i]) == 0) return i;
+    invalid("unknown array name");
 }
 
 struct array_info {
-    zip_uint64_t index;
-    std::uint64_t count;
-    std::uint32_t header_size;
+    std::uint64_t count, offset, length;
+    std::uint32_t crc;
     char endian, kind;
     unsigned width;
 };
 
-class reader {
-    zip_owner file_;
+class writer {
+    std::filesystem::path destination_;
+    temporary_file temporary_;
+    file_owner file_;
+    prefix_type prefix_{};
+    std::array<bool, names.size()> present_{};
+    std::size_t added_ = 0;
+    std::uint64_t position_ = prefix_bytes;
 public:
-    explicit reader(const std::filesystem::path& path) : file_(open_zip(path, ZIP_RDONLY | ZIP_CHECKCONS)) {}
-
-    array_info inspect(const char* name) const {
-        zip_int64_t index = -1;
-        const auto entries = zip_get_num_entries(file_.get(), 0);
-        for (zip_int64_t i = 0; i < entries; ++i) {
-            const char* candidate = zip_get_name(file_.get(), i, ZIP_FL_ENC_STRICT);
-            if (!candidate) zip_error(file_.get(), "read entry name");
-            if (std::strcmp(candidate, name) == 0) {
-                if (index >= 0) invalid(std::string("duplicate array ") + name);
-                index = i;
-            }
-        }
-        if (index < 0) invalid(std::string("missing array ") + name);
-        zip_stat_t stat;
-        zip_stat_init(&stat);
-        if (zip_stat_index(file_.get(), index, 0, &stat) < 0) zip_error(file_.get(), "read array metadata");
-        if (!(stat.valid & ZIP_STAT_SIZE) || stat.encryption_method != ZIP_EM_NONE ||
-            (stat.comp_method != ZIP_CM_STORE && stat.comp_method != ZIP_CM_DEFLATE))
-            invalid("unsupported ZIP entry");
-        auto entry = open(index);
-        std::array<unsigned char, 12> prefix{};
-        read_exact(entry.get(), prefix.data(), 8);
-        if (std::memcmp(prefix.data(), "\x93NUMPY", 6) ||
-            (prefix[6] != 1 && prefix[6] != 2) || prefix[7] != 0)
-            invalid("unsupported NPY header");
-        const unsigned prefix_size = prefix[6] == 1 ? 10 : 12;
-        read_exact(entry.get(), prefix.data() + 8, prefix_size - 8);
-        std::uint32_t size = prefix[8] | (std::uint32_t(prefix[9]) << 8);
-        if (prefix_size == 12) size |= (std::uint32_t(prefix[10]) << 16) | (std::uint32_t(prefix[11]) << 24);
-        if (size == 0 || size > 1024 || stat.size < prefix_size + size)
-            invalid("invalid NPY header length");
-        std::string header(size, '\0');
-        read_exact(entry.get(), header.data(), size);
-        std::string_view fields(header);
-        const auto whitespace = [&] {
-            while (!fields.empty() && (fields.front() == ' ' || fields.front() == '\n' || fields.front() == '\t'))
-                fields.remove_prefix(1);
-        };
-        const auto consume = [&](std::string_view token) {
-            whitespace();
-            if (!fields.starts_with(token)) invalid("invalid NPY header");
-            fields.remove_prefix(token.size());
-        };
-        const auto quoted = [&]() {
-            whitespace();
-            if (fields.empty() || (fields.front() != '\'' && fields.front() != '"')) invalid("expected NPY string");
-            const char quote = fields.front(); fields.remove_prefix(1);
-            const auto end = fields.find(quote);
-            if (end == std::string_view::npos) invalid("unterminated NPY string");
-            const auto result = fields.substr(0, end); fields.remove_prefix(end + 1);
-            return result;
-        };
-        char endian = 0, kind = 0;
-        unsigned width = 0, found = 0;
-        std::uint64_t count = 0;
-        consume("{");
-        while (true) {
-            whitespace();
-            if (fields.starts_with('}')) { fields.remove_prefix(1); break; }
-            const auto key = quoted(); consume(":");
-            unsigned bit = 0;
-            if (key == "descr") {
-                bit = 1; const auto type = quoted();
-                if (type.size() != 3) invalid("unsupported NPY dtype");
-                endian = type[0]; kind = type[1]; width = type[2] - '0';
-                if ((endian != '<' && endian != '>') || (kind != 'u' && kind != 'i' && kind != 'f') ||
-                    (width != 4 && width != 8)) invalid("unsupported NPY dtype");
-            } else if (key == "fortran_order") {
-                bit = 2; whitespace();
-                if (fields.starts_with("True")) consume("True");
-                else consume("False"); // Both orders are contiguous for one-dimensional arrays.
-            } else if (key == "shape") {
-                bit = 4; consume("("); whitespace();
-                const auto parsed = std::from_chars(fields.data(), fields.data() + fields.size(), count);
-                if (parsed.ec != std::errc{}) invalid("array length overflow");
-                fields.remove_prefix(static_cast<std::size_t>(parsed.ptr - fields.data()));
-                consume(","); consume(")");
-            } else invalid("unknown NPY header key");
-            if (found & bit) invalid("duplicate NPY header key");
-            found |= bit; whitespace();
-            if (fields.starts_with('}')) continue;
-            consume(",");
-        }
-        whitespace();
-        if (found != 7 || !fields.empty()) invalid("incomplete NPY header");
-        const auto header_size = prefix_size + size;
-        if (count > (std::numeric_limits<std::uint64_t>::max() - header_size) / width ||
-            stat.size != header_size + count * width)
-            invalid("array shape and ZIP length differ");
-        return {static_cast<zip_uint64_t>(index), count, header_size,
-                endian, kind, width};
+    explicit writer(const std::filesystem::path& path)
+        : destination_(std::filesystem::absolute(path)), temporary_(destination_),
+          file_(open_file(temporary_.name, "wb+")) {
+        write_exact(file_.get(), prefix_.data(), prefix_.size());
     }
 
-    entry_owner open(zip_uint64_t index) const {
-        entry_owner entry(zip_fopen_index(file_.get(), index, 0), &zip_fclose);
-        if (!entry) zip_error(file_.get(), "open array");
-        return entry;
+    template<class T> void add(const char* name, std::span<const T> values) {
+        static_assert(std::is_integral_v<T> || std::is_floating_point_v<T>);
+        static_assert(sizeof(T) == 4 || sizeof(T) == 8);
+        const auto id = array_id(name);
+        if (present_[id] || added_ == names.size()) invalid("duplicate array");
+        present_[id] = true;
+        const auto offset = align_payload(position_);
+        const auto length = values.size_bytes();
+        if (length > std::numeric_limits<std::uint64_t>::max() - offset) invalid("array length overflow");
+        const std::array<unsigned char, 64> padding{};
+        write_exact(file_.get(), padding.data(), static_cast<std::size_t>(offset - position_));
+        std::uint32_t crc = 0;
+        const auto bytes = std::as_bytes(values);
+        for (std::size_t first = 0; first < bytes.size();) {
+            const auto count = std::min<std::size_t>(65536, bytes.size() - first);
+            crc = checksum(crc, bytes.data() + first, count);
+            write_exact(file_.get(), bytes.data() + first, count);
+            first += count;
+        }
+        auto* d = prefix_.data() + header_bytes + added_++ * descriptor_bytes;
+        set<std::uint32_t>(d, static_cast<std::uint32_t>(id));
+        d[4] = std::endian::native == std::endian::little ? '<' : '>';
+        d[5] = std::is_floating_point_v<T> ? 'f' : std::is_signed_v<T> ? 'i' : 'u';
+        d[6] = sizeof(T);
+        set<std::uint64_t>(d + 8, values.size());
+        set<std::uint64_t>(d + 16, offset);
+        set<std::uint64_t>(d + 24, length);
+        set<std::uint32_t>(d + 32, crc);
+        position_ = offset + length;
     }
+
+    void finish() {
+        if (added_ != names.size()) invalid("missing array");
+        std::memcpy(prefix_.data(), "APXCHB01", 8);
+        set<std::uint32_t>(prefix_.data() + 8, 1);
+        set<std::uint32_t>(prefix_.data() + 12, names.size());
+        set<std::uint32_t>(prefix_.data() + 16, descriptor_bytes);
+        set<std::uint64_t>(prefix_.data() + 24, position_);
+        set<std::uint32_t>(prefix_.data() + 20, checksum(0, prefix_.data(), prefix_.size()));
+        seek(file_.get(), 0);
+        write_exact(file_.get(), prefix_.data(), prefix_.size());
+        if (std::fclose(file_.release()) != 0)
+            throw std::system_error(errno, std::generic_category(), "finish solver archive");
+        std::filesystem::create_hard_link(temporary_.name, destination_);
+    }
+};
+
+class reader {
+    file_owner file_;
+    std::array<array_info, names.size()> arrays_{};
+public:
+    explicit reader(const std::filesystem::path& path) : file_(open_file(path, "rb")) {
+        prefix_type prefix;
+        read_exact(file_.get(), prefix.data(), prefix.size());
+        if (std::memcmp(prefix.data(), "APXCHB01", 8) || get<std::uint32_t>(prefix.data() + 8) != 1 ||
+            get<std::uint32_t>(prefix.data() + 12) != names.size() ||
+            get<std::uint32_t>(prefix.data() + 16) != descriptor_bytes ||
+            !std::all_of(prefix.begin() + 32, prefix.begin() + header_bytes, [](auto v) { return v == 0; }))
+            invalid("unsupported binary header");
+        const auto expected_crc = get<std::uint32_t>(prefix.data() + 20);
+        set<std::uint32_t>(prefix.data() + 20, 0);
+        if (checksum(0, prefix.data(), prefix.size()) != expected_crc) invalid("metadata checksum mismatch");
+        if (fseeko(file_.get(), 0, SEEK_END) != 0) invalid("cannot seek archive");
+        const auto file_length = ftello(file_.get());
+        if (file_length < 0 || static_cast<std::uint64_t>(file_length) != get<std::uint64_t>(prefix.data() + 24))
+            invalid("file length mismatch");
+        std::array<bool, names.size()> present{};
+        std::uint64_t position = prefix_bytes;
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            const auto* d = prefix.data() + header_bytes + i * descriptor_bytes;
+            const auto id = get<std::uint32_t>(d);
+            if (id >= names.size() || present[id]) invalid("duplicate or unknown array id");
+            present[id] = true;
+            auto& a = arrays_[id];
+            a = {get<std::uint64_t>(d + 8), get<std::uint64_t>(d + 16), get<std::uint64_t>(d + 24),
+                 get<std::uint32_t>(d + 32), static_cast<char>(d[4]), static_cast<char>(d[5]), d[6]};
+            if (d[7] || get<std::uint32_t>(d + 36) || (a.endian != '<' && a.endian != '>') ||
+                (a.kind != 'f' && a.kind != 'i' && a.kind != 'u') || (a.width != 4 && a.width != 8))
+                invalid("unsupported array dtype");
+            if (a.count > std::numeric_limits<std::uint64_t>::max() / a.width || a.length != a.count * a.width ||
+                a.offset != align_payload(position) || a.offset > static_cast<std::uint64_t>(file_length) ||
+                a.length > static_cast<std::uint64_t>(file_length) - a.offset)
+                invalid("invalid array extent");
+            position = a.offset + a.length;
+        }
+        if (position != static_cast<std::uint64_t>(file_length)) invalid("trailing bytes");
+    }
+
+    array_info inspect(const char* name) const { return arrays_[array_id(name)]; }
 
     template<class T> void read(const array_info& info, std::span<T> values) const {
         if (info.count != values.size()) invalid("array length mismatch");
@@ -261,7 +218,6 @@ public:
     template<class T> std::vector<T> read_vector(const array_info& info) const {
         std::vector<T> values;
         if (info.count > values.max_size()) invalid("array exceeds container capacity");
-        // Reserve address space without touching a forged declared payload.
         values.reserve(static_cast<std::size_t>(info.count));
         decode<T>(info, [&](std::span<const T> chunk) { values.insert(values.end(), chunk.begin(), chunk.end()); });
         return values;
@@ -272,47 +228,49 @@ private:
         if constexpr (std::is_floating_point_v<T>) {
             if (info.kind != 'f' || info.width != sizeof(T)) invalid("unexpected floating-point type");
         } else if (info.kind != 'i' && info.kind != 'u') invalid("expected an integer array");
-        auto entry = open(info.index);
-        std::array<std::byte, 1040> header{};
-        read_exact(entry.get(), header.data(), info.header_size);
+        seek(file_.get(), info.offset);
         std::array<std::uint64_t, 8192> buffer;
         std::array<T, 8192> decoded;
         const bool swap = (info.endian == '<') != (std::endian::native == std::endian::little);
+        std::uint32_t crc = 0;
         std::size_t first = 0;
         while (first < info.count) {
             const auto count = std::min({static_cast<std::size_t>(info.count) - first, sizeof(buffer) / info.width, decoded.size()});
-            read_exact(entry.get(), buffer.data(), count * info.width);
             const char target_kind = std::is_floating_point_v<T> ? 'f' : std::is_signed_v<T> ? 'i' : 'u';
             if (!swap && info.width == sizeof(T) && info.kind == target_kind) {
-                std::memcpy(decoded.data(), buffer.data(), count * sizeof(T));
+                read_exact(file_.get(), decoded.data(), count * sizeof(T));
+                crc = checksum(crc, decoded.data(), count * sizeof(T));
                 if constexpr (std::is_integral_v<T> && std::is_signed_v<T>)
                     for (std::size_t i = 0; i < count; ++i)
                         if (decoded[i] < 0) invalid("negative index");
-            } else for (std::size_t i = 0; i < count; ++i) {
-                std::uint64_t bits = 0;
-                if (info.width == 4) {
-                    std::uint32_t word;
-                    std::memcpy(&word, reinterpret_cast<const std::byte*>(buffer.data()) + 4 * i, 4);
-                    bits = swap ? std::byteswap(word) : word;
-                } else {
-                    bits = buffer[i];
-                    if (swap) bits = std::byteswap(bits);
-                }
-                if constexpr (std::is_floating_point_v<T>) {
-                    if constexpr (sizeof(T) == 4) decoded[i] = std::bit_cast<float>(static_cast<std::uint32_t>(bits));
-                    else decoded[i] = std::bit_cast<double>(bits);
-                } else {
-                    if ((info.kind == 'i' && (bits >> (info.width * 8 - 1))) ||
-                        bits > static_cast<std::uint64_t>(std::numeric_limits<T>::max()))
-                        invalid("index does not fit this build");
-                    decoded[i] = static_cast<T>(bits);
+            } else {
+                read_exact(file_.get(), buffer.data(), count * info.width);
+                crc = checksum(crc, buffer.data(), count * info.width);
+                for (std::size_t i = 0; i < count; ++i) {
+                    std::uint64_t bits = 0;
+                    if (info.width == 4) {
+                        std::uint32_t word;
+                        std::memcpy(&word, reinterpret_cast<const std::byte*>(buffer.data()) + 4 * i, 4);
+                        bits = swap ? std::byteswap(word) : word;
+                    } else {
+                        bits = buffer[i];
+                        if (swap) bits = std::byteswap(bits);
+                    }
+                    if constexpr (std::is_floating_point_v<T>) {
+                        if constexpr (sizeof(T) == 4) decoded[i] = std::bit_cast<float>(static_cast<std::uint32_t>(bits));
+                        else decoded[i] = std::bit_cast<double>(bits);
+                    } else {
+                        if ((info.kind == 'i' && (bits >> (info.width * 8 - 1))) ||
+                            bits > static_cast<std::uint64_t>(std::numeric_limits<T>::max()))
+                            invalid("index does not fit this build");
+                        decoded[i] = static_cast<T>(bits);
+                    }
                 }
             }
             put(std::span<const T>(decoded.data(), count));
             first += count;
         }
-        std::byte tail;
-        if (zip_fread(entry.get(), &tail, 1) != 0) invalid("array checksum or length mismatch");
+        if (crc != info.crc) invalid("array checksum mismatch");
     }
 };
 
