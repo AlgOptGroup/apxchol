@@ -12,6 +12,7 @@
 #include <fstream>
 #include <functional>
 #include <future>
+#include <system_error>
 #include <vector>
 #include <barrier>
 
@@ -339,6 +340,10 @@ TEST_F(SolverArchive, InvalidOptionsFailBeforeOpeningAnArchive) {
     auto opts = options(); opts.num_threads = -1;
     EXPECT_THROW(load_solver(directory / "missing.apxchol", opts), std::invalid_argument);
     EXPECT_THROW(load_solver(directory / "missing.apxchol", options()), std::runtime_error);
+}
+
+TEST_F(SolverArchive, ReportsDirectoryReadError) {
+    EXPECT_THROW(load_solver(directory, options()), std::system_error);
 }
 
 TEST_F(SolverArchive, RejectsMetadataAndIndexOverflow) {
