@@ -64,7 +64,7 @@ endif()
 target_link_libraries(unit_tests PRIVATE
         apxchol_mtx_input
         GTest::gtest_main
-        libzip::zip
+        ZLIB::ZLIB
 )
 
 include(GoogleTest)

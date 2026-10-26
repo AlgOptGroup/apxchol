@@ -5,7 +5,7 @@
 
 namespace apxchol {
 
-/// Save the solver's original operator and retained FP32 factor in portable NPZ.
+/// Save the solver's original operator and retained FP32 factor in a portable binary file.
 /// Creates a new file; an existing destination is an error. Factor retention
 /// must have been enabled at construction. No extra matrix is kept between saves.
 void save_solver(const std::filesystem::path& path, const solver& owner);

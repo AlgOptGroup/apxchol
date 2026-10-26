@@ -2,18 +2,18 @@
 #include "apxchol/solver/archive.h"
 #include "apxchol/detail/csc_import.h"
 #include "../src/solver_archive_internal.h"
-#include <zip.h>
+#include <zlib.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <future>
+#include <vector>
 #include <barrier>
-#include <ranges>
-#include <string_view>
 
 namespace {
 using namespace apxchol;
@@ -39,6 +39,82 @@ solve_options options() {
     return result;
 }
 
+// Independent test fixture encoder for the documented binary layout.
+using Bytes = std::vector<unsigned char>;
+constexpr std::size_t prefix_size = 64 + 9 * 40;
+enum ArrayId : std::size_t { metadata, a_outer, a_inner, a_values, l_outer, l_inner, l_values, permutation, round_sizes };
+std::uint64_t number(const Bytes& bytes, std::size_t at, unsigned width, bool little = true) {
+    std::uint64_t result = 0;
+    for (unsigned i = 0; i < width; ++i)
+        result |= static_cast<std::uint64_t>(bytes.at(at + i)) << (8 * (little ? i : width - 1 - i));
+    return result;
+}
+void put_number(Bytes& bytes, std::size_t at, unsigned width, std::uint64_t value, bool little = true) {
+    for (unsigned i = 0; i < width; ++i)
+        bytes.at(at + i) = static_cast<unsigned char>(value >> (8 * (little ? i : width - 1 - i)));
+}
+Bytes read_bytes(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
+    const auto size = input.tellg();
+    if (size < 0 || size > 16 * 1024 * 1024) throw std::runtime_error("invalid test fixture size");
+    Bytes bytes(static_cast<std::size_t>(size));
+    input.seekg(0);
+    if (!input.read(reinterpret_cast<char*>(bytes.data()), bytes.size())) throw std::runtime_error("fixture read failed");
+    return bytes;
+}
+void write_bytes(const std::filesystem::path& path, const Bytes& bytes) {
+    std::ofstream output(path, std::ios::binary);
+    if (!output.write(reinterpret_cast<const char*>(bytes.data()), bytes.size())) throw std::runtime_error("fixture write failed");
+}
+void checksum_metadata(Bytes& bytes) {
+    put_number(bytes, 20, 4, 0);
+    put_number(bytes, 20, 4, crc32(0, bytes.data(), prefix_size));
+}
+struct FixtureArray {
+    unsigned char endian, kind, width;
+    std::uint64_t count;
+    Bytes data;
+    std::uint64_t value(std::size_t index) const { return number(data, index * width, width, endian == '<'); }
+    void value(std::size_t index, std::uint64_t bits) { put_number(data, index * width, width, bits, endian == '<'); }
+};
+using Fixture = std::array<FixtureArray, 9>;
+Fixture read_fixture(const std::filesystem::path& path) {
+    const auto bytes = read_bytes(path);
+    Fixture arrays{};
+    for (std::size_t i = 0; i < arrays.size(); ++i) {
+        const auto d = 64 + 40 * i;
+        if (number(bytes, d, 4) != i) throw std::runtime_error("unexpected test fixture array order");
+        const auto offset = number(bytes, d + 16, 8), length = number(bytes, d + 24, 8);
+        if (offset > bytes.size() || length > bytes.size() - offset) throw std::runtime_error("invalid test fixture extent");
+        arrays[i] = {bytes.at(d + 4), bytes.at(d + 5), bytes.at(d + 6), number(bytes, d + 8, 8),
+                     Bytes(bytes.begin() + offset, bytes.begin() + offset + length)};
+    }
+    return arrays;
+}
+Bytes encode_fixture(const Fixture& arrays) {
+    Bytes bytes(prefix_size, 0);
+    std::memcpy(bytes.data(), "APXCHB01", 8);
+    put_number(bytes, 8, 4, 1); put_number(bytes, 12, 4, arrays.size()); put_number(bytes, 16, 4, 40);
+    for (std::size_t i = 0; i < arrays.size(); ++i) {
+        const auto& a = arrays[i];
+        const auto offset = (bytes.size() + 63) & ~std::size_t(63), d = 64 + i * 40;
+        bytes.resize(offset, 0);
+        bytes.insert(bytes.end(), a.data.begin(), a.data.end());
+        put_number(bytes, d, 4, i); bytes[d + 4] = a.endian; bytes[d + 5] = a.kind; bytes[d + 6] = a.width;
+        put_number(bytes, d + 8, 8, a.count); put_number(bytes, d + 16, 8, offset);
+        put_number(bytes, d + 24, 8, a.data.size());
+        put_number(bytes, d + 32, 4, crc32(0, a.data.data(), a.data.size()));
+    }
+    put_number(bytes, 24, 8, bytes.size()); checksum_metadata(bytes);
+    return bytes;
+}
+void widen(FixtureArray& a) {
+    if (a.width == 8) return;
+    Bytes wide(a.count * 8);
+    for (std::size_t i = 0; i < a.count; ++i) put_number(wide, i * 8, 8, a.value(i), a.endian == '<');
+    a.width = 8; a.data = std::move(wide);
+}
+
 class SolverArchive : public ::testing::Test {
 protected:
     std::filesystem::path directory;
@@ -48,58 +124,36 @@ protected:
         directory = std::filesystem::temp_directory_path() /
             ("apxchol-archive-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         ASSERT_TRUE(std::filesystem::create_directory(directory));
-        save_solver(directory / "original.npz", original);
+        save_solver(directory / "original.apxchol", original);
     }
     void TearDown() override { std::filesystem::remove_all(directory); }
 
-    std::filesystem::path change(const char* label, const char* entry,
-                                const std::function<void(std::vector<unsigned char>&)>& modify) {
-        const auto path = directory / (std::string(label) + ".npz");
-        std::filesystem::copy_file(directory / "original.npz", path);
-        int error = 0;
-        zip_t* file = zip_open(path.c_str(), 0, &error);
-        if (!file) throw std::runtime_error("fixture open failed");
-        zip_stat_t stat;
-        if (zip_stat(file, entry, 0, &stat)) throw std::runtime_error("fixture stat failed");
-        std::vector<unsigned char> bytes(stat.size);
-        auto* input = zip_fopen(file, entry, 0);
-        if (!input || zip_fread(input, bytes.data(), bytes.size()) != static_cast<zip_int64_t>(bytes.size()))
-            throw std::runtime_error("fixture read failed");
-        zip_fclose(input);
-        modify(bytes);
-        auto* source = zip_source_buffer(file, bytes.data(), bytes.size(), 0);
-        if (!source || zip_file_replace(file, stat.index, source, 0) || zip_close(file))
-            throw std::runtime_error("fixture write failed");
+    std::filesystem::path change(const char* label, ArrayId entry,
+                                const std::function<void(FixtureArray&)>& modify) {
+        auto fixture = read_fixture(directory / "original.apxchol");
+        modify(fixture[entry]);
+        const auto path = directory / (std::string(label) + ".apxchol");
+        write_bytes(path, encode_fixture(fixture));
         return path;
     }
-    static std::size_t data_offset(const std::vector<unsigned char>& bytes) {
-        return 10 + bytes[8] + 256 * bytes[9];
-    }
-    static std::vector<unsigned char> entry_bytes(const std::filesystem::path& path, const char* name) {
-        int error = 0;
-        std::unique_ptr<zip_t, decltype(&zip_discard)> file(zip_open(path.c_str(), ZIP_RDONLY, &error), &zip_discard);
-        if (!file) throw std::runtime_error("fixture open failed");
-        zip_stat_t stat;
-        if (zip_stat(file.get(), name, 0, &stat) || stat.size > 16 * 1024 * 1024)
-            throw std::runtime_error("fixture entry unavailable or oversized");
-        std::vector<unsigned char> bytes(stat.size);
-        std::unique_ptr<zip_file_t, decltype(&zip_fclose)> entry(zip_fopen(file.get(), name, 0), &zip_fclose);
-        if (!entry || zip_fread(entry.get(), bytes.data(), bytes.size()) != static_cast<zip_int64_t>(bytes.size()))
-            throw std::runtime_error("fixture entry read failed");
-        return bytes;
+    std::filesystem::path change_file(const char* label, const std::function<void(Bytes&)>& modify,
+                                     bool repair_checksum = true) {
+        auto bytes = read_bytes(directory / "original.apxchol");
+        modify(bytes);
+        if (repair_checksum) checksum_metadata(bytes);
+        const auto path = directory / (std::string(label) + ".apxchol");
+        write_bytes(path, bytes);
+        return path;
     }
     static void expect_operator(const std::filesystem::path& path, const Sparse& expected) {
-        const auto compare = [&](const char* name, const void* data, std::size_t size) {
-            const auto bytes = entry_bytes(path, name);
-            ASSERT_GE(bytes.size(), 10);
-            const auto offset = data_offset(bytes);
-            ASSERT_GE(bytes.size(), offset);
-            ASSERT_EQ(bytes.size() - offset, size);
-            EXPECT_EQ(std::memcmp(bytes.data() + offset, data, size), 0);
+        const auto arrays = read_fixture(path);
+        const auto compare = [&](ArrayId id, const void* data, std::size_t size) {
+            ASSERT_EQ(arrays[id].data.size(), size);
+            EXPECT_EQ(std::memcmp(arrays[id].data.data(), data, size), 0);
         };
-        compare("A_indptr.npy", expected.outerIndexPtr(), (expected.cols() + 1) * sizeof(int));
-        compare("A_indices.npy", expected.innerIndexPtr(), expected.nonZeros() * sizeof(int));
-        compare("A_data.npy", expected.valuePtr(), expected.nonZeros() * sizeof(double));
+        compare(a_outer, expected.outerIndexPtr(), (expected.cols() + 1) * sizeof(int));
+        compare(a_inner, expected.innerIndexPtr(), expected.nonZeros() * sizeof(int));
+        compare(a_values, expected.valuePtr(), expected.nonZeros() * sizeof(double));
     }
     static void check_solve_modes(const Sparse& input, solver& restored, bool laplacian, int& checked_rhs) {
         for (int width : {1, 4, 16}) {
@@ -138,7 +192,7 @@ protected:
 };
 
 TEST_F(SolverArchive, ExactFactorAndScalarBatchWarmSolves) {
-    auto restored = load_solver(directory / "original.npz", options());
+    auto restored = load_solver(directory / "original.apxchol", options());
     EXPECT_EQ(restored.operator_nnz(), A.nonZeros());
     EXPECT_EQ(original.operator_nnz(), A.nonZeros());
     const auto& before = original.factor();
@@ -177,7 +231,7 @@ TEST_F(SolverArchive, LaplacianFactorAndCenteredSolves) {
         L.coeffRef(i, i) = (i > 0) + (i + 1 < L.rows());
     solver before(L, options());
     ASSERT_FALSE(before.factor().sddm);
-    const auto path = directory / "laplacian.npz";
+    const auto path = directory / "laplacian.apxchol";
     save_solver(path, before);
     auto restored = load_solver(path, options());
     EXPECT_FALSE(restored.factor().sddm);
@@ -217,7 +271,7 @@ TEST_F(SolverArchive, ReconstructsOriginalSystemCoefficients) {
         input.makeCompressed(); expected.makeCompressed();
         solver fresh(expected, options());
         solver owner(input, fresh.factor(), options());
-        const auto path = directory / ("operator-" + std::to_string(mode) + ".npz");
+        const auto path = directory / ("operator-" + std::to_string(mode) + ".apxchol");
         save_solver(path, owner);
         expect_operator(path, expected);
         auto restored = load_solver(path, options());
@@ -250,30 +304,32 @@ TEST_F(SolverArchive, RejectsTooManyEmptyRoundsBeforeWriting) {
     auto F = original.factor();
     F.rounds.resize(A.rows() + 1);
     solver owner(A, std::move(F), options());
-    const auto path = directory / "empty-rounds.npz";
+    const auto path = directory / "empty-rounds.apxchol";
     EXPECT_THROW(save_solver(path, owner), std::invalid_argument);
     EXPECT_FALSE(std::filesystem::exists(path));
 }
 
 TEST_F(SolverArchive, AutomaticAdoptionUsesCpu) {
     auto opts = options(); opts.backend = solve_backend::automatic;
-    auto restored = load_solver(directory / "original.npz", opts);
+    auto restored = load_solver(directory / "original.apxchol", opts);
     EXPECT_EQ(restored.backend(), solve_backend::cpu);
     EXPECT_EQ(restored.factor_storage(), factor_storage_type::fp32);
 }
 
 TEST_F(SolverArchive, ExistingFilesAndReleasedFactorsAreRejected) {
-    EXPECT_THROW(save_solver(directory / "original.npz", original), std::runtime_error);
+    const auto before = read_bytes(directory / "original.apxchol");
+    EXPECT_THROW(save_solver(directory / "original.apxchol", original), std::runtime_error);
+    EXPECT_EQ(read_bytes(directory / "original.apxchol"), before);
     auto opts = options(); opts.keep_factor_values = false;
     solver released(A, opts);
-    EXPECT_THROW(save_solver(directory / "released.npz", released), std::invalid_argument);
-    EXPECT_FALSE(std::filesystem::exists(directory / "released.npz"));
+    EXPECT_THROW(save_solver(directory / "released.apxchol", released), std::invalid_argument);
+    EXPECT_FALSE(std::filesystem::exists(directory / "released.apxchol"));
 }
 
 TEST_F(SolverArchive, RejectsNullCharactersInPaths) {
-    const auto existing = (directory / "original.npz").string() + std::string("\0suffix", 7);
+    const auto existing = (directory / "original.apxchol").string() + std::string("\0suffix", 7);
     EXPECT_THROW(load_solver(existing), std::invalid_argument);
-    const auto prefix = directory / "new.npz";
+    const auto prefix = directory / "new.apxchol";
     const auto output = prefix.string() + std::string("\0suffix", 7);
     EXPECT_THROW(save_solver(output, original), std::invalid_argument);
     EXPECT_FALSE(std::filesystem::exists(prefix));
@@ -281,78 +337,99 @@ TEST_F(SolverArchive, RejectsNullCharactersInPaths) {
 
 TEST_F(SolverArchive, InvalidOptionsFailBeforeOpeningAnArchive) {
     auto opts = options(); opts.num_threads = -1;
-    EXPECT_THROW(load_solver(directory / "missing.npz", opts), std::invalid_argument);
-    EXPECT_THROW(load_solver(directory / "missing.npz", options()), std::runtime_error);
+    EXPECT_THROW(load_solver(directory / "missing.apxchol", opts), std::invalid_argument);
+    EXPECT_THROW(load_solver(directory / "missing.apxchol", options()), std::runtime_error);
 }
 
 TEST_F(SolverArchive, RejectsMetadataAndIndexOverflow) {
-    for (const auto& entry : std::array<std::pair<std::size_t, std::uint64_t>, 6>{{
+    for (const auto& [index, value] : std::array<std::pair<std::size_t, std::uint64_t>, 6>{{
         {0, 99}, {1, UINT64_MAX}, {2, 2}, {3, UINT64_MAX}, {4, UINT64_MAX}, {6, UINT64_MAX}}}) {
-        const auto index = entry.first;
-        const auto value = entry.second;
-        const auto path = change(("meta-" + std::to_string(index)).c_str(), "apxchol.npy", [&](auto& bytes) {
-            std::memcpy(bytes.data() + data_offset(bytes) + index * 8, &value, 8);
-        });
+        const auto path = change(("meta-" + std::to_string(index)).c_str(), metadata,
+                                 [&](auto& a) { a.value(index, value); });
         EXPECT_THROW(load_solver(path), std::invalid_argument);
     }
-    const auto bad_row = change("bad-row", "A_indices.npy", [&](auto& bytes) {
-        const std::int32_t value = -1;
-        std::memcpy(bytes.data() + data_offset(bytes), &value, sizeof(value));
-    });
+    const auto bad_row = change("bad-row", a_inner, [](auto& a) { a.value(0, UINT32_MAX); });
     EXPECT_THROW(load_solver(bad_row), std::invalid_argument);
-    const auto bad_offset = change("bad-offset", "L_indptr.npy", [&](auto& bytes) {
-        std::fill_n(bytes.data() + data_offset(bytes), sizeof(edge_index), 0xff);
-    });
+    const auto bad_offset = change("bad-offset", l_outer, [](auto& a) { a.value(0, UINT64_MAX); });
     EXPECT_THROW(load_solver(bad_offset), std::invalid_argument);
+    const auto wide_row = change("wide-row", a_inner, [](auto& a) { widen(a); a.kind = 'u'; a.value(0, UINT64_MAX); });
+    EXPECT_THROW(load_solver(wide_row), std::invalid_argument);
 }
 
 TEST_F(SolverArchive, RejectsMalformedHeaderAndTruncation) {
-    const auto path = change("shape", "L_data.npy", [&](auto& bytes) {
-        bytes[8] = bytes[9] = 0xff;
-    });
-    EXPECT_THROW(load_solver(path), std::invalid_argument);
-    const auto truncated = directory / "truncated.npz";
-    std::filesystem::copy_file(directory / "original.npz", truncated);
-    std::filesystem::resize_file(truncated, 100);
-    EXPECT_THROW(load_solver(truncated), std::runtime_error);
-    const auto wrong_type = change("type", "A_data.npy", [&](auto& bytes) {
-        auto it = std::ranges::search(bytes, std::string_view("<f8")).begin();
-        ASSERT_NE(it, bytes.end()); it[1] = 'u';
-    });
+    const auto header = change_file("version", [](auto& bytes) { put_number(bytes, 8, 4, 99); });
+    EXPECT_THROW(load_solver(header), std::invalid_argument);
+    const auto extent = change_file("extent", [](auto& bytes) { put_number(bytes, 64 + 40 * l_values + 8, 8, UINT64_MAX); });
+    EXPECT_THROW(load_solver(extent), std::invalid_argument);
+    const auto wrong_type = change("type", a_values, [](auto& a) { a.kind = 'u'; });
     EXPECT_THROW(load_solver(wrong_type), std::invalid_argument);
+    const auto wrong_width = change_file("width", [](auto& bytes) { bytes.at(64 + 40 * a_values + 6) = 3; });
+    EXPECT_THROW(load_solver(wrong_width), std::invalid_argument);
+    const auto duplicate = change_file("duplicate", [](auto& bytes) { put_number(bytes, 64 + 40, 4, 0); });
+    EXPECT_THROW(load_solver(duplicate), std::invalid_argument);
+    const auto overlap = change_file("overlap", [](auto& bytes) { put_number(bytes, 64 + 40 + 16, 8, 448); });
+    EXPECT_THROW(load_solver(overlap), std::invalid_argument);
+    const auto truncated = change_file("truncated", [](auto& bytes) { bytes.resize(100); }, false);
+    EXPECT_THROW(load_solver(truncated), std::invalid_argument);
+    const auto short_payload = change_file("short-payload", [](auto& bytes) { bytes.pop_back(); }, false);
+    EXPECT_THROW(load_solver(short_payload), std::invalid_argument);
+    const auto trailing = change_file("trailing", [](auto& bytes) { bytes.push_back(0); put_number(bytes, 24, 8, bytes.size()); });
+    EXPECT_THROW(load_solver(trailing), std::invalid_argument);
 }
 
 TEST_F(SolverArchive, ReadsOppositeEndianArrays) {
-    const auto path = change("big-endian", "A_data.npy", [&](auto& bytes) {
-        auto it = std::ranges::search(bytes, std::string_view("<f8")).begin();
-        ASSERT_NE(it, bytes.end()); *it = '>';
-        for (std::size_t i = data_offset(bytes); i < bytes.size(); i += 8)
-            std::reverse(bytes.begin() + i, bytes.begin() + i + 8);
-    });
+    auto arrays = read_fixture(directory / "original.apxchol");
+    for (auto& a : arrays) {
+        a.endian = a.endian == '<' ? '>' : '<';
+        for (std::size_t i = 0; i < a.data.size(); i += a.width)
+            std::reverse(a.data.begin() + i, a.data.begin() + i + a.width);
+    }
+    const auto path = directory / "opposite-endian.apxchol";
+    write_bytes(path, encode_fixture(arrays));
     auto restored = load_solver(path, options());
+    EXPECT_EQ(restored.factor().L.vals_, original.factor().L.vals_);
+    EXPECT_EQ(restored.factor().perm, original.factor().perm);
     const Eigen::VectorXd b = Eigen::VectorXd::Ones(A.rows());
     auto result = restored.solve(b, 1e-9);
+    EXPECT_TRUE(result.converged);
     EXPECT_LT((A * result.x - b).norm() / b.norm(), 1e-9);
 }
 
+TEST_F(SolverArchive, ReadsWideIntegerArrays) {
+    auto arrays = read_fixture(directory / "original.apxchol");
+    for (auto& a : arrays) if (a.kind != 'f') widen(a);
+    const auto path = directory / "wide.apxchol";
+    write_bytes(path, encode_fixture(arrays));
+    auto restored = load_solver(path, options());
+    EXPECT_EQ(restored.factor().L.outer_, original.factor().L.outer_);
+    EXPECT_EQ(restored.factor().L.inner_, original.factor().L.inner_);
+    EXPECT_EQ(restored.factor().L.vals_, original.factor().L.vals_);
+    EXPECT_EQ(restored.factor().perm, original.factor().perm);
+}
+
 TEST_F(SolverArchive, RejectsCorruptArrayPayload) {
-    const auto path = directory / "crc.npz";
-    std::filesystem::copy_file(directory / "original.npz", path);
-    std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
-    file.seekg(0, std::ios::end);
-    const auto size = file.tellg(); file.seekg(0);
-    std::vector<char> bytes(static_cast<std::size_t>(size));
-    file.read(bytes.data(), bytes.size());
-    const auto name = std::ranges::search(bytes, std::string_view("A_data.npy")).begin();
-    ASSERT_NE(name, bytes.end());
-    const auto magic = std::ranges::search(std::ranges::subrange(name, bytes.end()),
-                                            std::string_view("\x93NUMPY")).begin();
-    ASSERT_NE(magic, bytes.end());
-    const auto offset = static_cast<std::size_t>(magic - bytes.begin());
-    const auto data = offset + 10 + static_cast<unsigned char>(bytes[offset + 8])
-        + 256 * static_cast<unsigned char>(bytes[offset + 9]);
-    file.seekp(data); file.put(static_cast<char>(bytes[data] ^ 1)); file.close();
+    const auto path = change_file("crc", [](auto& bytes) {
+        const auto offset = number(bytes, 64 + 40 * a_values + 16, 8);
+        bytes.at(offset) ^= 1;
+    }, false);
     EXPECT_THROW(load_solver(path), std::invalid_argument);
+    const auto descriptor = change_file("metadata-crc", [](auto& bytes) { bytes.at(64 + 32) ^= 1; }, false);
+    EXPECT_THROW(load_solver(descriptor), std::invalid_argument);
+}
+
+TEST_F(SolverArchive, RejectsDuplicatePermutation) {
+    const auto path = change("permutation", permutation, [](auto& a) { a.value(1, a.value(0)); });
+    EXPECT_THROW(load_solver(path), std::invalid_argument);
+}
+
+TEST_F(SolverArchive, AcceptsUnicodeAndExtensionlessPaths) {
+    for (const auto& name : {std::filesystem::path(u8"matrice-α.apxchol"), std::filesystem::path("system")}) {
+        const auto path = directory / name;
+        save_solver(path, original);
+        auto restored = load_solver(path, options());
+        EXPECT_EQ(restored.factor().L.vals_, original.factor().L.vals_);
+        EXPECT_EQ(restored.factor().perm, original.factor().perm);
+    }
 }
 
 TEST_F(SolverArchive, OperatorEntryCountUsesCanonicalInput) {
@@ -364,8 +441,8 @@ TEST_F(SolverArchive, OperatorEntryCountUsesCanonicalInput) {
     solver adopted(canonical, direct.factor(), options());
     EXPECT_EQ(direct.operator_nnz(), 4);
     EXPECT_EQ(adopted.operator_nnz(), 4);
-    save_solver(directory / "duplicates.npz", direct);
-    EXPECT_EQ(load_solver(directory / "duplicates.npz").operator_nnz(), 4);
+    save_solver(directory / "duplicates.apxchol", direct);
+    EXPECT_EQ(load_solver(directory / "duplicates.apxchol").operator_nnz(), 4);
 }
 
 TEST_F(SolverArchive, CpuAndGpuFactorsCrossAdopt) {
@@ -383,7 +460,7 @@ TEST_F(SolverArchive, CpuAndGpuFactorsCrossAdopt) {
                 auto build = options(); build.backend = origin;
                 if (origin == solve_backend::gpu) build.factor_opts.factor_storage = storage;
                 solver resident(input, build);
-                const auto path = directory / ("source-" + std::to_string(source_owners++) + ".npz");
+                const auto path = directory / ("source-" + std::to_string(source_owners++) + ".apxchol");
                 save_solver(path, resident);
                 expect_operator(path, input);
                 const auto& F = resident.factor();
@@ -406,7 +483,7 @@ TEST_F(SolverArchive, CpuAndGpuFactorsCrossAdopt) {
                         EXPECT_EQ(restored.factor().rounds[i].is_size, F.rounds[i].is_size);
                     check_solve_modes(input, restored, laplacian, checked_rhs);
                     if (target == solve_backend::gpu) {
-                        const auto adopted = directory / ("adopted-" + std::to_string(resaves++) + ".npz");
+                        const auto adopted = directory / ("adopted-" + std::to_string(resaves++) + ".apxchol");
                         save_solver(adopted, restored); expect_operator(adopted, input);
                         auto host = load_solver(adopted, options());
                         Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(input.rows(), -1.0, 1.0);
@@ -435,7 +512,7 @@ TEST_F(SolverArchive, PreservesLumpingAndRegularizationWithoutReapplyingThem) {
     construction.factor_opts.regularization = 0.25;
     solver before(positive, construction);
     ASSERT_EQ(before.factor().lumped_offdiag, 2);
-    const auto path = directory / "positive.npz";
+    const auto path = directory / "positive.apxchol";
     save_solver(path, before);
     EXPECT_THROW(load_solver(path), std::invalid_argument);
     auto admission = options(); admission.factor_opts.lump_max_mass = 1.0;
@@ -453,12 +530,12 @@ TEST_F(SolverArchive, PreservesLumpingAndRegularizationWithoutReapplyingThem) {
 }
 
 TEST_F(SolverArchive, DoesNotReplaceSymlinksOrConcurrentWriters) {
-    const auto link = directory / "dangling.npz";
+    const auto link = directory / "dangling.apxchol";
     std::filesystem::create_symlink(directory / "missing", link);
     EXPECT_THROW(save_solver(link, original), std::runtime_error);
     EXPECT_TRUE(std::filesystem::is_symlink(link));
     EXPECT_FALSE(std::filesystem::exists(directory / "missing"));
-    const auto path = directory / "concurrent.npz";
+    const auto path = directory / "concurrent.apxchol";
     std::barrier start(2);
     auto write = [&] {
         start.arrive_and_wait();
