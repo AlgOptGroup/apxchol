@@ -20,27 +20,20 @@
 /// The `degree_prepass` trait (default false) decides what the orchestrator
 /// does before the call:
 ///
-///   * true  — the orchestrator prunes dead edges, computes fresh degrees,
-///     and applies the degree cap (ctx.options.degree_quantile /
-///     degree_multiplier): `candidates` is the ELIGIBLE vertex list, and
-///     ctx.degrees[v] gives the current incident-edge count of every active
-///     vertex. The shipped scan rules (block_greedy, priority_greedy) use this.
+///   * true — the orchestrator supplies degree counts and applies the cap
+///     (ctx.options.degree_quantile / degree_multiplier): `candidates` is
+///     the eligible vertex list. ctx.degrees[v] is exact after pruning or a
+///     cache update, and may be conservative during audited prune skipping.
+///     The scan rules (block_greedy, priority_greedy) use this.
 ///   * false — no O(active + edges) pre-pass runs: `candidates` is the raw
 ///     active list (ascending original-index order) and ctx.degrees is
 ///     empty. baumann_kyng works this way — it estimates degrees from its
 ///     hash sample and applies the cap to that estimate.
 ///
-/// Degrees come as a vertex-indexed span — ctx.degrees[v] is indexed by
-/// VERTEX ID, not by position in `candidates` — because rules compare
-/// priorities of ADJACENT vertices, i.e. they need degree-by-id lookups for
-/// neighbors. They cannot be queried from G instead: a CURRENT degree is
-/// not an O(1) graph query — incidence lists accumulate edges to eliminated
-/// vertices, so the truth requires the prune walk the pre-pass already does
-/// for the cap. (Eager degree counters in the graph were tried and lost at
-/// high thread counts — the decrements become atomic contention in the
-/// elimination hot loop — and stale O(1) list sizes overcount without bound.
-/// A contention-free incremental scheme is an open problem, not a closed
-/// door.)
+/// Degrees are indexed by vertex ID so rules can compare neighboring vertices.
+/// Incidence-list sizes may include eliminated neighbors. The orchestrator
+/// supplies the span through pruning, block_greedy's exact incremental cache,
+/// or audited prune skipping, which may retain conservative raw counts.
 ///
 /// `out` records the round's selection and answers membership:
 ///   out.add(v)       — select v          (thread-safe for distinct v)
@@ -152,10 +145,9 @@ struct partition_context {
     unsigned seed = 42;
     std::size_t omp_threshold = 2000;  ///< min work size before OpenMP engages
     checkpoint* cp = nullptr;          ///< optional profiling tree (may be null)
-    /// Current degrees indexed by VERTEX ID — degrees[v], not by position in
-    /// the candidates span — valid for every active vertex. Non-empty
-    /// exactly when this partitioner declares degree_prepass (it is the
-    /// pre-pass's byproduct).
+    /// Degree counts indexed by vertex ID, valid for every active vertex.
+    /// Audited prune skipping may supply conservative counts; otherwise they
+    /// are exact. Non-empty when this partitioner declares degree_prepass.
     std::span<const node_index> degrees;
 };
 

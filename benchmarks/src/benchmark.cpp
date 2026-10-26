@@ -984,9 +984,8 @@ struct Args {
     bool component_info = false;   // count connected components and exit; no serialization
     bool giant_dump = false;       // with --dump-mtx: write a connected component's PURE Laplacian
                                    // (relabeled 0..cn-1) -- the comp_rank-th LARGEST (0 = giant).
-                                   // = the full pure L for a connected matrix. Lets ParAC physics
-                                   // ground a CONNECTED component by its single-node trim, and the
-                                   // runner loop the large components (the per-component "split").
+                                   // = the full pure L for a connected matrix. The CPU ParAC
+                                   // runner solves each non-singleton component in graph mode.
     int comp_rank = 0;             // with --giant-dump: which component (by descending size) to dump
                                    // without the --reg-rel eps*I perturbation.
     double reg_rel = 0.0;          // >0: regularize L += reg_rel*mean|diag|*I (unify singular grids to SDDM)
@@ -2235,7 +2234,7 @@ static BenchResult run_hypre_boomeramg(
     t.start();
     // Symmetric Dirichlet pin (one node per connected component) for a singular
     // Laplacian (full n x n, SPD); the stopping wrapper checks ORIGINAL L.
-    // SDDM/regularized L solves the full operator unchanged. (Under --desing split this
+    // SDDM/regularized L solves the full operator unchanged. (Under --decompose split this
     // wrapper is called per connected component, so dirichlet_pin grounds a single node.)
     const int m = n;
     std::vector<int> pinned;
@@ -2288,7 +2287,7 @@ static BenchResult run_hypre_boomeramg(
     HYPRE_PCGSetTwoNorm(pcg, 1);  // 2-norm matches our bench recompute (else preconditioned norm)
     // RELATIVE stop ||r||_2 < tol*||b||_2 (StopCrit=0). NOTE: StopCrit=1 is HYPRE's
     // ABSOLUTE criterion ||r|| < tol -- it only happened to behave correctly because
-    // make_rhs normalizes ||b||=1, but under --desing split each component is solved
+    // make_rhs normalizes ||b||=1, but under --decompose split each component is solved
     // against its OWN ||b_c|| (sum ||b_c||^2 = 1, so specks have ||b_c|| ~ 1e-4) where
     // absolute 1e-8 is a LOOSE relative ~1e-4 -> specks undersolve and the combined
     // residual floors above tol. Relative stop converges every component to tol; on the
@@ -2428,7 +2427,7 @@ static BenchResult run_hypre_boomeramg_gpu(
     HYPRE_PCGSetTwoNorm(pcg, 1);  // 2-norm matches our bench recompute (else preconditioned norm)
     // RELATIVE stop ||r||_2 < tol*||b||_2 (StopCrit=0). NOTE: StopCrit=1 is HYPRE's
     // ABSOLUTE criterion ||r|| < tol -- it only happened to behave correctly because
-    // make_rhs normalizes ||b||=1, but under --desing split each component is solved
+    // make_rhs normalizes ||b||=1, but under --decompose split each component is solved
     // against its OWN ||b_c|| (sum ||b_c||^2 = 1, so specks have ||b_c|| ~ 1e-4) where
     // absolute 1e-8 is a LOOSE relative ~1e-4 -> specks undersolve and the combined
     // residual floors above tol. Relative stop converges every component to tol; on the
@@ -2883,10 +2882,9 @@ int main(int argc, char** argv) try {
 
             // The comp_rank-th LARGEST connected component's PURE Laplacian, relabeled
             // 0..cn-1. rank 0 = the giant (= the full pure L for a connected matrix). The
-            // runner loops rank 0,1,2,... over components above a size threshold and runs
-            // ParAC physics on each (single-node trim grounds a CONNECTED component) — the
-            // per-component split. The "K components" count + per-rank size are printed so
-            // the runner knows when to stop.
+            // CPU ParAC runner visits ranks 0,1,2,... until a singleton and runs graph
+            // mode on each connected Laplacian. Report the component count and size
+            // so the runner knows when to stop.
             const auto component_begin = std::chrono::high_resolution_clock::now();
             auto comps = connected_components(L);
             std::vector<size_t> order(comps.size());
@@ -3121,9 +3119,8 @@ int main(int argc, char** argv) try {
         print(median_run([&]() { return run_cholmod(L, b, graph_name, args.tol, args.maxiter); }, R));
 #endif
 
-    // Black-box AMG solvers route through run_desing(--desing). auto = AMGCL split,
-    // BoomerAMG split; each a no-op on connected matrices (1 component). The
-    // connected-grounding for AMGCL's split is `native` (default constant near-null-space).
+    // AMG solvers use run_desing (--decompose/--ground). Auto pins Laplacians;
+    // AMGCL solves the whole operator, while BoomerAMG splits disconnected inputs.
 #ifdef HAVE_AMGCL
     if (args.solvers.count("amgcl"))
         print(median_run([&]() { return run_desing("amgcl", "AMG+CG [AMGCL]",
