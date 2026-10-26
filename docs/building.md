@@ -102,18 +102,17 @@ backend selection and factor storage are runtime settings; see the
 | `APXCHOL_DEVICE` | `CPU` | `CPU` only, or CPU plus `CUDA` / `METAL` |
 | `APXCHOL_NATIVE_ARCH` | ON for root/helper/local Python; OFF for SDK/wheels | Tune for the build machine; turn OFF for distribution |
 | `APXCHOL_POOL_FP32` | ON | Store mutable graph weights in FP32; OFF uses FP64 |
-| `APXCHOL_64BIT_EDGE_INDICES` | OFF | Use 64-bit factor/pool offsets |
-| `APXCHOL_64BIT_NODE_INDICES` | OFF | Use 64-bit vertex indices and offsets |
+| `APXCHOL_INDEX_WIDTH` | `32` | `32`, `64_OFFSETS` or `64`; see layouts below |
 | `APXCHOL_BUILD_TESTS` | ON in root build | Build the test suite |
 | `APXCHOL_BUILD_EXAMPLES` | ON in root build | Build the examples |
 
-The index controls give three useful layouts:
+The index setting selects one of three layouts:
 
 | Vertex indices | Offsets | Configuration |
 |---|---|---|
-| 32-bit | 32-bit | Default |
-| 32-bit | 64-bit | `APXCHOL_64BIT_EDGE_INDICES=ON` |
-| 64-bit | 64-bit | `APXCHOL_64BIT_NODE_INDICES=ON` (also widens offsets) |
+| 32-bit | 32-bit | `APXCHOL_INDEX_WIDTH=32` (default) |
+| 32-bit | 64-bit | `APXCHOL_INDEX_WIDTH=64_OFFSETS` |
+| 64-bit | 64-bit | `APXCHOL_INDEX_WIDTH=64` |
 
 Offsets count stored entries; a graph can need wide offsets while its vertex
 IDs still fit 32 bits. GPU setup requires 32-bit vertices.

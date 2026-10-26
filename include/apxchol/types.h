@@ -1,32 +1,9 @@
 #pragma once
-/// Core index types for the apxchol library.
-///
-/// Since apxchol owns all sparse storage (sparse_csc, vec_pool — no Eigen factor),
-/// it is NOT bound by Eigen's signed-`StorageIndex` requirement, so both index
-/// types are UNSIGNED. Two roles, deliberately different sizes:
-///
-///   node_index : vertex ids. n << 4.29B for any realistic graph, so this stays
-///                32-bit even under APXCHOL_64BIT_EDGE_INDICES -- the large row-index
-///                arrays (factor inner indices) never double.
-///   edge_index : cumulative column offsets and edge ids, which DO reach billions
-///                on dense factors / over-allocated pools -> the one widened by
-///                APXCHOL_64BIT_EDGE_INDICES once they exceed uint32 capacity.
-///
-/// Two independent width knobs (CMake options of the same name):
-///   APXCHOL_64BIT_EDGE_INDICES -> edge_index = uint64. Needed when the factor
-///       nnz / pool size exceeds 2^32-1 even though the vertex count does not.
-///       com-Orkut's roughly 2.15e9-entry raw factor exceeds signed int32 but
-///       fits the default unsigned edge_index; it does NOT need this option.
-///   APXCHOL_64BIT_NODE_INDICES -> node_index = uint64. Needed for graphs with
-///       more than ~4.29B vertices. Since #edges >= #vertices, a 64-bit node
-///       index implies a 64-bit edge index -- this knob AUTO-WIDENS edges too.
-///
-/// Unsigned-safety rules (the surface is tiny -- audited):
-///   * `npos = (T)-1` is a valid sentinel, but ONLY compared with `==`/`!=`
-///     (never `< 0`, which is always false for unsigned).
-///   * reverse loops use `for (i = n; i-- > 0; )` (or `~i`), never `i >= 0`.
-///   * offsets are added as cumulative non-negative sums (asserted not to wrap);
-///     never `(lo+hi)/2` (use `lo + (hi-lo)/2`) and never a diff that can go < 0.
+/// Unsigned vertex IDs (node_index) and stored-entry offsets (edge_index).
+/// APXCHOL_INDEX_WIDTH selects 32-bit indices (32, default), 64-bit offsets
+/// with 32-bit vertices (64_OFFSETS), or 64-bit indices throughout (64).
+/// Wide offsets support factors and pools exceeding 2^32-1 stored entries
+/// without doubling their vertex-index arrays.
 
 #include <cstdint>
 #include <stdexcept>
@@ -91,7 +68,7 @@ inline constexpr std::uint64_t splitmix64_mix(std::uint64_t z) noexcept {
     throw std::length_error(std::string("apxchol: ") + where
         + ": an edge_index counter exceeded its "
         + std::to_string(sizeof(edge_index) * 8) + "-bit capacity. "
-          "Rebuild with -DAPXCHOL_64BIT_EDGE_INDICES=ON.");
+          "Rebuild with -DAPXCHOL_INDEX_WIDTH=64_OFFSETS or 64.");
 }
 
 } // namespace apxchol

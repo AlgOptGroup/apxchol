@@ -87,7 +87,7 @@ jobs:
             cxx: g++-14
             packages: g++-14
             native_arch: 'OFF'
-            cmake_args: -DAPXCHOL_64BIT_NODE_INDICES=ON -DAPXCHOL_POOL_FP32=OFF
+            cmake_args: -DAPXCHOL_INDEX_WIDTH=64 -DAPXCHOL_POOL_FP32=OFF
           - name: Clang 18, portable
             cc: clang-18
             cxx: clang++-18
