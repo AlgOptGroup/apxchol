@@ -342,10 +342,10 @@ TEST_F(SolverArchive, InvalidOptionsFailBeforeOpeningAnArchive) {
 }
 
 TEST_F(SolverArchive, RejectsMetadataAndIndexOverflow) {
-    for (const auto& [index, value] : std::array<std::pair<std::size_t, std::uint64_t>, 6>{{
+    for (const auto& item : std::array<std::pair<std::size_t, std::uint64_t>, 6>{{
         {0, 99}, {1, UINT64_MAX}, {2, 2}, {3, UINT64_MAX}, {4, UINT64_MAX}, {6, UINT64_MAX}}}) {
-        const auto path = change(("meta-" + std::to_string(index)).c_str(), metadata,
-                                 [&](auto& a) { a.value(index, value); });
+        const auto path = change(("meta-" + std::to_string(item.first)).c_str(), metadata,
+                                 [&](auto& a) { a.value(item.first, item.second); });
         EXPECT_THROW(load_solver(path), std::invalid_argument);
     }
     const auto bad_row = change("bad-row", a_inner, [](auto& a) { a.value(0, UINT32_MAX); });
