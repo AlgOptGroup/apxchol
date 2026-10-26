@@ -10,7 +10,7 @@ also runs the examples. Run one test while iterating with
 `./build/tests/unit_tests --gtest_filter='FactorizeTest.PermutationIsValid'`.
 
 CI builds `tests/cmake_consumer` to check the
-[CMake consumer](README.md#use-from-cmake) requirements with warnings as errors.
+[CMake consumer](docs/building.md#use-from-cmake) requirements with warnings as errors.
 The [workflow](.github/workflows/ci.yml) defines compiler and backend coverage;
 the CUDA job compiles without running device tests.
 

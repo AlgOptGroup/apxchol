@@ -1,0 +1,143 @@
+# Using the solver
+
+## The matrix you supply
+
+Pass the sparse matrix `A` in the equation `A x = b`.
+apxchol is designed for graph Laplacians and SDDM matrices: symmetric,
+diagonally dominant matrices with nonpositive off-diagonal entries.
+
+For a graph with nonnegative edge weights, the adjacency matrix stores those
+weights. Its Laplacian is
+`L = D - Adj`, where `D` contains the sums of incident weights.
+Use `apxchol.laplacian(Adj)` in Python or `apxchol_laplacian(Adj)` in
+MATLAB/Octave to form it. A Laplacian RHS must sum to zero on each connected
+component; the solution is defined up to a constant on each component.
+
+Python accepts SciPy sparse matrices and arrays. It converts them to CSC
+(compressed sparse column) format, sorts row indices and combines duplicate
+entries. Supply the full symmetric matrix, not just one triangle. Format conversion
+does not invent missing symmetric entries.
+
+The CLI can detect adjacency input and construct its Laplacian. Use
+`--input-kind` to choose explicitly. Library bindings treat the input as `A`
+and do not guess whether it is an adjacency matrix.
+
+## Choosing CPU or GPU
+
+The `CPU` build contains the CPU solver. `CUDA` and `METAL` builds add their
+GPU backend and retain CPU support. Python wheels include CPU plus the GPU
+backend for their platform; they work without a GPU.
+
+| Request | Behavior |
+|---|---|
+| `auto` | Select a compatible available backend before setup; may prefer CPU for small inputs |
+| `cpu` | Run setup and solves on CPU |
+| `gpu` | Run setup and solves on the compiled GPU backend; fail if the device, input or options are unsupported |
+
+Automatic selection is not a guarantee of the fastest backend for every
+matrix. Once selected, the backend stays fixed. An execution error is
+reported rather than silently retrying on another backend.
+
+Use Python's `backend` argument, C++ `solve_options.backend`, or CLI
+`--backend`. Python's `solver.backend` and native solve results report the
+selected backend. The MATLAB/Octave binding currently uses CPU only.
+
+### Native GPU input and options
+
+For direct C++ input, GPU setup needs compressed CSC storage: column offsets
+must cover only stored entries, row indices within each column must be sorted
+and unique, and every stored off-diagonal `(i, j)` needs its matching `(j, i)`.
+GPU setup also requires 32-bit vertex indices.
+
+CPU setup supports custom partitioners and eliminators. CUDA setup supports
+`block_greedy`, natural residual peeling, and GKS or trace-cycle sampling;
+exact-clique, exact-core and double-cycle overrides require CPU construction.
+Metal setup supports the default `block_greedy`/GKS options and FP32 graph
+weights. See [precision limits](precision.md#apple-metal-pcg) for Metal ranges.
+
+These construction restrictions do not prevent using an explicitly supplied
+host factor with a GPU solver. See [factor handoff](extending.md#reusing-a-custom-factor).
+
+## Reuse, batches and initial guesses
+
+Construct a solver once, then call `solve` for each new RHS. A matrix RHS
+represents several independent systems with the same `A`; pass the columns
+together to use native batching. This reuses the factor and shares work across
+columns.
+
+A **warm start** is an initial guess `x0`, often the solution of a related
+system. Without one, the solver starts from zero. A useful guess can reduce
+iterations; a poor guess need not help. Python and C++ support vector and
+matrix initial guesses. See the [Python examples](../python/README.md).
+
+For C++:
+
+```cpp
+#include "apxchol.h"
+apxchol::solver solver(A);
+auto result = solver.solve(b, 1e-8);
+// Negative tolerance/budget arguments keep this solver's defaults.
+auto warm = solver.solve(b2, -1, -1, &result.x);
+Eigen::MatrixXd X(B.rows(), B.cols());
+auto batch = solver.solve(B, X);
+```
+
+One-shot `apxchol::solve(A, b)` uses the same backend selection. For explicit
+CPU execution, set `solve_options.backend = solve_backend::cpu`. Use
+`cpu_solver` only when you need its direct `preconditioner()` accessor;
+see the [C++ reference](reference/cpp.md#cpu-specific-owner).
+
+## Convergence and cost
+
+Built-in solves verify the returned solution against the original matrix and
+RHS. `result.residual` reports that relative residual, and `result.converged`
+tells whether it meets the requested tolerance. Inspect this flag even when
+the call returns without an exception.
+
+This check is always part of the solve, including when timing collection is
+disabled. It usually costs one additional sparse matrix–vector product and
+norm reductions per RHS; trivial exact exits can avoid that work. Its cost is
+included in reported solve time.
+
+A failed final check does not trigger more iterations or a different backend.
+The [precision contract](precision.md) explains where each backend checks the
+residual and how rounding affects it.
+
+## Using another iterative solver
+
+apxchol's SciPy operator (`solver.aslinearoperator()`) and Eigen-compatible
+preconditioner (`apx_cholesky`, CPU only) let another solver drive the
+iteration. That solver controls its stopping test.
+
+A GPU-backed SciPy operator exchanges host vectors with the device on each
+application. Native `solve` keeps iteration vectors on the GPU, so prefer it
+for GPU workloads unless you need another outer solver.
+
+## Keeping and exporting a factor
+
+Exported factor values are FP32. Internal triangular-solve storage can be
+FP16 or FP32 independently; see [storage choices](precision.md).
+
+C++ defaults to releasing factor values after preparation. Set
+`keep_factor_values=true` when you need them later through `solver.factor()`.
+Python's reusable solver instead defaults to `keep_factor=True`, enabling
+`chol()`, `L` and `D` exports. Set it to `False` to save memory; the permutation
+`P` remains available.
+
+CPU-, CUDA- and Metal-built factors can be reused through
+[C++ factor handoff](extending.md#reusing-a-custom-factor). Automatic adoption
+uses CPU; request `solve_backend::gpu` to upload the factor to a GPU.
+
+There is currently no built-in factor file format, save/load API, or Python
+factor-import API. Solving still needs the original matrix `A`.
+
+## CPU threads
+
+Set Python `num_threads`, C++ `solve_options.num_threads`, or CLI `--threads`
+to cap CPU parallelism. Zero inherits the caller's OpenMP setting; a positive
+value overrides it for the operation and is restored afterward. Small
+workloads may use fewer threads.
+
+The setting also covers CPU work in a GPU build; it does not control GPU
+threadgroups. More CPU threads need not be faster. To choose which cores run those CPU workers,
+see [thread placement](../benchmarks/README.md#thread-placement).

@@ -41,11 +41,13 @@ orchestrator applies the buffered edges after the parallel elimination phase.
 It retains responsibility for factor-column construction.
 
 One const eliminator instance is shared across concurrent calls. Each call
-must remain single-threaded; use local or thread-local scratch and a local
-random generator seeded from `seed`. `apxchol::random_stream{seed}` provides
-`next()` and `next_unit()`. Shared mutable RNG state makes results depend on
-scheduling. A per-elimination seed does not guarantee equal factors across
-thread counts: parallel accumulation and the selected order can differ.
+must remain single-threaded; use local or thread-local scratch and a random
+generator seeded from `seed`. `apxchol::random_stream{seed}` provides
+`next()` and `next_unit()`.
+
+Shared mutable RNG state makes results depend on scheduling. Even with local
+random streams, factors can differ across thread counts because parallel
+accumulation and the selected order can differ.
 
 `as_eliminator(lambda)` adapts a matching callable. An instance is passed by
 const reference, allowing immutable configuration. The built-in
@@ -117,9 +119,16 @@ auto result = solver.solve(b);
 ```
 
 An explicit GPU request uploads the factor for CUDA or Metal solves, without
-factorizing again. Automatic adoption stays on CPU. `cpu_solver` and
-`apxchol::apx_cholesky::set_factor` remain CPU-only alternatives. This is an
-in-memory handoff, not a serialized-factor API.
+factorizing again. Automatic adoption stays on CPU. The original matrix `A`
+is still needed for PCG and residual checks.
+
+The factor may come from CPU construction or from a GPU solver created with
+`keep_factor_values=true`: pass its `solver.factor()` to the constructor above.
+The destination rebuilds its own triangular-solve storage. There is no built-in
+save/load format; this handoff is in memory.
+
+`apxchol::apx_cholesky::set_factor` also accepts a factor for use with an
+Eigen iterative solver. That adapter always applies it on CPU.
 
 A `factorization` holds CSC factor columns
 (diagonal first), permutation with `perm[original] = elimination_position`,

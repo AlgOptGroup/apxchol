@@ -10,7 +10,8 @@ from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 GUIDES = ["README.md", "python/README.md", "octave/README.md", "CONTRIBUTING.md",
-          "benchmarks/README.md", "docs/api.md", "docs/precision.md", "docs/extending.md"]
+          "benchmarks/README.md", "docs/api.md", "docs/precision.md", "docs/extending.md",
+          "docs/usage.md", "docs/building.md"]
 PAGES = {name: name for name in GUIDES}
 PAGES.update({"README.md": "_readme.md", "docs/index.md": "index.md",
               "docs/reference/cpp.md": "docs/reference/cpp.md",
@@ -32,6 +33,16 @@ def main():
             def link(match):
                 href = match.group(1)
                 parsed = urlsplit(href)
+                # The Python package README also serves as the PyPI description.
+                # Its absolute site links should stay local in HTML previews.
+                site = "https://algoptgroup.github.io/apxchol/"
+                if href.startswith(site):
+                    path = parsed.path.removeprefix("/apxchol/")
+                    page = path.removesuffix(".html") + ".md" if path else "index.md"
+                    if page not in PAGES.values():
+                        raise ValueError(f"Unknown documentation page: {href}")
+                    url = os.path.relpath(source / page, (source / destination).parent)
+                    return "](" + url + ("#" + parsed.fragment if parsed.fragment else "") + ")"
                 if parsed.scheme or parsed.netloc or not parsed.path:
                     return match.group(0)
                 target = (ROOT / original).parent / parsed.path

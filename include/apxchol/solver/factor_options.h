@@ -14,6 +14,7 @@
 
 namespace apxchol {
 
+/// CPU triangular-solve scheduling: choose automatically or use levels only.
 enum class cpu_sptrsv_schedule { automatic, levels };
 
 namespace detail {
@@ -61,16 +62,14 @@ inline constexpr double degree_quantile_or_host_default(double q) noexcept {
 
 /// Selection options for built-in partitioners, passed as opts.partition.
 struct partition_options {
-    /// Admit the lowest-degree quantile of active vertices as IS candidates,
-    /// including ties at the cutoff. Values in (0,1) replace degree_multiplier;
-    /// 0 uses that multiplier instead. The -1 sentinel selects 0.2 on CPU/Metal
-    /// or 0.5 on CUDA, whose wider rounds amortize device launch overhead.
-    /// Metal requires a quantile in (0,1) and rounds the cutoff up to its
-    /// degree bucket's upper bound. CPU/CUDA preserve explicit values.
+    /// Lowest-degree fraction admitted as selection candidates, including ties.
+    /// Use -1 for the backend default (CPU/Metal 0.2, CUDA 0.5), or a value in
+    /// [0, 1). Zero uses degree_multiplier instead.
+    /// Metal requires (0, 1) and rounds the cutoff to its degree-bucket boundary.
     double degree_quantile = degree_quantile_by_route;
 
-    /// Fallback IS degree cap when degree_quantile == 0:
-    /// threshold = degree_multiplier × avg_degree.
+    /// Positive degree cap multiplier when degree_quantile is zero:
+    /// admit degrees at most degree_multiplier times the average degree.
     double degree_multiplier = 2.0;
 
     /// Prefer lower-degree candidates in conflicts. block_greedy breaks degree
@@ -79,58 +78,60 @@ struct partition_options {
 };
 
 struct factor_options {
+    /// Seed for factor construction; see the precision guide for repeatability limits.
     unsigned seed = 42;
-    /// Matrix-input diagonal regularization as a fraction of each diagonal; zero disables it.
+    /// Nonnegative diagonal regularization, as a fraction of each input diagonal.
+    /// Zero disables it; only the preconditioner changes.
     double regularization = 0;
-    /// Matrix-input lumping ceiling; zero rejects positive off-diagonals.
+    /// Allowed positive off-diagonal mass fraction in [0, 1]. Zero rejects it.
+    /// Accepted positive entries are moved to the preconditioner's diagonal.
     double lump_max_mass = kDefaultLumpMassCeiling;
     /// Triangular-solve storage; construction arithmetic and exports are unchanged.
     /// automatic uses the backend default (CPU/Metal fp32, CUDA fp16).
     factor_storage_type factor_storage = factor_storage_type::automatic;
+    /// CPU triangular-solve schedule; automatic chooses the installed schedule.
     cpu_sptrsv_schedule cpu_schedule = cpu_sptrsv_schedule::automatic;
     /// Relative off-diagonal drop threshold in [0, 1]; zero disables dropping.
     double drop_tolerance = 1e-4;
+    /// Print setup and solve diagnostics.
     bool verbose = false;
-    partition_options partition{};   // selection options (see above)
-    /// Minimum yield for scan-based selectors (selected regions / degree-eligible
-    /// vertices) before BK handoff; 0 disables yield-based handoff.
-    /// Zero progress always hands off.
-    /// Nonempty selections are retained within twice the handoff threshold, or
-    /// when their size reaches omp_threshold. For residuals larger than four
-    /// handoff thresholds with average degree at least that threshold, use
-    /// max(base, min(0.15, 3*base)); sparse/small residuals use the base value.
+    /// Candidate selection controls for the chosen partitioner.
+    partition_options partition{};
+    /// Base selection-yield threshold before switching to Baumann-Kyng rounds.
+    /// Measured as selected regions divided by degree-eligible vertices; dense
+    /// residuals may use a higher threshold. Zero disables yield-based handoff,
+    /// but a round with no progress always hands off.
     double min_is_fraction = 0.05;
-    /// OpenMP work threshold for selection and elimination. Smaller rounds size
-    /// their team from selected pivots and live-degree work. Changing this may
-    /// change selection order and the factor across thread counts.
+    /// Work threshold for parallel selection and elimination. Smaller rounds
+    /// may use fewer threads; changing this can change the constructed factor.
     size_t omp_threshold = 2000;
-    std::string is_select = "block_greedy";  // Partitioner name (runtime dispatch via dispatch_partitioner)
+    /// Built-in partitioner name used by runtime dispatch.
+    std::string is_select = "block_greedy";
 
-    /// After the main selector hands off, run BK rounds until the residual
-    /// reaches this size, then use residual_peel. SIZE_MAX selects the
-    /// partitioner's default: 500 for block_greedy and priority_greedy.
-    /// Keeping the default natural-order serial tail small limits fill.
+    /// Residual size at which Baumann-Kyng rounds switch to residual_peel.
+    /// SIZE_MAX uses the partitioner's default: 500 for block_greedy and
+    /// priority_greedy. A small serial tail limits fill.
     size_t parallel_residual_threshold = std::numeric_limits<size_t>::max();
 
     /// Serial pivot order: natural visits the supplied order; min_degree uses
     /// a lazy heap (not exact current minimum degree); bk_serial samples
     /// sqrt(active) vertices with replacement and picks the lowest live degree.
     residual_peel_strategy residual_peel = residual_peel_strategy::natural;
-    /// Emit the exact Schur clique for degrees at most this value; 0 disables
-    /// it. This removes sampling variance at the cost of d(d-1)/2 fill edges,
-    /// so it is intended for small degrees. GPU-owned setup requires 0.
+    /// Emit an exact Schur clique for degrees at most this value; zero disables
+    /// it. Intended for small degrees because it adds d(d-1)/2 edges.
+    /// GPU factor construction requires zero.
     size_t exact_clique_max_degree = 0;
 
-    /// Trace-cycle core rules for h near-equal heavy neighbors. For
-    /// h <= exact_core_max_h, emit the exact core clique; otherwise, when
-    /// h >= double_cycle_min_h > 0, emit two independent cycles at half weight.
-    /// Both preserve expected pair weights; 0 disables the corresponding rule.
-    /// The exact-core sentinel resolves to 4 on CPU, balancing fill against
-    /// solve cost, or 0 for GPU-owned setup. Other host samplers ignore these
-    /// rules, but GPU-owned setup requires them off regardless of sampler.
+    /// Trace-cycle exact-clique limit for near-equal heavy neighbors; zero
+    /// disables it. exact_core_by_route selects 4 on CPU or 0 on GPU.
+    /// Other CPU samplers ignore it; GPU construction requires zero.
     size_t exact_core_max_h = exact_core_by_route;
+    /// Trace-cycle rule: with at least this many near-equal heavy neighbors, emit
+    /// two half-weight cycles unless the exact-core rule applies. Zero disables
+    /// it; GPU construction requires zero. Expected pair weights are preserved.
     size_t double_cycle_min_h = 0;
 
+    /// Clique-sampling algorithm for factor construction.
     clique_sampler sampler = clique_sampler::gks;
 
 
