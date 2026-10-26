@@ -67,8 +67,9 @@ columns.
 
 A **warm start** is an initial guess `x0`, often the solution of a related
 system. Without one, the solver starts from zero. A useful guess can reduce
-iterations; a poor guess need not help. Python and C++ support vector and
-matrix initial guesses. See the [Python examples](../python/README.md).
+iterations; a poor guess need not help. C++, Python and MATLAB/Octave support
+vector and matrix initial guesses. See the [Python](../python/README.md) and
+[MATLAB/Octave](../octave/README.md) examples.
 
 For C++:
 
@@ -86,6 +87,19 @@ One-shot `apxchol::solve(A, b)` uses the same backend selection. For explicit
 CPU execution, set `solve_options.backend = solve_backend::cpu`. Use
 `cpu_solver` only when you need its direct `preconditioner()` accessor;
 see the [C++ reference](reference/cpp.md#cpu-specific-owner).
+
+## Binding capabilities
+
+The bindings reuse the native solver, convergence checks and option defaults.
+Their language-specific helpers differ:
+
+| Capability | Python | MATLAB/Octave |
+|---|---|---|
+| Reusable factor, scalar and batched solves/apply | Yes | Yes |
+| Initial guess, per-call tolerance and iteration budget | Yes | Yes |
+| GPU setup and solve | CUDA or Metal when built and available | CPU only |
+| Factor export | FP32 values when retained | Not exposed |
+| External iterative solver | SciPy `LinearOperator` | Function handle for `pcg` |
 
 ## Convergence and cost
 
