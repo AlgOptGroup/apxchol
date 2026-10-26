@@ -14,10 +14,10 @@ conjugate gradients (PCG) to compute the solution.
 
 ## Quick start
 
-This page follows the development branch. Use a
-[source installation](docs/building.md#python-source-installation) for a matching build.
-For the latest published package and its API, see
-[PyPI](https://pypi.org/project/apxchol/).
+This page follows the development branch. For this SciPy-based example, use a
+[source installation](docs/building.md#python-source-installation) with the `scipy` extra.
+For the latest published package, run `python -m pip install "apxchol[scipy]"`;
+see [PyPI](https://pypi.org/project/apxchol/) for that version's API.
 
 ```python
 import apxchol
@@ -44,11 +44,11 @@ requires neither the CUDA Toolkit nor Homebrew.
 
 | Wheel builds | Minimum platform | Included backends |
 |---|---|---|
-| CPython 3.11–3.15, Linux | x86-64-v2 CPU, glibc 2.28 | CPU + CUDA |
-| CPython 3.11–3.15, macOS | macOS 15, Apple silicon | CPU + Metal |
+| CPython 3.11–3.15 / PyPy 7.3.23, Linux | x86-64-v2 CPU, glibc 2.28 | CPU + CUDA |
+| CPython 3.11–3.15 / PyPy 7.3.23, macOS | macOS 15, Apple silicon | CPU + Metal |
 
-PyPy 7.3.23 (Python 3.11, `pp73`) wheels support the same platforms and
-backends. On PyPy, use the [NumPy-only interface](python/README.md#numpy-only-input).
+PyPy wheels use Python 3.11 (`pp73`). On PyPy, use the
+[NumPy-only interface](python/README.md#numpy-only-input).
 
 `solver.backend` reports which backend was selected. Use `backend="cpu"`
 or `backend="gpu"` in `factorize` to choose explicitly.
