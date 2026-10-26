@@ -1,0 +1,66 @@
+name: Native SDK archives
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            device: CPU
+            name: linux-x86_64-cpu
+          - runner: ubuntu-latest
+            device: CUDA
+            name: linux-x86_64-cuda
+          - runner: macos-15
+            device: METAL
+            name: macos-arm64-metal
+    env:
+      IMAGE: quay.io/pypa/manylinux_2_28_x86_64@sha256:53390351aeb4688114b02c36a23b3e6ce1166ee9b7afc5df1a4f776354fc764c
+      SDK_DEVICE: ${{ matrix.device }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux install, archive and consumer
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          docker run --rm --cpus=2 --memory=8g --memory-swap=8g -w /project \
+            -v "$PWD:/project" -e SDK_DEVICE "$IMAGE" timeout 1500 bash -euc '
+              export CC=gcc CXX=g++
+              export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=/project
+              if test "$SDK_DEVICE" = CUDA; then
+                dnf install -y dnf-plugins-core
+                dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
+                dnf install -y cuda-nvcc-13-4 cuda-cudart-devel-13-4
+                export CUDACXX=/usr/local/cuda-13.4/bin/nvcc CUDAHOSTCXX=g++
+              fi
+              bash .github/scripts/build-sdk.sh "$SDK_DEVICE"
+              /opt/python/cp311-cp311/bin/python tests/check_sdk_archive.py dist/*.tar.gz tests/cmake_install cpu'
+          if test "$SDK_DEVICE" = CPU; then
+            docker run --rm --network=none --cpus=2 --memory=4g --read-only \
+              --tmpfs /tmp:rw,size=512m -v "$PWD/dist:/artifacts:ro" \
+              -v "$PWD/tests/check_sdk_archive.py:/check.py:ro" \
+              -v "$PWD/tests/cmake_install:/consumer:ro" "$IMAGE" \
+              timeout 180 /opt/python/cp311-cp311/bin/python /check.py /artifacts/*.tar.gz /consumer cpu
+          fi
+      - name: macOS install, archive and consumer
+        if: runner.os == 'macOS'
+        env:
+          CC: clang
+          CXX: clang++
+          MACOSX_DEPLOYMENT_TARGET: '15.0'
+        run: |
+          brew install libomp
+          bash .github/scripts/build-sdk.sh METAL
+          python3 tests/check_sdk_archive.py dist/*.tar.gz tests/cmake_install cpu gpu
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-${{ matrix.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error

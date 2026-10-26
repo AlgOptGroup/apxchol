@@ -24,7 +24,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 - `APXCHOL_INDEX_WIDTH=32|64_EDGES|64` selects vertex/offset widths of 32/32, 32/64 or 64/64 bits; the default is `32`.
 - `cmake/apxchol_version.cmake` is the version source for native builds and Python packages. Release tags must be `v` followed by that version.
 - `cmake/core` builds just the native library and defaults to portable code (`APXCHOL_NATIVE_ARCH=OFF`); root and local Python builds default to native tuning. Source consumers include `cmake/apxchol_core.cmake` and call `apxchol_add_core()` at their top level; installed consumers use `find_package(apxchol CONFIG)`. Both link `apxchol::core`; installed consumers must use the same OpenMP runtime family.
-- `.github/scripts/build-sdk.sh` packages the shared native install with portable tuning, bundled Eigen and private static libzip; `tests/cmake_install` checks extracted SDK save/load consumers.
+- `.github/scripts/build-sdk.sh` packages the shared native install with portable tuning, bundled Eigen and private static libzip; `tests/check_sdk_archive.py` extracts it and builds the `tests/cmake_install` save/load consumer.
 - Native SDK installs include Eigen headers when apxchol fetched them; builds using an existing Eigen package retain that dependency. Python wheels do not install the SDK.
 - Portable save/load: `solver/archive.h` and `docs/serialization.md`; files contain original CSC operator data and retained canonical factors. The codec uses libzip 1.12.1+ and zlib; Python wheels fetch a minimal static libzip and include its notice.
 - Public API scope and compatibility: `docs/api.md`. Precision and storage: `docs/precision.md`. Extension seams: `docs/extending.md`.
