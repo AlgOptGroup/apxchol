@@ -73,24 +73,65 @@ protected:
     static std::size_t data_offset(const std::vector<unsigned char>& bytes) {
         return 10 + bytes[8] + 256 * bytes[9];
     }
-    void expect_operator(const std::filesystem::path& path, const Sparse& expected) {
+    static std::vector<unsigned char> entry_bytes(const std::filesystem::path& path, const char* name) {
         int error = 0;
         std::unique_ptr<zip_t, decltype(&zip_discard)> file(zip_open(path.c_str(), ZIP_RDONLY, &error), &zip_discard);
-        ASSERT_TRUE(file);
+        if (!file) throw std::runtime_error("fixture open failed");
+        zip_stat_t stat;
+        if (zip_stat(file.get(), name, 0, &stat) || stat.size > 16 * 1024 * 1024)
+            throw std::runtime_error("fixture entry unavailable or oversized");
+        std::vector<unsigned char> bytes(stat.size);
+        std::unique_ptr<zip_file_t, decltype(&zip_fclose)> entry(zip_fopen(file.get(), name, 0), &zip_fclose);
+        if (!entry || zip_fread(entry.get(), bytes.data(), bytes.size()) != static_cast<zip_int64_t>(bytes.size()))
+            throw std::runtime_error("fixture entry read failed");
+        return bytes;
+    }
+    static void expect_operator(const std::filesystem::path& path, const Sparse& expected) {
         const auto compare = [&](const char* name, const void* data, std::size_t size) {
-            zip_stat_t stat;
-            ASSERT_EQ(zip_stat(file.get(), name, 0, &stat), 0);
-            std::vector<unsigned char> bytes(stat.size);
-            std::unique_ptr<zip_file_t, decltype(&zip_fclose)> entry(zip_fopen(file.get(), name, 0), &zip_fclose);
-            ASSERT_TRUE(entry);
-            ASSERT_EQ(zip_fread(entry.get(), bytes.data(), bytes.size()), static_cast<zip_int64_t>(bytes.size()));
+            const auto bytes = entry_bytes(path, name);
+            ASSERT_GE(bytes.size(), 10);
             const auto offset = data_offset(bytes);
+            ASSERT_GE(bytes.size(), offset);
             ASSERT_EQ(bytes.size() - offset, size);
             EXPECT_EQ(std::memcmp(bytes.data() + offset, data, size), 0);
         };
         compare("A_indptr.npy", expected.outerIndexPtr(), (expected.cols() + 1) * sizeof(int));
         compare("A_indices.npy", expected.innerIndexPtr(), expected.nonZeros() * sizeof(int));
         compare("A_data.npy", expected.valuePtr(), expected.nonZeros() * sizeof(double));
+    }
+    static void check_solve_modes(const Sparse& input, solver& restored, bool laplacian, int& checked_rhs) {
+        for (int width : {1, 4, 16}) {
+            Eigen::MatrixXd B(input.rows(), width), X(input.rows(), width), cold(input.rows(), width);
+            for (int col = 0; col < width; ++col) {
+                for (int row = 0; row < input.rows(); ++row)
+                    B(row, col) = (static_cast<double>((row * 7 + col * 3) % 19) - 9) / 16;
+                if (laplacian) B.col(col).array() -= B.col(col).mean();
+            }
+            for (int phase = 0; phase < 3; ++phase) {
+                Eigen::MatrixXd initial = phase ? Eigen::MatrixXd(cold * (phase == 1 ? 0.5 : 1.0)) : Eigen::MatrixXd::Zero(input.rows(), width);
+                std::vector<solve_result> columns;
+                if (width == 1) {
+                    const Eigen::VectorXd b = B.col(0), x0 = initial.col(0);
+                    columns.push_back(restored.solve(b, 1e-8, phase == 2 ? 0 : 200, phase ? &x0 : nullptr));
+                    X.col(0) = columns.front().x;
+                } else {
+                    const const_matrix_view x0(initial);
+                    columns = restored.solve(B, X, 1e-8, phase == 2 ? 0 : 200, phase ? &x0 : nullptr).columns;
+                }
+                ASSERT_EQ(columns.size(), static_cast<std::size_t>(width));
+                for (int col = 0; col < width; ++col) {
+                    Eigen::VectorXd residual = B.col(col);
+                    for (int j = 0; j < input.cols(); ++j)
+                        for (Sparse::InnerIterator entry(input, j); entry; ++entry)
+                            residual[entry.row()] -= entry.value() * X(j, col);
+                    EXPECT_TRUE(columns[col].converged);
+                    EXPECT_LT(residual.stableNorm() / B.col(col).stableNorm(), 1e-8);
+                    if (phase == 2) EXPECT_EQ(columns[col].iterations, 0);
+                    ++checked_rhs;
+                }
+                if (phase == 0) cold = X;
+            }
+        }
     }
 };
 
@@ -355,38 +396,10 @@ TEST_F(SolverArchive, CpuAndGpuFactorsCrossAdopt) {
                     EXPECT_EQ(std::memcmp(restored.factor().L.vals_.data(), F.L.vals_.data(), F.L.vals_.size() * sizeof(float)), 0);
                     EXPECT_EQ(restored.factor().perm, F.perm);
                     EXPECT_EQ(restored.factor().sddm, F.sddm);
-                    for (int width : {1, 4, 16}) {
-                        Eigen::MatrixXd B(input.rows(), width), X(input.rows(), width), cold(input.rows(), width);
-                        for (int col = 0; col < width; ++col) {
-                            for (int row = 0; row < input.rows(); ++row)
-                                B(row, col) = (static_cast<double>((row * 7 + col * 3) % 19) - 9) / 16;
-                            if (laplacian) B.col(col).array() -= B.col(col).mean();
-                        }
-                        for (int phase = 0; phase < 3; ++phase) {
-                            Eigen::MatrixXd initial = phase ? Eigen::MatrixXd(cold * (phase == 1 ? 0.5 : 1.0)) : Eigen::MatrixXd::Zero(input.rows(), width);
-                            std::vector<solve_result> columns;
-                            if (width == 1) {
-                                const Eigen::VectorXd b = B.col(0), x0 = initial.col(0);
-                                columns.push_back(restored.solve(b, 1e-8, phase == 2 ? 0 : 200, phase ? &x0 : nullptr));
-                                X.col(0) = columns.front().x;
-                            } else {
-                                const const_matrix_view x0(initial);
-                                columns = restored.solve(B, X, 1e-8, phase == 2 ? 0 : 200, phase ? &x0 : nullptr).columns;
-                            }
-                            ASSERT_EQ(columns.size(), static_cast<std::size_t>(width));
-                            for (int col = 0; col < width; ++col) {
-                                Eigen::VectorXd residual = B.col(col);
-                                for (int j = 0; j < input.cols(); ++j)
-                                    for (Sparse::InnerIterator entry(input, j); entry; ++entry)
-                                        residual[entry.row()] -= entry.value() * X(j, col);
-                                EXPECT_TRUE(columns[col].converged);
-                                EXPECT_LT(residual.stableNorm() / B.col(col).stableNorm(), 1e-8);
-                                if (phase == 2) EXPECT_EQ(columns[col].iterations, 0);
-                                ++checked_rhs;
-                            }
-                            if (phase == 0) cold = X;
-                        }
-                    }
+                    ASSERT_EQ(restored.factor().rounds.size(), F.rounds.size());
+                    for (std::size_t i = 0; i < F.rounds.size(); ++i)
+                        EXPECT_EQ(restored.factor().rounds[i].is_size, F.rounds[i].is_size);
+                    check_solve_modes(input, restored, laplacian, checked_rhs);
                     if (target == solve_backend::gpu) {
                         const auto adopted = directory / ("adopted-" + std::to_string(resaves++) + ".npz");
                         save_solver(adopted, restored); expect_operator(adopted, input);
