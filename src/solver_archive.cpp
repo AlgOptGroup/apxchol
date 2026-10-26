@@ -1,4 +1,4 @@
-#include "apxchol/solver/archive.h"
+#include "solver_archive_internal.h"
 #include "apxchol/solver/detail/factor_validation.h"
 
 #include <zip.h>
@@ -30,6 +30,11 @@ namespace {
 
 [[noreturn]] void invalid(const std::string& message) {
     throw std::invalid_argument("solver archive: " + message);
+}
+
+void check_path(const std::filesystem::path& path) {
+    if (path.native().find('\0') != std::filesystem::path::string_type::npos)
+        invalid("path contains a null character");
 }
 
 void zip_error(zip_t* file, const std::string& operation) {
@@ -337,9 +342,8 @@ template<class T> void require_extent(const array_info& info, std::uint64_t expe
 
 } // namespace
 
-void save_solver(const std::filesystem::path& path, const Eigen::SparseMatrix<double>& A,
-                 const factorization& F) {
-    detail::validate_adopted_factor(F);
+void detail::save_solver_data(const std::filesystem::path& path, const Eigen::SparseMatrix<double>& A,
+                              const factorization& F, Eigen::Index input_entries) {
     if (A.rows() != static_cast<Eigen::Index>(F.L.rows())) invalid("operator/factor dimension mismatch");
     Eigen::SparseMatrix<double> compressed;
     const auto* op = &A;
@@ -349,8 +353,8 @@ void save_solver(const std::filesystem::path& path, const Eigen::SparseMatrix<do
     const auto n = static_cast<std::size_t>(op->rows());
     const auto annz = static_cast<std::size_t>(op->nonZeros());
     if (F.lumped_offdiag < 0) invalid("negative lumped entry count");
-    const std::array<std::uint64_t, 6> metadata{1, n, F.sddm, annz, F.L.vals_.size(),
-        static_cast<std::uint64_t>(F.lumped_offdiag)};
+    const std::array<std::uint64_t, 7> metadata{1, n, F.sddm, annz, F.L.vals_.size(),
+        static_cast<std::uint64_t>(F.lumped_offdiag), static_cast<std::uint64_t>(input_entries)};
     std::vector<std::uint64_t> rounds;
     rounds.reserve(F.rounds.size());
     for (const auto& round : F.rounds) rounds.push_back(round.is_size);
@@ -367,17 +371,25 @@ void save_solver(const std::filesystem::path& path, const Eigen::SparseMatrix<do
     archive.finish();
 }
 
+void save_solver(const std::filesystem::path& path, const solver& owner) {
+    check_path(path);
+    detail::solver_archive_access::save(path, owner);
+}
+
 solver load_solver(const std::filesystem::path& path, const solve_options& options) {
+    detail::validate_solve_options(options);
+    check_path(path);
     reader archive(path);
     const auto metadata_info = archive.inspect("apxchol.npy");
-    require_extent<std::uint64_t>(metadata_info, 6);
-    std::array<std::uint64_t, 6> metadata{};
+    require_extent<std::uint64_t>(metadata_info, 7);
+    std::array<std::uint64_t, 7> metadata{};
     archive.read(metadata_info, std::span<std::uint64_t>(metadata));
-    const auto [version, n, sddm, annz, lnnz, lumped] = metadata;
+    const auto [version, n, sddm, annz, lnnz, lumped, input_entries] = metadata;
     if (version != 1) invalid("unsupported schema version");
     if (n == 0 || n > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
         n > std::numeric_limits<node_index>::max() || sddm > 1 ||
         annz > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
+        input_entries > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
         lnnz > std::numeric_limits<edge_index>::max() ||
         lumped > static_cast<std::uint64_t>(std::numeric_limits<Eigen::Index>::max())) invalid("dimensions do not fit this build");
     const auto ao = archive.inspect("A_indptr.npy"), ai = archive.inspect("A_indices.npy"), av = archive.inspect("A_data.npy");
@@ -413,7 +425,9 @@ solver load_solver(const std::filesystem::path& path, const solve_options& optio
         if (count > n) invalid("invalid elimination round size");
         F.rounds.push_back({0, static_cast<std::size_t>(count), std::numeric_limits<double>::quiet_NaN(), 0, 0});
     }
-    return solver(A, std::move(F), options);
+    solver restored(A, std::move(F), options);
+    detail::solver_archive_access::restore_input_entries(restored, static_cast<Eigen::Index>(input_entries));
+    return restored;
 }
 
 } // namespace apxchol

@@ -7,6 +7,7 @@
 #include <memory>
 
 namespace apxchol {
+namespace detail { struct solver_archive_access; }
 
 inline constexpr double default_tol      = 1e-8;
 inline constexpr int    default_max_iter = 200;
@@ -86,6 +87,7 @@ Eigen::VectorXd generate_test_rhs(Eigen::Index n);
 /// needed. Setup and solves stay on CPU, including in GPU-enabled builds.
 /// The optional checkpoint receives setup timings and is not retained.
 class cpu_solver {
+    friend struct detail::solver_archive_access;
 public:
     explicit cpu_solver(const Eigen::SparseMatrix<double>& L,
                         const solve_options& opts = {},
@@ -187,6 +189,7 @@ private:
 /// Every solve verifies the returned residual against the original operator/RHS.
 /// Supplied factors use CPU in automatic mode; an explicit GPU request uploads them.
 class solver {
+    friend struct detail::solver_archive_access;
 public:
     explicit solver(const Eigen::SparseMatrix<double>& A,
                     const solve_options& opts = {}, checkpoint* cp = nullptr);
