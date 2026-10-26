@@ -1,7 +1,7 @@
-# Wheels-only PyPI publishing (no sdist — python/CMakeLists.txt references
+# Python wheel and standalone CLI publishing (no sdist — python/CMakeLists.txt references
 # ../src, so the package only builds from a full checkout).
-# Trigger: publishing a GitHub release (or manual dispatch to dry-run the build
-# job). Uses PyPI Trusted Publishing (OIDC), configured on pypi.org under
+# Trigger: publishing a GitHub release (or manual dispatch to dry-run the artifact
+# jobs). Uses PyPI Trusted Publishing (OIDC), configured on pypi.org under
 # "Publishing" with: owner=AlgOptGroup, repo=apxchol,
 # workflow=publish.yml, environment=pypi. No API tokens needed.
 name: publish-pypi
@@ -33,10 +33,14 @@ jobs:
     needs: version
     uses: ./.github/workflows/pypy.yml
 
+  cli:
+    needs: version
+    uses: ./.github/workflows/cli.yml
+
   publish:
     name: upload to PyPI (wheels only)
-    needs: [wheels, pypy]
-    # workflow_dispatch only dry-runs the wheel jobs; uploads happen on a release.
+    needs: [wheels, pypy, cli]
+    # workflow_dispatch only builds artifacts; uploads happen on a release.
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     environment: pypi
@@ -49,3 +53,23 @@ jobs:
           merge-multiple: true
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-cli:
+    needs: [wheels, pypy, cli]
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          merge-multiple: true
+          path: dist
+      - name: Attach CLI archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          (cd dist && sha256sum -c -- *.sha256)
+          gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/*.sha256 --repo "$GITHUB_REPOSITORY"
