@@ -64,8 +64,8 @@ solver; see [integration and factor reuse](docs/usage.md#using-another-iterative
 
 ## Build and run
 
-Standalone [CLI downloads](docs/building.md#download-the-cli) are available for Linux CPU
-and Apple-silicon CPU/Metal; they do not need Python.
+CI builds standalone [CLI archives](docs/building.md#download-the-cli) for Linux CPU
+and Apple-silicon CPU/Metal. New releases attach these downloads; Python is not required.
 
 A source build needs CMake, GCC or Clang with C++23 and OpenMP, and Eigen.
 See [building and installation](docs/building.md) for dependencies, GPU builds

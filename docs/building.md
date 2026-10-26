@@ -16,8 +16,9 @@ CUDA Toolkit nor Homebrew, and every wheel can run on CPU without a GPU.
 
 ## Download the CLI
 
-[GitHub releases](https://github.com/AlgOptGroup/apxchol/releases) provide standalone
-CLI archives. Python is not required.
+Download standalone CLI artifacts from a successful [CI run](https://github.com/AlgOptGroup/apxchol/actions/workflows/ci.yml).
+Unpack the CI artifact ZIP first. New [GitHub releases](https://github.com/AlgOptGroup/apxchol/releases)
+attach the same archives and checksum files directly. Python is not required.
 
 | Archive suffix | Platform | Backends |
 |---|---|---|
