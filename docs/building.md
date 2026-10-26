@@ -14,6 +14,33 @@ Line Tools and `brew install cmake libomp`.
 These are source-build dependencies. Using a Python wheel needs neither the
 CUDA Toolkit nor Homebrew, and every wheel can run on CPU without a GPU.
 
+## Download the CLI
+
+[GitHub releases](https://github.com/AlgOptGroup/apxchol/releases) provide standalone
+CLI archives. Python is not required.
+
+| Archive suffix | Platform | Backends |
+|---|---|---|
+| `linux-x86_64-cpu` | Linux x86-64-v2, glibc 2.28+ | CPU |
+| `macos-arm64-metal` | Apple silicon, macOS 15+ | CPU and Metal |
+
+Download the `.tar.gz` archive and its matching `.sha256` file. Verify the checksum
+with `sha256sum -c <archive>.sha256` on Linux or `shasum -a 256 -c <archive>.sha256`
+on macOS, then extract the archive. Keep its `bin/` and `lib/` directories together:
+
+```bash
+./apxchol-<version>-<platform>/bin/apxchol --help
+./apxchol-<version>-<platform>/bin/apxchol matrix.mtx --rhs rhs.mtx -o solution.mtx
+```
+
+Replace `<version>` and `<platform>` with the downloaded archive's name. OpenMP is
+included; Linux still needs the system C++ and GCC runtimes listed in the archive's
+`README.txt`. `BUILD.json` records source and dependency provenance, and
+`share/licenses` contains redistribution notices. The macOS archive is ad-hoc
+signed, not notarized with an Apple developer identity; Gatekeeper may require
+manual approval. Use a source build where your policy requires notarized binaries.
+The CLI accepts one RHS vector per invocation.
+
 ## Build the CLI and tests
 
 ```bash
@@ -26,7 +53,14 @@ ctest --test-dir build --output-on-failure
 
 The default build is CPU-only. Add `-DAPXCHOL_DEVICE=CUDA` or
 `-DAPXCHOL_DEVICE=METAL` at configuration to include that GPU backend as well.
-The same executable still supports CPU solves.
+The same executable still supports CPU solves. To install only the CLI executable:
+
+```bash
+cmake --install build --component cli --prefix /path/to/prefix
+```
+
+This source installation uses your system runtime libraries. The download archives
+use the separate packaging workflow described in [CONTRIBUTING](../CONTRIBUTING.md#cli-archives).
 
 ## Python source installation
 

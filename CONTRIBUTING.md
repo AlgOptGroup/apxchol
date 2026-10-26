@@ -28,7 +28,36 @@ pytest python/tests
 
 The release version is set in `cmake/apxchol_version.cmake`; native builds and
 Python packages share it. PyPI publication requires a matching `v<version>`
-GitHub release tag. Manually running the publish workflow only builds the wheels.
+GitHub release tag. Manually running the publish workflow builds artifacts without publishing them.
+
+## CLI archives
+
+`.github/workflows/cli.yml` builds Linux CPU and macOS CPU+Metal archives for CI
+and release publishing. Artifact names and version checks use
+`cmake/apxchol_version.cmake`. The reusable jobs upload `cli-*` artifacts; release
+publishing attaches their uniquely named `.tar.gz` and `.tar.gz.sha256` files only
+after both CLI and wheel builds pass. Manual publish runs only build artifacts.
+
+The workflow contains the complete portable build commands. Given such a static
+build with fetched dependencies and the relative install RPATH, package it with:
+
+```bash
+python packaging/cli.py build-cli dist
+python packaging/check_cli_archive.py dist/*.tar.gz "$PWD" "$PWD/build-cli"
+```
+
+The Linux build uses the pinned manylinux image and copies the installed OpenMP
+RPM's license. macOS uses its installed Homebrew OpenMP version and license (or the
+matching upstream license when the bottle omits it). Both include the fetched CLI
+dependency notices and source provenance. Packaging fails on unexpected dynamic
+dependencies. The relocation check verifies help/version, bundled runtime loading
+and independently recomputed residuals; macOS also requires an explicit Metal
+solve with validation layers and denies reads from source/build/runtime paths.
+Linux checks run in a fresh offline container without source or build mounts.
+
+The macOS job runs on macOS 15, builds arm64 and checks ad-hoc signatures. It does
+not use signing credentials or notarization services. Linux CUDA archives are not
+part of this distribution matrix; CUDA remains available through source builds.
 
 ## Documentation
 
