@@ -1,6 +1,7 @@
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
+find_dependency(libzip 1.12.1 CONFIG HINTS "${PACKAGE_PREFIX_DIR}")
 if (NOT @APXCHOL_BUNDLED_EIGEN@)
     find_dependency(Eigen3 3.3 CONFIG)
 endif()

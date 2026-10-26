@@ -1069,6 +1069,7 @@ struct solver::impl {
 #endif
         >;
     owner_type owner;
+    Eigen::Index operator_entries;
     double tol;
     int max_iter;
     int num_threads;
@@ -1081,23 +1082,7 @@ struct solver::impl {
         const detail::thread_budget threads(opts.num_threads);
         if (!opts.collect_timings) cp = nullptr;
         if (A.rows() == 0) throw std::invalid_argument("solver: empty operator");
-        if (F) {
-            if (A.rows() != A.cols() || static_cast<Eigen::Index>(F->L.rows()) != A.rows())
-                throw std::invalid_argument("solver: factorization dimension mismatch");
-            require_operator(A, opts.factor_opts.lump_max_mass);
-            if (!F->sddm) {
-                for (Eigen::Index col = 0; col < A.cols(); ++col) {
-                    double diagonal = 0, positive = 0, degree = 0;
-                    for (Eigen::SparseMatrix<double>::InnerIterator entry(A, col); entry; ++entry)
-                        if (entry.row() == entry.col()) diagonal = entry.value();
-                        else if (entry.value() > 0) positive += entry.value();
-                        else degree -= entry.value();
-                    diagonal += positive; // Match lumping without copying the operator.
-                    if (diagonal - degree > diagonal * 1e-12)
-                        throw std::invalid_argument("a Laplacian factor cannot precondition an SDDM operator");
-                }
-            }
-        }
+        if (F) detail::validate_adopted_operator(A, *F, opts.factor_opts.lump_max_mass);
         if (cp) { cp->descend("setup"); cp->tick(); }
         const auto route = F && opts.backend == solve_backend::automatic
             ? solve_backend::cpu
@@ -1123,7 +1108,8 @@ struct solver::impl {
 
     impl(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
          checkpoint* cp, factorization* F = nullptr)
-        : owner(make_owner(A, opts, cp, F)), tol(opts.tol), max_iter(opts.max_iter),
+        : owner(make_owner(A, opts, cp, F)), operator_entries(A.nonZeros()),
+          tol(opts.tol), max_iter(opts.max_iter),
           num_threads(opts.num_threads), collect_timings(opts.collect_timings) {
 #if defined(APXCHOL_USE_CUDA)
         if (const auto* gpu = std::get_if<detail::gpu_solve_session>(&owner))
@@ -1243,6 +1229,7 @@ const factorization& solver::factor() const {
     }, impl_->owner);
 }
 Eigen::Index solver::rows() const { return static_cast<Eigen::Index>(factor().perm.size()); }
+Eigen::Index solver::operator_nnz() const { return impl_->operator_entries; }
 solve_backend solver::backend() const {
     return std::holds_alternative<cpu_solver>(impl_->owner)
         ? solve_backend::cpu : solve_backend::gpu;
