@@ -20,6 +20,8 @@ on:
       - 'benchmarks/patches/**'
       - 'python/**'
       - 'octave/**'
+      - '.github/scripts/build-cli.sh'
+      - '.github/workflows/cli.yml'
       - '.github/workflows/ci.yml'
       - '.github/workflows/wheels.yml'
       - '.github/workflows/publish.yml'
@@ -239,6 +241,9 @@ jobs:
 
   python:
     uses: ./.github/workflows/wheels.yml
+
+  cli:
+    uses: ./.github/workflows/cli.yml
 
   octave:
     name: octave (mkoctfile + tests)
