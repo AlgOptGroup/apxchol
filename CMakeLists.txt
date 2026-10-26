@@ -95,6 +95,7 @@ if (APXCHOL_BUILD_CLI)
     add_executable(apxchol src/main.cpp src/config.cpp)
     target_link_libraries(apxchol PRIVATE apxchol_core apxchol_mtx_input CLI11::CLI11
                           spdlog::spdlog fast_matrix_market::fast_matrix_market)
+    install(TARGETS apxchol RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" COMPONENT cli)
 endif()
 
 if (APXCHOL_BUILD_EXAMPLES OR APXCHOL_BUILD_TESTS)

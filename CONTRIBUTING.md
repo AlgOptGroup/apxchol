@@ -40,7 +40,12 @@ pytest python/tests
 
 The release version is set in `cmake/apxchol_version.cmake`; native builds and
 Python packages share it. PyPI publication requires a matching `v<version>`
-GitHub release tag. Manually running the publish workflow only builds the wheels.
+GitHub release tag. Manually running the publish workflow builds artifacts without publishing them.
+
+The [CLI workflow](.github/workflows/cli.yml) sets up each platform and calls
+`.github/scripts/build-cli.sh`: normal CMake install, OpenMP/notices, tar and checksum.
+`tests/check_cli_archive.py` checks relocation and the existing SDDM fixture on CPU
+and Metal. The version comes from the same CMake source used by wheels.
 
 ## Documentation
 

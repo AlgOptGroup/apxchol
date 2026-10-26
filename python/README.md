@@ -42,6 +42,9 @@ For one solve, use `apxchol.solve(A, b)`. Results include `x`, `iters`,
 `residual` and `converged`. Convergence is always checked against the original
 `A` and `b`; inspect `converged` for success.
 
+See the shared [binding capabilities](https://algoptgroup.github.io/apxchol/docs/usage.html#binding-capabilities)
+for comparison with MATLAB/Octave.
+
 ## Matrix inputs
 
 Pass the matrix `A` in `A @ x = b`. For a graph's adjacency matrix, first use

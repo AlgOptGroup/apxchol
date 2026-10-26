@@ -373,12 +373,13 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
                   **advanced)
 
 
-def solve(A, b, rtol=None, maxiter=None,
+def solve(A, b, rtol=None, maxiter=None, *, x0=None, out=None,
           **opts) -> SolveResult:
     """One-shot convenience: factorize A, then solve A x = b.
 
+    ``x0`` and ``out`` have the same meaning as in :meth:`Solver.solve`.
     The factor is discarded afterwards, so this passes `keep_factor=False`
     (no factor export) unless overridden.
     """
     opts.setdefault("keep_factor", False)
-    return factorize(A, **opts).solve(b, rtol=rtol, maxiter=maxiter)
+    return factorize(A, **opts).solve(b, rtol=rtol, maxiter=maxiter, x0=x0, out=out)
