@@ -4,6 +4,8 @@
 //   h                          = apxchol_mex('factorize', A)        % A sparse double, square
 //   [x, iters, resid, conv]    = apxchol_mex('solve', h, b, tol, maxiter, x0)
 //   z                          = apxchol_mex('apply', h, r)         % z = M^{-1} r
+//   apxchol_mex('save', h, path)
+//   h                          = apxchol_mex('load', path, options)
 //   apxchol_mex('free', h)
 //
 // M-file wrappers (apxchol_solver.m / apxchol_solve.m) give the user-facing API;
@@ -25,6 +27,7 @@
 #include <utility>
 
 #include "apxchol.h"
+#include "apxchol/solver/archive.h"
 #include "apxchol/detail/csc_import.h"
 
 namespace {
@@ -97,10 +100,11 @@ apxchol::solve_options setup_options(const mxArray* options) {
             else if (name == "drop_tolerance") result.factor_opts.drop_tolerance = scalar_option(value, name.c_str());
             else if (name == "regularization") result.factor_opts.regularization = scalar_option(value, name.c_str());
             else if (name == "lump_max_mass") result.factor_opts.lump_max_mass = scalar_option(value, name.c_str());
-            else if (name == "verbose") {
+            else if (name == "verbose" || name == "keep_factor") {
                 const double flag = scalar_option(value, name.c_str());
-                if (flag != 0 && flag != 1) fail("apxchol:badInput", "verbose must be logical or 0/1");
-                result.factor_opts.verbose = flag != 0;
+                if (flag != 0 && flag != 1) fail("apxchol:badInput", name + " must be logical or 0/1");
+                if (name == "keep_factor") result.keep_factor_values = flag != 0;
+                else result.factor_opts.verbose = flag != 0;
             } else fail("apxchol:badInput", "unknown option '" + name + "'");
         }
     }
@@ -115,6 +119,14 @@ std::map<std::uint64_t, std::unique_ptr<apxchol::solver>>& store() {
 std::uint64_t next_handle = 1;
 
 void at_exit() { store().clear(); }
+
+mxArray* store_solver(std::unique_ptr<apxchol::solver> solver) {
+    const std::uint64_t h = next_handle++;
+    store()[h] = std::move(solver);
+    mxArray* result = mxCreateNumericMatrix(1, 1, mxUINT64_CLASS, mxREAL);
+    *static_cast<std::uint64_t*>(mxGetData(result)) = h;
+    return result;
+}
 
 apxchol::solver& get_solver(const mxArray* mh) {
     if (!mxIsUint64(mh) || mxGetNumberOfElements(mh) != 1)
@@ -196,10 +208,18 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 fail("apxchol:usage", "usage: h = apxchol_mex('factorize', A, options)");
             auto solver = std::make_unique<apxchol::solver>(
                 mx_to_eigen(prhs[1]), setup_options(nrhs == 3 ? prhs[2] : nullptr));
-            const std::uint64_t h = next_handle++;
-            store()[h] = std::move(solver);
-            plhs[0] = mxCreateNumericMatrix(1, 1, mxUINT64_CLASS, mxREAL);
-            *static_cast<std::uint64_t*>(mxGetData(plhs[0])) = h;
+            plhs[0] = store_solver(std::move(solver));
+        } else if (op == "load") {
+            if (nrhs != 2 && nrhs != 3)
+                fail("apxchol:usage", "usage: h = apxchol_mex('load', path, options)");
+            const auto path = string_option(prhs[1], "path");
+            auto options = setup_options(nrhs == 3 ? prhs[2] : nullptr);
+            plhs[0] = store_solver(std::make_unique<apxchol::solver>(
+                apxchol::load_solver(path, options)));
+        } else if (op == "save") {
+            if (nrhs != 3)
+                fail("apxchol:usage", "usage: apxchol_mex('save', h, path)");
+            apxchol::save_solver(string_option(prhs[2], "path"), get_solver(prhs[1]));
         } else if (op == "solve") {
             if (nrhs != 5 && nrhs != 6)
                 fail("apxchol:usage",

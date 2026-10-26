@@ -62,10 +62,31 @@ Unspecified fields use the C++ defaults. Unknown fields are rejected.
 | `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
 | `regularization` | Nonnegative diagonal fraction added during factor construction; `0` disables it |
 | `lump_max_mass` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
+| `keep_factor` | Retain canonical FP32 factor values for saving; off by default |
 | `verbose` | Logical flag for setup diagnostics; off by default |
 
 See [precision](../docs/precision.md) and the [native option reference](../docs/reference/cpp.md)
 for storage behavior and advanced controls.
+
+## Save and load a solver
+
+Enable factor retention when constructing a solver, then save its original
+matrix and factor together:
+
+```matlab
+s = apxchol_solver(A, struct('keep_factor', true));
+s.save('system.npz');
+restored = apxchol_solver.load('system.npz');
+res = restored.solve(B);  % scalar/matrix RHS and warm starts work as usual
+```
+
+The path must be a character row vector. Saving creates a new file and rejects
+an existing destination. Loading accepts the same optional options struct as
+the constructor, including `factor_storage` and `keep_factor`; enable retention
+when loading if you want to save again. Setup defaults are unchanged.
+
+Archives use the shared [portable file format](../docs/serialization.md).
+Loading prepares the saved factor without factorizing the matrix again.
 
 ## Use another iterative solver
 
@@ -82,8 +103,8 @@ That outer solver controls convergence and reports its own result. Use
 
 ## Build for Octave
 
-Requires `mkoctfile` (Octave development tools), Eigen3 and an OpenMP-capable
-C++23 compiler (GCC 14 or equivalent). Use matching C/C++ compiler families
+Requires CMake 3.20+, `mkoctfile` (Octave development tools), zlib and an
+OpenMP-capable C++23 compiler (GCC 14 or equivalent). Use matching C/C++ compiler families
 and one OpenMP runtime.
 
 ```bash
@@ -92,14 +113,15 @@ cd octave
 octave --no-gui --eval "addpath(pwd); run('tests/test_apxchol.m')"
 ```
 
-The extension compiles the three core CPU sources directly; a root CMake
-build is not required.
+The extension links the shared native CMake target. Eigen3 and libzip 1.12.1+
+are found or fetched by the native build helpers; a root build is not required.
+`CMAKE_BUILD_PARALLEL_LEVEL` sets the build worker count (default: 2).
 
 ## Build for MATLAB
 
 MATLAB and Octave share the wrapper source and tests, but their MEX binaries
 are not interchangeable. Linux x86-64 builds are tested with MATLAB R2026b
-and GCC 13. Install OpenMP and Eigen, then run:
+and GCC 13. Install CMake, OpenMP and zlib, then run:
 
 ```bash
 matlab -batch "run('/path/to/apxchol/octave/build_and_test.m')"

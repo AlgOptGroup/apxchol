@@ -14,6 +14,19 @@ auto restored = apxchol::load_solver("system.npz", options);
 auto result = restored.solve(b);
 ```
 
+MATLAB and Octave use the same archive API through their reusable solver:
+
+```matlab
+s = apxchol_solver(A, struct('keep_factor', true));
+s.save('system.npz');
+restored = apxchol_solver.load('system.npz', struct('factor_storage', 'float16'));
+result = restored.solve(b);
+```
+
+The MATLAB/Octave loader accepts the normal constructor options and uses CPU,
+as with ordinary construction. Set `keep_factor=true` when loading to save the
+restored solver again.
+
 Saving requires retained canonical factor values. It creates a new file and rejects an existing destination. The original operator is reconstructed on demand from the solver’s owned data, without keeping another permanent matrix copy. CUDA saving downloads that operator to the host.
 
 The file preserves the system used by the solver, including its canonical lower-triangle coefficients. Discarded duplicate entries or tolerated upper-triangle differences in the caller’s input are not restored.

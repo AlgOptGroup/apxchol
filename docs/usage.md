@@ -142,8 +142,9 @@ CPU-, CUDA- and Metal-built factors can be reused through
 [C++ factor handoff](extending.md#reusing-a-custom-factor). Automatic adoption
 uses CPU; request `solve_backend::gpu` to upload the factor to a GPU.
 
-There is currently no built-in factor file format, save/load API, or Python
-factor-import API. Solving still needs the original matrix `A`.
+Portable solver archives [save the original matrix and retained factor
+together](serialization.md), so loading can prepare the solver without
+repeating factorization.
 
 ## CPU threads
 
