@@ -1282,9 +1282,11 @@ def record_gpu_disconnected_na(mid, n_components):
 
 
 def run_gpu(mid, tol=TOL):
-    """ParAC GPU pass for one matrix: one real cell and one n/a, the same split as
-    the CPU axis — kind=graph runs driver.cu on the pure L, kind=operator runs
-    driver_physics.cu on the augmented published operator."""
+    """Run the ParAC GPU route selected by operator class, as on the CPU.
+
+    Laplacians use driver.cu; full-rank SDDM operators use driver_physics.cu
+    after ground-node augmentation. The other route is reported as n/a.
+    """
     family = rc.MATRICES[mid]["family"]
     tag = _dump_tag(mid)
     aug = _augments(mid)

@@ -1,125 +1,186 @@
 # apxchol for Python
 
-Approximate-Cholesky preconditioning and PCG for sparse Laplacian/SDDM
-operators.
+Solve sparse Laplacian and SDDM systems with reusable approximate-Cholesky
+factors. NumPy and SciPy are required.
+
+## Install and solve
 
 ```bash
-pip install apxchol
+python -m pip install apxchol
 ```
 
-NumPy and SciPy are required. Pass a SciPy sparse matrix or sparse array as the operator.
+For an unreleased checkout, use the [source installation](#build-from-source)
+below; pip installs the published version.
 
-Wheels: Linux x86_64 (manylinux, x86-64-v2 CPU or newer) and macOS arm64
-(macOS 15 or newer), CPython 3.10–3.14. Both platforms use Clang and bundle LLVM's OpenMP runtime
-(license in `LICENSE.libomp.txt`); Homebrew is not needed to use the macOS
-wheels. Importing packages that bundle another OpenMP runtime in the same
-process can cause runtime conflicts.
+Wheels work on CPU without a GPU. Compatible hardware enables the included
+GPU backend; no CUDA Toolkit or Homebrew installation is needed.
 
-Linux wheels include CUDA support and macOS wheels include Metal support.
-GPU use requires a compatible device and driver; the CUDA Toolkit is not
-needed to use the Linux wheels.
+| Platform | CPU requirement | Optional GPU backend |
+|---|---|---|
+| Linux | x86-64-v2 or newer | NVIDIA CUDA |
+| macOS 15+ | Apple silicon (arm64) | Apple Metal |
+
+Wheels support CPython 3.11–3.15.
 
 ```python
 import apxchol
-solver = apxchol.factorize(A)           # assembled scipy sparse operator
-solver.backend                         # resolved "cpu" or "gpu"
-res = solver.solve(b, rtol=1e-8, maxiter=500)
-res.x, res.iters, res.residual, res.converged
-z = solver.apply(r)
-M = solver.aslinearoperator()           # scipy.sparse.linalg.cg(..., M=M)
-res = apxchol.solve(A, b)               # one-shot
+import numpy as np
+from scipy.sparse import diags
+
+n = 1000
+# Tridiagonal matrix: 3 on the diagonal, -1 on each neighboring diagonal.
+A = diags([-1.0, 3.0, -1.0], [-1, 0, 1], shape=(n, n), format="csc")
+b = np.ones(n)
+
+solver = apxchol.factorize(A)
+result = solver.solve(b, rtol=1e-8)
+assert result.converged
+x = result.x
 ```
 
-For adjacency input, explicitly call `apxchol.laplacian(Adj)` to form `D - Adj`
-with self-loops removed. Operator validation is shared with the C++ library.
-Positive off-diagonal pairs are lumped onto the diagonal for preconditioning;
-PCG and residual checks still use the original operator. `solver.lumped`
-counts stored positive off-diagonal entries (two per symmetric pair). A Laplacian
-RHS must sum to zero separately on each connected component.
+For one solve, use `apxchol.solve(A, b)`. Results include `x`, `iters`,
+`residual` and `converged`. Convergence is always checked against the original
+`A` and `b`; inspect `converged` for success.
 
-Operators, right-hand sides, initial guesses, and preconditioner inputs must
-be real. Complex dtypes raise `ValueError`, even when their imaginary parts
-are zero.
+## Matrix inputs
 
-## Options and reuse
+Pass the matrix `A` in `A @ x = b`. For a graph's adjacency matrix, first use
+`A = apxchol.laplacian(Adj)` to form its Laplacian. See [supported matrices
+and RHS requirements](https://algoptgroup.github.io/apxchol/docs/usage.html).
 
-`factorize` builds once; subsequent solves reuse the factor
-and workspace. `backend="auto"` uses the common C++ selection policy: it may
-prefer CPU for small systems, then checks GPU availability and compatibility.
-`"cpu"` and `"gpu"` request a specific backend. GPU use requires CUDA or Metal
-support in the installed build and a usable device. Explicit GPU requests fail
-when unavailable or unsupported; execution errors do not trigger a CPU retry.
-`solver.backend` reports the choice made during setup and is read-only.
-See [backend capabilities](../README.md#backend-capabilities) for GPU option restrictions.
-`num_threads=4` bounds CPU parallelism for setup and each solve/apply, overriding the calling OpenMP task's setting. The default `0` inherits that setting, normally initialized by `OMP_NUM_THREADS`; small workloads may use fewer threads. A solver cannot
-serve concurrent `solve`/`apply` calls; use separate instances or serialize.
+Any SciPy sparse format is converted to sorted, duplicate-free CSC without
+changing the input. Supply the full symmetric matrix, including both
+entries of each off-diagonal pair. Complex inputs are rejected, even with
+zero imaginary parts.
 
-`Solver.solve` accepts `rtol`, `maxiter`, `x0`, and `out`; the one-shot
-`apxchol.solve` accepts `rtol` and `maxiter` plus factorization options.
-Omitted tolerance and iteration limits use the C++ defaults (`1e-8` and `200`). Tolerance must be
-finite and positive; the iteration limit must be a nonnegative integer.
-Right-hand sides may have shape `(n,)` or `(n, nrhs)`;
-`solve` and `apply` preserve that shape. For matrix inputs, `iters`, `residual`
-and `converged` are per-column arrays. CPU and GPU solves share traversal across
-bounded RHS panels; width-one calls use the scalar path.
-`x0` and `out` must match the RHS shape. `out` must be writable, C- or
-F-contiguous float64 and is returned as `res.x`. Overlapping inputs are copied
-before writing output. An already-converged guess takes zero iterations.
+## Reuse, batches and initial guesses
+
+Subsequent solves reuse the factor and workspace:
 
 ```python
-solver = apxchol.factorize(A, seed=42, partitioner="block_greedy",
-                           keep_factor=False)
+first = solver.solve(b)
+b2 = np.arange(n, dtype=float)
+B = np.column_stack((b, b2))
+batch = solver.solve(B)            # native batched solve, one RHS per column
+assert batch.converged.all()
 ```
 
-Partitioners: `block_greedy`, `priority_greedy`, `baumann_kyng`.
-Omitting `seed` or `partitioner` (or passing `None`) uses the C++ default.
-`keep_factor=True` is the reusable API default and retains an extra factor
-copy (~8 bytes/nonzero in default builds). `False` disables factor export,
-but preserves `P`, `factor_nnz`, `fill_ratio`; one-shot `solve` uses `False`.
+Vector inputs have shape `(n,)`; batches have shape `(n, nrhs)`. `result.x`
+and `apply` outputs preserve that shape and use float64. Batch convergence
+fields contain one value per column.
 
-`factor_storage_dtype=np.float16` or `np.float32` selects triangular-solve storage per solver; dtype objects and the strings `"float16"`/`"float32"` also work. Read the resolved dtype through `solver.factor_storage_dtype`. The default, `None`, selects FP32 on CPU/Metal and FP16 on CUDA. Invalid dtypes raise an error.
-
-FP16 stores scaled off-diagonals with FP32 diagonals and scales. CPU conversion requires x86 AVX/F16C or Apple ARM64; an unsupported request raises an error. CPU arithmetic remains FP64; constructed factors and exports remain FP32. FP64 factor storage is not supported. See [precision and storage](../docs/precision.md).
-
-Advanced keywords: `degree_quantile`, `degree_multiplier`, `degree_tiebreak`,
-`exact_clique_max_degree`, `residual_peel`,
-`cpu_schedule` (`"auto"` or `"levels"`), `drop_tolerance` (in [0, 1];
-0 disables), `regularization` (nonnegative diagonal fraction; 0 disables),
-`lump_max_mass` (fraction in [0, 1]; 0 rejects positive off-diagonals), and
-`verbose` (default False).
-`degree_multiplier` applies only when `degree_quantile=0`; unknown keywords
-raise `ValueError`. See [core defaults](../include/apxchol/solver/factor_options.h).
-
-## Factor export
+A *warm start* supplies an initial solution estimate:
 
 ```python
-solver = apxchol.factorize(A, keep_factor=True)
-P = solver.P                           # P[original vertex] = elimination position
-G = solver.chol()                      # lower CSC, including sqrt-diagonal
-L, D = solver.L, solver.D              # unit lower CSC and diagonal
+result = solver.solve(b2, x0=first.x)
+```
+
+| Solve argument | Meaning |
+|---|---|
+| `rtol` | Positive, finite relative residual tolerance; omitted uses the native default |
+| `maxiter` | Nonnegative iteration budget; omitted uses the native default |
+| `x0` | Initial guess with the same shape as the RHS; omitted starts from zero |
+| `out` | Writable, C- or F-contiguous float64 array with the RHS shape; returned as `result.x` |
+
+The [native reference](https://algoptgroup.github.io/apxchol/docs/reference/cpp.html#solve-defaults) shows the
+compiled tolerance and iteration defaults.
+
+Overlapping inputs are copied before writing `out`. Use separate solver
+instances for concurrent calls; each solver shares mutable workspace.
+
+## Setup options
+
+Pass these keywords to `factorize` or the one-shot `solve`:
+
+| Keyword | Meaning |
+|---|---|
+| `backend` | `"auto"` chooses a compatible CPU/GPU route; `"cpu"` or `"gpu"` requests one explicitly |
+| `num_threads` | CPU thread ceiling; `0` inherits the caller's OpenMP setting |
+| `seed` | Sampling seed; `None` uses the native default |
+| `partitioner` | `"block_greedy"`, `"priority_greedy"` or `"baumann_kyng"`; `None` uses the native default |
+| `keep_factor` | Retain exportable arrays; defaults to `True` for `factorize`, `False` for one-shot `solve` |
+| `factor_storage_dtype` | `np.float16`, `np.float32`, or `None` for the backend default; dtype names also work |
+
+Read the chosen route from `solver.backend` and storage type from
+`solver.factor_storage_dtype`. See [backend and thread selection](https://algoptgroup.github.io/apxchol/docs/usage.html)
+for automatic selection and explicit-request behavior.
+
+Storage defaults to FP32 on CPU/Metal and FP16 on CUDA. This affects
+triangular-solve storage, not export or outer solve precision. Unsupported
+FP16 requests fail; FP64 storage is unavailable. See [precision](https://algoptgroup.github.io/apxchol/docs/precision.html).
+
+### Advanced options
+
+These share the native defaults and can usually be left unset. GPU routes
+support fewer construction choices.
+
+| Keyword | Meaning |
+|---|---|
+| `degree_quantile` | Degree cutoff quantile; `0` selects the multiplier-based cutoff |
+| `degree_multiplier` | Positive degree multiplier, used only when `degree_quantile=0` |
+| `degree_tiebreak` | Prefer lower-degree vertices in selection conflicts |
+| `exact_clique_max_degree` | Maximum degree for exact clique elimination; `0` disables it |
+| `residual_peel` | Residual pivot order: `"natural"`, `"min_degree"` or `"bk_serial"` |
+| `cpu_schedule` | CPU triangular-solve scheduling: `"auto"` or `"levels"` |
+| `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
+| `regularization` | Nonnegative diagonal fraction added during factor construction; `0` disables it |
+| `lump_max_mass` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
+| `verbose` | Print setup diagnostics; off by default |
+
+Unknown keywords raise `ValueError`. The [Python reference](https://algoptgroup.github.io/apxchol/docs/reference/python.html)
+and [native option reference](https://algoptgroup.github.io/apxchol/docs/reference/cpp.html) describe the controls.
+
+## Use with a SciPy solver
+
+Use the built-in `solver.solve` for the standard PCG path. To use apxchol as a
+preconditioner for another SciPy iterative method:
+
+```python
+from scipy.sparse.linalg import cg
+
+M = solver.aslinearoperator()
+x, info = cg(A, b, M=M, rtol=1e-8)
+```
+
+SciPy controls convergence. Use this when you need its algorithm or interface.
+With a GPU factor, each application exchanges vectors with the host; the
+built-in GPU solve keeps the iteration on the device.
+
+## Export the factor
+
+`factorize` retains exportable arrays by default. Exported factor values are
+FP32, regardless of backend or internal storage:
+
+```python
+P = solver.P                          # P[original vertex] = elimination position
+G = solver.chol()                     # lower CSC factor, including its diagonal
+L, D = solver.L, solver.D             # unit lower CSC factor and diagonal
 p = P.argsort()
-# A[p][:, p] ≈ G @ G.T ≈ L @ scipy.sparse.diags(D) @ L.T
+# A[p][:, p] ≈ G @ G.T ≈ L @ diags(D) @ L.T
 ```
 
-For a Laplacian with `k` components, this represents the rank-`n-k` subspace;
-each component's last column contains a placeholder diagonal.
-`fill_ratio = (2 * factor_nnz - n) / nnz(A)` counts the symmetric factor pattern.
-`chol()`, `L` and `D` return float32 values, matching the C++ factor. `solve` and `apply` accept float32 inputs, but use FP64 CPU arithmetic and return float64 arrays. Use `.astype(np.float64)` if a consumer requires double-precision factor arrays.
+`chol()`, `L` and `D` return independent copies. For a Laplacian, they represent
+the nonsingular subspace; see the [factor reference](https://algoptgroup.github.io/apxchol/docs/reference/python.html).
 
-Matrix import uses signed 32-bit dimensions/nonzero counts; default factor
-offsets are unsigned 32-bit. The core's wide-index options are separate.
+Use `keep_factor=False` to save the extra host factor copy when export is
+unnecessary. Repeated solves, `P`, `factor_nnz` and `fill_ratio` remain available.
 
-## Source build
+Matrix import is limited to signed 32-bit dimensions and stored-entry counts.
+The native library's wide-index build options do not enlarge this binding.
+
+## Build from source
+
+From a repository checkout, install a development build and run its tests:
 
 ```bash
-pip install -e 'python[test]'
-pytest python/tests -v
+python -m pip install -e './python[test]'
+python -m pytest python/tests -v
 ```
 
-The extension uses the common C++ library. Local builds tune for the build machine; distributed wheels
-use the CPU baselines above. On macOS, install the [build dependencies](../README.md#build-and-run)
-first, then use the same pip command above.
-Select a GPU source build with `CMAKE_ARGS="-DAPXCHOL_DEVICE=CUDA"` or
-`CMAKE_ARGS="-DAPXCHOL_DEVICE=METAL"`; the corresponding core build dependencies
-are required.
-Without build isolation, install `pybind11 scikit-build-core` first. [License](../LICENSE).
+The `-e` option links the installed package to the local Python source.
+Re-run the install command after changing C++ code. Local builds tune for the
+build machine; see [build instructions](https://algoptgroup.github.io/apxchol/docs/building.html).
+
+Set `CMAKE_ARGS="-DAPXCHOL_DEVICE=CUDA"` or `CMAKE_ARGS="-DAPXCHOL_DEVICE=METAL"`
+for a GPU source build, with its native dependencies installed. Without build
+isolation, install `pybind11 scikit-build-core` first. [License](https://github.com/AlgOptGroup/apxchol/blob/main/LICENSE).

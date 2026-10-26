@@ -1,8 +1,7 @@
 #pragma once
 /// Input interpretation for the CLI.
 ///
-/// A .mtx file can hold either of two very different things, and the two are
-/// numerically indistinguishable to the solver core:
+/// A .mtx file can hold either an assembled operator or graph input:
 ///
 ///   * an ALREADY-ASSEMBLED Laplacian / SDDM operator (positive diagonal,
 ///     non-positive off-diagonals) — solve it as given; or
@@ -10,12 +9,8 @@
 ///     off-diagonals) — the operator is L = D - A, which must be assembled
 ///     first.
 ///
-/// Handing an adjacency matrix straight to the solver negates every off-
-/// diagonal into a NEGATIVE edge weight; `tree_elimination::sample_clique`
-/// early-returns on a non-positive weighted degree, so the factorization
-/// silently produces zero fill and PCG breaks down on iteration 1 with
-/// `p·Ap <= 0` (reported as "iterations 0 / residual 1"). This header exists
-/// so that never happens without the user being told.
+/// The solver validates assembled operators. The CLI detects adjacency input
+/// and assembles L = D - A before passing it to the operator contract.
 ///
 /// This module is the CLI's HUMAN-FACING interpretation layer, and nothing
 /// else compiles it. It may guess, because it prints the guess and takes

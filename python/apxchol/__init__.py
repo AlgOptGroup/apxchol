@@ -36,6 +36,13 @@ __version__ = _apxchol.__version__
 
 @dataclass(frozen=True)
 class SolveResult:
+    """Solution and convergence information for the original system.
+
+    ``residual`` is checked against the original matrix and RHS. For a
+    matrix RHS, ``iters``, ``residual`` and ``converged`` contain one entry
+    per column; for a vector RHS they are scalars.
+    """
+
     x: np.ndarray
     iters: int | np.ndarray
     residual: float | np.ndarray
@@ -43,21 +50,16 @@ class SolveResult:
 
 
 def laplacian(A):
-    """Assemble the graph Laplacian ``L = D - A`` of a weighted ADJACENCY matrix.
+    """Convert a weighted adjacency matrix to its graph Laplacian.
 
-    The solver takes the assembled operator, never the adjacency matrix of the
-    graph (see :func:`factorize`); this is the explicit one-call conversion,
-    named after :func:`scipy.sparse.csgraph.laplacian` and following the same
-    convention — self-loops contribute nothing, `D` is the weighted-degree
-    diagonal, and isolated vertices get an all-zero row. It differs on one
-    point: edge weights are taken as ``|A_ij|``, matching the CLI's
-    ``--input-kind adjacency`` and the benchmark suite's reading of a `.mtx`
-    file, so a graph stored with negative weights is read as an undirected
-    graph rather than silently made indefinite.
+    Forms ``L = D - W`` using absolute edge weights, with self-loops removed.
+    ``D`` contains the weighted vertex degrees; isolated vertices have zero
+    rows. Pass this result to :func:`factorize` or :func:`solve`, which expect
+    the matrix in ``L @ x = b`` rather than adjacency input.
 
     Parameters
     ----------
-    A : scipy.sparse matrix
+    A : scipy.sparse matrix or array
         Square, real, symmetric weighted adjacency matrix, in any sparse
         format. Explicit zeros and self-loops are dropped; duplicate entries
         are summed. `A` is not modified.
@@ -65,8 +67,7 @@ def laplacian(A):
     Returns
     -------
     scipy.sparse.csc_matrix
-        The float64 Laplacian, ready to hand to :func:`factorize`. Every
-        vertex keeps an explicit diagonal entry (zero for isolated ones).
+        The float64 Laplacian, ready to pass to :func:`factorize`.
 
     Examples
     --------
@@ -137,6 +138,7 @@ class Solver:
 
     @property
     def shape(self):
+        """Shape of the square operator, as ``(n, n)``."""
         return (self._n, self._n)
 
     @property
@@ -146,6 +148,7 @@ class Solver:
 
     @property
     def sddm(self) -> bool:
+        """Whether the solver uses SDDM rather than Laplacian handling."""
         return self._impl.sddm()
 
     @property
@@ -155,15 +158,11 @@ class Solver:
 
     @property
     def lumped(self) -> int:
-        """Positive off-diagonal entries M-matrix lumping moved onto the diagonal.
+        """Number of positive off-diagonal entries moved during preconditioning.
 
-        Zero for a Laplacian or SDDM operator, which is the usual case. A
-        nonzero count means `A` was not an M-matrix and the PRECONDITIONER was
-        built from a repaired copy — `a_ii += a_ij; a_jj += a_ij; a_ij = 0` for
-        each positive off-diagonal pair, which preserves every row sum and can
-        only raise the matrix in the Loewner order. `A` itself is untouched and
-        is what the PCG applies, so `SolveResult.residual` is for the system
-        you passed. Two entries are counted per pair (both triangles).
+        Zero for a Laplacian or SDDM matrix. Each positive pair is moved to
+        the diagonal of the preconditioner and counts as two entries. PCG
+        and the reported residual still use the original, unchanged matrix.
         """
         return self._impl.lumped()
 
@@ -190,13 +189,19 @@ class Solver:
 
     def solve(self, b, rtol=None, maxiter=None, *,
               x0=None, out=None) -> SolveResult:
-        """PCG-solve A x = b to relative residual `rtol`.
+        """Solve ``A @ x = b`` with PCG, reusing this solver's factor.
 
-        `b` has shape `(n,)` or `(n, nrhs)`. Matrix inputs return a matrix
-        solution and per-column arrays for iterations, residuals and convergence.
-        `x0` must match `b`'s shape; an exact guess takes zero iterations.
-        `out` must have the same shape and be writable, C- or F-contiguous
-        float64; it is returned as `SolveResult.x`.
+        ``b`` has shape ``(n,)`` or ``(n, nrhs)``. Matrix inputs use the native
+        batched solver and return one convergence result per column. Omitted
+        ``rtol`` and ``maxiter`` use the compiled native defaults.
+
+        ``x0`` is an initial solution estimate with the RHS shape; an
+        already-converged guess takes zero iterations. ``out`` must have
+        that shape and be writable, C- or F-contiguous float64. It is returned
+        as :attr:`SolveResult.x`.
+
+        The final residual is always checked against the original matrix
+        and RHS. Inspect :attr:`SolveResult.converged` for success.
         """
         b = self._rhs(b, "b")
         if x0 is not None:
@@ -213,6 +218,12 @@ class Solver:
         return self._impl.apply(self._rhs(r, "r"))
 
     def aslinearoperator(self) -> LinearOperator:
+        """Return a SciPy ``LinearOperator`` for another iterative solver.
+
+        That solver controls convergence. With a GPU-backed factor, each
+        application exchanges vectors with the host; :meth:`solve` keeps
+        the GPU iteration on the device.
+        """
         return LinearOperator(shape=self.shape, matvec=self.apply, matmat=self.apply,
                               dtype=np.float64)
 
@@ -234,18 +245,16 @@ class Solver:
         return self._P
 
     def chol(self):
-        """Lower-triangular factor G (sqrt-diagonal included) in PERMUTED space.
+        """Return a copy of the FP32 lower-triangular factor in permuted order.
 
-        Returns a `scipy.sparse.csc_matrix` (float32) with
-        `A[p][:, p] ≈ G @ G.T`, `p = np.argsort(self.P)`. G is an APPROXIMATE
-        (randomly sampled) factor, so the identity holds only approximately.
-        For a pure Laplacian (`sddm == False`) it holds on the rank-(n−k)
-        subspace, where k is the number of connected components: the last
-        eliminated column of each component carries a placeholder diagonal.
-        Requires `keep_factor=True` (the default).
+        The result is a ``scipy.sparse.csc_matrix`` with
+        ``A[p][:, p] ≈ G @ G.T``, where ``p = np.argsort(self.P)``.
+        Export requires ``keep_factor=True`` (the default), regardless of
+        backend or internal factor storage dtype.
 
-        A fresh matrix is returned on every call — mutating it does not
-        affect the solver.
+        For a Laplacian with ``k`` connected components, the factor represents
+        the rank-``n-k`` subspace. Each component's last eliminated column
+        carries a placeholder diagonal.
         """
         if self._chol is None:
             indptr, indices, data = self._impl.factor_csc()
@@ -301,12 +310,14 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
 
     Parameters
     ----------
-    A : scipy.sparse matrix
-        Square, real symmetric assembled operator, typically a graph Laplacian
-        or SDDM matrix. Nonempty rows must have positive diagonals. Use
-        :func:`laplacian` to convert an adjacency matrix first. A Laplacian with
-        k connected components has rank n−k; its RHS must sum to zero within
-        each component.
+    A : scipy.sparse matrix or array
+        The square, real symmetric matrix in ``A @ x = b``, typically a graph
+        Laplacian or SDDM matrix. Nonempty rows need positive diagonals.
+        Supply both triangles; sparse inputs are converted to sorted,
+        duplicate-free CSC without modifying the caller's matrix.
+
+        Use :func:`laplacian` to convert adjacency input first. A Laplacian
+        RHS must sum to zero within each connected component.
 
         Positive off-diagonal pairs are lumped onto the diagonal for
         preconditioning, subject to `lump_max_mass` (see :attr:`Solver.lumped`).
@@ -328,20 +339,17 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
         "baumann_kyng". None uses the C++ default. Unknown names raise at
         factorization time.
     keep_factor : bool
-        Keep the factor's row/value arrays alive so `chol()`/`L`/`D` can be
-        exported. Costs one extra factor-sized copy in memory (~8 bytes per
-        factor nonzero in the default fp32 wheels); with `keep_factor=False`
-        those exports raise, while `P`, `factor_nnz` and `fill_ratio` remain
-        available. Pass `keep_factor=False` for the leanest factor-once /
-        solve-many footprint.
+        Retain an extra host factor copy for ``chol()``, ``L`` and ``D``
+        export; enabled by default. ``False`` saves this memory while still
+        allowing repeated solves, ``P``, ``factor_nnz`` and ``fill_ratio``.
     factor_storage_dtype : numpy dtype, dtype name, or None
-        ``np.float16`` or ``np.float32`` (also "float16"/"float32") selects
-        triangular-solve value storage for this solver. FP16 stores scaled
-        off-diagonals with FP32 diagonals and scales; CPU conversion requires
-        x86 AVX/F16C or Apple ARM64.
-        Unsupported FP16 requests raise an error. CPU arithmetic remains FP64;
-        constructed factors and exports remain FP32. FP64 factor storage is
-        not supported. ``None`` uses the backend default (CPU/Metal FP32, CUDA FP16).
+        ``np.float16`` or ``np.float32`` selects triangular-solve storage;
+        dtype names also work. ``None`` uses the backend default: FP32 on
+        CPU/Metal, FP16 on CUDA.
+
+        FP16 stores scaled off-diagonals with FP32 diagonals and scales. It
+        does not change the exported factor's FP32 type or CPU arithmetic's
+        FP64 type. Unsupported FP16 requests fail; FP64 storage is unavailable.
     **advanced
         Passed straight through to the core options: `degree_quantile`,
         `degree_multiplier`, `degree_tiebreak`, `exact_clique_max_degree`,
@@ -351,10 +359,14 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
         `regularization` (nonnegative diagonal fraction; 0 disables),
         `lump_max_mass` (fraction in [0, 1]; 0 rejects positive off-diagonals),
         and `verbose` (default False).
-        Unknown keys raise `ValueError`. Note:
-        `degree_multiplier` only takes effect when `degree_quantile=0`
-        (the quantile cap defaults to 0.2 on CPU/Metal and 0.5 on CUDA).
-        Metal accepts values in (0,1); its degree buckets include all ties.
+
+    Notes
+    -----
+    Unknown option keys raise ``ValueError``.
+
+    ``degree_multiplier`` only takes effect when ``degree_quantile=0``.
+    Omitting the quantile uses the backend's default. Metal requires a
+    quantile in ``(0, 1)`` and includes all vertices tied at its degree cutoff.
     """
     return Solver(A, backend=backend, num_threads=num_threads, seed=seed, partitioner=partitioner,
                   keep_factor=keep_factor, factor_storage_dtype=factor_storage_dtype,

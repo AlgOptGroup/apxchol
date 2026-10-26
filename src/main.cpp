@@ -26,10 +26,8 @@ int main(int argc, char* argv[]) try {
         return 2;
     }
 
-    // Decide what the file actually holds before handing it to the solver:
-    // an adjacency matrix fed in as an operator gives negative edge weights,
-    // zero fill and an immediate PCG breakdown, with nothing on screen to say
-    // why. See src/mtx_input.h.
+    // Interpret the input and assemble adjacency matrices into Laplacians
+    // before operator validation (see src/mtx_input.h).
     // An unusable or ambiguous matrix throws here; the handler below logs it
     // and exits 2, as it does for any other input error.
     const auto scan = scan_input(L);

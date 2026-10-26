@@ -21,17 +21,15 @@ scores every solver's true residual against the original L, so multigrid reaches
 1e-8 without the eps*I perturbation that --reg-rel used to add. (reg-rel was
 masking real solver limitations -- e.g. AMGCL floors on the disconnected
 as-Skitter -- by solving a better-conditioned L+eps*I.) IPM normal-equation
-matrices are already strictly SDDM and likewise run unshifted. CMG remains the
-lone reg-rel solver on the singular families (it is scored on L+eps*I there, and
-on the published operator itself for kind=operator); everything else in this
-sweep is reg-free.
+matrices are already strictly SDDM and likewise run unshifted. The retained CMG
+adapter is unavailable because it generates its own RHS and shifts Laplacians;
+it produces no comparison cells.
 
-EVERY solver in the comparison runs from here, so one sweep fills every cell:
-apxchol + the C++ competitors in-process, ParAC via parac_runner.py, AC/AC2 via
-benchmarks/julia/bench_laplacians.jl and CMG via cmg_matlab_runner.py (canonical
-MATLAB CMG in the matlab-deps container). --no-julia / --no-cmg / --no-parac opt
-out individually; --headline-only restricts the apxchol config list (AC/AC2 are
-dropped only by an explicit --no-julia).
+The CPU sweep runs apxchol and the C++ competitors in-process, ParAC through
+parac_runner.py, and AC/AC2 through benchmarks/julia/bench_laplacians.jl.
+--no-julia and --no-parac skip those adapters; --no-cmg skips CMG's availability
+check. --headline-only restricts the apxchol config list; AC/AC2 are dropped
+only by an explicit --no-julia.
 A solver that cannot take a given matrix emits an explicit `n/a` cell carrying
 the reason, never a silent gap.
 
@@ -447,10 +445,8 @@ COMP = ["rchol","rchol_par","hypre_boomeramg","amgcl"]
 JULIA = ["ac","ac2"]
 RUN_PARAC = True     # ParAC runs as part of every sweep (skip via --no-parac)
 PARAC_ONLY = False   # --parac-only: run ONLY ParAC (skip apxchol/competitors/AC)
-# CMG (canonical MATLAB CMG in the matlab-deps container) likewise runs as part of
-# every CPU sweep -- it is a charted competitor, so leaving it to a separate
-# command is how its column went empty. --no-cmg skips it; a machine without
-# MATLAB/docker says so once and moves on. CPU only: it is serial MATLAB.
+# The retained CMG adapter is unavailable. Report this once and write no cells;
+# --no-cmg skips the availability check.
 RUN_CMG = True
 # --no-cap: drop the 10x-GPU-apxchol competitor wall cap and RE-RUN cells currently
 # stored as 'timeout' (clamped), so AMGCL/BoomerAMG get an HONEST uncapped wall time on

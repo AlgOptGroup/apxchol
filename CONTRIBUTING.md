@@ -10,7 +10,7 @@ also runs the examples. Run one test while iterating with
 `./build/tests/unit_tests --gtest_filter='FactorizeTest.PermutationIsValid'`.
 
 CI builds `tests/cmake_consumer` to check the
-[CMake consumer](README.md#use-from-cmake) requirements with warnings as errors.
+[CMake consumer](docs/building.md#use-from-cmake) requirements with warnings as errors.
 The [workflow](.github/workflows/ci.yml) defines compiler and backend coverage;
 the CUDA job compiles without running device tests.
 
@@ -29,6 +29,22 @@ pytest python/tests
 The release version is set in `cmake/apxchol_version.cmake`; native builds and
 Python packages share it. PyPI publication requires a matching `v<version>`
 GitHub release tag. Manually running the publish workflow only builds the wheels.
+
+## Documentation
+
+Install Doxygen, build the CLI as above, then run:
+
+```bash
+python -m pip install -r docs/requirements.txt -e ./python
+python docs/build.py
+python -m http.server 8000 --directory build/docs
+```
+
+The site reuses the repository guides, selected C++ comments, Python docstrings
+and the CLI's `--help`. Generated files stay in `build/docs`. To use another
+CLI or output directory, pass them as positional arguments to `docs/build.py`.
+Documentation CI uploads an HTML preview for review. Successful main builds
+publish the same site to GitHub Pages.
 
 ## Code conventions
 

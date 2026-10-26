@@ -9,7 +9,7 @@ interfaces throughout the 1.x series:
 - [Python](../python/README.md) names exported through `__all__` and their
   documented methods and arguments.
 - Documented [MATLAB/Octave wrappers](../octave/README.md) and CLI options.
-- `apxchol::core` and the [documented CMake integration](../README.md#use-from-cmake).
+- `apxchol::core` and the [documented CMake integration](building.md#use-from-cmake).
 
 Numerical results and performance may change within the documented
 [precision and convergence contracts](precision.md). This compatibility

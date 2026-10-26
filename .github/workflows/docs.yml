@@ -1,0 +1,91 @@
+name: documentation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: &docs_paths
+      - 'docs/**'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'python/README.md'
+      - 'python/apxchol/**'
+      - 'python/src/**'
+      - 'python/CMakeLists.txt'
+      - 'python/pyproject.toml'
+      - 'octave/README.md'
+      - 'benchmarks/README.md'
+      - 'include/**'
+      - 'src/config.cpp'
+      - 'src/main.cpp'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - '.github/workflows/docs.yml'
+      - '.github/actions/ccache/**'
+  pull_request:
+    paths: *docs_paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CC: gcc-14
+      CXX: g++-14
+      CMAKE_ARGS: -DAPXCHOL_DEVICE=CPU -DAPXCHOL_NATIVE_ARCH=OFF
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y g++-14 libeigen3-dev ninja-build doxygen ccache
+      - uses: ./.github/actions/ccache
+        with:
+          key: docs-gcc14
+      - name: Install Python dependencies
+        run: python -m pip install -r docs/requirements.txt -e ./python
+      - name: Build CLI
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release ${CMAKE_ARGS} \
+                -DAPXCHOL_BUILD_TESTS=OFF -DAPXCHOL_BUILD_EXAMPLES=OFF
+          cmake --build build --target apxchol
+      - name: Build documentation
+        run: python docs/build.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: documentation
+          path: build/docs
+          if-no-files-found: error
+      - uses: actions/upload-pages-artifact@v4
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: build/docs
+      - name: Show compiler cache statistics
+        if: always()
+        run: ccache --show-log-stats
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deployment
