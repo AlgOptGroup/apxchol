@@ -1,0 +1,27 @@
+name: Compiler cache
+description: Restore a bounded compiler cache and enable CMake launchers
+inputs:
+  key:
+    description: Compiler and build configuration
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/ccache
+        key: ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.key }}-${{ github.sha }}
+        restore-keys: ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.key }}-
+    - shell: bash
+      run: |
+        cat >> "$GITHUB_ENV" <<EOF
+        CCACHE_DIR=${RUNNER_TEMP}/ccache
+        CCACHE_BASEDIR=${GITHUB_WORKSPACE}
+        CCACHE_MAXSIZE=500M
+        CCACHE_COMPILERCHECK=content
+        CCACHE_STATSLOG=${RUNNER_TEMP}/ccache-stats.log
+        CMAKE_C_COMPILER_LAUNCHER=ccache
+        CMAKE_CXX_COMPILER_LAUNCHER=ccache
+        CMAKE_CUDA_COMPILER_LAUNCHER=ccache
+        CMAKE_OBJCXX_COMPILER_LAUNCHER=ccache
+        EOF

@@ -23,8 +23,21 @@ jobs:
       - name: Test oldest and newest Python on pull requests
         if: github.event_name == 'pull_request'
         run: printf '%s\n' 'CIBW_BUILD=cp310-* cp314-*' >> "$GITHUB_ENV"
+      - uses: ./.github/actions/ccache
+        with:
+          key: wheels-${{ matrix.name }}
       - name: Build wheels and run tests
         uses: pypa/cibuildwheel@v4.2.1
+        env:
+          # Linux builds run inside manylinux; its /host mount exposes the cache.
+          CCACHE_DIR: ${{ runner.os == 'Linux' && format('/host{0}/ccache', runner.temp) || format('{0}/ccache', runner.temp) }}
+          CCACHE_STATSLOG: ${{ runner.os == 'Linux' && format('/host{0}/ccache-stats.log', runner.temp) || format('{0}/ccache-stats.log', runner.temp) }}
+          CCACHE_BASEDIR: ${{ runner.os == 'Linux' && '/project' || github.workspace }}
+          CIBW_ENVIRONMENT_PASS_LINUX: >-
+            CCACHE_DIR CCACHE_BASEDIR CCACHE_MAXSIZE CCACHE_COMPILERCHECK CCACHE_STATSLOG
+            CMAKE_C_COMPILER_LAUNCHER CMAKE_CXX_COMPILER_LAUNCHER
+            CMAKE_CUDA_COMPILER_LAUNCHER CMAKE_OBJCXX_COMPILER_LAUNCHER
+          CIBW_BEFORE_TEST: ccache --show-log-stats
         with:
           package-dir: python
       - uses: actions/upload-artifact@v4
