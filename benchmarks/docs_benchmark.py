@@ -146,11 +146,16 @@ def hardware(metal):
             "runner_image": os.getenv("ImageVersion"),
             "python": platform.python_version(), "numpy": np.__version__, "scipy": scipy.__version__}
     if metal:
-        devices = json.loads(subprocess.check_output(
-            ["system_profiler", "SPDisplaysDataType", "-json"], text=True))["SPDisplaysDataType"]
-        data["gpus"] = [device.get("sppci_model", "unknown") for device in devices]
-        if not data["gpus"] or "unknown" in data["gpus"]:
-            raise ValueError("missing GPU model")
+        # Query the device selected by the solver, including on headless runners.
+        query = ("import Metal; import Foundation; "
+                 "guard let device = MTLCreateSystemDefaultDevice() else { exit(1) }; "
+                 "print(device.name)")
+        name = subprocess.check_output(
+            ["xcrun", "swift", "-framework", "CoreGraphics", "-e", query],
+            text=True, timeout=30).strip()
+        if not name:
+            raise ValueError("missing Metal device name")
+        data["gpus"] = [name]
     return data
 
 

@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -29,6 +30,17 @@ class DocsBenchmarkTest(unittest.TestCase):
                 report.write_text(json.dumps(content))
                 with self.assertRaisesRegex(ValueError, "clean documentation revision"):
                     plot.render([report], root / "figures", "expected")
+
+    def test_metal_identity_is_not_inferred_from_cpu(self):
+        with patch.object(benchmark.sys, "platform", "darwin"), patch.object(
+                benchmark.subprocess, "check_output", side_effect=["Apple CPU\n", "3\n", "Virtual Metal device\n"]) as query:
+            self.assertEqual(benchmark.hardware(True)["gpus"], ["Virtual Metal device"])
+            self.assertIn("CoreGraphics", query.call_args.args[0])
+            self.assertEqual(query.call_args.kwargs["timeout"], 30)
+        with patch.object(benchmark.sys, "platform", "darwin"), patch.object(
+                benchmark.subprocess, "check_output", side_effect=["Apple CPU\n", "3\n", "\n"]):
+            with self.assertRaisesRegex(ValueError, "missing Metal device name"):
+                benchmark.hardware(True)
 
     def test_complete_controls(self):
         report = benchmark.summarize(self.records())
