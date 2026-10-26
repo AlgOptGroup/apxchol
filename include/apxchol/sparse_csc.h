@@ -35,7 +35,7 @@ using sptrsv_value_t = float;
 ///   - column pointers (`outer_`)  -> edge_index : a cumulative NON-NEGATIVE
 ///     offset that can reach billions, so it is the widenable one.
 ///   - row indices     (`inner_`)  -> node_index : a vertex id, < 2^32 by default,
-///     so it stays 32-bit even under APXCHOL_64BIT_EDGE_INDICES.
+///     so it stays 32-bit with APXCHOL_INDEX_WIDTH=64_OFFSETS.
 ///
 /// Overflow safety: the only place a value can exceed its type is the cumulative
 /// column pointer; `set_outer`/`finish` assert it stays <= edge_index max. We
