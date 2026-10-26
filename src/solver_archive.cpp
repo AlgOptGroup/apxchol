@@ -20,6 +20,11 @@
 #include <utility>
 #include <unistd.h>
 
+static_assert(LIBZIP_VERSION_MAJOR > 1 ||
+    (LIBZIP_VERSION_MAJOR == 1 && (LIBZIP_VERSION_MINOR > 12 ||
+        (LIBZIP_VERSION_MINOR == 12 && LIBZIP_VERSION_MICRO >= 1))),
+    "solver archives require libzip 1.12.1 or later");
+
 namespace apxchol {
 namespace {
 
