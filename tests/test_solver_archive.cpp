@@ -126,7 +126,7 @@ protected:
                             residual[entry.row()] -= entry.value() * X(j, col);
                     EXPECT_TRUE(columns[col].converged);
                     EXPECT_LT(residual.stableNorm() / B.col(col).stableNorm(), 1e-8);
-                    if (phase == 2) EXPECT_EQ(columns[col].iterations, 0);
+                    if (phase == 2) { EXPECT_EQ(columns[col].iterations, 0); }
                     ++checked_rhs;
                 }
                 if (phase == 0) cold = X;
