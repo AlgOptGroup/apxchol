@@ -119,7 +119,7 @@ def test_disconnected_laplacian_matrix_rhs():
     assert result.converged.all()
     np.testing.assert_allclose(A @ result.x, B, rtol=1e-7, atol=1e-8)
     expected = np.column_stack([instance.apply(column) for column in B.T])
-    # Restore the same periodic Laplacian centering counter for both calls.
+    # An intervening solve must not change preconditioner application.
     instance.solve(B, rtol=1e-9)
     np.testing.assert_allclose(instance.apply(B), expected, rtol=1e-12, atol=1e-12)
 

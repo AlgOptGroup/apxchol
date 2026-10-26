@@ -92,7 +92,8 @@ struct sparse_csc {
     /// nonZeros()/rows()/cols() still work. Called once the factor has been
     /// consumed by the SpTRSV setup (which copies it into its own CSR/CSC): the
     /// PCG loop never touches F_.L afterwards, so this drops one full copy of the
-    /// factor (~nnz*12 B) for the entire solve. swap-with-empty actually frees.
+    /// factor: nnz * (sizeof(node_index) + sizeof(factor_value_t)) bytes.
+    /// swap-with-empty releases the arrays' allocations.
     void release_values() {
         std::vector<node_index>().swap(inner_);
         std::vector<factor_value_t>().swap(vals_);

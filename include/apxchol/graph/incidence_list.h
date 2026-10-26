@@ -445,26 +445,11 @@ template<typename Value> struct basic_vec_pool_incidence {
     double min_live_fraction() const { return min_live_frac_; }
     void note_live_fraction() { min_live_frac_ = std::min(min_live_frac_, live_fraction()); }
 
-    /// Compact: rebuild the pool with each vertex's live slab laid out
-    /// contiguously, reclaiming the abandoned dead slabs.  O(n + sum(count)).
-    ///   with_headroom == false : tighten cap=count (explicit/manual use).
-    ///   with_headroom == true  : leave cap = count*growth headroom per slab,
-    ///       so the next pushes don't immediately re-grow. Used by the
-    ///       defrag-on-extension path so reclaiming dead slabs doesn't just
-    ///       trade abandoned space for a storm of re-grows.
-    /// `round_incoming == nullptr` : tighten every slab to cap=count (manual
-    /// use). non-null : a vertex receiving fill THIS round (incoming[v] > 0) is
-    /// sized to
-    ///   its KNOWN need `count+incoming` plus the same geometric future-headroom
-    ///   a normal grow would give (`max(need, cap*growth)`), so the round's grows
-    ///   become a no-op; untouched vertices are tightened to count. Reclaims all
-    ///   abandoned slabs in the same pass.
-    /// Rebuild the pool, reclaiming abandoned dead slabs + pruning bloat. Each
-    /// live slab is sized to `max(count(+incoming), count*growth)` -- downsizing
-    /// over-grown slabs to 2x their CURRENT count while keeping room for this
-    /// round's known incoming.
-    ///   round_incoming : per-vertex fill counts for the imminent round (or
-    ///   null).
+    /// Rebuild live slabs contiguously, reclaiming abandoned slabs and excess
+    /// capacity. Empty slabs receive no capacity; each nonempty slab gets
+    /// max(2 * count, count + incoming), where incoming is this round's fill
+    /// count (zero when round_incoming is null). This leaves room for growth
+    /// without retaining headroom from a formerly larger slab. O(n + sum(count)).
     void compact(const std::vector<node_index>* round_incoming = nullptr) {
         auto target_cap = [&](node_index v) -> node_index {
             const node_index cnt = count_[v];

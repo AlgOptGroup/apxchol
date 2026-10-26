@@ -1,25 +1,11 @@
-// The compacting factor drop of omp_sptrsv::setup (drop_tolerance, default 1e-4):
-//   * stored nnz == the number of kept entries (the predicate |v| >= rel * s_j
-//     restated here independently of omp_sptrsv::keep_offdiag), the diagonal
-//     is always kept (first in every CSC column, last in every CSR row), no
-//     stored zeros survive, the statistics say what went;
-//   * the column-sum compensation (default): every column of the compacted
-//     factor sums to what the original column summed to, and the forward AND
-//     back solves through the compacted arrays agree with a drop-OFF
-//     omp_sptrsv on the reference factor with the dropped entries ZEROED in
-//     place and the same compensation applied (restated independently);
-//     (the column-sum compensation is unconditional; the reference is the
-//     zeroed factor (a stored zero and an absent entry solve identically);
-//   * the CSR/CSC the drop produces are byte-identical across thread counts;
-//   * zero disables threshold dropping; values outside [0, 1] or NaN are invalid.
-// Under APXCHOL_SPTRSV_LOWPREC=FP16_SCALED (sptrsv_value_t narrower than the
-// factor's factor_value_t; it stores L_ij / s_j with s_j the PRE-drop column
-// max) the drop and the compensation run on the fp32 factor
-// before the narrowing, so the value contract becomes "stored ==
-// narrow_value(compensated reference value, s_j)" bit-for-bit, and the
-// column-sum / solve comparisons hold to the storage format's rounding; the
-// storage-format-specific drop clause (format_flushes) has its own tests in
-// test_lowprec.cpp.
+// Compaction in omp_sptrsv::setup on default fp32 storage: keep off-diagonals
+// with |v| >= drop_tolerance * the pre-drop column maximum, always keep the
+// diagonal, remove stored zeros, and report the kept/dropped counts.
+// Column-sum compensation is unconditional. Forward/back solves must match
+// the reference with dropped entries zeroed and the same compensation applied.
+// CSR/CSC arrays must agree byte for byte across thread counts. Zero disables
+// threshold dropping; values outside [0, 1] and NaN are invalid.
+// GPU-host fp16 preparation is checked below; CPU fp16 storage in test_lowprec.cpp.
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <array>
@@ -156,18 +142,15 @@ std::vector<double> column_sums_L11(const sparse_csc& L, node_index m) {
     return cs;
 }
 
-// Relative rounding of ONE stored off-diagonal in this build's storage
-// format (what the column-sum / solve comparisons below are held to): 0 on
-// the fp32 / fp64 builds (the factor IS the stored value), 2^-11 fp16.
+// These fp32 drop checks introduce no storage rounding after factor construction.
 constexpr double kStorageEps =
     0.0;
-// The pre-drop per-column scale FP16_SCALED divides by (1.0 off it).
+// The fp32 reference uses unscaled factor values.
 double pair_scale(double s_pre) {
     (void)s_pre;
     return 1.0;
 }
-// The EFFECTIVE factor value a stored off-diagonal stands for: widened, times
-// the column scale under *_SCALED (the kernels run on L~ = L D^-1).
+// Widen the stored fp32 value; pair_scale is one for this reference.
 double effective(sptrsv_value_t w, double s_pre) { return apxchol::widen(w) * pair_scale(s_pre); }
 
 std::uint64_t L11_nnz_of(const sparse_csc& L, node_index m) {
@@ -193,15 +176,10 @@ sparse_csc make_wide_magnitude_lower(node_index n) {
 
 } // namespace
 
-// drop_tolerance=rel: off-diagonals with |v| < rel * s_j are REMOVED
-// before the CSR/CSC are built: stored nnz == the number of kept entries, the
-// diagonal is always kept (first in every CSC column, last in every CSR row),
-// the statistics say what was dropped, the column sums are preserved (default
-// compensation) and the forward AND back solves through the compacted arrays
-// agree with the reference dense drop (entries zeroed in place, same
-// compensation, drop OFF) to ~1e-12. Both compensation modes, both the SDDM
-// alias path (m == n) and the Laplacian copy path (m == n-1), serial and
-// parallel transpose (m > 50000).
+// Dropping removes |v| < rel * s_j before building CSR/CSC. Check kept counts,
+// diagonal placement and unconditional column-sum compensation, then compare
+// both solves with the zeroed reference to about 1e-12. Cover SDDM (m == n),
+// Laplacian (m == n-1), and serial/parallel transpose (m > 50000).
 TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
 
     struct cfg { node_index n; bool laplacian; };
@@ -324,10 +302,8 @@ TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
             EXPECT_LT(worst_f, 1e-12 * std::max(1.0, scale_f)) << "forward";
             EXPECT_LT(worst_b, 1e-12 * std::max(1.0, scale_b)) << "back";
         }
-        // And the compacted forward solve is an exact solve of the STORED L
-        // (double accumulation): componentwise residual at roundoff. (On the
-        // lowprec build the kernels divide by stored_diag(), not the narrow
-        // diagonal slot; under FP16_SCALED y1 is y' = D y on L~ = L D^-1.)
+        // The compacted forward solve must satisfy the stored fp32 factor
+        // to componentwise FP64 roundoff.
         {
             const std::vector<double> s = reference_scales_L11(L, m);
             double worst = 0.0;
@@ -389,10 +365,8 @@ TEST(SpTRSVDrop, EdgeCases) {
         if ((p % 5) == 2) L.vals_[p] = static_cast<factor_value_t>(L.vals_[p] * 1e-9);   // far below 1e-4 * s_j
     const std::uint64_t nnz = static_cast<std::uint64_t>(L.nonZeros());
     ASSERT_GT(reference_dense_drop(L, m, 1e-4).zeroed, 100u);   // the default would remove plenty here
-    // What the storage format alone would store as zero (the drop's second
-    // clause, omp_sptrsv::format_flushes): nothing on the fp32 / fp64 builds
-    // (every entry here is a nonzero fp32); on FP16_SCALED the
-    // 1e-9-scaled entries (fp16 flushes them, subnormals included by default).
+    // No value here is zero in fp32, so format_flushes must remove nothing
+    // when threshold dropping is disabled.
     const std::vector<double> s_pre = reference_scales_L11(L, m);
     std::uint64_t fmt_zero = 0;
     for (node_index j = 0; j < m; ++j)
@@ -582,11 +556,9 @@ TEST(GpuHostPrep, DropOnTheGpuHostArraysIsTheCpuDrop) {
 // FP16 factor storage (cuda_host.h file header): each slot is
 // binary16(fp32(v) / s_j) RNE with fp16 subnormals flushed to signed zero
 // (restated here with native _Float16 conversions), diag[j] =
-// fp32(L_jj) / s_j, inv_scale2[j] = fp64(fp32(1 / s_j))^2; with diag_comp the column's
-// rounding residual is folded into diag[j] so the STORED column (diag +
-// widened off-diagonals) sums to the fp32 column / s_j; the drop's fp16 keep
-// predicate additionally removes what fp16 flushes. Under the CPU FP16_SCALED
-// build the bits equal omp_sptrsv's stored bits entry for entry.
+// fp32(L_jj) / s_j, inv_scale2[j] = fp64(fp32(1 / s_j))^2. The column's
+// rounding residual is always folded into diag[j], compensating the stored
+// column sum to fp32 precision. The drop predicate also removes fp16-flushed values.
 TEST(GpuHostPrep, Fp16ScaledStorageContract) {
     for (bool laplacian : {false, true}) {
         const node_index n = 4001;
