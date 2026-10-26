@@ -38,6 +38,12 @@ cmake -S cmake/core -B "$build" -DCMAKE_BUILD_TYPE=Release \
 cmake --build "$build" --parallel 2
 cmake --install "$build"
 cp docs/sdk.md "$prefix/README.md"
+if [[ $device == CUDA ]]; then
+  # Same CUDA 13.4 release-image notices retained by the Python wheel build.
+  mkdir -p "$prefix/share/licenses/cuda" "$prefix/share/licenses/cccl"
+  cp /usr/share/licenses/cuda-cudart-13-4/LICENSE "$prefix/share/licenses/cuda/"
+  cp /usr/share/licenses/cccl-13-4/LICENSE "$prefix/share/licenses/cccl/"
+fi
 mkdir -p dist
 tar -czf "dist/$name.tar.gz" -C stage "$name"
 (cd dist && "${checksum[@]}" "$name.tar.gz" > "$name.tar.gz.sha256")

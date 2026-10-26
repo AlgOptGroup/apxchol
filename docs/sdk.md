@@ -31,7 +31,9 @@ and currently requires CUDA Toolkit 13.3 or newer when compiling consumers,
 including CPU-route consumers: its public headers and exported CMake target
 use CUDA. Use a compatible NVIDIA driver to execute GPU routes. A Metal SDK
 includes CPU and Metal routes and needs Apple's system frameworks, plus libomp.
-The macOS deployment target is 15.0.
+The macOS deployment target is 15.0. The proposed release set has Linux CPU,
+Linux CPU+CUDA and macOS CPU+Metal archives; each uses one shared-library and
+index-layout configuration.
 
 Keep the shared library accessible at runtime when installing your program.
 CMake handles the build-tree library path; set your application's installation
@@ -47,5 +49,6 @@ bash .github/scripts/build-sdk.sh CPU
 
 Use `CUDA` on Linux or `METAL` on macOS for the GPU-enabled variants. CUDA uses
 `all-major`, matching the wheel build; additional arguments are ordinary CMake
-arguments. Each archive has a SHA256 checksum. The script creates a new staging
+arguments. The CUDA archive producer uses the same CUDA 13.4 RPM packages and
+license paths as the Linux wheel build. Each archive has a SHA256 checksum. The script creates a new staging
 prefix and refuses to overwrite an existing one.
