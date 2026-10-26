@@ -782,10 +782,9 @@ factorization factorize_impl(const Eliminator& elim,
         detail::make_gpu_round_shadow_session<Eliminator>(elim,
             route, opts.verbose);
 
-    // Detect SDDM: any vertex with positive excess means the matrix
-    // is positive definite (not just semidefinite like a Laplacian).
-    // Note: make_graph already filters out FP noise (excess < diag * 1e-12),
-    // so any remaining positive excess is genuine.
+    // Record diagonal excess to select the full factor dimension. Excess in
+    // one component does not prove every component positive definite.
+    // make_graph suppresses row-sum noise before applying regularization.
     if (!initial_csc) for (node_index v = 0; v < n; ++v) {
         if (work.excess(v) > 0.0) { result.sddm = true; break; }
     }

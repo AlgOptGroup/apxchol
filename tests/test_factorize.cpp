@@ -319,24 +319,11 @@ TEST_F(FactorizeTest, Deterministic) {
 
 // ── Determinism of the PARALLEL selection path ───────
 //
-// FactorizeTest.Deterministic above factorizes a 5x5 grid: 25 candidates,
-// far below factor_options::omp_threshold, so every round takes the SERIAL
-// branch of the partitioner and the parallel one is never executed. This test
-// executes it, and is the regression guard for two schedule-dependent outputs
-// fixed 2026-08-20:
-//
-//   * block_greedy's cross-block conflict resolution read the shared chosen[]
-//     mask while other threads were clearing it, so whether a boundary pick
-//     dropped depended on who got there first. That changed the round's
-//     independent set, hence the elimination order, hence the factor's
-//     STRUCTURE and its nnz, run to run at one seed and one thread count.
-//     Measured at the parent commit on a 32-core box, standalone (i.e. not
-//     under ctest's OMP_NUM_THREADS=4 cap), SpTRSVSetupMemory.SetupConsuming-
-//     ReleasesTheFactorAndSolvesIdentically — which factorizes a 120x120 grid
-//     twice and compares — failed 19/50 at T=8, 16/50 at T=16, 19/50 at T=32,
-//     and 0/50 at T=1 and T=4.
-// Both are selection-side, so one storage suffices here; the storage x
-// partitioner matrix was checked separately.
+// The 25-vertex test above stays below omp_threshold. These tests exercise
+// parallel selection and require the same selected set and insertion order
+// for a fixed graph, selector state, seed and team size. Cross-block conflict
+// resolution must read a stable chosen mask before threads clear losing picks;
+// otherwise scheduling can change the set and subsequent factor structure.
 namespace {
 // Raise the OpenMP team size for one test and put it back (gtest runs the
 // whole binary in one process; ctest pins OMP_NUM_THREADS=4 for it).
@@ -1188,9 +1175,8 @@ TEST(Solve, TimingsReported) {
     auto b = apxchol::generate_test_rhs(100);
     auto res = apxchol::solve(L, b);
     EXPECT_GT(res.timings.total("setup"), 0.0);
-    // After 53e1d1d the PCG-loop ops are grouped under "pcg"; on the CPU path
-    // the precond.solve() triangular-solve subtree nests as pcg.solve, while
-    // the GPU-resident PCG records one pcg.gpu_pcg_loop leaf instead.
+    // CPU triangular solves are timed under pcg.solve; GPU-resident PCG
+    // records one pcg.gpu_pcg_loop leaf.
     EXPECT_GT(res.timings.total("pcg"), 0.0);
     if (res.backend == apxchol::solve_backend::gpu) {
         EXPECT_GT(res.timings.total("pcg.gpu_pcg_loop"), 0.0);
@@ -1460,9 +1446,9 @@ INSTANTIATE_TEST_SUITE_P(AllStrategies, StrategyConvergenceTest,
 
 // ─── F1: factorization quality regression tests ──────────────────────
 //
-// Historical bounds from forward-star: max residual observed across all
-// partitioners × thread counts {1, 8, 16}, multiplied by 1.5 for headroom.
-// Keep these thresholds unchanged when migrating this check to directed AoS.
+// Bounds retained from the forward-star implementation: maximum observed
+// residual across partitioners and thread counts {1, 8, 16}, with 1.5x headroom.
+// Storage-layout changes must preserve these quality bounds.
 //
 // Update bounds only when a deliberate algorithmic change shifts the
 // achievable residual.  A regression in unbiasedness shows up as

@@ -1,10 +1,7 @@
-// Storage-width-agnostic checks of the OpenMP SpTRSV kernels
-// (include/apxchol/solver/sptrsv/omp.h): the compiled storage type matches
-// the build flag, and the kernels compute in double from the WIDENED stored
-// factor values (whatever sptrsv_value_t this build compiled: fp16-scaled /
-// fp32 / fp64 -- see lowprec.h; _Float16 itself and the storage contract of
-// setup() are tested in test_lowprec.cpp) -- thin-level (`omp single`) and
-// fat-level (`omp for`, SIMD on 16-bit storage) kernels, both gather flavours.
+// OpenMP SpTRSV kernels accumulate in double from widened fp32 or per-column
+// scaled fp16 storage selected by factor_storage. Check both gather flavours
+// on thin (omp single) and fat (omp for, with fp16 SIMD) levels.
+// FP16 conversion and setup storage contracts are covered in test_lowprec.cpp.
 
 #include <gtest/gtest.h>
 #include <cmath>
@@ -70,13 +67,13 @@ TEST(SpTRSVKernels, StorageWidthFollowsTheExplicitOption) {
 // the values the SpTRSV STORES row by row with a componentwise bound. Because
 // the kernels accumulate in double, the residual is at roundoff level even
 // when the storage is 16-bit -- fp16/fp32 arithmetic would produce larger
-// rounding error. Under the FP16_SCALED build the stored values
+// rounding error. With fp16 storage the stored values
 // are: off-diagonals narrowed by omp_sptrsv::narrow_value (RNE of L_ij / s_j,
 // s_j the per-column scale) and the DIAGONAL fp32 (omp_sptrsv::stored_diag:
 // L_jj / s_j) -- so this test also pins (a) that the kernels divide by that
 // diagonal (a narrow diagonal would show as a ~2^-11 residual), (b) that CSR
 // (forward) and CSC (back) hold the SAME rounded value for every entry, and
-// (c) the FP16_SCALED PAIR CONTRACT (omp.h, "FOLDED INTO THE VECTORS"): the
+// (c) the fp16 pair contract (lowprec.h and docs/precision.md): the
 // kernels run on the stored L~ = L D^-1 with no scale multiplication --
 // forward_solve returns y' = D y (y'_j = s_j y_j) and transpose_solve, given
 // y', solves L~^T z = R y' with R = diag(r_j^2), r_j = inv_scale(s_j) =

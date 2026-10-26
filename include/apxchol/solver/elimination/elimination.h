@@ -181,12 +181,13 @@ inline void sample_cycle_clique(std::span<weighted_neighbor>, double,
 /// "Robust and Practical Solution of Laplacian Equations by Approximate
 /// Elimination" (arXiv:2303.00709).
 ///
-/// For each neighbor i = 0..d-2 (in ascending-weight order):
-///   - sample one neighbor j from the suffix {i+1,...,d-1} with
+/// For each neighbor i = 0..k-2 of k (in ascending-weight order):
+///   - sample one neighbor j from the suffix {i+1,...,k-1} with
 ///     probability  p_i(j) = a(j) / (1^T a_i),
-///   - emit edge (i,j) with weight  w̃(i,j) = a(i) · (1^T a_i) / d,
-/// where (1^T a_i) is the suffix sum w_{i+1}+...+w_{d-1} and d = S(v,v)
-/// is the total weighted degree.  Unbiased per clique edge: Claim 4.3
+///   - emit edge (i,j) with weight  w̃(i,j) = a(i) · (1^T a_i) / deg,
+/// where (1^T a_i) is the suffix sum w_{i+1}+...+w_{k-1} and deg = S(v,v)
+/// is the total weighted degree, including diagonal excess. Unbiased per
+/// clique edge: Claim 4.3
 /// shows E[Σ_i S̃_i] = Clique[L]_v.
 ///
 /// The estimator is unbiased for ANY fixed neighbor order; sorting ascending
@@ -197,7 +198,8 @@ inline void sample_cycle_clique(std::span<weighted_neighbor>, double,
 /// Earlier code used the iid pairwise harmonic mean w_i·w_j/(w_i+w_j)
 /// here; that is the Kyng-Sachdeva CliqueSample weight (BK SPAA'24
 /// Algorithm 4 / iid_elimination), not the tree-sample weight.  The two
-/// agree only on degree-2 suffixes (where d = w_i+w_j).
+/// agree for a two-neighbor star without diagonal excess
+/// (where deg = w_i+w_j).
 struct tree_elimination {
     /// Exact-clique-at-low-degree: when the eliminated vertex's degree is at
     /// most this value, emit the FULL exact Schur-complement clique

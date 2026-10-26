@@ -331,8 +331,8 @@ private:
         // The SpTRSV (and the CUDA path) have copied the factor into their own
         // CSR/CSC; the PCG loop only uses trsv_, never F_.L. Free the factor's
         // big row/value arrays -> one fewer full copy of the factor held during
-        // the solve (~nnz*12 B; e.g. ~1.4 GB on com-LiveJournal). nonZeros() (the
-        // fill stat) still works via the retained column pointers. (On the CPU
+        // the solve: nnz * (sizeof(node_index) + sizeof(factor_value_t)) bytes.
+        // nonZeros() still uses the retained column pointers. (On the CPU
         // path setup_consuming has normally done this already; idempotent.)
         // set_keep_factor(true) skips the free for callers that export L.
         if (!keep_factor_)
