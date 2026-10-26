@@ -20,7 +20,8 @@ GPU backend; no CUDA Toolkit or Homebrew installation is needed.
 | Linux | x86-64-v2 or newer | NVIDIA CUDA |
 | macOS 15+ | Apple silicon (arm64) | Apple Metal |
 
-Wheels support CPython 3.11–3.15.
+Wheels support CPython 3.11–3.15 and PyPy 7.3.23 (Python 3.11, `pp73`).
+On PyPy, install `apxchol` and use the [NumPy-only interface](#numpy-only-input).
 
 ```python
 import apxchol

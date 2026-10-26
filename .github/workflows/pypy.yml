@@ -1,4 +1,4 @@
-name: PyPy prototype
+name: PyPy wheels
 
 on:
   workflow_dispatch:

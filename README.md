@@ -47,6 +47,9 @@ requires neither the CUDA Toolkit nor Homebrew.
 | CPython 3.11–3.15, Linux | x86-64-v2 CPU, glibc 2.28 | CPU + CUDA |
 | CPython 3.11–3.15, macOS | macOS 15, Apple silicon | CPU + Metal |
 
+PyPy 7.3.23 (Python 3.11, `pp73`) wheels support the same platforms and
+backends. On PyPy, use the [NumPy-only interface](python/README.md#numpy-only-input).
+
 `solver.backend` reports which backend was selected. Use `backend="cpu"`
 or `backend="gpu"` in `factorize` to choose explicitly.
 
