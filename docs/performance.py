@@ -61,7 +61,8 @@ def hosted(reports, output):
         hw = report["hardware"]
         axes[row, 0].text(0, 1.16, f"{hw['os']} · {hw['cpu']} · {report['source'][:10]}",
                           transform=axes[row, 0].transAxes, fontsize=10)
-    fig.suptitle("Current hosted-runner measurements\nDots: all six observations; hatching: repeated runs differ by more than 10%", fontsize=13)
+    title = "Current hosted-runner measurements" if all(r.get("kind") == "hosted" for r in reports) else "Local validation preview (not hosted results)"
+    fig.suptitle(title + "\nDots: all six observations; hatching: repeated runs differ by more than 10%", fontsize=13)
     save(fig, output / "hosted.svg")
 
 
@@ -101,6 +102,7 @@ def render(report_paths, output, revision=None):
     for path, report in zip(report_paths, reports):
         hw = report["hardware"]
         lines += [f"# {hw['os']}", "", f"{hw['cpu']}; {hw['logical_cpus']} logical CPUs. "
+                  + (f"GPU: {', '.join(hw['gpus'])}. " if hw.get('gpus') else "") +
                   f"Source `{report['source'][:12]}`. "
                   f"Numerical checks: {report['passed_owners']}/{report['planned_owners']} runs, "
                   f"{report['rhs_checks']}/{report['planned_rhs_checks']} apxchol RHSs. "

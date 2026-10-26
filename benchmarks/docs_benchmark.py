@@ -177,7 +177,7 @@ def main():
         if sys.platform != "darwin":
             parser.error("--metal needs a macOS Metal build")
         configurations.append(("Metal (2 host workers)", "gpu", 2))
-    data = {"schema": 1, "kind": "hosted", "date": datetime.now(timezone.utc).isoformat(),
+    data = {"schema": 1, "kind": "hosted" if os.getenv("GITHUB_ACTIONS") == "true" else "local", "date": datetime.now(timezone.utc).isoformat(),
             "source": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
             "dirty": bool(subprocess.check_output(["git", "diff", "HEAD", "--"], cwd=ROOT)),
             "hardware": hardware(args.metal), "tolerance": RTOL, "noise_limit": NOISE_LIMIT,
