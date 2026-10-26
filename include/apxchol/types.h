@@ -1,7 +1,7 @@
 #pragma once
 /// Unsigned vertex IDs (node_index) and stored-entry offsets (edge_index).
 /// APXCHOL_INDEX_WIDTH selects 32-bit indices (32, default), 64-bit offsets
-/// with 32-bit vertices (64_OFFSETS), or 64-bit indices throughout (64).
+/// with 32-bit vertices (64_EDGES), or 64-bit indices throughout (64).
 /// Wide offsets support factors and pools exceeding 2^32-1 stored entries
 /// without doubling their vertex-index arrays.
 
@@ -68,7 +68,7 @@ inline constexpr std::uint64_t splitmix64_mix(std::uint64_t z) noexcept {
     throw std::length_error(std::string("apxchol: ") + where
         + ": an edge_index counter exceeded its "
         + std::to_string(sizeof(edge_index) * 8) + "-bit capacity. "
-          "Rebuild with -DAPXCHOL_INDEX_WIDTH=64_OFFSETS or 64.");
+          "Rebuild with -DAPXCHOL_INDEX_WIDTH=64_EDGES or 64.");
 }
 
 } // namespace apxchol
