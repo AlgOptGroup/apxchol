@@ -30,19 +30,10 @@ The release version is set in `cmake/apxchol_version.cmake`; native builds and
 Python packages share it. PyPI publication requires a matching `v<version>`
 GitHub release tag. Manually running the publish workflow builds artifacts without publishing them.
 
-## CLI archives
-
-The [CLI workflow](.github/workflows/cli.yml) contains the portable Linux CPU and
-macOS CPU+Metal build commands and relocation checks. Given a configured static
-build with fetched dependencies and the workflow's relative install RPATH:
-
-```bash
-python packaging/cli.py build-cli dist
-python packaging/check_cli_archive.py dist/*.tar.gz "$PWD" "$PWD/build-cli"
-```
-
-CI uploads archives and checksums; new releases attach them after CLI and wheel
-builds pass. Manual publish runs only build artifacts.
+The [CLI workflow](.github/workflows/cli.yml) sets up each platform and calls
+`.github/scripts/build-cli.sh`: normal CMake install, OpenMP/notices, tar and checksum.
+`tests/check_cli_archive.py` checks relocation and the existing SDDM fixture on CPU
+and Metal. The version comes from the same CMake source used by wheels.
 
 ## Documentation
 

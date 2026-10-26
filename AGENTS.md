@@ -28,7 +28,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 - Public API scope and compatibility: `docs/api.md`. Precision and storage: `docs/precision.md`. Extension seams: `docs/extending.md`.
 - Operator validation and M-matrix lumping: `operator_class`. Adjacency detection belongs to the CLI (`src/mtx_input.h`); bindings accept assembled operators only.
 - Measurement contracts: `benchmarks/README.md`.
-- CLI downloads: `.github/workflows/cli.yml` builds portable Linux CPU and macOS CPU+Metal archives. `packaging/cli.py` packages the `cli` install component with OpenMP and notices; `packaging/check_cli_archive.py` checks relocation and original-system residuals.
+- CLI archives: `.github/workflows/cli.yml` uses the `cli` install component, bundles OpenMP/notices, and runs `tests/check_cli_archive.py` after relocation.
 - Documentation: `python docs/build.py` reuses the guides, public C++ comments, Python docstrings and CLI help. Build instructions are in `CONTRIBUTING.md`; generated HTML goes to `build/docs`.
 
 ## Route invariants
@@ -64,7 +64,6 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 | Operators, input, routes, owners | `Operator*`, `MMatrixLumping.*`, `PermutedOperator.*`, `MtxInput*`, `AdjacencyInputRegression.*`, `SolveRoutes.*`, `Solve*`, `Solver.*`, `Checkpoint.*` |
 | CUDA | `Gpu*`, `CudaDeviceScope.*`, `gpu_factor_finalize_leak_check` (with compute-sanitizer) |
 | Metal | `Metal*`, `GpuDataflowPlan.*`; also under `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1` |
-| CLI archives | `packaging/check_cli_archive.py` in the platform archive jobs; macOS requires CPU and explicit Metal solves |
 | Benchmark harness | `benchmarks/tests` (unittest) and the benchmark project's CTest contracts |
 
 Integration correctness is not performance acceptance: compare original-system quality, setup, solve, one-RHS total, reuse and memory against a frozen baseline, following `benchmarks/README.md`.

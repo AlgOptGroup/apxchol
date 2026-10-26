@@ -14,34 +14,6 @@ Line Tools and `brew install cmake libomp`.
 These are source-build dependencies. Using a Python wheel needs neither the
 CUDA Toolkit nor Homebrew, and every wheel can run on CPU without a GPU.
 
-## Download the CLI
-
-Download standalone CLI artifacts from a successful [CI run](https://github.com/AlgOptGroup/apxchol/actions/workflows/ci.yml).
-Unpack the CI artifact ZIP first. New [GitHub releases](https://github.com/AlgOptGroup/apxchol/releases)
-attach the same archives and checksum files directly. Python is not required.
-
-| Archive suffix | Platform | Backends |
-|---|---|---|
-| `linux-x86_64-cpu` | Linux x86-64-v2, glibc 2.28+ | CPU |
-| `macos-arm64-metal` | Apple silicon, macOS 15+ | CPU and Metal |
-
-Download the `.tar.gz` archive and its matching `.sha256` file. Verify the checksum
-with `sha256sum -c <archive>.sha256` on Linux or `shasum -a 256 -c <archive>.sha256`
-on macOS, then extract the archive. Keep its `bin/` and `lib/` directories together:
-
-```bash
-./apxchol-<version>-<platform>/bin/apxchol --help
-./apxchol-<version>-<platform>/bin/apxchol matrix.mtx --rhs rhs.mtx -o solution.mtx
-```
-
-Replace `<version>` and `<platform>` with the downloaded archive's name. OpenMP is
-included; Linux still needs the system C++ and GCC runtimes listed in the archive's
-`README.txt`. `BUILD.json` records source and dependency provenance, and
-`share/licenses` contains redistribution notices. The macOS archive is ad-hoc
-signed, not notarized with an Apple developer identity; Gatekeeper may require
-manual approval. Use a source build where your policy requires notarized binaries.
-The CLI accepts one RHS vector per invocation.
-
 ## Build the CLI and tests
 
 ```bash
@@ -54,14 +26,21 @@ ctest --test-dir build --output-on-failure
 
 The default build is CPU-only. Add `-DAPXCHOL_DEVICE=CUDA` or
 `-DAPXCHOL_DEVICE=METAL` at configuration to include that GPU backend as well.
-The same executable still supports CPU solves. To install only the CLI executable:
+The same executable still supports CPU solves.
 
-```bash
-cmake --install build --component cli --prefix /path/to/prefix
-```
+## CLI archives
 
-This source installation uses your system runtime libraries. The download archives
-use the separate packaging workflow described in [CONTRIBUTING](../CONTRIBUTING.md#cli-archives).
+Download `cli-*` artifacts from a successful [CI run](https://github.com/AlgOptGroup/apxchol/actions/workflows/ci.yml);
+new [releases](https://github.com/AlgOptGroup/apxchol/releases) attach the archives directly.
+Linux archives require x86-64-v2, glibc 2.28+ and system C++/GCC runtimes. macOS
+archives require Apple silicon and macOS 15+, and include CPU and Metal routes.
+Verify the matching `.sha256` file with `sha256sum -c` (Linux) or `shasum -a 256 -c`
+(macOS), extract the archive, then run its `bin/apxchol --help`. Keep `bin/` and
+`lib/` together; OpenMP and redistribution notices are included. macOS binaries
+are ad-hoc signed, not notarized; Gatekeeper may require manual approval.
+
+For a source build, `cmake --install build --component cli --prefix /path/to/prefix`
+installs the executable using your system runtime libraries.
 
 ## Python source installation
 

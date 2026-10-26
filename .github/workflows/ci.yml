@@ -20,7 +20,7 @@ on:
       - 'benchmarks/patches/**'
       - 'python/**'
       - 'octave/**'
-      - 'packaging/**'
+      - '.github/scripts/build-cli.sh'
       - '.github/workflows/cli.yml'
       - '.github/workflows/ci.yml'
       - '.github/workflows/wheels.yml'

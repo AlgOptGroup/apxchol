@@ -1,95 +1,51 @@
 name: CLI archives
-
 on:
   workflow_call:
-
 permissions:
   contents: read
-
 jobs:
-  linux:
-    name: Linux x86-64 CPU archive
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+  build:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            name: linux-x86_64-cpu
+          - runner: macos-15
+            name: macos-arm64-metal
     env:
-      MANYLINUX_IMAGE: quay.io/pypa/manylinux_2_28_x86_64@sha256:53390351aeb4688114b02c36a23b3e6ce1166ee9b7afc5df1a4f776354fc764c
+      IMAGE: quay.io/pypa/manylinux_2_28_x86_64@sha256:53390351aeb4688114b02c36a23b3e6ce1166ee9b7afc5df1a4f776354fc764c
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ccache
         with:
-          key: cli-linux-clang21
-      - name: Build and package
+          key: cli-${{ matrix.name }}
+      - name: Linux install and archive
+        if: runner.os == 'Linux'
         run: |
           mkdir -p "$CCACHE_DIR" dist
-          docker run --rm --cpus=2 --memory=4g --memory-swap=4g \
-            -v "$PWD:/project:ro" -v "$PWD/dist:/dist" -v "$CCACHE_DIR:/ccache" \
-            -e CCACHE_DIR=/ccache -e CCACHE_BASEDIR=/project -e CCACHE_MAXSIZE -e CCACHE_COMPILERCHECK \
-            "$MANYLINUX_IMAGE" timeout --signal=TERM --kill-after=15s 600s bash -euxo pipefail -c '
-              export PATH=/opt/python/cp311-cp311/bin:$PATH
-              export CC=clang CXX=clang++ CMAKE_BUILD_PARALLEL_LEVEL=2 OMP_NUM_THREADS=2
+          docker run --rm --cpus=2 --memory=4g --memory-swap=4g -w /project \
+            -v "$PWD:/project" -v "$CCACHE_DIR:/ccache" -e CCACHE_DIR=/ccache -e CCACHE_MAXSIZE \
+            -e CMAKE_C_COMPILER_LAUNCHER -e CMAKE_CXX_COMPILER_LAUNCHER \
+            "$IMAGE" timeout 600 bash -euc '
               export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=/project
               dnf install -y clang-21.1.8-1.module_el8.10.0+4172+b6b13d75 libomp-devel-21.1.8-1.module_el8.10.0+4172+b6b13d75 ccache
-              cmake -S /project -B /tmp/build -G "Unix Makefiles" \
-                -DCMAKE_BUILD_TYPE=Release -DAPXCHOL_DEVICE=CPU -DAPXCHOL_NATIVE_ARCH=OFF \
-                -DBUILD_SHARED_LIBS=OFF -DAPXCHOL_BUILD_TESTS=OFF -DAPXCHOL_BUILD_EXAMPLES=OFF \
-                -DCMAKE_DISABLE_FIND_PACKAGE_Eigen3=ON -DCMAKE_DISABLE_FIND_PACKAGE_spdlog=ON \
-                -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-                -DCMAKE_INSTALL_RPATH="\$ORIGIN/../lib"
-              cmake --build /tmp/build --target apxchol --parallel 2
-              python /project/packaging/cli.py /tmp/build /dist
-              ccache --show-stats
-            '
-      - name: Check relocated archive without source or build mounts
+              bash .github/scripts/build-cli.sh'
+          docker run --rm --network=none --cpus=2 --memory=4g \
+            -v "$PWD/dist:/artifacts:ro" -v "$PWD/tests/check_cli_archive.py:/check.py:ro" \
+            -v "$PWD/tests/fixtures/path5_sddm.mtx:/matrix.mtx:ro" "$IMAGE" \
+            timeout 120 bash -ec '/opt/python/cp311-cp311/bin/python /check.py /artifacts/*.tar.gz /matrix.mtx cpu'
+      - name: macOS install and archive
+        if: runner.os == 'macOS'
         run: |
-          docker run --rm --network=none --cpus=2 --memory=4g --memory-swap=4g \
-            -v "$PWD/dist:/artifacts:ro" -v "$PWD/packaging/check_cli_archive.py:/check.py:ro" \
-            "$MANYLINUX_IMAGE" timeout --signal=TERM --kill-after=10s 120s bash -ec \
-            '/opt/python/cp311-cp311/bin/python /check.py /artifacts/*.tar.gz'
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cli-linux-x86_64-cpu
-          path: |
-            dist/*.tar.gz
-            dist/*.sha256
-          if-no-files-found: error
-
-  macos:
-    name: macOS 15 arm64 CPU and Metal archive
-    runs-on: macos-15
-    timeout-minutes: 15
-    env:
-      MACOSX_DEPLOYMENT_TARGET: '15.0'
-      CMAKE_BUILD_PARALLEL_LEVEL: '2'
-      OMP_NUM_THREADS: '2'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install build dependencies
-        run: |
-          test "$(uname -m)" = arm64
           test "$(sw_vers -productVersion | cut -d. -f1)" = 15
           brew install libomp ccache
-      - uses: ./.github/actions/ccache
-        with:
-          key: cli-macos15-metal
-      - name: Build and package
-        run: |
-          cmake -S . -B build-cli -G "Unix Makefiles" \
-            -DCMAKE_BUILD_TYPE=Release -DAPXCHOL_DEVICE=METAL -DAPXCHOL_NATIVE_ARCH=OFF \
-            -DBUILD_SHARED_LIBS=OFF -DAPXCHOL_BUILD_TESTS=OFF -DAPXCHOL_BUILD_EXAMPLES=OFF \
-            -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
-            -DCMAKE_DISABLE_FIND_PACKAGE_Eigen3=ON -DCMAKE_DISABLE_FIND_PACKAGE_spdlog=ON \
-            -DCMAKE_INSTALL_RPATH='@executable_path/../lib'
-          cmake --build build-cli --target apxchol --parallel 2
-          python packaging/cli.py build-cli dist
-          ccache --show-log-stats
-      - name: Check relocated CPU and Metal solves
-        run: python packaging/check_cli_archive.py dist/*.tar.gz "$PWD" "$PWD/build-cli"
+          bash .github/scripts/build-cli.sh
+          python3 tests/check_cli_archive.py dist/*.tar.gz tests/fixtures/path5_sddm.mtx cpu gpu
       - uses: actions/upload-artifact@v4
         with:
-          name: cli-macos-arm64-metal
+          name: cli-${{ matrix.name }}
           path: |
             dist/*.tar.gz
             dist/*.sha256
