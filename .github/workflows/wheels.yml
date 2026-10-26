@@ -22,9 +22,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Test oldest and newest Python on pull requests
         if: github.event_name == 'pull_request'
-        run: printf '%s\n' 'CIBW_BUILD=cp310-* cp314-*' >> "$GITHUB_ENV"
+        run: printf '%s\n' 'CIBW_BUILD=cp311-* cp315-*' >> "$GITHUB_ENV"
       - name: Build wheels and run tests
-        uses: pypa/cibuildwheel@v4.2.1
+        uses: pypa/cibuildwheel@v4.3.4
         with:
           package-dir: python
       - uses: actions/upload-artifact@v4

@@ -44,8 +44,8 @@ requires neither the CUDA Toolkit nor Homebrew.
 
 | Wheel builds | Minimum platform | Included backends |
 |---|---|---|
-| CPython 3.10–3.14, Linux | x86-64-v2 CPU, glibc 2.28 | CPU + CUDA |
-| CPython 3.10–3.14, macOS | macOS 15, Apple silicon | CPU + Metal |
+| CPython 3.11–3.15, Linux | x86-64-v2 CPU, glibc 2.28 | CPU + CUDA |
+| CPython 3.11–3.15, macOS | macOS 15, Apple silicon | CPU + Metal |
 
 `solver.backend` reports which backend was selected. Use `backend="cpu"`
 or `backend="gpu"` in `factorize` to choose explicitly.
