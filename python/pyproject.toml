@@ -9,7 +9,7 @@ description = "Approximate-Cholesky preconditioner for graph-Laplacian / SDDM li
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.11"
-dependencies = ["numpy>=1.21", "scipy>=1.7"]
+dependencies = ["numpy>=1.21"]
 authors = [
     {name = "Oleksandr Kulkov"},
     {name = "Yves Baumann"},
@@ -36,6 +36,7 @@ Repository = "https://github.com/AlgOptGroup/apxchol"
 Issues = "https://github.com/AlgOptGroup/apxchol/issues"
 
 [project.optional-dependencies]
+scipy = ["scipy>=1.7"]
 test = ["pytest>=7"]
 
 [tool.scikit-build]
@@ -55,7 +56,7 @@ build = "cp311-* cp312-* cp313-* cp314-* cp315-*"
 skip = "*-musllinux_*"
 # Fetch the upstream license for the OpenMP runtime bundled by wheel repair.
 before-build = 'curl -fsSL --retry 3 https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-21.1.8/openmp/LICENSE.TXT -o "{package}/LICENSE.libomp.txt"'
-test-extras = ["test"]
+test-extras = ["test", "scipy"]
 test-command = "python -m pytest {package}/tests -q"
 config-settings = { "cmake.define.APXCHOL_NATIVE_ARCH" = "OFF", "cmake.define.CMAKE_COMPILE_WARNING_AS_ERROR" = "ON", "cmake.version" = ">=4.4" }
 

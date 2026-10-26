@@ -29,13 +29,17 @@ jobs:
     needs: version
     uses: ./.github/workflows/wheels.yml
 
+  pypy:
+    needs: version
+    uses: ./.github/workflows/pypy.yml
+
   cli:
     needs: version
     uses: ./.github/workflows/cli.yml
 
   publish:
     name: upload to PyPI (wheels only)
-    needs: [wheels, cli]
+    needs: [wheels, pypy, cli]
     # workflow_dispatch only builds artifacts; uploads happen on a release.
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
@@ -45,13 +49,13 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: wheels-*
+          pattern: '{wheels-linux-x86_64-cuda,wheels-macos-arm64-metal,pypy-linux-x86_64-cuda,pypy-macos-arm64-metal}'
           merge-multiple: true
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
 
   publish-cli:
-    needs: [wheels, cli]
+    needs: [wheels, pypy, cli]
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions:

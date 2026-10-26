@@ -778,3 +778,22 @@ def test_thread_budget(num_threads):
 def test_negative_thread_budget():
     with pytest.raises(ValueError, match="num_threads must be nonnegative"):
         apxchol.factorize(sp.eye(4, format="csc"), num_threads=-1)
+
+
+def test_archive_restores_scipy_helpers(tmp_path):
+    A = grid2d_sddm(5)
+    original = apxchol.factorize(A, backend="cpu", seed=2)
+    path = tmp_path / "scipy.npz"
+    original.save(path)
+    restored = apxchol.Solver.load(path)
+    original_factor = original.chol()
+    factor = restored.chol()
+    np.testing.assert_array_equal(restored.P, original.P)
+    np.testing.assert_array_equal(factor.indptr, original_factor.indptr)
+    np.testing.assert_array_equal(factor.indices, original_factor.indices)
+    np.testing.assert_array_equal(factor.data, original_factor.data)
+    rhs = np.arange(A.shape[0], dtype=float)
+    np.testing.assert_allclose(restored.aslinearoperator() @ rhs, original.apply(rhs))
+    result = restored.solve(rhs)
+    assert result.converged
+    assert np.linalg.norm(A @ result.x - rhs) / np.linalg.norm(rhs) <= 1e-8
