@@ -321,9 +321,9 @@ class Solver:
         carries a placeholder diagonal.
         """
         if self._chol is None:
+            sp = _scipy_sparse()
             indptr, indices, data = self._impl.factor_csc()
-            self._chol = _scipy_sparse().csc_matrix((data, indices, indptr),
-                                       shape=(self._n, self._n))
+            self._chol = sp.csc_matrix((data, indices, indptr), shape=(self._n, self._n))
         return self._chol.copy()
 
     def _ld(self):

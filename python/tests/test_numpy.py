@@ -157,3 +157,17 @@ else:
 '''
     subprocess.run([sys.executable, "-I", "-B", "-c", probe], check=True, timeout=30,
                    env=dict(os.environ, CUDA_VISIBLE_DEVICES=""))
+
+
+def test_missing_scipy_does_not_export_factor(monkeypatch):
+    from unittest.mock import Mock
+    solver = apxchol.Solver.__new__(apxchol.Solver)
+    solver._impl = Mock()
+    solver._impl.factor_csc.return_value = ([], [], [])
+    solver._chol = None
+    def missing_scipy():
+        raise ImportError("Install apxchol[scipy] to use this operation.")
+    monkeypatch.setattr(apxchol, "_scipy_sparse", missing_scipy)
+    with pytest.raises(ImportError, match=r"apxchol\[scipy\]"):
+        solver.chol()
+    solver._impl.factor_csc.assert_not_called()
