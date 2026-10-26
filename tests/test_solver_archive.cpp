@@ -12,6 +12,8 @@
 #include <functional>
 #include <future>
 #include <barrier>
+#include <ranges>
+#include <string_view>
 
 namespace {
 using namespace apxchol;
@@ -284,8 +286,10 @@ TEST_F(SolverArchive, InvalidOptionsFailBeforeOpeningAnArchive) {
 }
 
 TEST_F(SolverArchive, RejectsMetadataAndIndexOverflow) {
-    for (auto [index, value] : std::array<std::pair<std::size_t, std::uint64_t>, 6>{{
+    for (const auto& entry : std::array<std::pair<std::size_t, std::uint64_t>, 6>{{
         {0, 99}, {1, UINT64_MAX}, {2, 2}, {3, UINT64_MAX}, {4, UINT64_MAX}, {6, UINT64_MAX}}}) {
+        const auto index = entry.first;
+        const auto value = entry.second;
         const auto path = change(("meta-" + std::to_string(index)).c_str(), "apxchol.npy", [&](auto& bytes) {
             std::memcpy(bytes.data() + data_offset(bytes) + index * 8, &value, 8);
         });
@@ -312,7 +316,7 @@ TEST_F(SolverArchive, RejectsMalformedHeaderAndTruncation) {
     std::filesystem::resize_file(truncated, 100);
     EXPECT_THROW(load_solver(truncated), std::runtime_error);
     const auto wrong_type = change("type", "A_data.npy", [&](auto& bytes) {
-        auto it = std::search(bytes.begin(), bytes.end(), "<f8", "<f8" + 3);
+        auto it = std::ranges::search(bytes, std::string_view("<f8")).begin();
         ASSERT_NE(it, bytes.end()); it[1] = 'u';
     });
     EXPECT_THROW(load_solver(wrong_type), std::invalid_argument);
@@ -320,7 +324,7 @@ TEST_F(SolverArchive, RejectsMalformedHeaderAndTruncation) {
 
 TEST_F(SolverArchive, ReadsOppositeEndianArrays) {
     const auto path = change("big-endian", "A_data.npy", [&](auto& bytes) {
-        auto it = std::search(bytes.begin(), bytes.end(), "<f8", "<f8" + 3);
+        auto it = std::ranges::search(bytes, std::string_view("<f8")).begin();
         ASSERT_NE(it, bytes.end()); *it = '>';
         for (std::size_t i = data_offset(bytes); i < bytes.size(); i += 8)
             std::reverse(bytes.begin() + i, bytes.begin() + i + 8);
@@ -339,9 +343,10 @@ TEST_F(SolverArchive, RejectsCorruptArrayPayload) {
     const auto size = file.tellg(); file.seekg(0);
     std::vector<char> bytes(static_cast<std::size_t>(size));
     file.read(bytes.data(), bytes.size());
-    const auto name = std::search(bytes.begin(), bytes.end(), "A_data.npy", "A_data.npy" + 10);
+    const auto name = std::ranges::search(bytes, std::string_view("A_data.npy")).begin();
     ASSERT_NE(name, bytes.end());
-    const auto magic = std::search(name, bytes.end(), "\x93NUMPY", "\x93NUMPY" + 6);
+    const auto magic = std::ranges::search(std::ranges::subrange(name, bytes.end()),
+                                            std::string_view("\x93NUMPY")).begin();
     ASSERT_NE(magic, bytes.end());
     const auto offset = static_cast<std::size_t>(magic - bytes.begin());
     const auto data = offset + 10 + static_cast<unsigned char>(bytes[offset + 8])
