@@ -29,7 +29,7 @@ jobs:
         run: |
           mkdir -p dist
           docker run --rm --cpus=2 --memory=8g --memory-swap=8g -w /project \
-            -v "$PWD:/project" -e SDK_DEVICE "$IMAGE" timeout 1500 bash -euc '
+            -v "$PWD:/project" -e SDK_DEVICE "$IMAGE" timeout 1500 bash -eluc '
               export CC=gcc CXX=g++
               export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=/project
               if test "$SDK_DEVICE" = CUDA; then
@@ -45,7 +45,7 @@ jobs:
               --tmpfs /tmp:rw,size=512m -v "$PWD/dist:/artifacts:ro" \
               -v "$PWD/tests/check_sdk_archive.py:/check.py:ro" \
               -v "$PWD/tests/cmake_install:/consumer:ro" "$IMAGE" \
-              timeout 180 /opt/python/cp311-cp311/bin/python /check.py /artifacts/*.tar.gz /consumer cpu
+              timeout 180 bash -lc '/opt/python/cp311-cp311/bin/python /check.py /artifacts/*.tar.gz /consumer cpu'
           fi
       - name: macOS install, archive and consumer
         if: runner.os == 'macOS'
