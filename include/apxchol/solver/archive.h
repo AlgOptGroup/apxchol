@@ -5,11 +5,10 @@
 
 namespace apxchol {
 
-/// Save the original operator and retained FP32 factor in a portable NPZ file.
-/// Creates a new file; an existing destination is an error. A must be the
-/// operator intended for later solves, not the factor's approximate product.
-void save_solver(const std::filesystem::path& path,
-                 const Eigen::SparseMatrix<double>& A, const factorization& F);
+/// Save the solver's original operator and retained FP32 factor in portable NPZ.
+/// Creates a new file; an existing destination is an error. Factor retention
+/// must have been enabled at construction. No extra matrix is kept between saves.
+void save_solver(const std::filesystem::path& path, const solver& owner);
 
 /// Restore a solver using the saved operator and factor. Backend, storage and
 /// solve options apply as with solver(A, F, options); automatic adoption uses CPU.

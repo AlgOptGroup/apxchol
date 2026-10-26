@@ -6,6 +6,7 @@
 
 namespace apxchol::detail {
 class gpu_solve_session {
+    friend struct solver_archive_access;
     gpu_preconditioner precond;
     cuda_pcg gpcg;
     const bool use_cp;

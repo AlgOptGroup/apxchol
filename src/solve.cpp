@@ -6,6 +6,7 @@
 #include "apxchol/csc_work.h"
 #include "apxchol/operator_class.h"
 #include "host_spmv.h"
+#include "solver_archive_internal.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -1117,6 +1118,51 @@ struct solver::impl {
 #endif
     }
 };
+
+void detail::solver_archive_access::save(const std::filesystem::path& path, const solver& owner) {
+    const auto& F = owner.factor();
+    validate_adopted_factor(F); // Reject released values before copying/downloading A.
+    if (F.rounds.size() > F.L.rows())
+        throw std::invalid_argument("solver archive: too many elimination rounds");
+    const thread_budget threads(owner.impl_->num_threads);
+    auto A = std::visit([](const auto& backend) { return original_operator(backend); }, owner.impl_->owner);
+    save_solver_data(path, A, F, owner.operator_nnz());
+}
+
+void detail::solver_archive_access::restore_input_entries(solver& owner, Eigen::Index entries) {
+    owner.impl_->operator_entries = entries;
+}
+
+Eigen::SparseMatrix<double> detail::solver_archive_access::original_operator(const cpu_solver& owner) {
+    if (owner.op_fp32_)
+        return archive_operator_csc(static_cast<int>(owner.n_), owner.Lrm_f_.outerIndexPtr(),
+            owner.Lrm_f_.innerIndexPtr(), owner.Lrm_f_.valuePtr());
+    return archive_operator_csc(static_cast<int>(owner.n_), owner.Lrm_.outerIndexPtr(),
+        owner.Lrm_.innerIndexPtr(), owner.Lrm_.valuePtr());
+}
+
+#if defined(APXCHOL_USE_CUDA)
+Eigen::SparseMatrix<double> detail::solver_archive_access::original_operator(const gpu_solve_session& owner) {
+    const auto& pcg = owner.gpcg;
+    const cuda_device_scope device(pcg.device_, cuda_device_scope::checked{});
+    const int n = static_cast<int>(pcg.n_), nnz = pcg.matrix_.nnz;
+    std::vector<int> outer(static_cast<std::size_t>(n) + 1), inner(nnz), inverse(n);
+    std::vector<double> values(nnz);
+    check_cuda(cudaMemcpy(outer.data(), pcg.matrix_.row_ptr, outer.size() * sizeof(int), cudaMemcpyDeviceToHost), "download archive offsets");
+    check_cuda(cudaMemcpy(inner.data(), pcg.matrix_.col_idx, inner.size() * sizeof(int), cudaMemcpyDeviceToHost), "download archive indices");
+    if (pcg.matrix_.fp32) {
+        std::vector<float> narrow(nnz);
+        check_cuda(cudaMemcpy(narrow.data(), pcg.matrix_.values_f32, narrow.size() * sizeof(float), cudaMemcpyDeviceToHost), "download archive values");
+        std::copy(narrow.begin(), narrow.end(), values.begin());
+    } else {
+        check_cuda(cudaMemcpy(values.data(), pcg.matrix_.values_f64, values.size() * sizeof(double), cudaMemcpyDeviceToHost), "download archive values");
+    }
+    // CUDA stores rows in original order and only columns in factor order.
+    for (int i = 0; i < n; ++i) inverse[pcg.h_perm_[i]] = i;
+    for (auto& column : inner) column = inverse[column];
+    return archive_operator_csc(n, outer.data(), inner.data(), values.data());
+}
+#endif
 
 solver::solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts, checkpoint* cp)
     : impl_(std::make_unique<impl>(A, opts, cp)) {}
