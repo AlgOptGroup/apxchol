@@ -75,9 +75,9 @@ Root embedding defaults to the portable library only. Set `APXCHOL_BUILD_CLI`,
 into those targets. CLI dependencies are fetched only when the CLI is enabled;
 tests with the CLI disabled still include the operator-input unit tests.
 
-For CUDA or Metal source consumers, keep using the top-level helper above so GPU
-languages are enabled in the parent scope. Root embedding has been checked for
-CPU consumers; it does not establish a new GPU language-scope contract.
+For CUDA or Metal, enable `CUDA` or `OBJCXX` in the consuming parent before
+`add_subdirectory`, for example with `project(my_project LANGUAGES CXX CUDA)`.
+The top-level helper above enables the selected language for you.
 
 For a separately installed SDK, use:
 

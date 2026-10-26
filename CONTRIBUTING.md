@@ -20,7 +20,9 @@ ctest --test-dir build-subdirectory --output-on-failure
 ```
 
 To check native tests without CLI dependencies, repeat in a fresh build directory
-with `-DAPXCHOL_BUILD_TESTS=ON -DAPXCHOL_BUILD_CLI=OFF`.
+with `-DAPXCHOL_BUILD_TESTS=ON -DAPXCHOL_BUILD_CLI=OFF`. The same consumer fixture
+supports `-DAPXCHOL_DEVICE=CUDA` or `METAL`, enabling the GPU language in its
+parent scope before embedding.
 The [workflow](.github/workflows/ci.yml) defines compiler and backend coverage;
 the CUDA job compiles without running device tests.
 

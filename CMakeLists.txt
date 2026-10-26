@@ -18,6 +18,13 @@ option(APXCHOL_BUILD_CLI "Build the command-line solver" ${_apxchol_top_level})
 option(APXCHOL_BUILD_EXAMPLES "Build the examples/ programs" ${_apxchol_top_level})
 option(APXCHOL_BUILD_TESTS "Build the unit tests (fetches GoogleTest)" ${_apxchol_top_level})
 option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)" ${_apxchol_top_level})
+# A parent's link dependencies also require the GPU language in its scope.
+if (NOT _apxchol_top_level)
+    if ((APXCHOL_DEVICE STREQUAL "CUDA" AND NOT CMAKE_CUDA_COMPILER_LOADED) OR
+        (APXCHOL_DEVICE STREQUAL "METAL" AND NOT CMAKE_OBJCXX_COMPILER_LOADED))
+        message(FATAL_ERROR "Enable CUDA or OBJCXX in the consuming parent before add_subdirectory(apxchol), or include cmake/apxchol_core.cmake and call apxchol_add_core() there.")
+    endif()
+endif()
 unset(_apxchol_top_level)
 
 include(cmake/apxchol_core.cmake)

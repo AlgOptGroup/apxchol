@@ -60,7 +60,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 | Graph, partitioners, elimination, sampling | `FactorizeTest.*`, `FactorizeDeterminism.*`, `AllStrategies/*`, `VecPoolAos.*`, `DirectedCscGraph.*`, `PruneSkip.*`, `IncrementalDegreeGate.*`, `TreeSampler.*`, `CycleSampler.*`, `Custom*` |
 | Residual sparsification | `ResidualBlocked*`, `ResidualSparsify*` |
 | CPU triangular solves, storage | `SpTRSV*`, `CriticalSchedule.*`, `BigAlloc.*`, `FP16.*`, `LowPrec*`, `FactorStorage.*` |
-| Root embedding | `tests/cmake_subdirectory`, with default options and with tests ON / CLI OFF |
+| Root embedding | `tests/cmake_subdirectory`, with default options and with tests ON / CLI OFF; GPU parents enable CUDA or OBJCXX before adding the root |
 | Operators, input, routes, owners | `Operator*`, `MMatrixLumping.*`, `PermutedOperator.*`, `MtxInput*`, `AdjacencyInputRegression.*`, `SolveRoutes.*`, `Solve*`, `Solver.*`, `Checkpoint.*` |
 | CUDA | `Gpu*`, `CudaDeviceScope.*`, `gpu_factor_finalize_leak_check` (with compute-sanitizer) |
 | Metal | `Metal*`, `GpuDataflowPlan.*`; also under `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1` |
