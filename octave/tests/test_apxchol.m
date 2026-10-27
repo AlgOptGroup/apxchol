@@ -393,5 +393,6 @@ function test_apxchol()
   assert(reused.converged && norm(Aopts * reused.x - bopts) / norm(bopts) < 1e-8);
   ok = ok + 1; fprintf('ok %d  matrix/initial-guess validation (20 errors)\n', ok);
 
-  fprintf('ALL %d TESTS PASSED\n', ok);
+  test_archive();
+  fprintf('ALL %d TESTS PASSED (plus archive tests)\n', ok);
 end
