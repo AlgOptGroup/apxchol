@@ -42,6 +42,11 @@ are ad-hoc signed, not notarized; Gatekeeper may require manual approval.
 For a source build, `cmake --install build --component cli --prefix /path/to/prefix`
 installs the executable using your system runtime libraries.
 
+## Native C++ SDK archives
+
+The [SDK guide](sdk.md) covers extracted C++ SDKs, compiler and runtime
+requirements, and building archives with the native CMake install rules.
+
 ## Python source installation
 
 The [Python guide](../python/README.md#build-from-source) gives the editable

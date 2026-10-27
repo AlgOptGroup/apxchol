@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/eigen.h>
+#include <pybind11/stl/filesystem.h>
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <algorithm>
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include "apxchol.h"
+#include "apxchol/solver/archive.h"
 #include "apxchol/detail/csc_import.h"
 #include "apxchol/version.h"
 
@@ -134,6 +136,17 @@ public:
     Solver(py::array indptr, py::array indices, py::array data,
            const py::dict& options)
         : slv_(csc_to_eigen(indptr, indices, data), parse_options(options)) {}
+
+    void save(const std::filesystem::path& path) const {
+        py::gil_scoped_release release;
+        apxchol::save_solver(path, slv_);
+    }
+
+    static Solver load(const std::filesystem::path& path, const py::dict& options) {
+        const auto parsed = parse_options(options);
+        py::gil_scoped_release release;
+        return Solver(apxchol::load_solver(path, parsed));
+    }
 
     Eigen::Index rows() const { return slv_.rows(); }
     Eigen::Index operator_nnz() const { return slv_.operator_nnz(); }
@@ -264,6 +277,8 @@ public:
     }
 
 private:
+    explicit Solver(apxchol::solver owner) : slv_(std::move(owner)) {}
+
     static bool same_shape(const py::array& a, const py::array& b) {
         return a.ndim() == b.ndim() && std::equal(a.shape(), a.shape() + a.ndim(), b.shape());
     }
@@ -331,6 +346,9 @@ PYBIND11_MODULE(_apxchol, m) {
         .def(py::init<py::array, py::array, py::array, const py::dict&>(),
              py::arg("indptr"), py::arg("indices"), py::arg("data"),
              py::arg("options") = py::dict())
+        .def("save", &Solver::save, py::arg("path"))
+        .def_static("load", &Solver::load, py::arg("path"),
+                    py::arg("options") = py::dict())
         .def("solve", &Solver::solve, py::arg("b"), py::arg("tol"), py::arg("maxiter"),
              py::arg("x0") = py::none(), py::arg("out") = py::none())
         .def("apply", &Solver::apply, py::arg("r"))
