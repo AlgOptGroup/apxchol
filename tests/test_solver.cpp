@@ -1488,3 +1488,79 @@ TEST(Solver, RejectsNegativeThreadBudget) {
     EXPECT_THROW(apxchol::solver(matrix, options), std::invalid_argument);
     EXPECT_THROW(apxchol::cpu_solver(matrix, options), std::invalid_argument);
 }
+
+namespace {
+void check_verified_tolerance(apxchol::solve_backend backend) {
+    const scoped_omp_threads threads(1);
+    constexpr int n = 64;
+    constexpr double tolerance = 1e-10;
+    Sparse matrix(n, n), identity(n, n);
+    identity.setIdentity();
+    std::vector<Eigen::Triplet<double>> entries;
+    for (int i = 0; i < n; ++i) {
+        entries.emplace_back(i, i, (i == 0 || i == n - 1 ? 1.0 : 2.0) + 1e-7);
+        if (i) {
+            entries.emplace_back(i, i - 1, -1.0);
+            entries.emplace_back(i - 1, i, -1.0);
+        }
+    }
+    matrix.setFromTriplets(entries.begin(), entries.end());
+    auto options = cpu_options();
+    options.backend = backend;
+    options.factor_opts.seed = 42;
+    const apxchol::solver owner(matrix, apxchol::factorize(identity, options.factor_opts), options);
+    Eigen::VectorXd rhs(n);
+    for (int i = 0; i < n; ++i) rhs[i] = (17 * i + 13) % 31 - 15 + 0.125;
+    // The recursive residual can cross tolerance before the original residual.
+    // The remaining budget must be available to correct that gap.
+    for (int budget : {0, 1, 68, 512}) {
+        SCOPED_TRACE(budget);
+        const auto result = owner.solve(rhs, tolerance, budget);
+        EXPECT_LE(result.iterations, budget);
+        EXPECT_EQ(result.converged, result.residual < tolerance);
+        if (budget == 512) {
+            EXPECT_TRUE(result.converged);
+            expect_solution(matrix, rhs, result.x, tolerance);
+        }
+    }
+    Eigen::MatrixXd B(n, 4), X(n, 4), guess = Eigen::MatrixXd::Zero(n, 4);
+    B.col(0) = rhs;
+    B.col(1).setZero();
+    guess.col(1).setOnes();
+    guess.col(2).setOnes();
+    B.col(2) = matrix * guess.col(2);
+    B.col(3) = -2 * rhs;
+    const apxchol::const_matrix_view initial(guess);
+    for (int budget : {0, 1, 68, 512}) {
+        SCOPED_TRACE(budget);
+        const auto result = owner.solve(B, X, tolerance, budget, &initial);
+        for (int c = 0; c < 4; ++c) {
+            const auto& column = result.columns[c];
+            EXPECT_LE(column.iterations, budget);
+            EXPECT_EQ(column.converged, column.residual < tolerance);
+            if (budget == 512) {
+                EXPECT_TRUE(column.converged);
+                if (c != 1) expect_solution(matrix, B.col(c), X.col(c), tolerance);
+            }
+        }
+        EXPECT_EQ(result.columns[1].iterations, 0);
+        EXPECT_TRUE(X.col(1).isZero(0.0));
+        EXPECT_EQ(result.columns[2].iterations, 0);
+        EXPECT_TRUE(X.col(2).isApprox(guess.col(2), 0.0));
+    }
+}
+}
+
+TEST(Solver, CpuContinuesAfterFailedOriginalResidualVerification) {
+    check_verified_tolerance(apxchol::solve_backend::cpu);
+}
+
+TEST(Solver, GpuContinuesAfterFailedOriginalResidualVerification) {
+#if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA owner required";
+#else
+    if (!apxchol::backend_available(apxchol::solve_backend::gpu))
+        GTEST_SKIP() << "GPU unavailable";
+    check_verified_tolerance(apxchol::solve_backend::gpu);
+#endif
+}

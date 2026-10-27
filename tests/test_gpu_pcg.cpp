@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <apxchol/solver/detail/gpu_pcg.h>
 #include <apxchol/solver/detail/gpu_scaling.h>
+#include <apxchol/solver/detail/pcg_restart.h>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -137,6 +138,7 @@ TEST(GpuPcg, ProductsRequireFinitePositiveValues) {
             state = pcg::advance(recurrence_math{}, state, mode, product, 4);
             EXPECT_EQ(state.active, unsigned(product == 1.0));
             EXPECT_EQ(state.iters, 3u);
+            EXPECT_EQ(state.tolerance_stop, 0u);
             if (product != 1.0) {
                 EXPECT_EQ(state.rz, 2);
             } else if (mode == pcg::kFinalizeAlpha) {
@@ -161,6 +163,7 @@ TEST(GpuPcg, OverflowingCoefficientsBreakDownBeforeUpdatingTheSolution) {
                              mode == pcg::kFinalizeRz ? large : small, 1);
         EXPECT_EQ(state.active, 0u);
         EXPECT_EQ(state.iters, 0u);
+        EXPECT_EQ(state.tolerance_stop, 0u);
     }
 }
 
@@ -176,6 +179,7 @@ TEST(GpuPcg, ResidualCheckCountsTheCompletedIterationEvenOnBreakdown) {
                              residual_squared, 4);
         EXPECT_EQ(state.active, 0u);
         EXPECT_EQ(state.iters, 4u);
+        EXPECT_EQ(state.tolerance_stop, unsigned(residual_squared == 0.0));
         if (!std::isnan(residual_squared)) {
             EXPECT_EQ(state.rr, residual_squared);
         }
@@ -228,4 +232,16 @@ TEST(GpuPcg, InputScalingKeepsOrdinaryValuesAndNormalizesExtremes) {
     const double scale = scaling::fp32_scale(tiny);
     EXPECT_TRUE(std::isnormal(float(tiny * scale)));
     EXPECT_EQ((tiny * scale) / scale, tiny);
+}
+
+TEST(GpuPcg, OnlyVerifiedToleranceFailuresCanRestartWithinTheBudget) {
+    using apxchol::detail::pcg_restart;
+    EXPECT_TRUE(pcg_restart(true, false, 2e-8, 4, 1));
+    EXPECT_FALSE(pcg_restart(false, false, 2e-8, 4, 1));
+    EXPECT_FALSE(pcg_restart(true, true, 1e-9, 4, 1));
+    EXPECT_FALSE(pcg_restart(true, false, 2e-8, 0, 1));
+    EXPECT_FALSE(pcg_restart(true, false, 2e-8, 4, 0));
+    for (double value : {std::numeric_limits<double>::infinity(),
+                         std::numeric_limits<double>::quiet_NaN()})
+        EXPECT_FALSE(pcg_restart(true, false, value, 4, 1));
 }

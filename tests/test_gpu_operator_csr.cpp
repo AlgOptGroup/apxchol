@@ -198,11 +198,15 @@ HostCsc precision_input(bool inexact) {
 struct TestPreconditioner {
     int n;
     bool breakdown = false;
+    unsigned breakdown_after = std::numeric_limits<unsigned>::max();
+    mutable unsigned calls = 0;
     const auto& trsv() const { return *this; }
     template<unsigned Columns>
     void solve_LLt_dev(const double* input, double* output, const unsigned*, unsigned) const {
         const auto bytes = n * Columns * sizeof(double);
-        const auto status = breakdown ? cudaMemset(output, 0, bytes)
+        const bool stopped = breakdown || calls >= breakdown_after;
+        ++calls;
+        const auto status = stopped ? cudaMemset(output, 0, bytes)
             : cudaMemcpy(output, input, bytes, cudaMemcpyDeviceToDevice);
         if (status != cudaSuccess) throw std::runtime_error(cudaGetErrorString(status));
     }
@@ -549,6 +553,26 @@ TEST(GpuSolveHonesty, FinalResidualChecksReturnedScalarAndPairOnReuse) {
         solver.solve(preconditioner, base, output, 1e-12, 10, iterations, reported, laplacian, &warm);
         EXPECT_EQ(iterations, 0);
         EXPECT_NEAR(reported, independent_residual(a, base, output), 2e-14);
+
+        // A breakdown after progress must not start another solve attempt.
+        preconditioner.breakdown = false;
+        preconditioner.breakdown_after = 1;
+        preconditioner.calls = 0;
+        solver.solve(preconditioner, base, output, 1e-12, 100, iterations, reported, laplacian, &warm);
+        EXPECT_EQ(iterations, 1);
+        EXPECT_EQ(preconditioner.calls, 2u);
+        EXPECT_GT(reported, 1e-12);
+        EXPECT_NEAR(reported, independent_residual(a, base, output), 2e-14);
+        Eigen::MatrixXd rhs(n, 4), panel(n, 4);
+        rhs.col(0) = base; rhs.col(1).setZero(); rhs.col(2) = -2 * base; rhs.col(3) = 0.5 * base;
+        std::array<int, 4> counts{};
+        std::array<double, 4> residuals{};
+        preconditioner.calls = 0;
+        solver.solve_panel<4>(preconditioner, rhs, panel, 1e-12, 100, counts, residuals, laplacian);
+        EXPECT_EQ(preconditioner.calls, 2u);
+        EXPECT_EQ(counts, (std::array<int, 4>{1, 0, 1, 1}));
+        for (unsigned q = 0; q < 4; ++q)
+            EXPECT_NEAR(residuals[q], independent_residual(a, rhs.col(q), panel.col(q)), 2e-14);
     }
 #endif
 }

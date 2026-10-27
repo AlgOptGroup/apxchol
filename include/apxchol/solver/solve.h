@@ -3,6 +3,7 @@
 #include "apxchol/solver/preconditioner.h"
 #include <Eigen/Core>
 #include <Eigen/Sparse>
+#include <array>
 #include <vector>
 #include <memory>
 
@@ -163,6 +164,9 @@ private:
     template<int Columns>
     void solve_panel(const double* b, double* x, solve_result* results, checkpoint& timings,
                      double tol, int max_iter, const double* x0) const;
+    template<int Columns>
+    void finish_solution(const_matrix_view B, double* x, solve_result* results,
+                         checkpoint& timings, double tol, int max_iter) const;
     template<int Columns>
     void check_solution(const_matrix_view B, const double* x, solve_result* results,
                         checkpoint& timings, double tol) const;

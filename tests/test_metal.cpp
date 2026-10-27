@@ -664,7 +664,9 @@ TEST_F(MetalDevice, EarlyExitsTruthful) {
         SCOPED_TRACE(int(storage));
         apxchol::solve_options options;
         options.factor_opts.factor_storage = storage;
-        const apxchol::metal_solver slv(A, options);
+        options.backend = apxchol::solve_backend::gpu;
+        const apxchol::solver slv(A, options);
+        ASSERT_EQ(slv.backend(), apxchol::solve_backend::gpu);
         const Eigen::VectorXd b = rhs(A.rows(), 1, true);
         const apxchol::solve_result none = slv.solve(b, 1e-8, 0);
         EXPECT_EQ(none.iterations, 0);
@@ -677,10 +679,29 @@ TEST_F(MetalDevice, EarlyExitsTruthful) {
         EXPECT_LT((seeded.x - guess).norm(), 1e-12);
         EXPECT_NEAR(seeded.residual, true_residual(A, b, seeded.x), 1e-12);
 
-        for (int limit : {1, 4, 5}) {
+        for (int limit : {0, 1, 4, 5}) {
             const auto limited = slv.solve(b, 1e-30, limit);
             EXPECT_EQ(limited.iterations, limit);
             EXPECT_NEAR(limited.residual, true_residual(A, b, limited.x), 1e-12);
+            Eigen::MatrixXd B = b.replicate(1, 4), initial = Eigen::MatrixXd::Zero(A.rows(), 4);
+            B.col(0).setZero();
+            B.col(1) = A * guess;
+            initial.col(1) = guess;
+            const apxchol::const_matrix_view warm(initial);
+            Eigen::MatrixXd storage = Eigen::MatrixXd::Constant(2 * A.rows(), 4, 77.0);
+            using Stride = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
+            Eigen::Map<Eigen::MatrixXd, 0, Stride> X(storage.data(), A.rows(), 4,
+                                                   Stride(2 * A.rows(), 2));
+            const auto panel = slv.solve(B, X, 1e-8, limit, &warm);
+            ASSERT_EQ(panel.columns.size(), 4u);
+            for (int q = 0; q < 4; ++q) {
+                EXPECT_LE(panel.columns[q].iterations, limit);
+                if (q < 2) EXPECT_EQ(panel.columns[q].iterations, 0);
+                const double residual = q == 0 ? X.col(q).norm() : true_residual(A, B.col(q), X.col(q));
+                EXPECT_NEAR(panel.columns[q].residual, residual, 1e-12);
+            }
+            for (Eigen::Index i = 1; i < storage.rows(); i += 2)
+                EXPECT_TRUE((storage.row(i).array() == 77.0).all());
         }
 
         const Eigen::VectorXd zero = Eigen::VectorXd::Zero(A.rows());
@@ -709,6 +730,73 @@ TEST_F(MetalDevice, BreakdownIsNotConvergence) {
         const apxchol::solve_result r = slv.solve(b, 1e-8, 50);
         EXPECT_EQ(r.iterations, 0);
         EXPECT_EQ(r.residual, 1.0);
+    }
+}
+
+TEST_F(MetalDevice, ProjectedWarmResidualDoesNotConsumeBudget) {
+    constexpr int side = 4, n = side * side;
+    constexpr double tolerance = 1e-8;
+    std::vector<Eigen::Triplet<double>> entries;
+    Eigen::VectorXd diagonal = Eigen::VectorXd::Zero(n);
+    for (int i = 0; i < n; ++i) {
+        for (const int j : {i % side + 1 < side ? i + 1 : -1, i + side < n ? i + side : -1}) {
+            if (j < 0) continue;
+            entries.emplace_back(i, j, -1.0);
+            entries.emplace_back(j, i, -1.0);
+            ++diagonal[i];
+            ++diagonal[j];
+        }
+    }
+    for (int i = 0; i < n; ++i) entries.emplace_back(i, i, diagonal[i]);
+    Sparse A(n, n);
+    A.setFromTriplets(entries.begin(), entries.end());
+    Eigen::VectorXd guess(n);
+    for (int i = 0; i < n; ++i) guess[i] = i % 2 ? -1.0 : 1.0;
+    const Eigen::VectorXd compatible = A * guess;
+    // The nonzero-mean RHS is incompatible, but its projected warm residual is tiny.
+    Eigen::VectorXd incompatible = compatible.array() + 1.0;
+    incompatible[0] += 0x1p-30;
+    incompatible[1] -= 0x1p-30;
+    Eigen::VectorXd projected = incompatible - A * guess;
+    projected.array() -= projected.mean();
+    ASSERT_GT(true_residual(A, incompatible, guess), tolerance);
+    ASSERT_LT(projected.norm() / incompatible.norm(), tolerance);
+
+    for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
+        SCOPED_TRACE(int(storage));
+        apxchol::solve_options options;
+        options.backend = apxchol::solve_backend::gpu;
+        options.factor_opts.factor_storage = storage;
+        const apxchol::solver slv(A, options);
+        ASSERT_EQ(slv.backend(), apxchol::solve_backend::gpu);
+        const auto scalar = slv.solve(incompatible, tolerance, 1000, &guess);
+        EXPECT_EQ(scalar.iterations, 0);
+        EXPECT_FALSE(scalar.converged);
+        EXPECT_TRUE(same_bytes(scalar.x, guess));
+        EXPECT_NEAR(scalar.residual, true_residual(A, incompatible, scalar.x), 1e-14);
+
+        Eigen::MatrixXd B(n, 4), initial = Eigen::MatrixXd::Zero(n, 4), X(n, 4);
+        B.col(0) = incompatible;
+        B.col(1) = compatible;
+        B.col(2).setZero();
+        B.col(3) = A * rhs(n, 3, true);
+        initial.col(0) = initial.col(1) = guess;
+        const apxchol::const_matrix_view warm(initial);
+        const auto batch = slv.solve(B, X, tolerance, 1000, &warm);
+        ASSERT_EQ(batch.columns.size(), 4u);
+        EXPECT_EQ(batch.columns[0].iterations, 0);
+        EXPECT_FALSE(batch.columns[0].converged);
+        EXPECT_TRUE(same_bytes(X.col(0), guess));
+        EXPECT_EQ(batch.columns[1].iterations, 0);
+        EXPECT_EQ(batch.columns[2].iterations, 0);
+        EXPECT_GT(batch.columns[3].iterations, 0);
+        EXPECT_TRUE(X.allFinite());
+        for (int q = 0; q < 4; ++q) {
+            const double residual = q == 2 ? X.col(q).norm() : true_residual(A, B.col(q), X.col(q));
+            EXPECT_NEAR(batch.columns[q].residual, residual, 1e-14);
+            EXPECT_EQ(batch.columns[q].converged, residual < tolerance);
+            if (q > 0) EXPECT_TRUE(batch.columns[q].converged);
+        }
     }
 }
 
