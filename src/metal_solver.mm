@@ -863,7 +863,10 @@ std::array<bool, Columns> metal_solver::impl::solve_columns_once(
         } else work = bp[q];
         const double initial = X0 ? bnorm[q].relative(work) : 1.0;
         if (initial < tol || max_iter == 0) continue;
-        if (laplacian) centre(work);
+        if (laplacian) {
+            centre(work);
+            if (X0 && bnorm[q].relative(work) < tol) continue;
+        }
         const double max_abs = work.cwiseAbs().maxCoeff();
         if (max_abs == 0.0) continue;
         scale[q] = mh::pow2_scale(max_abs);

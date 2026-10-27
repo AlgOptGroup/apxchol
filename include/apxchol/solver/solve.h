@@ -163,12 +163,10 @@ private:
 
     template<int Columns>
     void solve_panel(const double* b, double* x, solve_result* results, checkpoint& timings,
-                     double tol, int max_iter, const double* x0,
-                     std::array<bool, Columns>* tolerance_stops = nullptr) const;
+                     double tol, int max_iter, const double* x0) const;
     template<int Columns>
     void finish_solution(const_matrix_view B, double* x, solve_result* results,
-                         checkpoint& timings, double tol, int max_iter,
-                         std::array<bool, Columns> tolerance_stops) const;
+                         checkpoint& timings, double tol, int max_iter) const;
     template<int Columns>
     void check_solution(const_matrix_view B, const double* x, solve_result* results,
                         checkpoint& timings, double tol) const;
