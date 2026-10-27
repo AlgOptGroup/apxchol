@@ -21,7 +21,9 @@ on:
       - 'python/**'
       - 'octave/**'
       - '.github/scripts/build-cli.sh'
+      - '.github/scripts/build-sdk.sh'
       - '.github/workflows/cli.yml'
+      - '.github/workflows/sdk.yml'
       - '.github/workflows/ci.yml'
       - '.github/workflows/wheels.yml'
       - '.github/workflows/publish.yml'
@@ -268,6 +270,9 @@ jobs:
 
   cli:
     uses: ./.github/workflows/cli.yml
+
+  sdk:
+    uses: ./.github/workflows/sdk.yml
 
   octave:
     name: octave (mkoctfile + tests)
