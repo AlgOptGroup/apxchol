@@ -61,7 +61,13 @@ The site reuses the repository guides, selected C++ comments, Python docstrings
 and the CLI's `--help`. Generated files stay in `build/docs`. To use another
 CLI or output directory, pass them as positional arguments to `docs/build.py`.
 Documentation CI uploads an HTML preview for review. Successful main builds
-publish the same site to GitHub Pages.
+publish development documentation at `/dev/`. Each stable GitHub release saves
+its rendered HTML as `documentation.tar.gz`; reruns retain the existing snapshot.
+The site root serves the most recently published stable release with a snapshot,
+or development documentation until the first snapshot exists. Older snapshots
+remain downloadable from their GitHub releases. Publishing a snapshot triggers
+a main documentation build to refresh the site. Release pages link to the latest
+runner measurements in development documentation.
 
 ## Code conventions
 
