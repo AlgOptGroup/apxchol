@@ -10,6 +10,7 @@ Building and installation <docs/building>
 Using the solver <docs/usage>
 Python <python/README>
 MATLAB / Octave <octave/README>
+Batching and factor reuse <docs/batching>
 Saving and loading <docs/serialization>
 Precision and convergence <docs/precision>
 Native C++ SDK archives <docs/sdk>

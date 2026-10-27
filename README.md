@@ -90,15 +90,8 @@ The CLI also accepts adjacency matrices. `--random-rhs` generates a test RHS;
 
 ## Performance
 
-Batching reuses work across right-hand sides. On a 1.13-million-row YouTube
-Laplacian, four-column solves were 2.1× faster than separate calls on CPU and
-1.7× faster on Metal. These measurements use the same factor for each comparison.
-
-![YouTube batching speedups on Apple M1 Max](docs/performance/youtube.svg)
-
-See [CPU/Metal runner measurements and the full methodology](docs/performance.md).
-The small benchmarks regenerate on each `main` commit; the larger comparison
-above is dated separately. Results depend on the matrix, hardware and settings.
+See [performance results and methodology](docs/performance.md) and
+[batching and factor reuse](docs/batching.md) for measured examples and guidance.
 
 ## Learn more
 
