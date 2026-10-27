@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 GUIDES = ["README.md", "python/README.md", "octave/README.md", "CONTRIBUTING.md",
           "benchmarks/README.md", "docs/api.md", "docs/precision.md", "docs/extending.md",
-          "docs/usage.md", "docs/building.md", "docs/performance.md"]
+          "docs/usage.md", "docs/building.md", "docs/serialization.md", "docs/performance.md"]
 PAGES = {name: name for name in GUIDES}
 PAGES.update({"README.md": "_readme.md", "docs/index.md": "index.md",
               "docs/reference/cpp.md": "docs/reference/cpp.md",

@@ -17,6 +17,7 @@ option(APXCHOL_POOL_FP32 "Store residual-pool weights in FP32; reads promote to 
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_arch.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_eigen.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_openmp.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/apxchol_archive.cmake)
 
 if (APXCHOL_DEVICE STREQUAL "METAL")
     enable_language(OBJCXX)
@@ -37,8 +38,9 @@ function(apxchol_configure_core target)
         ${root}/src/factorization.cpp
         ${root}/src/operator_class.cpp
         ${root}/src/solve.cpp
+        ${root}/src/solver_archive.cpp
     )
-    target_link_libraries(${target} PUBLIC Eigen3::Eigen OpenMP::OpenMP_CXX)
+    target_link_libraries(${target} PUBLIC Eigen3::Eigen OpenMP::OpenMP_CXX PRIVATE ZLIB::ZLIB)
     target_compile_features(${target} PUBLIC cxx_std_23)
     set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
     target_compile_options(${target} PRIVATE

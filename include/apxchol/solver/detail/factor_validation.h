@@ -9,6 +9,26 @@
 
 namespace apxchol::detail {
 
+// Operator checks shared by adoption and portable archive creation.
+inline void validate_adopted_operator(const Eigen::SparseMatrix<double>& A,
+                                      const factorization& F, double lump_max_mass) {
+    if (A.rows() == 0 || A.rows() != A.cols() || static_cast<Eigen::Index>(F.L.rows()) != A.rows())
+        throw std::invalid_argument("solver: factorization dimension mismatch");
+    require_operator(A, lump_max_mass);
+    if (!F.sddm) {
+        for (Eigen::Index col = 0; col < A.cols(); ++col) {
+            double diagonal = 0, positive = 0, degree = 0;
+            for (Eigen::SparseMatrix<double>::InnerIterator entry(A, col); entry; ++entry)
+                if (entry.row() == entry.col()) diagonal = entry.value();
+                else if (entry.value() > 0) positive += entry.value();
+                else degree -= entry.value();
+            diagonal += positive;
+            if (diagonal - degree > diagonal * 1e-12)
+                throw std::invalid_argument("a Laplacian factor cannot precondition an SDDM operator");
+        }
+    }
+}
+
 // External factors expose mutable arrays. Validate them before setup or
 // permutation indexing; internally generated factors do not need this scan.
 inline void validate_adopted_factor(const factorization& factor) {

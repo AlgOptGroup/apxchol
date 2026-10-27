@@ -23,11 +23,13 @@
 #include "apxchol/solver/sptrsv/cuda.h"
 
 namespace apxchol {
+namespace detail { struct solver_archive_access; }
 
 #define APXCHOL_PCG_CUDA_CHECK(c)      apxchol::detail::check_cuda((c), #c)
 
 /// All-on-device PCG. Construct once per matrix; reusable across solves.
 class cuda_pcg {
+    friend struct detail::solver_archive_access;
 public:
     cuda_pcg() = default;
     cuda_pcg(const cuda_pcg&) = delete;

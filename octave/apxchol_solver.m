@@ -10,6 +10,10 @@ classdef apxchol_solver < handle
   % has rank n-k; its RHS must sum to zero within each component. The constructor
   % builds the factor once; clearing the object frees it automatically.
   %
+  % b and r may be vectors or n-by-k matrices of independent RHS columns.
+  % Matrix solves return 1-by-k status arrays. x0 is an optional initial guess
+  % with the same shape as b; omitted or [] starts from zero.
+  %
   % Omitted or [] solve options use the C++ defaults. rtol must be finite
   % and positive; maxiter must be an integer in [0, 2^31-1].
   % Setup options: num_threads, seed, factor_storage, cpu_schedule,
@@ -28,10 +32,11 @@ classdef apxchol_solver < handle
       obj.h = apxchol_mex('factorize', A, options);
     end
 
-    function res = solve(obj, b, rtol, maxiter)
+    function res = solve(obj, b, rtol, maxiter, x0)
       if nargin < 3, rtol = []; end
       if nargin < 4, maxiter = []; end
-      [x, iters, residual, converged] = apxchol_mex('solve', obj.h, full(b), rtol, maxiter);
+      if nargin < 5, x0 = []; end
+      [x, iters, residual, converged] = apxchol_mex('solve', obj.h, full(b), rtol, maxiter, full(x0));
       res = struct('x', x, 'iters', iters, 'residual', residual, 'converged', converged);
     end
 
