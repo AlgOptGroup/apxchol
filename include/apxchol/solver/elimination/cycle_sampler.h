@@ -143,7 +143,7 @@ inline void sample_trace_cycle(std::span<weighted_neighbor> n, double pivot,
     static thread_local trace_cycle_plan workspace;
     static thread_local std::vector<std::size_t> cycle;
     static thread_local std::vector<deferred_edge> staged;
-    staged.clear(); staged.reserve(2 * n.size() + exact_core_max_h * exact_core_max_h);
+    staged.clear();
     // Only plan construction may choose an input-only numerical fallback.
     // Once random sampling starts, errors remain errors; never redraw.
     try { workspace.prepare(n); }
@@ -169,12 +169,24 @@ inline void sample_trace_cycle(std::span<weighted_neighbor> n, double pivot,
         sample_cycle_gks_fallback(n, pivot, seed, out);
         return;
     }
-    random_stream rng{seed};
     // Reject the by-route sentinel defensively: it is SIZE_MAX, so an
     // unresolved value would make `h <= exact_core_max_h` true for every core
     // and switch the exact clique on everywhere.
-    if (exact_core_max_h > 0 && exact_core_max_h != exact_core_by_route &&
-        h <= exact_core_max_h) {
+    const bool exact_core = exact_core_max_h > 0 &&
+        exact_core_max_h != exact_core_by_route && h <= exact_core_max_h;
+    const size_t cycles = (double_cycle_min_h > 0 && h >= double_cycle_min_h) ? 2 : 1;
+    // Reserve the actual core edges plus light attachments. Divide the exact
+    // pair count before multiplying, and check against the vector's limit.
+    size_t core_count = h, core_factor = exact_core ? h - 1 : cycles;
+    if (exact_core) {
+        if (core_count % 2 == 0) core_count /= 2;
+        else core_factor /= 2;
+    }
+    if (cut > staged.max_size() || core_count > (staged.max_size() - cut) / core_factor)
+        throw std::length_error("cycle sampler: too many staged edges");
+    staged.reserve(cut + core_count * core_factor);
+    random_stream rng{seed};
+    if (exact_core) {
         // Exact core: every core pair with its clique weight. Zero core
         // variance; light attachments below are unchanged.
         for (std::size_t x = cut; x < d; ++x)
@@ -186,8 +198,7 @@ inline void sample_trace_cycle(std::span<weighted_neighbor> n, double pivot,
     } else {
         // One uniform Hamiltonian cycle, or two independent ones with halved
         // weights on a large core (random 4-regular core). Both unbiased.
-        const int cycles = (double_cycle_min_h > 0 && h >= double_cycle_min_h) ? 2 : 1;
-        for (int c = 0; c < cycles; ++c) {
+        for (size_t c = 0; c < cycles; ++c) {
             cycle.resize(h);std::iota(cycle.begin(),cycle.end(),cut);
             for(std::size_t k=h;k>1;--k)
                 std::swap(cycle[k-1],cycle[uniform_index(rng,k)]);

@@ -94,6 +94,53 @@
 #endif
 #endif
 
+#ifdef HAVE_APXCHOL_V1
+struct V1Combo {
+    const char* name;
+    std::string is;
+    size_t exact_clique_max_degree = 0; // 0 = off; emit exact clique when deg <= this
+    double degree_mult = 0.0;           // 0 = use fopts default (2.0); else override the IS cap
+    apxchol::clique_sampler sampler = apxchol::clique_sampler::gks; // gks | trace_cycle
+    size_t exact_core_max_h = apxchol::exact_core_by_route;  // trace_cycle: exact clique on heavy cores with h <= this (sentinel = library default)
+    size_t double_cycle_min_h = 0;      // trace_cycle: two cycles on heavy cores with h >= this
+};
+static const V1Combo v1_combos[] = {
+    {.name="bg+tree[vec_pool_aos]", .is="block_greedy"},
+    {.name="bk+tree[vec_pool_aos]", .is="baumann_kyng"},
+    {.name="greedy+tree[vec_pool_aos]", .is="priority_greedy"},
+    // Cycle-core samplers on the headline storage (2026-09-18). /ec5 = exact
+    // clique on heavy cores of <= 5 vertices; /dc32 = two cycles on cores of
+    // >= 32 vertices; /ec5dc32 = both. See factor_options for the rationale.
+    {.name="bg+trace_cycle[vec_pool_aos]", .is="block_greedy",
+     .sampler=apxchol::clique_sampler::trace_cycle},
+    {.name="bg+trace_cycle/ec5[vec_pool_aos]", .is="block_greedy",
+     .sampler=apxchol::clique_sampler::trace_cycle, .exact_core_max_h=5},
+    {.name="bg+trace_cycle/dc32[vec_pool_aos]", .is="block_greedy",
+     .sampler=apxchol::clique_sampler::trace_cycle, .double_cycle_min_h=32},
+    {.name="bg+trace_cycle/ec5dc32[vec_pool_aos]", .is="block_greedy",
+     .sampler=apxchol::clique_sampler::trace_cycle, .exact_core_max_h=5, .double_cycle_min_h=32},
+    // Quality levers: exact full clique at low degree (xcN), relaxed IS degree cap (capN).
+    {.name="bg+tree/xc4[vec_pool_aos]",  .is="block_greedy", .exact_clique_max_degree=4},
+    {.name="bg+tree/xc8[vec_pool_aos]",  .is="block_greedy", .exact_clique_max_degree=8},
+    {.name="bg+tree/xc16[vec_pool_aos]", .is="block_greedy", .exact_clique_max_degree=16},
+    {.name="bg+tree/cap4[vec_pool_aos]", .is="block_greedy", .degree_mult=4.0},
+};
+
+static apxchol::factor_options v1_factor_options(const V1Combo& combo,
+                                                apxchol::factor_options opts) {
+    opts.is_select = combo.is;
+    opts.sampler = combo.sampler;
+    opts.exact_clique_max_degree = combo.exact_clique_max_degree;
+    opts.exact_core_max_h = combo.exact_core_max_h;
+    opts.double_cycle_min_h = combo.double_cycle_min_h;
+    if (combo.degree_mult > 0) {
+        opts.partition.degree_quantile = 0;
+        opts.partition.degree_multiplier = combo.degree_mult;
+    }
+    return opts;
+}
+#endif
+
 #ifdef HAVE_RCHOL
 #include "sparse.hpp"
 #include "rchol.hpp"
@@ -3017,36 +3064,6 @@ int main(int argc, char** argv) try {
 
 #ifdef HAVE_APXCHOL_V1
     if (args.solvers.count("apxchol_v1")) {
-        struct V1Combo {
-            const char* name;
-            std::string is;
-            size_t exact_clique_max_degree = 0; // 0 = off; emit exact clique when deg <= this
-            double degree_mult = 0.0;           // 0 = use fopts default (2.0); else override the IS cap
-            apxchol::clique_sampler sampler = apxchol::clique_sampler::gks; // gks | trace_cycle
-            size_t exact_core_max_h = apxchol::exact_core_by_route;  // trace_cycle: exact clique on heavy cores with h <= this (sentinel = library default)
-            size_t double_cycle_min_h = 0;      // trace_cycle: two cycles on heavy cores with h >= this
-        };
-        static const V1Combo v1_combos[] = {
-            {.name="bg+tree[vec_pool_aos]", .is="block_greedy"},
-            {.name="bk+tree[vec_pool_aos]", .is="baumann_kyng"},
-            {.name="greedy+tree[vec_pool_aos]", .is="priority_greedy"},
-            // Cycle-core samplers on the headline storage (2026-09-18). /ec5 = exact
-            // clique on heavy cores of <= 5 vertices; /dc32 = two cycles on cores of
-            // >= 32 vertices; /ec5dc32 = both. See factor_options for the rationale.
-            {.name="bg+trace_cycle[vec_pool_aos]", .is="block_greedy",
-             .sampler=apxchol::clique_sampler::trace_cycle},
-            {.name="bg+trace_cycle/ec5[vec_pool_aos]", .is="block_greedy",
-             .sampler=apxchol::clique_sampler::trace_cycle, .exact_core_max_h=5},
-            {.name="bg+trace_cycle/dc32[vec_pool_aos]", .is="block_greedy",
-             .sampler=apxchol::clique_sampler::trace_cycle, .double_cycle_min_h=32},
-            {.name="bg+trace_cycle/ec5dc32[vec_pool_aos]", .is="block_greedy",
-             .sampler=apxchol::clique_sampler::trace_cycle, .exact_core_max_h=5, .double_cycle_min_h=32},
-            // Quality levers: exact full clique at low degree (xcN), relaxed IS degree cap (capN).
-            {.name="bg+tree/xc4[vec_pool_aos]",  .is="block_greedy", .exact_clique_max_degree=4},
-            {.name="bg+tree/xc8[vec_pool_aos]",  .is="block_greedy", .exact_clique_max_degree=8},
-            {.name="bg+tree/xc16[vec_pool_aos]", .is="block_greedy", .exact_clique_max_degree=16},
-            {.name="bg+tree/cap4[vec_pool_aos]", .is="block_greedy", .degree_mult=4.0},
-        };
         // Thread count: if --threads is set, use that; otherwise current OMP setting.
         int tc = args.threads;
         if (tc <= 0) {
@@ -3069,13 +3086,7 @@ int main(int argc, char** argv) try {
             // factorizes each component independently. The single-component callable
             // ignores `ground` (apxchol has only its native grounding).
             auto opts = args.v1_options;
-            opts.factor_opts.is_select = combo.is;
-            opts.factor_opts.sampler = combo.sampler;
-            opts.factor_opts.exact_clique_max_degree = combo.exact_clique_max_degree;
-            opts.factor_opts.exact_core_max_h = combo.exact_core_max_h;
-            opts.factor_opts.double_cycle_min_h = combo.double_cycle_min_h;
-            if (combo.degree_mult > 0)
-                opts.factor_opts.partition.degree_multiplier = combo.degree_mult;
+            opts.factor_opts = v1_factor_options(combo, opts.factor_opts);
             auto apx_single = [&, label, opts](const Eigen::SparseMatrix<double>& L_,
                                               const Eigen::VectorXd& b_, const std::string& nm,
                                               double tl, int mi, ground_mode) {

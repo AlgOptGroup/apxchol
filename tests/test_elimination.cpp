@@ -207,6 +207,36 @@ TEST(CycleSampler, PreservesDegreeTwoAndDeclaredCapacity) {
     }
 }
 
+TEST(CycleSampler, LargeExactCoreCapUsesOnlyActualCore) {
+    const std::vector<weighted_neighbor> input{
+        {5, 1.0}, {4, 1.0}, {3, 1.0}, {2, 1.0}, {1, 1.0}, {0, 1.0}};
+    tree_elimination rule{.exact_core_max_h = input.size(),
+                          .sampler = clique_sampler::trace_cycle};
+    auto neighbors = input;
+    std::vector<deferred_edge> expected;
+    rule.sample_clique(neighbors, 6.0, 42, edge_emitter(expected));
+    ASSERT_EQ(expected.size(), 15u);
+
+    // Both caps accept the same six-vertex core. The first cap used to request
+    // an impossible reserve; squaring the second cap wrapped size_t.
+    for (const size_t cap : {
+            size_t{1} << (std::numeric_limits<size_t>::digits / 2 - 1),
+            std::numeric_limits<size_t>::max() - 1}) {
+        SCOPED_TRACE(cap);
+        rule.exact_core_max_h = cap;
+        neighbors = input;
+        std::vector<deferred_edge> actual;
+        ASSERT_NO_THROW(rule.sample_clique(neighbors, 6.0, 42, edge_emitter(actual)));
+        ASSERT_EQ(actual.size(), expected.size());
+        for (size_t i = 0; i < actual.size(); ++i) {
+            EXPECT_EQ(actual[i].u, expected[i].u);
+            EXPECT_EQ(actual[i].v, expected[i].v);
+            EXPECT_EQ(std::bit_cast<std::uint64_t>(actual[i].w),
+                      std::bit_cast<std::uint64_t>(expected[i].w));
+        }
+    }
+}
+
 TEST(CycleSampler, ExactCoreAndDoubleCycleStayUnbiasedWithinBudget) {
     // Trace-cycle core rules: the exact core (h <= exact_core_max_h) and the
     // doubled cycle (h >= double_cycle_min_h) must keep every pair's expected
