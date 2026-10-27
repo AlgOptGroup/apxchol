@@ -82,8 +82,21 @@ project's scope. Set `APXCHOL_DEVICE` when configuring the consuming project.
 For distribution, set `APXCHOL_NATIVE_ARCH=OFF`; CUDA consumers must also
 choose `CMAKE_CUDA_ARCHITECTURES` instead of its `native` default.
 
-Adding the repository root with `add_subdirectory` also
-includes the CLI and, by default, tests and examples.
+Alternatively, embed the repository root directly:
+
+```cmake
+add_subdirectory(path/to/apxchol)
+target_link_libraries(my_program PRIVATE apxchol::core)
+```
+
+Root embedding defaults to the portable library only. Set `APXCHOL_BUILD_CLI`,
+`APXCHOL_BUILD_TESTS` or `APXCHOL_BUILD_EXAMPLES` before `add_subdirectory` to opt
+into those targets. CLI dependencies are fetched only when the CLI is enabled;
+tests with the CLI disabled still include the operator-input unit tests.
+
+For CUDA or Metal, enable `CUDA` or `OBJCXX` in the consuming parent before
+`add_subdirectory`, for example with `project(my_project LANGUAGES CXX CUDA)`.
+The top-level helper above enables the selected language for you.
 
 For a separately installed SDK, use:
 
@@ -120,11 +133,12 @@ backend selection and factor storage are runtime settings; see the
 | Option | Default | Meaning |
 |---|---|---|
 | `APXCHOL_DEVICE` | `CPU` | `CPU` only, or CPU plus `CUDA` / `METAL` |
-| `APXCHOL_NATIVE_ARCH` | ON for root/helper/local Python; OFF for SDK/wheels | Tune for the build machine; turn OFF for distribution |
+| `APXCHOL_NATIVE_ARCH` | ON for standalone root/helper/local Python; OFF for root embedding/SDK/wheels | Tune for the build machine; turn OFF for distribution |
 | `APXCHOL_POOL_FP32` | ON | Store mutable graph weights in FP32; OFF uses FP64 |
 | `APXCHOL_INDEX_WIDTH` | `32` | `32`, `64_EDGES` or `64`; see layouts below |
-| `APXCHOL_BUILD_TESTS` | ON in root build | Build the test suite |
-| `APXCHOL_BUILD_EXAMPLES` | ON in root build | Build the examples |
+| `APXCHOL_BUILD_CLI` | ON standalone; OFF when embedded | Build the CLI and its input/logging dependencies |
+| `APXCHOL_BUILD_TESTS` | ON standalone; OFF when embedded | Build the test suite |
+| `APXCHOL_BUILD_EXAMPLES` | ON standalone; OFF when embedded | Build the examples |
 
 The index setting selects one of three layouts:
 

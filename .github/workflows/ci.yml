@@ -74,7 +74,7 @@ jobs:
                 -DBENCH_HYPRE_USE_CUDA=OFF -DBUILD_GPU_RCHOL=OFF \
                 -DAPXCHOL_RCHOL_PORTABLE_PCG=ON -DAPXCHOL_BENCH_FETCH_METIS=OFF \
                 -DCMAKE_DISABLE_FIND_PACKAGE_Boost=ON
-          cmake --build build-benchmark --target benchmark original_stop_tests split_components_tests -j2
+          cmake --build build-benchmark --target benchmark original_stop_tests split_components_tests v1_config_tests -j2
       - name: Run native benchmark contracts
         run: ctest --test-dir build-benchmark --no-tests=error --output-on-failure --timeout 60
       - &ccache-stats
@@ -140,6 +140,18 @@ jobs:
       - &ctest
         name: Run unit tests and examples
         run: ctest --test-dir build --no-tests=error --output-on-failure
+      - name: Test library-only root embedding
+        if: matrix.cxx == 'clang++-18'
+        run: |
+          cmake -S tests/cmake_subdirectory -B build-subdirectory -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+          cmake --build build-subdirectory --parallel 2
+          ctest --test-dir build-subdirectory --no-tests=error --output-on-failure
+          cmake -S tests/cmake_subdirectory -B build-subdirectory-tests -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
+                -DAPXCHOL_BUILD_TESTS=ON -DAPXCHOL_BUILD_CLI=OFF
+          cmake --build build-subdirectory-tests --parallel 2
+          ctest --test-dir build-subdirectory-tests --no-tests=error --output-on-failure
       - name: Test relocated SDK with fetched Eigen
         if: matrix.cxx == 'clang++-18'
         run: |
@@ -213,6 +225,11 @@ jobs:
         with:
           key: cuda13.4-gcc14-sm80
       - *configure-build
+      - name: Build root-embedding consumer
+        run: |
+          cmake -S tests/cmake_subdirectory -B build-subdirectory -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON ${CMAKE_ARGS}
+          cmake --build build-subdirectory --parallel 2
       - *ccache-stats
 
   macos:
@@ -239,6 +256,13 @@ jobs:
           key: mac-${{ matrix.device }}-${{ matrix.native_arch }}
       - *configure-build
       - *ctest
+      - name: Test Metal root-embedding consumer
+        if: matrix.device == 'METAL'
+        run: |
+          cmake -S tests/cmake_subdirectory -B build-subdirectory -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON ${CMAKE_ARGS}
+          cmake --build build-subdirectory --parallel 2
+          ctest --test-dir build-subdirectory --no-tests=error --output-on-failure
       - *ccache-stats
 
   python:

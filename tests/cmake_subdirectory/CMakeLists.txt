@@ -1,0 +1,45 @@
+cmake_minimum_required(VERSION 3.20)
+project(apxchol_subdirectory_consumer LANGUAGES CXX)
+
+# Link dependencies require GPU languages in the consuming parent's scope too.
+if (APXCHOL_DEVICE STREQUAL "CUDA")
+    enable_language(CUDA)
+elseif (APXCHOL_DEVICE STREQUAL "METAL")
+    enable_language(OBJCXX)
+endif()
+
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS ON)
+set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
+enable_testing()
+set(_tests_requested OFF)
+if (DEFINED APXCHOL_BUILD_TESTS AND APXCHOL_BUILD_TESTS)
+    set(_tests_requested ON)
+endif()
+add_subdirectory(../.. apxchol)
+
+if (APXCHOL_BUILD_TESTS AND NOT _tests_requested)
+    message(FATAL_ERROR "Root embedding enabled tests without an explicit request")
+endif()
+if (APXCHOL_BUILD_CLI OR APXCHOL_BUILD_EXAMPLES OR APXCHOL_NATIVE_ARCH)
+    message(FATAL_ERROR "Root embedding enabled CLI, examples or native tuning")
+endif()
+if (TARGET apxchol OR TARGET CLI11 OR TARGET spdlog OR TARGET fast_matrix_market)
+    message(FATAL_ERROR "CLI-only targets were created with CLI disabled")
+endif()
+if (NOT CMAKE_CXX_STANDARD EQUAL 14 OR NOT CMAKE_CXX_EXTENSIONS
+    OR NOT CMAKE_CUDA_RUNTIME_LIBRARY STREQUAL "Shared")
+    message(FATAL_ERROR "Root embedding changed the parent's compiler defaults")
+endif()
+if (NOT APXCHOL_BUILD_TESTS AND TARGET apxchol_mtx_input)
+    message(FATAL_ERROR "Library-only embedding built the CLI input helper")
+endif()
+
+# Reuse the existing real consumer's alignment and original-residual checks.
+target_sources(apxchol_core PRIVATE ../cmake_consumer/core_alignment.cpp)
+add_executable(apxchol_subdirectory_consumer ../cmake_consumer/consumer.cpp)
+target_link_libraries(apxchol_subdirectory_consumer PRIVATE apxchol::core)
+add_test(NAME cmake_subdirectory_consumer COMMAND apxchol_subdirectory_consumer)
+set_tests_properties(cmake_subdirectory_consumer PROPERTIES
+    TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=2")
