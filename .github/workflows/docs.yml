@@ -35,42 +35,8 @@ env:
   VECLIB_MAXIMUM_THREADS: '1'
 
 jobs:
-  metal-measurements:
-    if: github.event_name != 'release' || !github.event.release.prerelease
-    runs-on: macos-15
-    timeout-minutes: 15
-    env:
-      CC: clang
-      CXX: clang++
-      CMAKE_ARGS: -DAPXCHOL_DEVICE=METAL -DAPXCHOL_NATIVE_ARCH=OFF
-      CMAKE_BUILD_PARALLEL_LEVEL: '2'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install native dependencies
-        run: brew install libomp ninja ccache
-      - uses: ./.github/actions/ccache
-        with:
-          key: docs-metal-portable
-      - name: Install this revision
-        run: python -m pip install scipy ./python
-      - name: Measure CPU and Metal
-        run: python benchmarks/docs_benchmark.py build/performance/macos.json --metal
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: performance-metal
-          path: build/performance/macos.json
-          if-no-files-found: error
-      - name: Show compiler cache statistics
-        if: always()
-        run: ccache --show-log-stats
-
   build:
     if: github.event_name != 'release' || !github.event.release.prerelease
-    needs: metal-measurements
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -104,23 +70,11 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release ${CMAKE_ARGS} \
                 -DAPXCHOL_BUILD_TESTS=OFF -DAPXCHOL_BUILD_EXAMPLES=OFF
           cmake --build build --target apxchol
-      - name: Measure CPU
-        run: python benchmarks/docs_benchmark.py build/performance/linux.json
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: performance-linux
-          path: build/performance/linux.json
-          if-no-files-found: error
-      - uses: actions/download-artifact@v4
-        with:
-          name: performance-metal
-          path: build/performance
       - name: Build documentation
         env:
           APXCHOL_DOCS_RELEASE: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
         run: |
-          python docs/build.py --benchmarks build/performance
+          python docs/build.py
           git rev-parse HEAD > build/docs/source-revision.txt
       - uses: actions/upload-artifact@v4
         with:
