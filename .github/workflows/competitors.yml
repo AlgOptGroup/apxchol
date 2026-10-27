@@ -1,0 +1,103 @@
+name: Manual competitor benchmark
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  cpu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CC: gcc-14
+      CXX: g++-14
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      OMP_NUM_THREADS: '2'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build and plotting dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y g++-14 libeigen3-dev libboost-dev libmetis-dev ninja-build ccache
+          python -m pip install numpy scipy matplotlib
+          mkdir -p build/competition
+          git rev-parse HEAD > build/competition/source-revision.txt
+      - uses: ./.github/actions/ccache
+        with:
+          key: competitors-cpu-gcc14
+      - name: Fetch pinned public irregular fixture
+        timeout-minutes: 4
+        run: |
+          mkdir -p data/matrices
+          curl --fail --location --connect-timeout 15 --max-time 120 \
+            https://sparse-files.engr.tamu.edu/MM/DIMACS10/kron_g500-logn16.tar.gz \
+            --output "$RUNNER_TEMP/kron.tar.gz" 2> build/competition/download.log
+          tar -xOf "$RUNNER_TEMP/kron.tar.gz" kron_g500-logn16/kron_g500-logn16.mtx \
+            > data/matrices/kron_g500-logn16.mtx
+          sha256sum --check <<'EOF'
+          269b84f18b7c5f93db7e0f547f996ec3fa6b8e86b563932a06e6f02c92c4171e  data/matrices/kron_g500-logn16.mtx
+          EOF
+          sha256sum data/matrices/kron_g500-logn16.mtx > build/competition/input-sha256.txt
+      - name: Build maintained native benchmark
+        run: |
+          cmake -S benchmarks -B build/competitors -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DAPXCHOL_DEVICE=CPU -DAPXCHOL_NATIVE_ARCH=OFF \
+            2>&1 | tee build/competition/configure.log
+          cmake --build build/competitors --target benchmark \
+            2>&1 | tee build/competition/build.log
+          sha256sum build/competitors/benchmark > build/competition/binary-sha256.txt
+      - name: Measure nine declared CPU2 cells
+        timeout-minutes: 12
+        run: |
+          python benchmarks/thread_scaling.py --binary build/competitors/benchmark \
+            --matrices grid_500,grid3d_100,kron_g500-logn16 \
+            --series 'apxchol bg+tree,AMGCL,BoomerAMG' --device cpu --thread-counts 2 \
+            --warmup 1 --repeat 3 --timeout 60 --compact \
+            --store build/competition/cells --out build/competition/plots \
+            2>&1 | tee build/competition/run.log
+      - name: Summarize complete denominator
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          cells = [json.loads(path.read_text()) for path in Path('build/competition/cells').glob('*.json')]
+          expected = [(matrix, solver) for matrix in ('grid_500', 'grid3d_100', 'kron_g500-logn16')
+                      for solver in ('apxchol bg+tree', 'AMGCL', 'BoomerAMG')]
+          found = {(cell['cell']['matrix_id'], cell['cell']['label']): cell['status'] for cell in cells}
+          complete = sum(status == 'complete' for status in found.values())
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
+              output.write('## Manual CPU2 competitor comparison\n\n')
+              output.write(f'Recorded {len(found)}/9 declared cells; {complete}/9 completed with accepted residuals.\n\n')
+              output.write('| Matrix | Solver | Status |\n|---|---|---|\n')
+              for matrix, solver in expected:
+                  status = found.get((matrix, solver), 'not checked: no record; see failed or cancelled step')
+                  output.write(f'| {matrix} | {solver} | {status} |\n')
+              output.write('\n')
+              output.write('Three registered inputs: 2D grid, 3D grid, and the irregular weighted Graph500 graph. ')
+              output.write('Each cell includes one warmup and three retained repetitions under original-v1 stopping. ')
+              output.write('Timeouts cover the whole cell; failed or missing cells are not timing results. ')
+              output.write('See artifacts for setup/solve plots, residuals, repetition receipts and source/build provenance.\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: competitor-cpu2
+          path: build/competition
+          if-no-files-found: warn
+      - name: Show compiler cache statistics
+        if: always()
+        run: ccache --show-log-stats

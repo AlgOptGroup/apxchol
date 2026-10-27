@@ -28,6 +28,42 @@ The C++ benchmark accepts `--factor-storage auto|float16|float32`, `--cpu-schedu
 
 ## Measurement contract
 
+### Hosted checks
+
+The `PR performance` workflow installs the exact PR base and head in separate
+Python environments on each runner. Both use the same downloaded dependencies,
+build flags, compiler cache and frozen harness. Linux measures CPU with two
+workers; macOS 15 requires the explicit Metal route with two host workers.
+The initial smoke fixtures are the 192-by-192 and 512-by-512 Dirichlet grids from
+`docs_benchmark.py`; this scope does not establish performance on irregular graphs.
+
+Each fixture has three alternating ABBA/BAAB rounds, with the same seed and a tiny
+untimed warmup in every fresh process. All 24 owners must pass the independent
+original-system residual check. Setup, solve and their sum are reported separately.
+A phase signals a slowdown only if all three head/base ratios are at least 1.20
+and both revisions' repeat controls stay within 10% in every round. Incomplete or
+invalid coverage fails first. Any qualified phase slowdown fails the overall
+check, even when another phase is noisy; each phase retains its own status.
+If no phase signals a slowdown but any phase is noisy, the overall check is
+**inconclusive**, with a job-summary warning and successful exit to avoid a noisy
+merge blocker. This is a conservative screening rule,
+not a statistical significance test. JSON, raw logs, input/binary/harness hashes
+and dependency/build records remain in artifacts, including after failures.
+
+The manual `Manual competitor benchmark` workflow uses the existing native build
+and `thread_scaling.py`: `grid_500`, `grid3d_100` and the public weighted irregular
+`kron_g500-logn16` graph, each with apxchol, AMGCL and BoomerAMG at two CPU workers.
+The downloaded Matrix Market file must match the pinned SHA-256; download or
+identity failure stops the run. Nine cells each receive one warmup and three
+retained repetitions. Timeout and nonconvergence statuses remain visible.
+Artifacts include setup/solve plots, residuals and the existing repetition receipts.
+
+PR timing has a four-minute campaign limit and a 30-second owner limit; the manual
+run has a 60-second whole-cell limit (nine minutes for nine cells). Outer job caps
+are 30 and 45 minutes including builds. These are limits, not measured runtimes;
+actual hosted cost depends on compiler-cache hits. Neither workflow publishes
+comments, Pages or README measurements.
+
 ### Accuracy and stopping
 
 - Inputs declare graph adjacency (`L=D-A`) or an assembled operator, and Laplacian
