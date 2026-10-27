@@ -6,13 +6,13 @@
 :maxdepth: 1
 :caption: Guides
 
-Using the solver <docs/usage>
 Building and installation <docs/building>
-Native C++ SDK archives <docs/sdk>
+Using the solver <docs/usage>
 Python <python/README>
 MATLAB / Octave <octave/README>
-Precision and convergence <docs/precision>
 Saving and loading <docs/serialization>
+Precision and convergence <docs/precision>
+Native C++ SDK archives <docs/sdk>
 Extending the solver <docs/extending>
 Performance results <docs/performance>
 Benchmarking <benchmarks/README>

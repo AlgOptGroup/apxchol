@@ -64,10 +64,13 @@ Documentation CI uploads an HTML preview for review. Successful main builds
 publish development documentation at `/dev/`. Each stable GitHub release saves
 its rendered HTML as `documentation.tar.gz`; reruns retain the existing snapshot.
 The site root serves the most recently published stable release with a snapshot,
-or development documentation until the first snapshot exists. Older snapshots
-remain downloadable from their GitHub releases. Publishing a snapshot triggers
-a main documentation build to refresh the site. Release pages link to the latest
-runner measurements in development documentation.
+or development documentation until the first snapshot exists. Each snapshot is
+also served at `/vX.Y.Z/`. The sidebar version selector lists these snapshots and
+development documentation; releases without a documentation asset are omitted.
+Assembly updates only the marked selector in deployed HTML copies; the release
+archives remain unchanged. Older HTML without the marker remains reachable from
+the current site's selector. Publishing a snapshot triggers a main documentation
+build to refresh the site.
 
 ## Code conventions
 

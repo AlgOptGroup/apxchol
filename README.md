@@ -16,8 +16,12 @@ conjugate gradients (PCG) to compute the solution.
 
 For an unreleased checkout, use a
 [source installation](docs/building.md#python-source-installation) with the `scipy` extra.
-For the latest published package, run `python -m pip install "apxchol[scipy]"`;
-see [PyPI](https://pypi.org/project/apxchol/) for that version's API.
+For the latest published package, see [PyPI](https://pypi.org/project/apxchol/)
+for that version's API and install with:
+
+```bash
+python -m pip install "apxchol[scipy]"
+```
 
 ```python
 import apxchol
@@ -98,8 +102,9 @@ above is dated separately. Results depend on the matrix, hardware and settings.
 
 ## Learn more
 
+- [Building and installation](docs/building.md)
 - [Choosing a backend, reusing factors and checking results](docs/usage.md)
-- [Build options](docs/building.md#build-options), [precision](docs/precision.md) and [API compatibility](docs/api.md)
+- [Precision](docs/precision.md) and [API compatibility](docs/api.md)
 - [Custom algorithms](docs/extending.md), [examples](examples/) and [contributing](CONTRIBUTING.md)
 - [Benchmarking and reproducibility](benchmarks/README.md)
 

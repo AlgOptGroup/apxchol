@@ -16,14 +16,16 @@ release_tag = os.environ.get("APXCHOL_DOCS_RELEASE", "")
 if release_tag:
     if release_tag != f"v{release}":
         raise ValueError(f"Documentation tag {release_tag!r} does not match v{release}")
-    announcement = (f'Release documentation for <code>{release_tag}</code>. '
-                    '<a href="https://algoptgroup.github.io/apxchol/dev/">Development documentation</a> · '
-                    '<a href="https://algoptgroup.github.io/apxchol/dev/docs/performance.html">Latest runner measurements</a>.')
-else:
-    announcement = ('Development documentation from <code>main</code>. '
-                    '<a href="https://algoptgroup.github.io/apxchol/">Documentation home</a>.')
-html_theme_options = {"announcement": announcement}
-html_title = f"apxchol {release}" if release_tag else "apxchol development"
+html_title = "apxchol"
+html_context = {"docs_version": release_tag or "Development"}
+templates_path = ["_templates"]
+html_static_path = ["_static"]
+html_css_files = ["versions.css"]
+html_sidebars = {"**": [
+    "sidebar/brand.html", "sidebar/version.html", "sidebar/search.html",
+    "sidebar/scroll-start.html", "sidebar/navigation.html", "sidebar/ethical-ads.html",
+    "sidebar/scroll-end.html", "sidebar/variant-selector.html",
+]}
 html_show_sourcelink = False
 html_show_copyright = False
 myst_enable_extensions = ["dollarmath"]

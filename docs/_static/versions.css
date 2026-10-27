@@ -1,0 +1,20 @@
+.version-selector {
+  margin: 0 1rem 0.75rem;
+  font-size: 0.875rem;
+}
+
+.version-selector summary {
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--color-sidebar-background-border);
+  border-radius: 0.25rem;
+  cursor: pointer;
+}
+
+.version-selector ul {
+  margin: 0.5rem 0;
+  padding-left: 1.5rem;
+}
+
+.version-selector a[aria-current="page"] {
+  font-weight: bold;
+}
