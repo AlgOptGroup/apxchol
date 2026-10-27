@@ -38,7 +38,14 @@ jobs:
       - uses: ./.github/actions/ccache
         with:
           key: competitors-cpu-gcc14
+      - name: Restore public fixture
+        id: fixture-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: data/matrices/kron_g500-logn16.mtx
+          key: kron_g500-logn16-269b84f18b7c5f93db7e0f547f996ec3fa6b8e86b563932a06e6f02c92c4171e
       - name: Fetch pinned public irregular fixture
+        if: steps.fixture-cache.outputs.cache-hit != 'true'
         timeout-minutes: 4
         run: |
           mkdir -p data/matrices
@@ -47,10 +54,18 @@ jobs:
             --output "$RUNNER_TEMP/kron.tar.gz" 2> build/competition/download.log
           tar -xOf "$RUNNER_TEMP/kron.tar.gz" kron_g500-logn16/kron_g500-logn16.mtx \
             > data/matrices/kron_g500-logn16.mtx
+      - name: Verify public fixture
+        run: |
           sha256sum --check <<'EOF'
           269b84f18b7c5f93db7e0f547f996ec3fa6b8e86b563932a06e6f02c92c4171e  data/matrices/kron_g500-logn16.mtx
           EOF
           sha256sum data/matrices/kron_g500-logn16.mtx > build/competition/input-sha256.txt
+      - name: Cache verified public fixture
+        if: steps.fixture-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: data/matrices/kron_g500-logn16.mtx
+          key: ${{ steps.fixture-cache.outputs.cache-primary-key }}
       - name: Build maintained native benchmark
         run: |
           cmake -S benchmarks -B build/competitors -G Ninja -DCMAKE_BUILD_TYPE=Release \
