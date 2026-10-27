@@ -7,6 +7,7 @@
 #include "apxchol/solver/detail/thread_budget.h"
 #include "apxchol/solver/detail/device_memory_error.h"
 #include "apxchol/solver/detail/gpu_pcg.h"
+#include "apxchol/solver/detail/pcg_restart.h"
 #include "apxchol/solver/detail/metal_schedule.h"
 #include "apxchol/solver/detail/permuted_operator.h"
 #include "apxchol/solver/sptrsv/cuda_host.h"
@@ -51,10 +52,11 @@ static_assert(offsetof(Params, preconditioner_scale) == 32);
 static_assert(offsetof(Params, mapped_rows) == 36);
 
 using solve_state = gpu_pcg::solve_state<df32, float>;
-static_assert(sizeof(solve_state) == 40);
+static_assert(sizeof(solve_state) == 44);
 static_assert(offsetof(solve_state, thr) == 16);
 static_assert(offsetof(solve_state, alpha) == 24);
 static_assert(offsetof(solve_state, active) == 32);
+static_assert(offsetof(solve_state, tolerance_stop) == 40);
 
 const char kKernelSource[] =
     "\n#include <metal_stdlib>\nusing namespace metal;\n"
@@ -505,6 +507,10 @@ struct metal_solver::impl {
     template<unsigned Columns>
     void solve_columns(const_matrix_view B, matrix_view X, std::span<solve_result> results,
                        checkpoint& cp, double tol, int max_iter, const const_matrix_view* X0);
+    template<unsigned Columns>
+    std::array<bool, Columns> solve_columns_once(const_matrix_view B, matrix_view X,
+                       std::span<solve_result> results, checkpoint& cp, double tol,
+                       int max_iter, const const_matrix_view* X0);
 
     // x follows the retained operator's ordering; y is factor-permuted.
     template<class Vector>
@@ -788,6 +794,36 @@ void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
                                        std::span<solve_result> results, checkpoint& cp,
                                        double tol, int max_iter, const const_matrix_view* X0) {
     detail::resolve_solve_parameters(tol, max_iter, opts.tol, opts.max_iter);
+    auto stopped = solve_columns_once<Columns>(B, X, results, cp, tol, max_iter, X0);
+    for (unsigned q = 0; q < Columns; ++q) {
+        auto& result = results[q];
+        auto progress = result.iterations;
+        const auto restart = [&] {
+            return detail::pcg_restart(stopped[q], result.converged, result.residual,
+                                       progress, max_iter - result.iterations);
+        };
+        if (!restart()) continue;
+        Eigen::VectorXd initial = X.col(q);
+        const const_matrix_view warm(initial);
+        while (restart()) {
+            solve_result attempt;
+            const auto next = solve_columns_once<1>(B.middleCols(q, 1), X.middleCols(q, 1),
+                {&attempt, 1}, cp, tol, max_iter - result.iterations, &warm);
+            progress = attempt.iterations;
+            result.iterations += progress;
+            result.residual = attempt.residual;
+            result.converged = attempt.converged;
+            stopped[q] = next[0];
+            initial = X.col(q);
+        }
+    }
+}
+
+template<unsigned Columns>
+std::array<bool, Columns> metal_solver::impl::solve_columns_once(
+                                       const_matrix_view B, matrix_view X,
+                                       std::span<solve_result> results, checkpoint& cp,
+                                       double tol, int max_iter, const const_matrix_view* X0) {
     if (opts.collect_timings) { cp.descend("pcg"); cp.tick(); }
     select_columns(Columns);
     auto* states = static_cast<solve_state*>([state_buffer contents]);
@@ -827,7 +863,10 @@ void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
         } else work = bp[q];
         const double initial = X0 ? bnorm[q].relative(work) : 1.0;
         if (initial < tol || max_iter == 0) continue;
-        if (laplacian) centre(work);
+        if (laplacian) {
+            centre(work);
+            if (X0 && bnorm[q].relative(work) < tol) continue;
+        }
         const double max_abs = work.cwiseAbs().maxCoeff();
         if (max_abs == 0.0) continue;
         scale[q] = mh::pow2_scale(max_abs);
@@ -879,6 +918,9 @@ void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
         if (checked) cp("exit_check");
         cp.ascend();
     }
+    std::array<bool, Columns> stopped{};
+    for (unsigned q = 0; q < Columns; ++q) stopped[q] = states[q].tolerance_stop != 0;
+    return stopped;
 }
 
 void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,

@@ -10,7 +10,8 @@ static_assert(sizeof(Params) == 40, "Params mirrors the host layout");
 static_assert(__builtin_offsetof(Params, preconditioner_scale) == 32, "Params mirrors the host layout");
 
 using SolveState = solve_state<df, float>;
-static_assert(sizeof(SolveState) == 40, "SolveState mirrors detail::metal::solve_state");
+static_assert(sizeof(SolveState) == 44, "SolveState mirrors detail::metal::solve_state");
+static_assert(__builtin_offsetof(SolveState, tolerance_stop) == 40, "SolveState mirrors the host layout");
 
 constant bool kForward [[function_constant(0)]];
 constant bool kOperatorDf [[function_constant(1)]];

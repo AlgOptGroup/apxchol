@@ -18,6 +18,7 @@
 
 #include "apxchol/solver/pcg_cuda_kernels.h"
 #include "apxchol/solver/detail/gpu_pcg.h"
+#include "apxchol/solver/detail/pcg_restart.h"
 #include "apxchol/solver/detail/gpu_scaling.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"
 #include "apxchol/solver/sptrsv/cuda.h"
@@ -135,6 +136,39 @@ private:
                        double tol, int max_iter, std::array<int, Columns>& iterations,
                        std::array<double, Columns>& residuals, bool laplacian,
                        const Input* x0) {
+        auto stopped = solve_columns_once<Columns>(precond, b_host, x_host, tol, max_iter,
+                                                    iterations, residuals, laplacian, x0);
+        for (unsigned q = 0; q < Columns; ++q) {
+            int progress = iterations[q];
+            const auto restart = [&] {
+                return detail::pcg_restart(stopped[q], residuals[q] < tol, residuals[q],
+                                           progress, max_iter - iterations[q]);
+            };
+            if (!restart()) continue;
+            Eigen::VectorXd solution = x_host.col(q);
+            using column_view = Eigen::Ref<const Eigen::VectorXd, 0,
+                                           Eigen::InnerStride<Eigen::Dynamic>>;
+            const column_view rhs(b_host.col(q)), initial(solution);
+            while (restart()) {
+                std::array<int, 1> count{};
+                std::array<double, 1> residual{};
+                const auto next = solve_columns_once<1>(precond, rhs, solution, tol,
+                    max_iter - iterations[q], count, residual, laplacian, &initial);
+                progress = count[0];
+                iterations[q] += progress;
+                residuals[q] = residual[0];
+                stopped[q] = next[0];
+            }
+            x_host.col(q) = solution;
+        }
+    }
+
+    template<unsigned Columns, class Precond, class Input, class Output>
+    std::array<bool, Columns> solve_columns_once(const Precond& precond,
+                       const Input& b_host, Output& x_host, double tol, int max_iter,
+                       std::array<int, Columns>& iterations,
+                       std::array<double, Columns>& residuals, bool laplacian,
+                       const Input* x0) {
         static_assert(Columns == 1 || Columns == 2 || Columns == 4);
         if (std::uint64_t(n_) > std::numeric_limits<unsigned>::max() / Columns)
             throw std::overflow_error("GPU RHS panel exceeds packed index range");
@@ -171,7 +205,7 @@ private:
             x_host.setZero();
             iterations.fill(0);
             residuals.fill(0);
-            return;
+            return {};
         }
         const std::size_t vector_bytes = n_ * Columns * sizeof(double);
         APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(vectors_.rhs, packed.data(), vector_bytes, cudaMemcpyHostToDevice));
@@ -229,10 +263,13 @@ private:
         for (int64_t v = 0; v < n_; ++v)
             for (unsigned q = 0; q < Columns; ++q)
                 x_host(v, q) = packed(h_perm_[v], q);
+        std::array<bool, Columns> stopped{};
         for (unsigned q = 0; q < Columns; ++q) {
             iterations[q] = h_state_[q].iters;
             residuals[q] = h_state_[q].rr;
+            stopped[q] = h_state_[q].tolerance_stop != 0;
         }
+        return stopped;
     }
 
     template<class Precond, unsigned Columns>
