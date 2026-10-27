@@ -14,6 +14,19 @@ auto restored = apxchol::load_solver("system.apxchol", options);
 auto result = restored.solve(b);
 ```
 
+MATLAB and Octave use the same archive API through their reusable solver:
+
+```matlab
+s = apxchol_solver(A, struct('keep_factor', true));
+s.save('system.apxchol');
+restored = apxchol_solver.load('system.apxchol', struct('factor_storage', 'float16'));
+result = restored.solve(b);
+```
+
+The MATLAB/Octave loader accepts the normal constructor options and uses CPU,
+as with ordinary construction. Set `keep_factor=true` when loading to save the
+restored solver again.
+
 Saving requires retained factor values. It creates a new file and rejects an existing destination. The destination filesystem must support hard links. The `.apxchol` extension is a convention; loading checks the file contents.
 
 The original operator is reconstructed from the solver’s owned data when saving, without keeping another permanent matrix copy. CUDA saving downloads that operator to the host. The file preserves the coefficients used by the solver; duplicate entries and tolerated differences between the input’s two triangles have already been normalized.

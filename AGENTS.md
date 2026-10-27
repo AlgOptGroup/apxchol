@@ -27,6 +27,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 - `.github/scripts/build-sdk.sh` packages the shared native install with portable tuning and bundled Eigen; `tests/check_sdk_archive.py` extracts it and builds the `tests/cmake_install` save/load consumer.
 - Native SDK installs include Eigen headers when apxchol fetched them; builds using an existing Eigen package retain that dependency. Python wheels do not install the SDK.
 - Portable save/load: `solver/archive.h` and `docs/serialization.md`; the versioned binary format stores the original CSC operator and retained canonical factor. Typed arrays carry explicit widths, byte order and zlib CRC32 checksums; loading validates and prepares the backend without memory mapping.
+- MATLAB/Octave builds use `octave/CMakeLists.txt` and the shared `apxchol::core` target. Archive methods reuse native save/load and require `keep_factor=true` when saving.
 - Public API scope and compatibility: `docs/api.md`. Precision and storage: `docs/precision.md`. Extension seams: `docs/extending.md`.
 - Operator validation and M-matrix lumping: `operator_class`. Adjacency detection belongs to the CLI (`src/mtx_input.h`); bindings accept assembled operators only.
 - Measurement contracts: `benchmarks/README.md`.
