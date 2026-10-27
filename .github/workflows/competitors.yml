@@ -43,7 +43,7 @@ jobs:
         run: |
           mkdir -p data/matrices
           curl --fail --location --connect-timeout 15 --max-time 120 \
-            https://sparse-files.engr.tamu.edu/MM/DIMACS10/kron_g500-logn16.tar.gz \
+            https://www.cise.ufl.edu/research/sparse/MM/DIMACS10/kron_g500-logn16.tar.gz \
             --output "$RUNNER_TEMP/kron.tar.gz" 2> build/competition/download.log
           tar -xOf "$RUNNER_TEMP/kron.tar.gz" kron_g500-logn16/kron_g500-logn16.mtx \
             > data/matrices/kron_g500-logn16.mtx
