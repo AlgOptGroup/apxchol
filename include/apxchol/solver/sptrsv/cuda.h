@@ -60,8 +60,8 @@ struct cuda_sptrsv_device_csr_fp16 {
     cuda_sptrsv_device_allocation<__half> values;
 };
 
-/// Move-only ownership capsule for the research-only direct CUDA SpTRSV
-/// installation boundary. A successful own_*() call takes immediate ownership
+/// Move-only ownership capsule for final CUDA SpTRSV storage.
+/// A successful own_*() call takes immediate ownership
 /// of every supplied cudaMalloc base pointer. Destruction frees them on the
 /// recorded CUDA device; moving leaves the source empty.
 ///
@@ -281,15 +281,14 @@ private:
 /// arrays this backend uploads are the arrays omp_sptrsv stores.
 ///
 /// FP16 STORAGE (factor_storage, default ON on the GPU): the storage is the
-/// CPU's FP16_SCALED contract (cuda_host.h file header; omp.h "FOLDED INTO
-/// THE VECTORS"): the off-diagonals hold binary16 of the column-scaled L~ =
+/// CPU per-column scaling contract (lowprec.h and cuda_host.h): off-diagonals
+/// hold binary16 of the column-scaled L~ =
 /// L D^-1 (s_j = column max |off-diagonal|), the diagonal is a separate fp32
-/// diag[j] = fp32(L_jj) / s_j -- plus the column's rounding residual, always
-/// (the same contract the CPU SpTRSV applies; without it the Laplacian path
-/// pays iter0040 45 -> 64 iterations) -- and inv_scale[j] = fp32(1 / s_j); the forward solve on
+/// diag[j] = fp32(L_jj) / s_j plus the column's rounding residual, matching
+/// CPU compensation. inv_scale[j] = fp32(1 / s_j); the forward solve on
 /// L~ returns y' = D y and the back solve reads its input times inv_scale^2
 /// (r_j^2 kept in DOUBLE on the device and multiplied in double, exactly the
-/// CPU FP16_SCALED contract: pre-squaring into fp32 overflows to Inf for
+/// CPU fp16 contract: pre-squaring into fp32 overflows to Inf for
 /// s_j < ~5.4e-20 -- a column whose off-diagonal max is that small does occur
 /// on real factors -- and the Inf turned the whole solve into silent NaN),
 /// so the pair applies (L_s L_s^T)^-1 for the stored L_s = L~ D. Products
@@ -450,7 +449,7 @@ public:
                 data_.factor_bytes / 1e6, data_.device_delta_bytes / 1e6, free_before / 1e9, free_after / 1e9, total / 1e9);
             if (data_.stats.rel > 0.0)
                 std::fprintf(stderr,
-                    "[apxchol] factor drop (drop_tolerance=%g, column sums preserved): dropped=%llu"
+                    "[apxchol] factor drop (drop_tolerance=%g): dropped=%llu"
                     " (%.4f%% of %llu off-diagonals; threshold=%llu, format_zero=%llu)"
                     " stored_nnz %llu -> %llu (%.4f%% of factor)\n",
                     data_.stats.rel,

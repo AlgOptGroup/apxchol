@@ -119,7 +119,7 @@ def test_disconnected_laplacian_matrix_rhs():
     assert result.converged.all()
     np.testing.assert_allclose(A @ result.x, B, rtol=1e-7, atol=1e-8)
     expected = np.column_stack([instance.apply(column) for column in B.T])
-    # Restore the same periodic Laplacian centering counter for both calls.
+    # An intervening solve must not change preconditioner application.
     instance.solve(B, rtol=1e-9)
     np.testing.assert_allclose(instance.apply(B), expected, rtol=1e-12, atol=1e-12)
 
@@ -192,3 +192,26 @@ def test_matrix_rhs_with_mixed_extreme_scales(solver, warm):
     normalized_rhs = B[:, nonzero] / scales[nonzero]
     assert (np.linalg.norm(normalized_error, axis=0) / np.linalg.norm(normalized_rhs, axis=0) < 1e-9).all()
     assert (result.x[:, ~nonzero] == 0).all()
+
+
+@pytest.mark.parametrize("matrix", [False, True])
+def test_one_shot_forwards_warm_start_and_output(matrix):
+    A = grid2d_sddm(7)
+    shape = (A.shape[0], 4) if matrix else (A.shape[0],)
+    exact = np.random.default_rng(31).standard_normal(shape)
+    B = A @ exact
+    out = np.empty_like(B)
+    result = apxchol.solve(A, B, backend="cpu", x0=exact, out=out, maxiter=0)
+    assert result.x is out
+    assert np.all(result.converged) and np.all(result.iters == 0)
+    np.testing.assert_allclose(result.x, exact, rtol=0, atol=1e-14)
+
+    # Reuse the owner's overlap handling when the output aliases the RHS.
+    expected = B.copy()
+    result = apxchol.solve(A, B, backend="cpu", out=B)
+    assert result.x is B and np.all(result.converged)
+    residual = np.linalg.norm(A @ result.x - expected, axis=0) / np.linalg.norm(expected, axis=0)
+    assert np.all(residual < 1e-8)
+    for keyword in ("x0", "out"):
+        with pytest.raises(ValueError):
+            apxchol.solve(A, expected, backend="cpu", **{keyword: np.zeros((3, 2))})

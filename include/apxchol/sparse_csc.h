@@ -35,7 +35,7 @@ using sptrsv_value_t = float;
 ///   - column pointers (`outer_`)  -> edge_index : a cumulative NON-NEGATIVE
 ///     offset that can reach billions, so it is the widenable one.
 ///   - row indices     (`inner_`)  -> node_index : a vertex id, < 2^32 by default,
-///     so it stays 32-bit even under APXCHOL_64BIT_EDGE_INDICES.
+///     so it stays 32-bit with APXCHOL_INDEX_WIDTH=64_EDGES.
 ///
 /// Overflow safety: the only place a value can exceed its type is the cumulative
 /// column pointer; `set_outer`/`finish` assert it stays <= edge_index max. We
@@ -92,7 +92,8 @@ struct sparse_csc {
     /// nonZeros()/rows()/cols() still work. Called once the factor has been
     /// consumed by the SpTRSV setup (which copies it into its own CSR/CSC): the
     /// PCG loop never touches F_.L afterwards, so this drops one full copy of the
-    /// factor (~nnz*12 B) for the entire solve. swap-with-empty actually frees.
+    /// factor: nnz * (sizeof(node_index) + sizeof(factor_value_t)) bytes.
+    /// swap-with-empty releases the arrays' allocations.
     void release_values() {
         std::vector<node_index>().swap(inner_);
         std::vector<factor_value_t>().swap(vals_);

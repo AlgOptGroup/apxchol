@@ -21,16 +21,20 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 ## Where things live
 
 - Algorithm defaults and their rationale: `include/apxchol/solver/factor_options.h`. Build options: root `CMakeLists.txt` and `cmake/apxchol_core.cmake`, which the root, Python and benchmark projects share.
+- `APXCHOL_INDEX_WIDTH=32|64_EDGES|64` selects vertex/offset widths of 32/32, 32/64 or 64/64 bits; the default is `32`.
 - `cmake/apxchol_version.cmake` is the version source for native builds and Python packages. Release tags must be `v` followed by that version.
-- `cmake/core` builds just the native library. Source consumers include `cmake/apxchol_core.cmake` and call `apxchol_add_core()` at their top level; installed consumers use `find_package(apxchol CONFIG)`. Both link `apxchol::core`. Distributable builds use `APXCHOL_NATIVE_ARCH=OFF`; installed consumers must use the same OpenMP runtime family.
+- `cmake/core` builds just the native library and defaults to portable code (`APXCHOL_NATIVE_ARCH=OFF`); standalone root and local Python builds default to native tuning. Root `add_subdirectory` embedding defaults to portable core only; CLI/tests/examples are opt-in there, while standalone root defaults remain enabled. Source consumers include `cmake/apxchol_core.cmake` and call `apxchol_add_core()` at their top level; installed consumers use `find_package(apxchol CONFIG)`. Both link `apxchol::core`; installed consumers must use the same OpenMP runtime family.
 - Native SDK installs include Eigen headers when apxchol fetched them; builds using an existing Eigen package retain that dependency. Python wheels do not install the SDK.
-- Precision and storage contract: `docs/precision.md`. Extension seams: `docs/extending.md`.
+- Portable save/load: `solver/archive.h` and `docs/serialization.md`; the versioned binary format stores the original CSC operator and retained canonical factor. Typed arrays carry explicit widths, byte order and zlib CRC32 checksums; loading validates and prepares the backend without memory mapping.
+- Public API scope and compatibility: `docs/api.md`. Precision and storage: `docs/precision.md`. Extension seams: `docs/extending.md`.
 - Operator validation and M-matrix lumping: `operator_class`. Adjacency detection belongs to the CLI (`src/mtx_input.h`); bindings accept assembled operators only.
 - Measurement contracts: `benchmarks/README.md`.
+- CLI archives: `.github/workflows/cli.yml` uses the `cli` install component, bundles OpenMP/notices, and runs `tests/check_cli_archive.py` after relocation.
+- Documentation: `python docs/build.py` reuses the guides, public C++ comments, Python docstrings and CLI help. Build instructions are in `CONTRIBUTING.md`; generated HTML goes to `build/docs`.
 
 ## Route invariants
 
-- Solver controls are typed per-instance options, not environment variables. Validate them before setup; bindings share compiled defaults. Libraries are quiet by default, and `collect_timings` controls optional checkpoints. Standard OpenMP/CUDA runtime and build controls remain external; reference-only tuning stays internal to tests.
+- Solver controls are typed per-instance options, not environment variables. Validate them before setup; `drop_tolerance` is in `[0, 1]`. Bindings share compiled defaults. Libraries are quiet by default, and `collect_timings` controls optional checkpoints. Standard OpenMP/CUDA runtime and build controls remain external; reference-only tuning stays internal to tests.
 - `solve_backend` (`automatic`, `cpu`, `gpu`) fixes one complete setup/solve route before setup. Explicit GPU requests fail for unsupported options, input or devices. Once selected, errors never retry on another route. Report the selected route in results and CLI output.
 - `cpu_solver`, public `factorize()` and Eigen preconditioning stay on CPU in GPU builds and must not initialize CUDA. Disabled or pristine GPU lifetimes must not initialize CUDA either.
 - `backend_available()` checks build/device availability, not compatibility with every solver option. CPU and automatic queries never initialize a GPU.
@@ -62,6 +66,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 | Graph, partitioners, elimination, sampling | `FactorizeTest.*`, `FactorizeDeterminism.*`, `AllStrategies/*`, `VecPoolAos.*`, `DirectedCscGraph.*`, `PruneSkip.*`, `IncrementalDegreeGate.*`, `TreeSampler.*`, `CycleSampler.*`, `Custom*` |
 | Residual sparsification | `ResidualBlocked*`, `ResidualSparsify*` |
 | CPU triangular solves, storage | `SpTRSV*`, `CriticalSchedule.*`, `BigAlloc.*`, `FP16.*`, `LowPrec*`, `FactorStorage.*` |
+| Root embedding | `tests/cmake_subdirectory`, with default options and with tests ON / CLI OFF; GPU parents enable CUDA or OBJCXX before adding the root |
 | Operators, input, routes, owners | `Operator*`, `MMatrixLumping.*`, `PermutedOperator.*`, `MtxInput*`, `AdjacencyInputRegression.*`, `SolveRoutes.*`, `Solve*`, `Solver.*`, `Checkpoint.*` |
 | CUDA | `Gpu*`, `CudaDeviceScope.*`, `gpu_factor_finalize_leak_check` (with compute-sanitizer) |
 | Metal | `Metal*`, `GpuDataflowPlan.*`; also under `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1` |

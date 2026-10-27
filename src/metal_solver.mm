@@ -14,6 +14,7 @@
 #include "metal_compile.h"
 #include "metal_setup.h"
 #include "host_spmv.h"
+#include "solver_archive_internal.h"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -763,6 +764,13 @@ void metal_solver::impl_deleter::operator()(impl* owner) const {
 metal_solver::~metal_solver() = default;
 metal_solver::metal_solver(metal_solver&&) noexcept = default;
 metal_solver& metal_solver::operator=(metal_solver&&) noexcept = default;
+
+Eigen::SparseMatrix<double> detail::solver_archive_access::original_operator(const metal_solver& owner) {
+    const auto& data = *owner.impl_;
+    if (data.original_operator.rows()) return data.original_operator;
+    return archive_operator_csc(static_cast<int>(data.n), data.op.ptr.data(),
+        data.op.idx.get(), data.op.vals.get(), data.F.perm);
+}
 
 const factorization& metal_solver::factor() const { return impl_->F; }
 metal_solver::statistics metal_solver::stats() const { return impl_->stats; }

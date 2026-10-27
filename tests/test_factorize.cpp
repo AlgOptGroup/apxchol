@@ -319,24 +319,11 @@ TEST_F(FactorizeTest, Deterministic) {
 
 // ── Determinism of the PARALLEL selection path ───────
 //
-// FactorizeTest.Deterministic above factorizes a 5x5 grid: 25 candidates,
-// far below factor_options::omp_threshold, so every round takes the SERIAL
-// branch of the partitioner and the parallel one is never executed. This test
-// executes it, and is the regression guard for two schedule-dependent outputs
-// fixed 2026-08-20:
-//
-//   * block_greedy's cross-block conflict resolution read the shared chosen[]
-//     mask while other threads were clearing it, so whether a boundary pick
-//     dropped depended on who got there first. That changed the round's
-//     independent set, hence the elimination order, hence the factor's
-//     STRUCTURE and its nnz, run to run at one seed and one thread count.
-//     Measured at the parent commit on a 32-core box, standalone (i.e. not
-//     under ctest's OMP_NUM_THREADS=4 cap), SpTRSVSetupMemory.SetupConsuming-
-//     ReleasesTheFactorAndSolvesIdentically — which factorizes a 120x120 grid
-//     twice and compares — failed 19/50 at T=8, 16/50 at T=16, 19/50 at T=32,
-//     and 0/50 at T=1 and T=4.
-// Both are selection-side, so one storage suffices here; the storage x
-// partitioner matrix was checked separately.
+// The 25-vertex test above stays below omp_threshold. These tests exercise
+// parallel selection and require the same selected set and insertion order
+// for a fixed graph, selector state, seed and team size. Cross-block conflict
+// resolution must read a stable chosen mask before threads clear losing picks;
+// otherwise scheduling can change the set and subsequent factor structure.
 namespace {
 // Raise the OpenMP team size for one test and put it back (gtest runs the
 // whole binary in one process; ctest pins OMP_NUM_THREADS=4 for it).
@@ -469,6 +456,125 @@ void expect_same_graph_selection(
     }
 }
 } // namespace
+
+namespace {
+struct eliminator_failure {};
+struct throwing_eliminator {
+    void sample_clique(std::span<apxchol::weighted_neighbor>, double,
+                       std::uint64_t, apxchol::edge_emitter) const {
+        throw eliminator_failure{};
+    }
+};
+
+apxchol::graph failure_test_graph() {
+    apxchol::graph graph(16);
+    for (apxchol::node_index i = 0; i + 1 < graph.n(); ++i)
+        graph.add_edge(i, i + 1, 1.0);
+    return graph;
+}
+} // namespace
+
+TEST_F(FactorizeTest, ParallelEliminatorFailureReachesCaller) {
+    const scoped_threads team(2);
+    apxchol::factor_options options;
+    options.omp_threshold = 0;
+    options.parallel_residual_threshold = 0;
+    EXPECT_THROW(apxchol::factorize(failure_test_graph(), throwing_eliminator{}, options),
+                 eliminator_failure);
+}
+
+TEST_F(FactorizeTest, ParallelFactorAllocationFailureReachesCaller) {
+    const scoped_threads team(2);
+    auto graph = failure_test_graph();
+    apxchol::factor_options options;
+    options.omp_threshold = 0;
+    options.parallel_residual_threshold = 0;
+    auto* previous = std::pmr::set_default_resource(std::pmr::null_memory_resource());
+    EXPECT_THROW(apxchol::factorize(std::move(graph), options), std::bad_alloc);
+    std::pmr::set_default_resource(previous);
+}
+
+TEST(VecPoolAos, ReserveFailureReachesCallerAfterTeamJoin) {
+    const scoped_threads team(2);
+    apxchol::basic_vec_pool_incidence<unsigned> pool;
+    pool.init(2);
+    const std::array<apxchol::node_index, 2> touched{0, 1};
+    std::vector<apxchol::node_index> incoming(2, 0);
+    // Reject a single oversized slab before allocating its storage.
+    incoming[0] = apxchol::segmented_pool<unsigned>::max_claim_slots() + 1;
+    apxchol::detail::parallel_exception error;
+#pragma omp parallel num_threads(2)
+    {
+        error.run([&] {
+            pool.bulk_reserve_parallel(touched.begin(), touched.end(), incoming);
+        });
+#pragma omp barrier
+    }
+    EXPECT_THROW(error.rethrow(), std::bad_alloc);
+}
+
+TEST(VecPoolAos, ReserveAccommodatesALargerTeamThanGraphConstruction) {
+    const scoped_threads team(4);
+    apxchol::basic_vec_pool_incidence<unsigned> pool;
+    {
+        const scoped_threads construction(1);
+        pool.init(8);
+    }
+    std::vector<apxchol::node_index> touched(8), incoming(8, 1);
+    std::iota(touched.begin(), touched.end(), 0);
+    int actual_threads = 0;
+#pragma omp parallel num_threads(4)
+    {
+#pragma omp single
+        {
+            actual_threads = omp_get_num_threads();
+            pool.compact_for_round_if_needed(incoming);
+        }
+        pool.bulk_reserve_parallel(touched.begin(), touched.end(), incoming);
+#pragma omp barrier
+#pragma omp for
+        for (unsigned v = 0; v < 8; ++v) {
+            pool.write_reserved_at(v, 0, 100 + v);
+            pool.commit_reserved(v, 1);
+        }
+    }
+    if (actual_threads < 2) GTEST_SKIP() << "OpenMP granted only one worker";
+    for (unsigned v = 0; v < 8; ++v) {
+        ASSERT_EQ(pool[v].size(), 1u);
+        EXPECT_EQ(pool[v][0], 100 + v);
+    }
+}
+
+TEST(VecPoolAos, ReducedEliminationTeamIgnoresInactiveWorkerScratch) {
+    const scoped_threads team(4);
+    apxchol::graph graph(6);
+    for (apxchol::node_index v = 0; v < 4; ++v) {
+        graph.add_edge(v, 4, 1.0);
+        graph.add_edge(v, 5, 1.0);
+    }
+    apxchol::factorize_workspace workspace;
+    workspace.threads.resize(4);
+    for (auto& worker : workspace.threads)
+        worker.factor_entries = std::make_unique<std::pmr::monotonic_buffer_resource>();
+    // A previous round used this worker; the next region will be serialized.
+    workspace.threads[1].touched_buffer = {4, 5};
+    workspace.reset_for_round();
+    apxchol::partition_result part;
+    part.data = {0, 1, 2, 3};
+    std::vector<apxchol::detail::factor_col> columns;
+    apxchol::factor_options options;
+    options.omp_threshold = 1;
+    const int previous_levels = omp_get_max_active_levels();
+    omp_set_max_active_levels(0);
+    EXPECT_NO_THROW(apxchol::detail::eliminate_partition_singleton(
+        apxchol::tree_elimination{}, graph, part, columns, workspace, options));
+    omp_set_max_active_levels(previous_levels);
+    EXPECT_EQ(columns.size(), 4u);
+    EXPECT_EQ(workspace.touched_concat, (std::vector<apxchol::node_index>{4, 5}));
+    EXPECT_TRUE(std::ranges::all_of(workspace.incoming, [](auto count) { return count == 0; }));
+    EXPECT_EQ(graph.adj_count(4), 8u);
+    EXPECT_EQ(graph.adj_count(5), 8u);
+}
 
 TEST(FactorAssembly, SerialAndParallelInvariantScansMatchByteForByte) {
     constexpr apxchol::node_index n = 32768;
@@ -1069,9 +1175,8 @@ TEST(Solve, TimingsReported) {
     auto b = apxchol::generate_test_rhs(100);
     auto res = apxchol::solve(L, b);
     EXPECT_GT(res.timings.total("setup"), 0.0);
-    // After 53e1d1d the PCG-loop ops are grouped under "pcg"; on the CPU path
-    // the precond.solve() triangular-solve subtree nests as pcg.solve, while
-    // the GPU-resident PCG records one pcg.gpu_pcg_loop leaf instead.
+    // CPU triangular solves are timed under pcg.solve; GPU-resident PCG
+    // records one pcg.gpu_pcg_loop leaf.
     EXPECT_GT(res.timings.total("pcg"), 0.0);
     if (res.backend == apxchol::solve_backend::gpu) {
         EXPECT_GT(res.timings.total("pcg.gpu_pcg_loop"), 0.0);
@@ -1341,9 +1446,9 @@ INSTANTIATE_TEST_SUITE_P(AllStrategies, StrategyConvergenceTest,
 
 // ─── F1: factorization quality regression tests ──────────────────────
 //
-// Historical bounds from forward-star: max residual observed across all
-// partitioners × thread counts {1, 8, 16}, multiplied by 1.5 for headroom.
-// Keep these thresholds unchanged when migrating this check to directed AoS.
+// Bounds retained from the forward-star implementation: maximum observed
+// residual across partitioners and thread counts {1, 8, 16}, with 1.5x headroom.
+// Storage-layout changes must preserve these quality bounds.
 //
 // Update bounds only when a deliberate algorithmic change shifts the
 // achievable residual.  A regression in unbiasedness shows up as

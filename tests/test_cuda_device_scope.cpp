@@ -112,4 +112,94 @@ TEST_F(CudaDeviceScope, CheckedScopeRestoresAfterException) {
     EXPECT_EQ(calls.current, 2);
     EXPECT_EQ(calls.sets, (std::vector<int>{3, 2}));
 }
+
+namespace {
+thread_local int context_device = 0;
+struct ContextCalls {
+    int gets = 0;
+    cudaError_t get_status = cudaSuccess;
+    cudaError_t set_status = cudaSuccess;
+    std::vector<int> sets;
+    std::vector<int> frees;
+} context_calls;
+
+cudaError_t test_context_get_device(int* device) {
+    ++context_calls.gets;
+    *device = context_device;
+    return context_calls.get_status;
+}
+cudaError_t test_context_set_device(int device) {
+    context_calls.sets.push_back(device);
+    if (context_calls.set_status == cudaSuccess) context_device = device;
+    return context_calls.set_status;
+}
+cudaError_t test_context_free(void*) {
+    context_calls.frees.push_back(context_device);
+    return cudaSuccess;
+}
+} // namespace
+
+#define cudaGetDevice test_context_get_device
+#define cudaSetDevice test_context_set_device
+#define cudaFree test_context_free
+#define cuda_ctx tested_cuda_context
+#include "apxchol/solver/cuda_context.h"
+#undef cuda_ctx
+#undef cudaFree
+#undef cudaSetDevice
+#undef cudaGetDevice
+
+namespace context = apxchol::tested_cuda_context;
+
+class CudaPrewarm : public ::testing::Test {
+    void SetUp() override {
+        auto& state = context::detail::state();
+        state.started = false;
+        state.ctx_seconds = 0;
+        context_calls = {};
+        context_device = 3;
+    }
+    void TearDown() override {
+        auto& worker = context::detail::state().worker;
+        if (worker.joinable()) worker.join();
+    }
+};
+
+TEST_F(CudaPrewarm, UsesCallersDeviceAndJoinsWorker) {
+    context::prewarm();
+    context::ensure_context();
+    EXPECT_EQ(context_calls.gets, 1);
+    EXPECT_EQ(context_calls.sets, (std::vector<int>{3}));
+    EXPECT_EQ(context_calls.frees, (std::vector<int>{3, 3}));
+    EXPECT_EQ(context_device, 3);
+    EXPECT_FALSE(context::detail::state().worker.joinable());
+}
+
+TEST_F(CudaPrewarm, FailedQueryDoesNotStartWorker) {
+    context_calls.get_status = cudaErrorUnknown;
+    context::prewarm();
+    EXPECT_FALSE(context::detail::state().started);
+    EXPECT_FALSE(context::detail::state().worker.joinable());
+    EXPECT_TRUE(context_calls.sets.empty());
+    EXPECT_TRUE(context_calls.frees.empty());
+}
+
+TEST_F(CudaPrewarm, FailedSelectionDoesNotInitializeDefaultDevice) {
+    context_calls.set_status = cudaErrorInvalidDevice;
+    context::prewarm();
+    context::ensure_context();
+    EXPECT_EQ(context_calls.sets, (std::vector<int>{3}));
+    EXPECT_EQ(context_calls.frees, (std::vector<int>{3}));
+    EXPECT_EQ(context_device, 3);
+}
+
+TEST_F(CudaPrewarm, RepeatedPrewarmDoesNotRestartWorker) {
+    context::prewarm();
+    context::ensure_context();
+    context::prewarm();
+    context::ensure_context();
+    EXPECT_EQ(context_calls.gets, 1);
+    EXPECT_EQ(context_calls.sets, (std::vector<int>{3}));
+    EXPECT_EQ(context_calls.frees, (std::vector<int>{3, 3, 3}));
+}
 #endif

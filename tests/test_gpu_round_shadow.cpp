@@ -2359,13 +2359,15 @@ TEST(GpuOwnedMetadataHost, RawOffsetCapacityMatchesOriginalConstruction) {
         EXPECT_EQ(permutation, expected.perm); EXPECT_EQ(offsets, expected.L.outer_);
         EXPECT_EQ(offsets.back(), maximum);
         // Only two headers are allocated: the large count is metadata, never
-        // a request for factor-entry storage. Both constructions must abort.
+        // a request for factor-entry storage.
         headers[0].entry_count = maximum - 1; headers[1].entry_begin = maximum - 1;
         old_columns[0].entry_count = maximum - 1;
-        EXPECT_DEATH(apxchol::detail::validate_owned_factor_columns(
-            headers, maximum - 1, permutation, offsets), "factor_metadata\\(nnz\\)");
-        EXPECT_DEATH(apxchol::detail::build_csc(
-            expected, old_columns, 2, nullptr, false), "factor_metadata\\(nnz\\)");
+        EXPECT_THROW(apxchol::detail::validate_owned_factor_columns(
+            headers, maximum - 1, permutation, offsets), std::length_error);
+        EXPECT_THROW(apxchol::detail::build_csc(
+            expected, old_columns, 2, nullptr, false), std::length_error);
+        EXPECT_THROW(apxchol::detail::build_csc(
+            expected, old_columns, 2, nullptr, true), std::length_error);
     } else {
         GTEST_SKIP() << "32-bit edge capacity boundary; no giant allocation for 64-bit offsets";
     }

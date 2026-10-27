@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 # Build the apxchol Octave MEX extension (CPU only).
 #
-# Compiles the core library TUs straight into the MEX (same approach as the
-# Python package: no dependency on the root CMake build). operator_class.cpp
-# supplies the operator-contract assertion and the M-matrix lumping, shared
-# verbatim with the CLI and the Python binding. Needs: mkoctfile
-# (octave-devel), Eigen3 headers, and an OpenMP-capable g++ or clang++.
+# Uses the same CMake core and archive dependencies as native and Python builds.
+# Needs CMake, mkoctfile (octave-devel), and an OpenMP-capable C++23 compiler.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -28,10 +25,8 @@ CXX="${CXX:-g++}"
 CXX_FAMILY=$(compiler_family "$CXX")
 if [ "$CXX_FAMILY" = clang ]; then
     CC="${CC:-clang}"
-    OMP_LIB="-lomp"
 else
     CC="${CC:-gcc}"
-    OMP_LIB="-lgomp"
 fi
 CC_FAMILY=$(compiler_family "$CC")
 if [ "$CC_FAMILY" != "$CXX_FAMILY" ]; then
@@ -43,34 +38,8 @@ if [ "$CC_FAMILY" != "$CXX_FAMILY" ]; then
 fi
 export CC CXX
 
-# -march=native is the x86 spelling. On aarch64 clang accepts it and silently
-# targets generic, so ask for the ISA's own spelling first and fall back; a
-# toolchain that takes neither gets no tuning flag rather than a hard failure.
-# Same rule as cmake/apxchol_native_arch.cmake.
-case "$(uname -m)" in
-    aarch64|arm64) ARCH_CANDIDATES="-mcpu=native -march=native" ;;
-    *)             ARCH_CANDIDATES="-march=native -mcpu=native" ;;
-esac
-ARCH_FLAG=""
-for _flag in $ARCH_CANDIDATES; do
-    if printf 'int main(){return 0;}\n' | "$CXX" -x c++ "$_flag" -c -o /dev/null - 2>/dev/null; then
-        ARCH_FLAG="$_flag"
-        break
-    fi
-done
-echo "toolchain: CXX=$CXX CC=$CC ($CXX_FAMILY), OpenMP=$OMP_LIB, tuning=${ARCH_FLAG:-none}"
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release "$@"
+cmake --build build --target apxchol_mex --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
 
-EIGEN_FLAGS=$(pkg-config --cflags eigen3 2>/dev/null || echo "-I/usr/include/eigen3")
-
-# CXXFLAGS overrides mkoctfile's defaults entirely -> restate optimization.
-# fp32 pool defines match the library defaults (root CMakeLists defaults).
-CXXFLAGS="-O3 ${ARCH_FLAG} -std=gnu++23 -fopenmp -fPIC -Wall" \
-mkoctfile --mex \
-    apxchol_mex.cpp ../src/factorization.cpp ../src/operator_class.cpp ../src/solve.cpp \
-    -I../include -I../src ${EIGEN_FLAGS} \
-    -DAPXCHOL_POOL_FP32 \
-    ${OMP_LIB} \
-    -o apxchol_mex
-
-echo "built: $(ls -la apxchol_mex.mex | awk '{print $9, "("$5" bytes)"}')"
+echo "built: $(pwd)/apxchol_mex.mex"
 echo "use:   addpath $(pwd)   then   s = apxchol_solver(A); res = s.solve(b);"

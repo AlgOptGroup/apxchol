@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <stdexcept>
@@ -1050,13 +1051,86 @@ TEST_F(MetalDevice, PerSolverStorageAndDropMatchTheReference) {
     const auto factor = apxchol::factorize(A);
     const auto b = rhs(A.rows(), 3, false);
     for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
-        for (double drop : {0.0, 0.1, 0.0}) {
+        for (double drop : {0.0, 0.1, 1.0, 0.0}) {
             auto options = keep_opts();
             options.factor_opts.factor_storage = storage;
             options.factor_opts.drop_tolerance = drop;
             const apxchol::metal_solver solver(A, factor, options);
             const auto expected = emulate_apply(factor, b, options.factor_opts);
             EXPECT_LT((solver.apply(b) - expected).norm() / expected.norm(), 2e-5);
+        }
+    }
+}
+
+TEST(MetalOptions, InvalidDropToleranceFailsBeforeDeviceSetup) {
+    const Sparse A = grid(4, 4, 0.25);
+    const auto factor = apxchol::factorize(A);
+    auto options = keep_opts();
+    for (double drop : {-1.0, std::nextafter(1.0, 2.0), 2.0,
+                        std::numeric_limits<double>::infinity(),
+                        std::numeric_limits<double>::quiet_NaN()}) {
+        options.factor_opts.drop_tolerance = drop;
+        EXPECT_THROW(apxchol::metal_solver(A, options), std::invalid_argument);
+        EXPECT_THROW(apxchol::metal_solver(A, factor, options), std::invalid_argument);
+    }
+}
+
+TEST_F(MetalDevice, ResidentDropToleranceMatchesHostReference) {
+    for (bool laplacian : {false, true}) {
+        const Sparse A = grid(7, 9, laplacian ? 0.0 : 0.25, true);
+        const auto b = rhs(A.rows(), 3, laplacian);
+        for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
+            for (double drop : {0.0, 0.1, 1.0}) {
+                SCOPED_TRACE(laplacian);
+                SCOPED_TRACE(static_cast<int>(storage));
+                SCOPED_TRACE(drop);
+                auto options = keep_opts();
+                options.factor_opts.factor_storage = storage;
+                options.factor_opts.drop_tolerance = drop;
+                const apxchol::metal_solver solver(A, options);
+                const auto expected = emulate_apply(solver.factor(), b, options.factor_opts);
+                const auto actual = solver.apply(b);
+                EXPECT_TRUE(actual.allFinite());
+                EXPECT_LT((actual - expected).norm() / expected.norm(), 2e-5);
+                const auto result = solver.solve(b, 1e-8, 1000);
+                EXPECT_TRUE(result.converged);
+                EXPECT_LE(true_residual(A, b, result.x), 1e-8);
+            }
+        }
+    }
+}
+
+TEST_F(MetalDevice, TinyPositiveDropMatchesHostReference) {
+    // Every first pivot has these three ratios, independent of its vertex ID.
+    constexpr double weights[]{1.0, 0.4998778998851776, 0x1p-16};
+    std::vector<Eigen::Triplet<double>> entries;
+    for (int i = 0; i < 4; ++i) {
+        entries.emplace_back(i, i, 4.0);
+        for (int j = i + 1; j < 4; ++j) {
+            const double weight = weights[(i ^ j) - 1];
+            entries.emplace_back(i, j, -weight);
+            entries.emplace_back(j, i, -weight);
+        }
+    }
+    Sparse A(4, 4);
+    A.setFromTriplets(entries.begin(), entries.end());
+    A.makeCompressed();
+    for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
+        for (double drop : {0.0, 1e-300, 1e-46, 0.1}) {
+            SCOPED_TRACE(static_cast<int>(storage));
+            SCOPED_TRACE(drop);
+            auto options = keep_opts();
+            options.factor_opts.factor_storage = storage;
+            options.factor_opts.drop_tolerance = drop;
+            const apxchol::metal_solver solver(A, options);
+            for (int i = 0; i < 4; ++i) {
+                SCOPED_TRACE(i);
+                const Eigen::VectorXd b = Eigen::VectorXd::Unit(4, i);
+                const auto expected = emulate_apply(solver.factor(), b, options.factor_opts);
+                const auto actual = solver.apply(b);
+                EXPECT_TRUE(actual.allFinite());
+                EXPECT_LT((actual - expected).norm() / expected.norm(), 2e-6);
+            }
         }
     }
 }

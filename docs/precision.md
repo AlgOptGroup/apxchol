@@ -19,30 +19,33 @@ installed triangular-solve arrays, and the outer iteration. A build with
 
 Construction precision is independent of triangular-solve storage; Python factor exports preserve the C++ factor's FP32 dtype, while CPU solve inputs and results use FP64 arithmetic.
 
-CPU FP16 is available on x86 CPUs with AVX/F16C and on Apple ARM64, including portable wheels. Unsupported explicit requests fail at setup.
-On x86, fat levels use the AVX2/F16C/FMA kernel where available, with scalar F16C conversion otherwise; Apple ARM64 uses native conversions.
-CPU setup converts the CSC values once and copies them into CSR. Consuming
-setup releases the input before transposing; non-consuming FP16 setup retains
-that input and the stored CSC alongside the parallel transpose's scratch.
+CPU FP16 is available on x86 CPUs with AVX/F16C and on Apple ARM64, including
+portable wheels. Unsupported explicit requests fail at setup. The CPU path
+selects available conversion and SIMD instructions at runtime.
+
 The GPU operator may use FP32 storage when the original values are exactly
 representable; this is separate from narrowing a preconditioner.
 CUDA rescales extreme RHS and warm-start vectors by a common power of two and
 restores the solution scale on return. Intermediate triangular-solve values
 must still fit FP32.
 
-All backends recompute the returned solution's relative residual in FP64. The GPU checks run:
-CUDA on the device, Metal on the host. This uses the full symmetric operator
-(canonical lower-triangle coefficients), before any preconditioner lumping,
-and the unmodified RHS. The reported residual can exceed tolerance after the
-recursive stopping test passes; verification does not add retries or iterations.
-CUDA retains one extra FP64 RHS vector per allocated panel column for this check.
+Built-in solves verify the final relative residual in FP64: CUDA checks on
+the device, Metal on the host. Verification uses the original symmetric
+operator (canonical lower-triangle coefficients) and unmodified RHS, before
+any preconditioner lumping.
+
+The reported residual can exceed tolerance even after the recursive stopping
+test passes. Verification does not add retries or iterations; check the returned
+`converged` flag. CUDA retains one extra FP64 RHS vector per allocated panel
+column for this check.
 
 ## Scaled FP16 contract
 
-For each column, let `s_j` be the maximum absolute off-diagonal factor value,
-or one for an empty/zero off-diagonal column. The factor-drop threshold uses
-this scale before dropping. Drop compensation runs on FP32 values before
-narrowing; the retained values preserve the column sum up to rounding.
+`drop_tolerance` must be in [0, 1]; zero disables threshold dropping. For each
+column, let `s_j` be the maximum absolute off-diagonal factor value, or one
+for an empty/zero off-diagonal column. The threshold uses this scale before
+dropping. Compensation redistributes dropped mass among retained
+off-diagonals before narrowing, when any remain.
 
 An off-diagonal is stored by native conversion of `L_ij / s_j` to FP16.
 Under the normal floating-point environment this rounds to nearest, ties to even.
@@ -50,8 +53,9 @@ FP16 subnormals are flushed to signed zero. The scaled diagonal remains FP32
 and absorbs the off-diagonal rounding residual. Degenerate scales fall back
 to one before dropping; invalid final diagonals/scales are rejected.
 
-CPU and CUDA solve with the scaled factor `L D^-1`: the forward sweep returns `D y` and
-the backward sweep applies the reciprocal scale squared to its input. CPU
+Let `S` be the diagonal matrix of column scales `s_j`. CPU and CUDA solve with
+the scaled factor `L S^-1`: the forward sweep returns `S y`, and the backward
+sweep applies the reciprocal scale squared to its input. CPU
 arithmetic widens to FP64, GPU triangular-solve arithmetic to FP32. A stored
 FP16 factor is not an FP16 outer solve. CPU and GPU-host preparation share the
 narrowing/flush rules in `lowprec.h`; CUDA and Metal finalize device-owned factors on the device.
@@ -59,7 +63,7 @@ Metal reconstructs FP32 coefficients before multiplication; each column stores a
 
 ## Apple Metal PCG
 
-Metal factorizes [supported inputs](../README.md#backend-capabilities) on the device and prepares FP32 or scaled FP16 solve storage with compensated dropping. [The solver](../README.md#interfaces) accepts vector or matrix right-hand sides, reusing its factor and workspace.
+Metal factorizes [supported inputs](usage.md#native-gpu-input-and-options) on the device and prepares FP32 or scaled FP16 solve storage with compensated dropping. [The solver](usage.md#reuse-batches-and-initial-guesses) accepts vector or matrix right-hand sides, reusing its factor and workspace.
 
 Double-float represents a value as the sum of two FP32 numbers, giving about
 48 significant bits but not IEEE FP64 precision or range. Metal uses it for
@@ -80,8 +84,12 @@ host thread counts, devices, OS/compiler versions or independent factorizations.
 
 Runtime compilation uses safe math and disables contraction where supported;
 `metal_solver::available()` checks rounding, intermediate precision and FMA.
-Nonzero operator values and unscaled factor diagonals need magnitudes in [2^-100, 2^100];
-factor off-diagonals must be finite. Factor and operator offsets must fit signed 32-bit integers; operator inputs must have fewer than 2^30 stored entries. Unsupported ranges are rejected. Device setup with regularization additionally requires `factor_options::regularization` in [2^-100, 2^100] and normal positive FP32 products with the operator diagonal.
+Metal rejects inputs outside these ranges:
+
+- Nonzero operator values and unscaled factor diagonals: magnitude in [2^-100, 2^100].
+- Factor off-diagonals: finite values.
+- Factor/operator offsets: signed 32-bit integers; the operator must have fewer than 2^30 stored entries.
+- Positive regularization: in [2^-100, 2^100], with normal positive FP32 products when multiplied by the operator diagonal.
 
 ## Accuracy and configuration choice
 
@@ -101,14 +109,9 @@ factor values. FP32 rounding may hide some differences that FP64 retains; neithe
 precision makes floating-point addition independent of order. FP16 factor storage
 is applied later and does not make factor construction deterministic.
 
-For the same graph, candidates, selector state and actual thread team, selection
-must preserve its selected set and insertion order. Tests also retain exact
-single-thread factor and same-owned-factor repeated-solve checks. Parallel FP64
-rebuilds are checked for valid structure and the requested original-system
-residual, rather than equal factor bytes or iteration counts between builds.
-This also applies to explicit host factor construction in CUDA-enabled builds.
-Low-level import of that factor onto the GPU does not make its earlier
-construction repeatable; public CPU solvers keep the factor and solves on CPU.
+Selection is deterministic for the same graph, candidates, selector state and
+actual thread team. Reusing one factor avoids the variability of rebuilding
+it; moving a host factor to a GPU does not change how it was constructed.
 
 The [benchmark protocol](../benchmarks/README.md) describes how to compare
 supported configurations without changing timing boundaries.

@@ -12,25 +12,18 @@
 // CPU unit tests can check, without a GPU, that the GPU upload matches
 // CPU storage (tests/test_sptrsv_drop.cpp, "GpuHostPrep*").
 //
-// fp16 STORAGE CONTRACT (mirrors omp.h's FP16_SCALED, "FOLDED INTO THE
-// VECTORS"): what is stored is the column-scaled factor L~ = L D^-1, D =
-// diag(s_j), s_j = factor_column_scale (max |off-diagonal| of column j, 1.0f
-// if none; the PRE-drop max, which the drop never removes): off-diagonal
-// slots hold fp16(fp32(L_ij) / s_j) (native conversion; fp16 subnormals flushed
-// to signed zero), the
-// diagonal is NOT read from its (still present, fp16) slot but from a
-// separate fp32 diag[j] = fp32(L_jj) / s_j, and inv_scale2[j] = fp64(fp32(1 / s_j))^2.
-// The kernels never multiply a scale back: the forward solve on L~ returns
-// y' = D y, the back solve reads its input scaled by inv_scale2[j] and
-// solves L~^T z = D^-2 y', so the pair applies (L_s L_s^T)^-1 for the stored
-// factor L_s = L~ D. The rounding residual of every column,
-// sum_i (x_ij - widen(h_ij)) with x_ij = fp64(L_ij) / s_j, is folded into
-// diag[j], always (the CPU SpTRSV does the same; the env knob that used
-// to gate it, APXCHOL_LOWPREC_DIAG_COMP, was removed 2026-08-20 -- it was OFF
-// there as a diagnostic, ON here because the fp16 GPU mode is new and was
-// measured with it: without it the Laplacian path pays iter0040 45 -> 64
-// PCG iterations, with it fp16 matches fp32's counts) so the stored column
-// sums to what the fp32 column sums to.
+// FP16 uses the CPU per-column scaling contract (lowprec.h). Store L~ = L D^-1,
+// where D = diag(s_j) and s_j is the pre-drop maximum |off-diagonal| in column j
+// (one if empty/zero, or if the reciprocal or scaled diagonal is non-finite
+// in FP32). Off-diagonals store fp16(fp32(L_ij) / s_j),
+// with fp16 subnormals flushed to signed zero.
+// The fp16 diagonal slot is present but unused. A separate fp32 diagonal holds
+// fp32(L_jj) / s_j plus the column's off-diagonal rounding residual,
+// sum_i (fp64(L_ij) / s_j - widen(h_ij)), to compensate column sums.
+// inv_scale2[j] = fp64(fp32(1 / s_j))^2; square in FP64 to avoid FP32 overflow.
+// The kernels do not multiply scales back: the forward solve on L~ returns
+// y' = D y, and the back solve uses L~^T z = D^-2 y'. Together they apply
+// (L_s L_s^T)^-1 for the stored factor L_s = L~ D, subject to reciprocal rounding.
 #include "apxchol/sparse_csc.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"
 #include "apxchol/solver/sptrsv/transpose.h"
@@ -261,8 +254,8 @@ inline csr_int<V> transpose_csr(const csr_int<V>& in) {
     return out;
 }
 
-/// Validate the two int32 CSR structures accepted by the research-only
-/// device-factor adoption boundary in cuda.h. `L` is the lower-triangular
+/// Validate the two int32 CSR structures supplied by generic device-factor
+/// capsules in cuda.h. `L` is the lower-triangular
 /// forward operand and `LT` is its exact structural transpose (the
 /// upper-triangular back operand). Values deliberately do not cross this host
 /// boundary; the caller separately promises that corresponding value arrays

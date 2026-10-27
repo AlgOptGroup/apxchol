@@ -13,14 +13,9 @@
 /// apache2 carry rows that break it and converge fine today, so requiring it
 /// would reject matrices that work.
 ///
-/// `require_operator` states which of the above a matrix violates, with counts.
-/// It replaces the old "does this look like an adjacency matrix?" heuristic:
-/// that was type-sniffing about intent, and it could only recognise the one
-/// shape it had been taught. Asserting the class instead names the real defect
-/// — and the adjacency case falls out of it, because an adjacency matrix is
-/// exactly a matrix with no positive diagonal anywhere and positive
-/// off-diagonals, which the diagonal condition catches. That case still gets
-/// the `laplacian(A)` suggestion appended.
+/// `require_operator` reports violated conditions with counts. When the diagonal
+/// check finds no positive diagonal but positive off-diagonals, its diagnostic
+/// suggests assembling the operator with `laplacian(A)`.
 ///
 /// ── M-matrix lumping ────────────────────────────────────────────────────────
 /// A symmetric operator that is SPD but carries positive off-diagonals is not
@@ -147,9 +142,9 @@ struct operator_scan {
 /// Relative tolerance on |a_ij - a_ji| before an entry counts as asymmetric.
 inline constexpr double kSymmetryRelTol = 1e-10;
 
-/// Census `A` in one pass. O(nnz) time, O(1) extra memory; the symmetry test
-/// binary-searches the transpose partner inside `A` itself rather than
-/// materializing A^T, so a 200M-nnz operator costs no extra allocation.
+/// Scan operator properties without materializing a transpose. Symmetry
+/// fingerprints provide a fast path; otherwise a second pass binary-searches
+/// transpose entries. Uses per-thread witness storage.
 operator_scan scan_operator(const Eigen::SparseMatrix<double>& A);
 
 /// Assert that `A` belongs to the class apxchol is defined on, and return the

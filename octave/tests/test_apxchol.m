@@ -286,13 +286,19 @@ function test_apxchol()
   options = struct('num_threads', 1, 'seed', 7, 'factor_storage', 'float32', ...
                    'cpu_schedule', 'levels', 'drop_tolerance', 0, ...
                    'regularization', 0, 'lump_max_mass', 0.25, 'verbose', false);
-  controlled = apxchol_solver(Aopts, options);
-  r = controlled.solve(bopts);
-  assert(r.converged && norm(Aopts * r.x - bopts) / norm(bopts) < 1e-8);
-  assert_same_solve(apxchol_solve(Aopts, bopts, [], [], options), r, 'one-shot setup options');
+  for drop = [0 1]
+    options.drop_tolerance = drop;
+    controlled = apxchol_solver(Aopts, options);
+    r = controlled.solve(bopts);
+    assert(r.converged && norm(Aopts * r.x - bopts) / norm(bopts) < 1e-8);
+    assert_same_solve(apxchol_solve(Aopts, bopts, [], [], options), r, 'one-shot setup options');
+  end
   bad_options = {struct('num_threads', 1.5), struct('num_threads', -1), ...
                  struct('seed', 1.5), struct('cpu_schedule', 'unknown'), ...
                  struct('factor_storage', 'float64'), struct('drop_tolerance', -1), ...
+                 struct('drop_tolerance', 1 + eps(1)), struct('drop_tolerance', 2), ...
+                 struct('drop_tolerance', NaN), struct('drop_tolerance', Inf), ...
+                 struct('drop_tolerance', -Inf), ...
                  struct('regularization', -1), struct('lump_max_mass', -0.1), ...
                  struct('verbose', 2), struct('unknown', 1)};
   for k = 1:numel(bad_options)
@@ -305,6 +311,87 @@ function test_apxchol()
   try, shaped.solve(ones(2)); catch, rejected_shape = true; end
   assert(rejected_shape, 'matrix RHS was silently flattened');
   ok = ok + 1; fprintf('ok %d  explicit setup controls\n', ok);
+
+  % ── 14. native matrix solves, apply and warm starts ──
+  rng(17);
+  operators = {grid2d_laplacian(7) + 0.5 * speye(49), ...
+               blkdiag(grid2d_laplacian(4), grid2d_laplacian(3))};
+  for a = 1:numel(operators)
+    A = operators{a}; n = size(A, 1);
+    batch_solver = apxchol_solver(A, struct('num_threads', 1));
+    for width = [0 1 4 5 16]
+      exact = randn(n, width);
+      if width > 1, exact(:, 2) = 0; end
+      B = A * exact; before = B;
+      result = batch_solver.solve(B, 1e-9, 500);
+      assert(isequal(size(result.x), [n width]));
+      assert(isequal(size(result.iters), [1 width]));
+      assert(isequal(size(result.residual), [1 width]));
+      assert(isequal(size(result.converged), [1 width]) && islogical(result.converged));
+      assert(all(result.converged));
+      errors = sqrt(sum((A * result.x - B).^2, 1));
+      assert(all(errors <= 1e-9 * sqrt(sum(B.^2, 1)) + 1e-12));
+      Z = batch_solver.apply(B);
+      assert(isequal(size(Z), [n width]));
+      for j = 1:width
+        scalar_z = batch_solver.apply(B(:, j));
+        assert(norm(Z(:, j) - scalar_z) <= 1e-11 * max(1, norm(scalar_z)));
+      end
+      warm = batch_solver.solve(B, 1e-9, 0, exact);
+      assert(all(warm.converged) && all(warm.iters == 0));
+      limited = batch_solver.solve(B, 1e-14, 0);
+      assert(all(limited.iters == 0));
+      assert(all(limited.converged == all(B == 0, 1)));
+      assert(isequal(B, before), 'matrix input was changed');
+    end
+  end
+  ok = ok + 1; fprintf('ok %d  native matrix solves/apply/warm starts (10 shapes)\n', ok);
+
+  % ── 15. scalar systems, row vectors and one-shot warm starts ──
+  scalar_solver = apxchol_solver(sparse(2));
+  for width = [0 1 4]
+    B = 1:width;
+    result = scalar_solver.solve(B);
+    assert(isequal(size(result.x), [1 width]) && all(result.converged));
+    assert(norm(result.x - B / 2) < 1e-14);
+    assert(isequal(size(scalar_solver.apply(B)), [1 width]));
+  end
+  row = sopts.solve(bopts');
+  assert_same_solve(row, sopts.solve(bopts), 'legacy row vector');
+  assert(isequal(size(sopts.apply(bopts')), [2 1]));
+  exact = [1 2 3 4; -2 -3 -4 -5]; B = Aopts * exact;
+  warm = apxchol_solve(Aopts, B, 1e-9, 0, struct(), exact);
+  assert(all(warm.converged) && all(warm.iters == 0));
+  assert(norm(warm.x - exact) < 1e-14);
+  row_warm = sopts.solve(B(:, 1)', 1e-9, 0, exact(:, 1)');
+  assert(row_warm.converged && row_warm.iters == 0);
+  ok = ok + 1; fprintf('ok %d  scalar/row shapes and one-shot warm starts\n', ok);
+
+  % ── 16. matrix and initial-guess errors leave the owner usable ──
+  bad_rhs = {ones(3, 2), ones(2, 2, 2), single(ones(2, 2)), ...
+             complex(ones(2, 2), 1), [NaN 1; 1 1], [Inf 1; 1 1]};
+  rejected = 0;
+  for k = 1:numel(bad_rhs)
+    value = bad_rhs{k};
+    calls = {@() sopts.solve(value), @() sopts.apply(value), ...
+             @() sopts.solve(ones(2, 2), [], [], value)};
+    for j = 1:numel(calls)
+      caught = false;
+      try, invoke = calls{j}; unused = invoke(); catch, caught = true; end
+      assert(caught, 'invalid RHS or initial guess was accepted');
+      rejected = rejected + 1;
+    end
+  end
+  for guess = {ones(2, 1), ones(2, 3)}
+    caught = false;
+    try, sopts.solve(ones(2, 2), [], [], guess{1}); catch, caught = true; end
+    assert(caught, 'wrong initial-guess width was accepted');
+    rejected = rejected + 1;
+  end
+  assert(rejected == 20);
+  reused = sopts.solve(bopts);
+  assert(reused.converged && norm(Aopts * reused.x - bopts) / norm(bopts) < 1e-8);
+  ok = ok + 1; fprintf('ok %d  matrix/initial-guess validation (20 errors)\n', ok);
 
   fprintf('ALL %d TESTS PASSED\n', ok);
 end

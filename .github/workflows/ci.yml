@@ -20,9 +20,12 @@ on:
       - 'benchmarks/patches/**'
       - 'python/**'
       - 'octave/**'
+      - '.github/scripts/build-cli.sh'
+      - '.github/workflows/cli.yml'
       - '.github/workflows/ci.yml'
       - '.github/workflows/wheels.yml'
       - '.github/workflows/publish.yml'
+      - '.github/actions/ccache/**'
   pull_request:
     paths: *ci_paths
 
@@ -57,7 +60,10 @@ jobs:
       - name: Install native benchmark dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y g++-14 libeigen3-dev ninja-build
+          sudo apt-get install -y g++-14 libeigen3-dev ninja-build ccache
+      - uses: ./.github/actions/ccache
+        with:
+          key: benchmark-gcc14
       - name: Configure + build native benchmark
         run: |
           cmake -S benchmarks -B build-benchmark -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -69,6 +75,10 @@ jobs:
           cmake --build build-benchmark --target benchmark original_stop_tests split_components_tests -j2
       - name: Run native benchmark contracts
         run: ctest --test-dir build-benchmark --no-tests=error --output-on-failure --timeout 60
+      - &ccache-stats
+        name: Show compiler cache statistics
+        if: always()
+        run: ccache --show-log-stats
 
   linux:
     name: Linux (${{ matrix.name }}, build + ctest)
@@ -87,7 +97,7 @@ jobs:
             cxx: g++-14
             packages: g++-14
             native_arch: 'OFF'
-            cmake_args: -DAPXCHOL_64BIT_NODE_INDICES=ON -DAPXCHOL_POOL_FP32=OFF
+            cmake_args: -DAPXCHOL_INDEX_WIDTH=64 -DAPXCHOL_POOL_FP32=OFF
           - name: Clang 18, portable
             cc: clang-18
             cxx: clang++-18
@@ -116,7 +126,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ${{ matrix.packages }} libeigen3-dev ninja-build
+          sudo apt-get install -y ${{ matrix.packages }} libeigen3-dev ninja-build ccache
+      - uses: ./.github/actions/ccache
+        with:
+          key: native-${{ matrix.cc }}-${{ matrix.native_arch }}
       - &configure-build
         name: Configure + build (Release)
         run: |
@@ -126,6 +139,18 @@ jobs:
       - &ctest
         name: Run unit tests and examples
         run: ctest --test-dir build --no-tests=error --output-on-failure
+      - name: Test library-only root embedding
+        if: matrix.cxx == 'clang++-18'
+        run: |
+          cmake -S tests/cmake_subdirectory -B build-subdirectory -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+          cmake --build build-subdirectory --parallel 2
+          ctest --test-dir build-subdirectory --no-tests=error --output-on-failure
+          cmake -S tests/cmake_subdirectory -B build-subdirectory-tests -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
+                -DAPXCHOL_BUILD_TESTS=ON -DAPXCHOL_BUILD_CLI=OFF
+          cmake --build build-subdirectory-tests --parallel 2
+          ctest --test-dir build-subdirectory-tests --no-tests=error --output-on-failure
       - name: Test relocated SDK with fetched Eigen
         if: matrix.cxx == 'clang++-18'
         run: |
@@ -145,6 +170,7 @@ jobs:
                 -DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF
           cmake --build build-sdk-consumer
           ctest --test-dir build-sdk-consumer --no-tests=error --output-on-failure
+      - *ccache-stats
 
   linux-gcc15:
     name: Linux (GCC 15, portable, build + ctest)
@@ -161,9 +187,13 @@ jobs:
       - name: Install dependencies
         run: |
           apt-get update -qq
-          apt-get install -y --no-install-recommends cmake ninja-build libeigen3-dev
+          apt-get install -y --no-install-recommends cmake ninja-build libeigen3-dev ccache
+      - uses: ./.github/actions/ccache
+        with:
+          key: native-gcc15
       - *configure-build
       - *ctest
+      - *ccache-stats
 
   cuda:
     name: Linux (CUDA 13.4, GCC 14, compile only)
@@ -189,8 +219,17 @@ jobs:
             https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i "$RUNNER_TEMP/cuda-keyring.deb"
           sudo apt-get update -qq
-          sudo apt-get install -y g++-14 libeigen3-dev ninja-build cuda-nvcc-13-4 cuda-cudart-dev-13-4
+          sudo apt-get install -y g++-14 libeigen3-dev ninja-build cuda-nvcc-13-4 cuda-cudart-dev-13-4 ccache
+      - uses: ./.github/actions/ccache
+        with:
+          key: cuda13.4-gcc14-sm80
       - *configure-build
+      - name: Build root-embedding consumer
+        run: |
+          cmake -S tests/cmake_subdirectory -B build-subdirectory -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON ${CMAKE_ARGS}
+          cmake --build build-subdirectory --parallel 2
+      - *ccache-stats
 
   macos:
     name: macOS (Apple Clang, ${{ matrix.device }}, ${{ matrix.native_arch == 'ON' && 'native' || 'portable' }}, build + ctest)
@@ -210,12 +249,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: brew install libomp ninja
+        run: brew install libomp ninja ccache
+      - uses: ./.github/actions/ccache
+        with:
+          key: mac-${{ matrix.device }}-${{ matrix.native_arch }}
       - *configure-build
       - *ctest
+      - name: Test Metal root-embedding consumer
+        if: matrix.device == 'METAL'
+        run: |
+          cmake -S tests/cmake_subdirectory -B build-subdirectory -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON ${CMAKE_ARGS}
+          cmake --build build-subdirectory --parallel 2
+          ctest --test-dir build-subdirectory --no-tests=error --output-on-failure
+      - *ccache-stats
 
   python:
     uses: ./.github/workflows/wheels.yml
+
+  cli:
+    uses: ./.github/workflows/cli.yml
 
   octave:
     name: octave (mkoctfile + tests)
@@ -233,8 +286,35 @@ jobs:
             g++-14 octave octave-dev libeigen3-dev libopenblas0-pthread
       - name: Build MEX + run tests
         env:
+          CC: gcc-14
           CXX: g++-14
         run: |
           cd octave
           ./build.sh
           octave --no-gui --eval "addpath(pwd); run('tests/test_apxchol.m')"
+
+  matlab:
+    name: MATLAB (R2026b, GCC 13, MEX + tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      OMP_NUM_THREADS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y g++-13 libeigen3-dev
+      - uses: matlab-actions/setup-matlab@v3
+        with:
+          release: R2026b
+      - name: Build MEX + run tests
+        uses: matlab-actions/run-command@v3
+        with:
+          command: >-
+            mex('-setup', 'C++');
+            compiler = mex.getCompilerConfigurations('C++', 'Selected');
+            assert(isscalar(compiler) && strcmp(compiler.Manufacturer, 'GNU'));
+            [status, version] = system([compiler.Details.CompilerExecutable ' -dumpversion']);
+            assert(status == 0 && sscanf(version, '%d', 1) == 13, 'Expected GCC 13 for this job');
+            run('octave/build_and_test.m');

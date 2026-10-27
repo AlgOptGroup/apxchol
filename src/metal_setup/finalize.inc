@@ -11,7 +11,7 @@ enum Stage : unsigned {
 
 struct Metadata { float scale, diagonal; };
 struct Row { unsigned count; float scale, diagonal; };
-struct Shape { unsigned n, m; float drop_hi, drop_lo; };
+struct Shape { unsigned n, m; float drop_hi, drop_lo; int drop_exponent; };
 
 template<class Memory>
 APXCHOL_GPU_FUNCTION void permutation(Memory s, unsigned row) {
@@ -39,12 +39,15 @@ APXCHOL_GPU_FUNCTION void prepare(Memory s, Math math, unsigned row) {
     if (s.fp16 && (!math.finite_float(1.0f / scale) || !math.finite_float(col.diagonal / scale)))
         scale = 1;
     auto dropped = math.from_float(0), kept = dropped;
+    int scale_exponent;
+    const auto threshold = math.multiply(math.drop(s.shape),
+        math.from_float(math.fraction(scale, scale_exponent)));
+    const int shift = -(s.shape.drop_exponent + scale_exponent);
     unsigned written = 0;
     for (unsigned p = 0; p < count; ++p) {
         const float v = entries[p].value;
         const bool keep = !(s.shape.drop_hi > 0) ||
-            (!math.less(math.from_float(math.absolute(v)),
-                        math.multiply(math.drop(s.shape), math.from_float(scale))) &&
+            (!math.less(math.from_float(math.scale_float(math.absolute(v), shift)), threshold) &&
              (s.fp16 ? !math.flushes(v / scale) : v != 0));
         if (keep) {
             kept = math.add(kept, math.from_float(-v));

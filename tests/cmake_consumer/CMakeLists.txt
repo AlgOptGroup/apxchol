@@ -13,6 +13,10 @@ if (NOT CMAKE_CXX_STANDARD EQUAL 14 OR NOT CMAKE_CXX_EXTENSIONS
     message(FATAL_ERROR "apxchol changed the consuming project's compiler defaults")
 endif()
 enable_testing()
+# This fixture drives the full CI suite; request its non-library targets explicitly.
+option(APXCHOL_BUILD_CLI "Build the command-line solver" ON)
+option(APXCHOL_BUILD_TESTS "Build the unit tests (fetches GoogleTest)" ON)
+option(APXCHOL_BUILD_EXAMPLES "Build the examples/ programs" ON)
 add_subdirectory(../.. apxchol)
 
 # Compile this probe as part of the core to observe its actual Eigen alignment.

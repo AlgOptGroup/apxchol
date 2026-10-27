@@ -1,5 +1,6 @@
 #pragma once
 #include "apxchol/csc_work.h"
+#include "apxchol/detail/parallel_exception.h"
 #include "apxchol/graph/incidence_list.h"
 #include "apxchol/graph/residual_normalization.h"
 #include <algorithm>
@@ -126,8 +127,7 @@ public:
 
     /// bulk parallel reserve_for. Must be called from inside an
     /// OpenMP parallel region after the caller's shared compaction decision;
-    /// the implementation partitions touched vertices and ends with a team
-    /// publication barrier.
+    /// the caller synchronizes the team before publishing the reserved slabs.
     template<typename TouchedIter>
     void adj_bulk_reserve_parallel(TouchedIter begin, TouchedIter end,
                                    const std::vector<node_index>& incoming) {
@@ -270,11 +270,12 @@ private:
         unsigned long long distinct_total = 0;
         long double weight_total = 0.0L;
         long double strongest_total = 0.0L;
+        detail::parallel_exception error;
         #pragma omp parallel reduction(+:multi_total,distinct_total,weight_total,strongest_total)
         {
             std::vector<std::pair<node_index, double>> neighbors;
             #pragma omp for schedule(static)
-            for (std::size_t s = 0; s < samples; ++s) {
+            for (std::size_t s = 0; s < samples; ++s) error.run([&] {
                 const node_index u = active[s * active.size() / samples];
                 neighbors.clear();
                 for (const auto& entry : adj_[u]) {
@@ -301,8 +302,9 @@ private:
                 }
                 weight_total += local_total;
                 strongest_total += local_strongest;
-            }
+            });
         }
+        error.rethrow();
         active_sparsify_sample result;
         result.sampled_vertices = samples;
         result.duplicate_ratio = distinct_total
@@ -440,8 +442,9 @@ private:
 
                 std::vector<std::vector<std::size_t>> local_forests(
                     forest_shards);
+                detail::parallel_exception forest_error;
 #pragma omp parallel for num_threads(forest_shards) schedule(static, 1)
-                for (std::size_t shard = 0; shard < forest_shards; ++shard) {
+                for (std::size_t shard = 0; shard < forest_shards; ++shard) forest_error.run([&] {
                     std::vector<node_index> local_parent(active.size());
                     std::iota(local_parent.begin(), local_parent.end(),
                               node_index{0});
@@ -481,7 +484,8 @@ private:
                         assert(u != dense_npos && v != dense_npos);
                         if (local_unite(u, v)) local.push_back(index);
                     }
-                }
+                });
+                forest_error.rethrow();
                 std::size_t candidates = 0;
                 for (const auto& local : local_forests)
                     candidates += local.size();
@@ -592,6 +596,7 @@ private:
             thread_offsets.assign(rebuild_threads * active.size(), 0);
             std::vector<std::size_t> kept_by_thread(rebuild_threads, 0);
             std::size_t actual_threads = 1;
+            detail::parallel_exception rebuild_error;
 #pragma omp parallel num_threads(rebuild_threads)
             {
 #ifdef _OPENMP
@@ -645,30 +650,36 @@ private:
                     physical_degree[active[i]] = offset;
                 }
 
-                rebuilt.adj_.bulk_reserve_parallel(
-                    active.begin(), active.end(), physical_degree);
-                for (std::size_t i = begin; i < end; ++i) {
-                    const item& edge = items[i];
-                    if (!edge.kept) continue;
-                    const double inv_p = 1.0 / probability(i);
-                    const pool_value_t weight = static_cast<pool_value_t>(
-                        edge.weight * inv_p);
-                    const node_index u = dense_of[edge.u];
-                    const node_index v = dense_of[edge.v];
-                    {
-                        rebuilt.adj_.write_reserved_at(
-                            edge.u, local[u]++, {edge.v, weight});
-                        rebuilt.adj_.write_reserved_at(
-                            edge.v, local[v]++, {edge.u, weight});
+                rebuild_error.run([&] {
+                    rebuilt.adj_.bulk_reserve_parallel(
+                        active.begin(), active.end(), physical_degree);
+                });
+#pragma omp barrier
+                if (!rebuild_error.failed()) {
+                    for (std::size_t i = begin; i < end; ++i) {
+                        const item& edge = items[i];
+                        if (!edge.kept) continue;
+                        const double inv_p = 1.0 / probability(i);
+                        const pool_value_t weight = static_cast<pool_value_t>(
+                            edge.weight * inv_p);
+                        const node_index u = dense_of[edge.u];
+                        const node_index v = dense_of[edge.v];
+                        {
+                            rebuilt.adj_.write_reserved_at(
+                                edge.u, local[u]++, {edge.v, weight});
+                            rebuilt.adj_.write_reserved_at(
+                                edge.v, local[v]++, {edge.u, weight});
+                        }
                     }
-                }
 #pragma omp barrier
 #pragma omp for schedule(static)
-                for (std::size_t i = 0; i < active.size(); ++i) {
-                    const node_index v = active[i];
-                    rebuilt.adj_.commit_reserved(v, physical_degree[v]);
+                    for (std::size_t i = 0; i < active.size(); ++i) {
+                        const node_index v = active[i];
+                        rebuilt.adj_.commit_reserved(v, physical_degree[v]);
+                    }
                 }
             }
+            rebuild_error.rethrow();
             rebuild_threads = actual_threads;
         }
         {

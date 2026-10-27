@@ -550,22 +550,20 @@ TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
     }
 }
 
-// Zero disables dropping; invalid thresholds fail. The diagonal survives
-// even when a threshold above one removes every off-diagonal.
+// Zero disables dropping; invalid thresholds fail.
 TEST(LowPrec, FactorDropEdgeCases) {
     sparse_csc L = make_random_lower(2000, 4.0, 31, -1.0, 1.0);
     for (edge_index p = 0; p < L.nonZeros(); ++p)
         if ((p % 5) == 2) L.vals_[p] = static_cast<factor_value_t>(L.vals_[p] * 1e-9);   // fp16-flush range
     const std::vector<float> s = reference_scales(L);
-    std::uint64_t offdiag = 0, fp16_zero = 0;
+    std::uint64_t fp16_zero = 0;
     for (node_index j = 0; j < 2000; ++j)
         for (edge_index p = L.outer_[j] + 1; p < L.outer_[j + 1]; ++p) {
-            ++offdiag;
             const auto h = _Float16(static_cast<float>(L.vals_[p]) / s[j]);
             fp16_zero += std::abs(float(h)) < 0x1p-14f;
         }
     ASSERT_GT(fp16_zero, 100u);
-    for (double rel : {-1.0, std::numeric_limits<double>::quiet_NaN(),
+    for (double rel : {-1.0, std::nextafter(1.0, 2.0), 2.0, std::numeric_limits<double>::quiet_NaN(),
                        std::numeric_limits<double>::infinity()}) {
         apxchol::omp_sptrsv t;
         EXPECT_THROW(t.setup(L, 2000, {.drop_tolerance = rel}), std::invalid_argument);
@@ -576,25 +574,6 @@ TEST(LowPrec, FactorDropEdgeCases) {
         t.setup(L, 2000, {.drop_tolerance = rel});
         EXPECT_EQ(t.drop_stats().dropped, 0u);
         EXPECT_EQ(t.stored_nnz(), static_cast<std::uint64_t>(L.nonZeros()));
-    }
-    {
-        apxchol::omp_sptrsv t;
-        t.setup(L, 2000, {.drop_tolerance = 2});
-        EXPECT_EQ(t.drop_stats().dropped, offdiag);
-        EXPECT_EQ(t.stored_nnz(), 2000u);
-        EXPECT_EQ(t.drop_stats().offdiag, 0u);
-        for (node_index j = 0; j < 2000; ++j) {
-            ASSERT_EQ(t.csc_col_ptr()[j], static_cast<edge_index>(j));
-            ASSERT_EQ(t.csc_row_idx()[j], j);
-        }
-        // Solving with a diagonal factor: y' = x / stored diagonal (L_jj, or
-        // L_jj / s_j under FP16_SCALED where forward_solve returns y' = D y).
-        std::vector<double> x(2000, 1.0), y(2000);
-        t.forward_solve(x.data(), y.data());
-        for (node_index j = 0; j < 2000; ++j) {
-            const double d = apxchol::omp_sptrsv::stored_diag(L.vals_[L.outer_[j]], s[j]);   // s ignored off FP16_SCALED
-            ASSERT_NEAR(y[j], 1.0 / d, 1e-15 * std::fabs(1.0 / d)) << j;
-        }
     }
 }
 

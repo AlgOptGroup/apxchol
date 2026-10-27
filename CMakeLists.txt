@@ -8,39 +8,57 @@ if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     message(STATUS "CMAKE_BUILD_TYPE not set; defaulting to Release")
 endif()
 
+# Keep add_subdirectory() library-only unless the parent opts into tools/tests.
+# Source-directory equality retains compatibility with CMake 3.20.
+set(_apxchol_top_level OFF)
+if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+    set(_apxchol_top_level ON)
+endif()
+option(APXCHOL_BUILD_CLI "Build the command-line solver" ${_apxchol_top_level})
+option(APXCHOL_BUILD_EXAMPLES "Build the examples/ programs" ${_apxchol_top_level})
+option(APXCHOL_BUILD_TESTS "Build the unit tests (fetches GoogleTest)" ${_apxchol_top_level})
+option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)" ${_apxchol_top_level})
+# A parent's link dependencies also require the GPU language in its scope.
+if (NOT _apxchol_top_level)
+    if ((APXCHOL_DEVICE STREQUAL "CUDA" AND NOT CMAKE_CUDA_COMPILER_LOADED) OR
+        (APXCHOL_DEVICE STREQUAL "METAL" AND NOT CMAKE_OBJCXX_COMPILER_LOADED))
+        message(FATAL_ERROR "Enable CUDA or OBJCXX in the consuming parent before add_subdirectory(apxchol), or include cmake/apxchol_core.cmake and call apxchol_add_core() there.")
+    endif()
+endif()
+unset(_apxchol_top_level)
+
 include(cmake/apxchol_core.cmake)
-include(FetchContent)
 
-# ── CLI11 ────────────────────────────────────────────
-FetchContent_Declare(cli11
-    GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
-    GIT_TAG        v2.4.2
-    GIT_SHALLOW    TRUE
-)
-FetchContent_MakeAvailable(cli11)
-
-# ── spdlog ───────────────────────────────────────────
-find_package(spdlog 1.14 CONFIG QUIET)
-if (NOT spdlog_FOUND)
-    set(SPDLOG_FMT_EXTERNAL OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(spdlog
-        GIT_REPOSITORY https://github.com/gabime/spdlog.git
-        GIT_TAG        v1.15.2
+if (APXCHOL_BUILD_CLI)
+    include(FetchContent)
+    # ── CLI11 ────────────────────────────────────────────
+    FetchContent_Declare(cli11
+        GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
+        GIT_TAG        v2.4.2
         GIT_SHALLOW    TRUE
     )
-    FetchContent_MakeAvailable(spdlog)
+    FetchContent_MakeAvailable(cli11)
+
+    # ── spdlog ───────────────────────────────────────────
+    find_package(spdlog 1.14 CONFIG QUIET)
+    if (NOT spdlog_FOUND)
+        set(SPDLOG_FMT_EXTERNAL OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(spdlog
+            GIT_REPOSITORY https://github.com/gabime/spdlog.git
+            GIT_TAG        v1.15.2
+            GIT_SHALLOW    TRUE
+        )
+        FetchContent_MakeAvailable(spdlog)
+    endif()
+
+    # ── fast_matrix_market ───────────────────────────────
+    FetchContent_Declare(fast_matrix_market
+        GIT_REPOSITORY https://github.com/alugowski/fast_matrix_market.git
+        GIT_TAG        v1.7.6
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(fast_matrix_market)
 endif()
-
-# ── fast_matrix_market ───────────────────────────────
-FetchContent_Declare(fast_matrix_market
-    GIT_REPOSITORY https://github.com/alugowski/fast_matrix_market.git
-    GIT_TAG        v1.7.6
-    GIT_SHALLOW    TRUE
-)
-FetchContent_MakeAvailable(fast_matrix_market)
-
-option(APXCHOL_BUILD_EXAMPLES "Build the examples/ programs" ON)
-option(APXCHOL_BUILD_TESTS "Build the unit tests (fetches GoogleTest)" ON)
 
 # ── Core library: ApxChol preconditioner ─────────────
 apxchol_add_core()
@@ -61,13 +79,15 @@ add_compile_options(-Wall -Wextra "$<$<COMPILE_LANGUAGE:C,CXX,OBJCXX>:-Wpedantic
 # Laplacian-vs-adjacency detection for the CLI's .mtx input. Its own target so
 # the unit tests can link it without pulling in CLI11/spdlog; Eigen-only, no
 # file I/O (the CLI reads the file and hands over the matrix).
-add_library(apxchol_mtx_input STATIC src/mtx_input.cpp)
-target_link_libraries(apxchol_mtx_input PUBLIC Eigen3::Eigen)
-target_include_directories(apxchol_mtx_input PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if (APXCHOL_BUILD_CLI OR APXCHOL_BUILD_TESTS)
+    add_library(apxchol_mtx_input STATIC src/mtx_input.cpp)
+    target_link_libraries(apxchol_mtx_input PUBLIC Eigen3::Eigen)
+    target_include_directories(apxchol_mtx_input PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-target_compile_features(apxchol_mtx_input PUBLIC cxx_std_23)
-if (APXCHOL_ARCH_FLAG)
-    target_compile_options(apxchol_mtx_input PUBLIC "${APXCHOL_ARCH_FLAG}")
+    target_compile_features(apxchol_mtx_input PUBLIC cxx_std_23)
+    if (APXCHOL_ARCH_FLAG)
+        target_compile_options(apxchol_mtx_input PUBLIC "${APXCHOL_ARCH_FLAG}")
+    endif()
 endif()
 
 # Exception-safe C interface for non-C++ consumers.
@@ -75,9 +95,12 @@ add_library(apxchol_c src/c_api.cpp)
 target_link_libraries(apxchol_c PUBLIC apxchol::core)
 
 # ── CLI solver ───────────────────────────────────────
-add_executable(apxchol src/main.cpp src/config.cpp)
-target_link_libraries(apxchol PRIVATE apxchol_core apxchol_mtx_input CLI11::CLI11
-                      spdlog::spdlog fast_matrix_market::fast_matrix_market)
+if (APXCHOL_BUILD_CLI)
+    add_executable(apxchol src/main.cpp src/config.cpp)
+    target_link_libraries(apxchol PRIVATE apxchol_core apxchol_mtx_input CLI11::CLI11
+                          spdlog::spdlog fast_matrix_market::fast_matrix_market)
+    install(TARGETS apxchol RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" COMPONENT cli)
+endif()
 
 if (APXCHOL_BUILD_EXAMPLES OR APXCHOL_BUILD_TESTS)
     enable_testing()

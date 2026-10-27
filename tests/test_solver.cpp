@@ -4,6 +4,7 @@
 #include "apxchol/solver/detail/thread_budget.h"
 #include "scoped_omp_threads.h"
 
+#include <Eigen/IterativeLinearSolvers>
 #include <Eigen/Sparse>
 #include <cmath>
 #include <future>
@@ -90,6 +91,80 @@ TEST(Solver, BackendAvailabilityKeepsHostQueriesOnHost) {
 #else
     EXPECT_FALSE(apxchol::backend_available(apxchol::solve_backend::gpu));
 #endif
+}
+
+TEST(Solver, CpuInterfacesRejectEmptyOperator) {
+    const Sparse empty(0, 0);
+    EXPECT_THROW(apxchol::cpu_solver(empty, cpu_options()), std::invalid_argument);
+    apxchol::apx_cholesky preconditioner;
+    EXPECT_THROW(preconditioner.compute(empty), std::invalid_argument);
+}
+
+TEST(Solver, EigenConjugateGradientUsesPreconditioner) {
+    const scoped_omp_threads threads(1);
+    const auto options = cpu_options();
+    for (const bool laplacian : {false, true}) {
+        SCOPED_TRACE(laplacian ? "Laplacian" : "SDDM");
+        Sparse matrix = operator_matrix();
+        if (laplacian)
+            for (int i = 0; i < matrix.rows(); ++i) matrix.coeffRef(i, i) -= 1.0;
+        Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
+        if (laplacian) rhs.array() -= rhs.mean();
+
+        Eigen::ConjugateGradient<Sparse, Eigen::Lower, apxchol::apx_cholesky> cg;
+        cg.preconditioner().set_options(options.factor_opts);
+        cg.setTolerance(options.tol);
+        cg.setMaxIterations(options.max_iter);
+        cg.compute(matrix);
+        ASSERT_EQ(cg.info(), Eigen::Success);
+        const Eigen::VectorXd x = cg.solve(rhs);
+        EXPECT_EQ(cg.info(), Eigen::Success);
+        expect_solution(matrix, rhs, x);
+    }
+}
+
+TEST(Solver, CpuBreakdownPreservesFiniteSolution) {
+    const scoped_omp_threads threads(1);
+    Sparse identity(2, 2);
+    identity.setIdentity();
+    const auto factor = apxchol::factorize(identity);
+    for (const auto& [diagonal, rhs_value] : {std::pair{1e308, 1e150}, std::pair{1e-320, 1.0}}) {
+        SCOPED_TRACE(diagonal);
+        const Sparse matrix = diagonal * identity;
+        const apxchol::cpu_solver owner(matrix, factor, cpu_options());
+        const Eigen::VectorXd rhs = Eigen::VectorXd::Constant(2, rhs_value);
+        const auto result = owner.solve(rhs, 1e-8, 12);
+        EXPECT_EQ(result.iterations, 0);
+        EXPECT_FALSE(result.converged);
+        EXPECT_TRUE(result.x.isZero(0.0));
+        EXPECT_EQ(result.residual, 1.0);
+        EXPECT_EQ((matrix * result.x - rhs).stableNorm() / rhs.stableNorm(), result.residual);
+    }
+}
+
+TEST(Solver, CpuBatchBreakdownDoesNotStopOtherColumns) {
+    const scoped_omp_threads threads(1);
+    Sparse identity(2, 2);
+    identity.setIdentity();
+    const Sparse matrix = 1e308 * identity;
+    const apxchol::cpu_solver owner(matrix, apxchol::factorize(identity), cpu_options());
+    for (const int columns : {2, 4, 8}) {
+        SCOPED_TRACE(columns);
+        Eigen::MatrixXd rhs = Eigen::MatrixXd::Zero(2, columns), output(2, columns);
+        rhs.col(0).setConstant(1e150);
+        for (int c = 2; c < columns; ++c) rhs(c % 2, c) = 1;
+        const auto result = owner.solve(rhs, output, 1e-8, 12);
+        EXPECT_TRUE(output.allFinite());
+        EXPECT_TRUE(output.leftCols(2).isZero(0.0));
+        for (int c = 0; c < columns; ++c) {
+            SCOPED_TRACE(c);
+            EXPECT_EQ(result.columns[c].iterations, c < 2 ? 0 : 1);
+            EXPECT_EQ(result.columns[c].converged, c != 0);
+            const double residual = rhs.col(c).isZero(0.0) ? 0
+                : (matrix * output.col(c) - rhs.col(c)).stableNorm() / rhs.col(c).stableNorm();
+            EXPECT_DOUBLE_EQ(result.columns[c].residual, residual);
+        }
+    }
 }
 
 TEST(Solver, CpuOwnerSurvivesInputsAndMovesAndReusesItsFactor) {
@@ -466,6 +541,31 @@ TEST(Solver, CpuExitCheckReducesStridedPanelsAcrossWorkerTeams) {
                     }
                 }
             }
+        }
+    }
+}
+
+TEST(Solver, InvalidDropTolerancePrecedesBackendSelection) {
+    const Sparse matrix = operator_matrix();
+    const auto factor = apxchol::factorize(matrix);
+    const auto reject = [](auto&& construct) {
+        try {
+            construct();
+            FAIL() << "accepted invalid drop tolerance";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_STREQ(error.what(), "drop_tolerance must be in [0, 1]");
+        }
+    };
+    for (auto backend : {apxchol::solve_backend::automatic, apxchol::solve_backend::cpu,
+                         apxchol::solve_backend::gpu}) {
+        for (double drop : {-1.0, std::nextafter(1.0, 2.0), 2.0,
+                            std::numeric_limits<double>::infinity(),
+                            std::numeric_limits<double>::quiet_NaN()}) {
+            auto options = cpu_options();
+            options.backend = backend;
+            options.factor_opts.drop_tolerance = drop;
+            reject([&] { apxchol::solver owner(matrix, options); });
+            reject([&] { apxchol::solver owner(matrix, factor, options); });
         }
     }
 }

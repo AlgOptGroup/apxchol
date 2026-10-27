@@ -445,26 +445,11 @@ template<typename Value> struct basic_vec_pool_incidence {
     double min_live_fraction() const { return min_live_frac_; }
     void note_live_fraction() { min_live_frac_ = std::min(min_live_frac_, live_fraction()); }
 
-    /// Compact: rebuild the pool with each vertex's live slab laid out
-    /// contiguously, reclaiming the abandoned dead slabs.  O(n + sum(count)).
-    ///   with_headroom == false : tighten cap=count (explicit/manual use).
-    ///   with_headroom == true  : leave cap = count*growth headroom per slab,
-    ///       so the next pushes don't immediately re-grow. Used by the
-    ///       defrag-on-extension path so reclaiming dead slabs doesn't just
-    ///       trade abandoned space for a storm of re-grows.
-    /// `round_incoming == nullptr` : tighten every slab to cap=count (manual
-    /// use). non-null : a vertex receiving fill THIS round (incoming[v] > 0) is
-    /// sized to
-    ///   its KNOWN need `count+incoming` plus the same geometric future-headroom
-    ///   a normal grow would give (`max(need, cap*growth)`), so the round's grows
-    ///   become a no-op; untouched vertices are tightened to count. Reclaims all
-    ///   abandoned slabs in the same pass.
-    /// Rebuild the pool, reclaiming abandoned dead slabs + pruning bloat. Each
-    /// live slab is sized to `max(count(+incoming), count*growth)` -- downsizing
-    /// over-grown slabs to 2x their CURRENT count while keeping room for this
-    /// round's known incoming.
-    ///   round_incoming : per-vertex fill counts for the imminent round (or
-    ///   null).
+    /// Rebuild live slabs contiguously, reclaiming abandoned slabs and excess
+    /// capacity. Empty slabs receive no capacity; each nonempty slab gets
+    /// max(2 * count, count + incoming), where incoming is this round's fill
+    /// count (zero when round_incoming is null). This leaves room for growth
+    /// without retaining headroom from a formerly larger slab. O(n + sum(count)).
     void compact(const std::vector<node_index>* round_incoming = nullptr) {
         auto target_cap = [&](node_index v) -> node_index {
             const node_index cnt = count_[v];
@@ -500,15 +485,20 @@ template<typename Value> struct basic_vec_pool_incidence {
     /// bulk_reserve_parallel starts.
     void compact_for_round_if_needed(
             const std::vector<node_index>& incoming) {
+#ifdef _OPENMP
+        // Graph construction and factorization can use different team sizes.
+        const auto team = static_cast<size_t>(omp_get_num_threads());
+        if (bulk_thread_grows_.size() < team)
+            bulk_thread_grows_.resize(team);
+#endif
         if (abandoned_ > pool_.size() / 2)
             compact(&incoming);
     }
 
     /// Bulk parallel reserve_for. Caller is inside an OpenMP parallel region.
     /// Each thread computes and copies the grows for a stable slice of touched
-    /// vertices. Atomic segment claims replace the old team prefix sum and
-    /// whole-pool resize; the trailing barrier publishes every new slab before
-    /// the caller's apply phase.
+    /// vertices. The caller must catch failures and synchronize the team before
+    /// publishing or accessing the reserved slabs.
     template<typename TouchedIter>
     void bulk_reserve_parallel(TouchedIter touched_begin, TouchedIter touched_end,
                                const std::vector<node_index>& incoming) {
@@ -579,10 +569,6 @@ template<typename Value> struct basic_vec_pool_incidence {
 #pragma omp atomic update
 #endif
         grow_count_ += grows.size();
-#ifdef _OPENMP
-#pragma omp barrier
-#endif
-        return;
     }
 
 private:

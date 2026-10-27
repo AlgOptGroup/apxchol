@@ -4,13 +4,20 @@ include(${CMAKE_CURRENT_LIST_DIR}/apxchol_version.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_device.cmake)
 
 option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)" ON)
-option(APXCHOL_64BIT_EDGE_INDICES "64-bit edge/offset indices, for factors or pools exceeding uint32 capacity (2^32-1 entries)" OFF)
-option(APXCHOL_64BIT_NODE_INDICES "64-bit vertex indices (implies 64-bit edge indices)" OFF)
+if (DEFINED APXCHOL_64BIT_EDGE_INDICES OR DEFINED APXCHOL_64BIT_NODE_INDICES)
+    message(FATAL_ERROR "Use APXCHOL_INDEX_WIDTH=32|64_EDGES|64; remove the old APXCHOL_64BIT_*_INDICES entries from your CMake cache")
+endif()
+set(APXCHOL_INDEX_WIDTH 32 CACHE STRING "Index width: 32, 64_EDGES or 64")
+set_property(CACHE APXCHOL_INDEX_WIDTH PROPERTY STRINGS 32 64_EDGES 64)
+if (NOT APXCHOL_INDEX_WIDTH MATCHES "^(32|64_EDGES|64)$")
+    message(FATAL_ERROR "APXCHOL_INDEX_WIDTH must be 32, 64_EDGES or 64")
+endif()
 option(APXCHOL_POOL_FP32 "Store residual-pool weights in FP32; reads promote to FP64. OFF selects the FP64 reference." ON)
 
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_arch.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_eigen.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_openmp.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/apxchol_archive.cmake)
 
 if (APXCHOL_DEVICE STREQUAL "METAL")
     enable_language(OBJCXX)
@@ -31,8 +38,9 @@ function(apxchol_configure_core target)
         ${root}/src/factorization.cpp
         ${root}/src/operator_class.cpp
         ${root}/src/solve.cpp
+        ${root}/src/solver_archive.cpp
     )
-    target_link_libraries(${target} PUBLIC Eigen3::Eigen OpenMP::OpenMP_CXX)
+    target_link_libraries(${target} PUBLIC Eigen3::Eigen OpenMP::OpenMP_CXX PRIVATE ZLIB::ZLIB)
     target_compile_features(${target} PUBLIC cxx_std_23)
     set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
     target_compile_options(${target} PRIVATE
@@ -90,10 +98,9 @@ function(apxchol_configure_core target)
                               "-framework CoreGraphics")
     endif()
 
-    if (APXCHOL_64BIT_EDGE_INDICES)
+    if (APXCHOL_INDEX_WIDTH STREQUAL "64_EDGES")
         target_compile_definitions(${target} PUBLIC APXCHOL_64BIT_EDGE_INDICES)
-    endif()
-    if (APXCHOL_64BIT_NODE_INDICES)
+    elseif (APXCHOL_INDEX_WIDTH STREQUAL "64")
         target_compile_definitions(${target} PUBLIC APXCHOL_64BIT_NODE_INDICES)
     endif()
     if (APXCHOL_POOL_FP32)

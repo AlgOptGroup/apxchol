@@ -6,6 +6,7 @@
 #include "apxchol/csc_work.h"
 #include "apxchol/operator_class.h"
 #include "host_spmv.h"
+#include "solver_archive_internal.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -858,10 +859,12 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
             timings("spmv+pAp");
         std::array<double, C> alpha{};
         for (int c = 0; c < C; c++) {
-            if (active[c] && pap[c] <= 0)
-                active[c] = false;
-            if (active[c])
+            active[c] = active[c] && rz[c] > 0 && std::isfinite(rz[c])
+                && pap[c] > 0 && std::isfinite(pap[c]);
+            if (active[c]) {
                 alpha[c] = rz[c] / pap[c];
+                active[c] = std::isfinite(alpha[c]);
+            }
         }
         if (!any_active())
             break;
@@ -877,7 +880,7 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
                 continue;
             results[c].iterations = i + 1;
             results[c].residual = std::sqrt(rr[c]) / norm[c];
-            if (results[c].residual < tol)
+            if (!std::isfinite(results[c].residual) || results[c].residual < tol)
                 active[c] = false;
         }
         if (!any_active())
@@ -887,9 +890,15 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
         if (trace)
             t_precond += now() - t;
         std::array<double, C> beta{};
-        for (int c = 0; c < C; c++)
-            if (active[c])
+        for (int c = 0; c < C; c++) {
+            active[c] = active[c] && next[c] > 0 && std::isfinite(next[c]);
+            if (active[c]) {
                 beta[c] = next[c] / rz[c];
+                active[c] = std::isfinite(beta[c]);
+            }
+        }
+        if (!any_active())
+            break;
         t = trace ? now() : 0;
         panel_update_p<C>(p, z, beta, active, n);
         if (trace)
@@ -1021,11 +1030,11 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
         if (compatible && zeros) compatible = detail::gpu_owned_csc_paired(*A);
     }
     if (compatible && (opts.backend == solve_backend::gpu ||
-                       detail::gpu_round_shadow_runtime_available()))
+                       backend_available(solve_backend::gpu)))
         return solve_backend::gpu;
     if (opts.backend == solve_backend::gpu)
-        throw std::invalid_argument("GPU route requires 32-bit nodes, block_greedy, vec_pool_aos, "
-            "natural residual peeling and supported sampler options; request CPU explicitly");
+        throw std::invalid_argument("GPU setup does not support the requested factor options "
+            "or node-index width; request CPU explicitly");
     return solve_backend::cpu;
 #elif defined(APXCHOL_USE_METAL)
     bool compatible = detail::metal_setup_options_supported(opts.factor_opts);
@@ -1061,6 +1070,7 @@ struct solver::impl {
 #endif
         >;
     owner_type owner;
+    Eigen::Index operator_entries;
     double tol;
     int max_iter;
     int num_threads;
@@ -1073,23 +1083,7 @@ struct solver::impl {
         const detail::thread_budget threads(opts.num_threads);
         if (!opts.collect_timings) cp = nullptr;
         if (A.rows() == 0) throw std::invalid_argument("solver: empty operator");
-        if (F) {
-            if (A.rows() != A.cols() || static_cast<Eigen::Index>(F->L.rows()) != A.rows())
-                throw std::invalid_argument("solver: factorization dimension mismatch");
-            require_operator(A, opts.factor_opts.lump_max_mass);
-            if (!F->sddm) {
-                for (Eigen::Index col = 0; col < A.cols(); ++col) {
-                    double diagonal = 0, positive = 0, degree = 0;
-                    for (Eigen::SparseMatrix<double>::InnerIterator entry(A, col); entry; ++entry)
-                        if (entry.row() == entry.col()) diagonal = entry.value();
-                        else if (entry.value() > 0) positive += entry.value();
-                        else degree -= entry.value();
-                    diagonal += positive; // Match lumping without copying the operator.
-                    if (diagonal - degree > diagonal * 1e-12)
-                        throw std::invalid_argument("a Laplacian factor cannot precondition an SDDM operator");
-                }
-            }
-        }
+        if (F) detail::validate_adopted_operator(A, *F, opts.factor_opts.lump_max_mass);
         if (cp) { cp->descend("setup"); cp->tick(); }
         const auto route = F && opts.backend == solve_backend::automatic
             ? solve_backend::cpu
@@ -1115,7 +1109,8 @@ struct solver::impl {
 
     impl(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
          checkpoint* cp, factorization* F = nullptr)
-        : owner(make_owner(A, opts, cp, F)), tol(opts.tol), max_iter(opts.max_iter),
+        : owner(make_owner(A, opts, cp, F)), operator_entries(A.nonZeros()),
+          tol(opts.tol), max_iter(opts.max_iter),
           num_threads(opts.num_threads), collect_timings(opts.collect_timings) {
 #if defined(APXCHOL_USE_CUDA)
         if (const auto* gpu = std::get_if<detail::gpu_solve_session>(&owner))
@@ -1123,6 +1118,51 @@ struct solver::impl {
 #endif
     }
 };
+
+void detail::solver_archive_access::save(const std::filesystem::path& path, const solver& owner) {
+    const auto& F = owner.factor();
+    validate_adopted_factor(F); // Reject released values before copying/downloading A.
+    if (F.rounds.size() > F.L.rows())
+        throw std::invalid_argument("solver archive: too many elimination rounds");
+    const thread_budget threads(owner.impl_->num_threads);
+    auto A = std::visit([](const auto& backend) { return original_operator(backend); }, owner.impl_->owner);
+    save_solver_data(path, A, F, owner.operator_nnz());
+}
+
+void detail::solver_archive_access::restore_input_entries(solver& owner, Eigen::Index entries) {
+    owner.impl_->operator_entries = entries;
+}
+
+Eigen::SparseMatrix<double> detail::solver_archive_access::original_operator(const cpu_solver& owner) {
+    if (owner.op_fp32_)
+        return archive_operator_csc(static_cast<int>(owner.n_), owner.Lrm_f_.outerIndexPtr(),
+            owner.Lrm_f_.innerIndexPtr(), owner.Lrm_f_.valuePtr());
+    return archive_operator_csc(static_cast<int>(owner.n_), owner.Lrm_.outerIndexPtr(),
+        owner.Lrm_.innerIndexPtr(), owner.Lrm_.valuePtr());
+}
+
+#if defined(APXCHOL_USE_CUDA)
+Eigen::SparseMatrix<double> detail::solver_archive_access::original_operator(const gpu_solve_session& owner) {
+    const auto& pcg = owner.gpcg;
+    const cuda_device_scope device(pcg.device_, cuda_device_scope::checked{});
+    const int n = static_cast<int>(pcg.n_), nnz = pcg.matrix_.nnz;
+    std::vector<int> outer(static_cast<std::size_t>(n) + 1), inner(nnz), inverse(n);
+    std::vector<double> values(nnz);
+    check_cuda(cudaMemcpy(outer.data(), pcg.matrix_.row_ptr, outer.size() * sizeof(int), cudaMemcpyDeviceToHost), "download archive offsets");
+    check_cuda(cudaMemcpy(inner.data(), pcg.matrix_.col_idx, inner.size() * sizeof(int), cudaMemcpyDeviceToHost), "download archive indices");
+    if (pcg.matrix_.fp32) {
+        std::vector<float> narrow(nnz);
+        check_cuda(cudaMemcpy(narrow.data(), pcg.matrix_.values_f32, narrow.size() * sizeof(float), cudaMemcpyDeviceToHost), "download archive values");
+        std::copy(narrow.begin(), narrow.end(), values.begin());
+    } else {
+        check_cuda(cudaMemcpy(values.data(), pcg.matrix_.values_f64, values.size() * sizeof(double), cudaMemcpyDeviceToHost), "download archive values");
+    }
+    // CUDA stores rows in original order and only columns in factor order.
+    for (int i = 0; i < n; ++i) inverse[pcg.h_perm_[i]] = i;
+    for (auto& column : inner) column = inverse[column];
+    return archive_operator_csc(n, outer.data(), inner.data(), values.data());
+}
+#endif
 
 solver::solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts, checkpoint* cp)
     : impl_(std::make_unique<impl>(A, opts, cp)) {}
@@ -1235,6 +1275,7 @@ const factorization& solver::factor() const {
     }, impl_->owner);
 }
 Eigen::Index solver::rows() const { return static_cast<Eigen::Index>(factor().perm.size()); }
+Eigen::Index solver::operator_nnz() const { return impl_->operator_entries; }
 solve_backend solver::backend() const {
     return std::holds_alternative<cpu_solver>(impl_->owner)
         ? solve_backend::cpu : solve_backend::gpu;

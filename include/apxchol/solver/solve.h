@@ -7,6 +7,7 @@
 #include <memory>
 
 namespace apxchol {
+namespace detail { struct solver_archive_access; }
 
 inline constexpr double default_tol      = 1e-8;
 inline constexpr int    default_max_iter = 200;
@@ -18,12 +19,15 @@ enum class solve_backend { automatic, cpu, gpu };
 bool backend_available(solve_backend backend) noexcept;
 
 struct solve_options {
+    /// Default relative residual tolerance; must be finite and positive.
     double tol       = default_tol;
+    /// Nonnegative default iteration budget; zero only checks the initial guess.
     int    max_iter  = default_max_iter;
-    /// Keep the factor's row/value arrays alive after SpTRSV setup so
-    /// solver::factor().L stays readable (costs one extra host factor copy;
-    /// the bindings' L/D/P export needs it, including in CUDA builds).
+    /// Retain FP32 host factor values for export or adoption by another solver.
+    /// Costs an additional host copy; false keeps the permutation but releases
+    /// row/value arrays. Python factorize() enables retention by default.
     bool keep_factor_values = false;
+    /// Factor construction and triangular-solve storage controls.
     factor_options factor_opts{};
     /// Select a complete setup/solve route; execution errors never change it.
     solve_backend backend = solve_backend::automatic;
@@ -31,6 +35,7 @@ struct solve_options {
     /// override the calling OpenMP task's setting; 0 inherits it.
     /// Small workloads may use fewer threads.
     int num_threads = 0;
+    /// Record timing checkpoints. Final residual verification always runs.
     bool collect_timings = true;
 };
 
@@ -44,13 +49,12 @@ void resolve_solve_parameters(double& tol, int& max_iter, double default_toleran
 struct solve_result {
     Eigen::VectorXd x;
     Eigen::Index iterations = 0;
-    /// Recomputed relative residual of the returned solution against the original operator/RHS.
+    /// Relative residual checked against the original operator and RHS.
     double residual      = 0.0;
-    bool converged = false; // residual < the effective tolerance, including zero-iteration exits.
-    // Positive off-diagonal entries the M-matrix lumping moved onto the
-    // diagonal while building the PRECONDITIONER (0 = the operator was already
-    // an M-matrix). The operator this residual is measured against is the one
-    // the caller passed, lumping or not. See operator_class.h.
+    /// Whether the checked residual is below the requested tolerance.
+    bool converged = false;
+    /// Positive off-diagonal entries moved onto the preconditioner's diagonal.
+    /// The original operator is unchanged, including for residual verification.
     Eigen::Index lumped_offdiag = 0;
     checkpoint timings;
     // Device-wide VRAM usage (MB), sampled at solve end via cudaMemGetInfo.
@@ -75,24 +79,15 @@ struct batch_solve_result {
     checkpoint timings;
 };
 
-/// Generate a random zero-mean unit RHS vector.
+/// Generate a random zero-mean unit RHS vector using Eigen's global std::rand state.
 Eigen::VectorXd generate_test_rhs(Eigen::Index n);
 
-/// Reusable CPU solver: factor + SpMV operator built ONCE, then PCG-solve any
-/// number of right-hand sides. Setup, triangular solves and PCG always run on
-/// the CPU, including in CUDA builds.
-///
-///   cpu_solver slv(L);                       // factorize + build parallel-SpMV operator
-///   auto r1 = slv.solve(b1);                 // tol/max_iter from opts
-///   auto r2 = slv.solve(b2, 1e-10, 1000);    // per-call override
-///   auto z  = slv.apply(r);                  // one preconditioner application, M^{-1} r
-///
-/// `cp` (optional) receives the setup-phase checkpoint records (factorize +
-/// sptrsv_setup + spmv_lrm_build); the per-solve PCG records go into the
-/// returned solve_result::timings. The one-shot solve() passes the SAME
-/// checkpoint for both so its result carries the full setup+pcg tree.
-/// The constructor does not retain `cp`; each solve records into its result.
+/// CPU-specific reusable solver, also used by the generic solver's CPU route.
+/// Prefer solver with solve_backend::cpu unless direct preconditioner access is
+/// needed. Setup and solves stay on CPU, including in GPU-enabled builds.
+/// The optional checkpoint receives setup timings and is not retained.
 class cpu_solver {
+    friend struct detail::solver_archive_access;
 public:
     explicit cpu_solver(const Eigen::SparseMatrix<double>& L,
                         const solve_options& opts = {},
@@ -103,32 +98,26 @@ public:
     /// internally.  L is still required — it is the PCG operator.
     /// Construction options (including regularization/lumping) are not reapplied;
     /// factor storage, dropping, scheduling and solve options still apply.
+    /// L is interpreted through its lower triangle. The caller must ensure it
+    /// is a valid operator compatible with F; use solver(L, F) for validation.
     cpu_solver(const Eigen::SparseMatrix<double>& L,
                factorization F,
                const solve_options& opts = {},
                checkpoint* cp = nullptr);
 
-    /// PCG against the held factor. Finite tol < 0 / max_iter < 0 = use opts values.
-    /// `x0` (optional) is the initial guess; nullptr = start from zero; a
-    /// wrong-length x0 throws std::invalid_argument.
-    /// For a pure Laplacian (rank n-1) the returned x is the min-norm
-    /// solution (mean(x) = 0), whatever x0's constant component was.
+    /// Solve using the retained factor. Negative tol/max_iter use constructor
+    /// defaults. x0 is an optional initial guess; nullptr starts from zero.
+    /// Laplacian solutions are centered to zero mean.
     solve_result solve(const Eigen::VectorXd& b,
                        double tol = -1.0, int max_iter = -1,
                        const Eigen::VectorXd* x0 = nullptr) const;
-    /// In-place variant: appends x/iterations/residual + the PCG checkpoint
-    /// records into an existing result (used by the one-shot solve() so setup
-    /// and pcg land in one timings tree).
+    /// Write into an existing result, preserving its setup timing records.
     void solve(const Eigen::VectorXd& b, solve_result& res,
                double tol = -1.0, int max_iter = -1,
                const Eigen::VectorXd* x0 = nullptr) const;
-    /// Caller-provided-memory variant: writes the solution into `x` (length n,
-    /// contents overwritten — pass a warm start via `x0`). Reuses the PCG
-    /// workspace, which can resize when panel width changes. Extreme inputs
-    /// need scaled copies.
-    /// The returned result's `x` member is left empty.
-    /// Note: like all solve/apply paths, not safe for concurrent calls on the
-    /// same cpu_solver (the reused workspace is shared state).
+    /// Overwrite caller-provided x; supply an initial guess separately in x0.
+    /// The returned result leaves x empty. Calls on one owner must not overlap,
+    /// because solves and preconditioner applications share workspace.
     solve_result solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
                        double tol = -1.0, int max_iter = -1,
                        const Eigen::VectorXd* x0 = nullptr) const;
@@ -197,8 +186,10 @@ private:
 
 /// Reusable solver owning one CPU or GPU backend, selected once at setup.
 /// Owns its input data; movable, noncopyable, and not safe for concurrent calls.
+/// Every solve verifies the returned residual against the original operator/RHS.
 /// Supplied factors use CPU in automatic mode; an explicit GPU request uploads them.
 class solver {
+    friend struct detail::solver_archive_access;
 public:
     explicit solver(const Eigen::SparseMatrix<double>& A,
                     const solve_options& opts = {}, checkpoint* cp = nullptr);
@@ -212,8 +203,12 @@ public:
     solver(const solver&) = delete;
     solver& operator=(const solver&) = delete;
 
+    /// Solve Ax=b. Negative tol/max_iter use constructor defaults. x0 supplies
+    /// an optional initial guess; nullptr starts from zero. Inspect converged
+    /// in the result even when the iteration budget is exhausted.
     solve_result solve(const Eigen::VectorXd& b, double tol = -1.0,
                        int max_iter = -1, const Eigen::VectorXd* x0 = nullptr) const;
+    /// Write into an existing result, preserving its setup timing records.
     void solve(const Eigen::VectorXd& b, solve_result& result, double tol = -1.0,
                int max_iter = -1, const Eigen::VectorXd* x0 = nullptr) const;
     /// Write into caller storage; the returned result leaves x empty.
@@ -240,9 +235,17 @@ public:
     }
     void apply(const_matrix_view R, matrix_view Z) const;
 
+    /// Factor metadata; L's row/value arrays require keep_factor_values=true.
+    /// The returned reference is owned by this solver.
     const factorization& factor() const;
+    /// Operator dimension.
     Eigen::Index rows() const;
+    /// Stored entries in the original operator, after input canonicalization
+    /// and before preconditioner lumping or dropping.
+    Eigen::Index operator_nnz() const;
+    /// Selected route: cpu or gpu, never automatic.
     solve_backend backend() const;
+    /// Installed triangular-solve storage: fp16 or fp32, never automatic.
     factor_storage_type factor_storage() const;
 
 private:

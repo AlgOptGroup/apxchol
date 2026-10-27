@@ -35,6 +35,7 @@ add_executable(unit_tests
         test_operator_class.cpp
         test_solve_routes.cpp
         test_solver.cpp
+        test_solver_archive.cpp
         test_cuda_device_scope.cpp
         test_permuted_operator.cpp
         test_metal_schedule.cpp
@@ -63,6 +64,7 @@ endif()
 target_link_libraries(unit_tests PRIVATE
         apxchol_mtx_input
         GTest::gtest_main
+        ZLIB::ZLIB
 )
 
 add_executable(c_api_tests test_c_api.cpp)
@@ -124,61 +126,63 @@ if (APXCHOL_DEVICE STREQUAL "CUDA")
     endif()
 endif()
 
-# CLI assertions check BOTH exit status and diagnostic text. CTest's
-# PASS_REGULAR_EXPRESSION alone overrides a failing solver exit status.
-function(apxchol_cli_test name fixture status output)
-    add_test(NAME ${name} COMMAND "${CMAKE_COMMAND}"
-        "-DCLI=$<TARGET_FILE:apxchol>"
-        "-DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${fixture}.mtx"
-        "-DEXPECT_STATUS=${status}" "-DEXPECT_OUTPUT=${output}"
-        "-DCLI_ARGS=${ARGN}"
-        -P "${CMAKE_CURRENT_SOURCE_DIR}/check_cli.cmake")
-    set_tests_properties(${name} PROPERTIES TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=4")
-endfunction()
+if (APXCHOL_BUILD_CLI)
+    # CLI assertions check BOTH exit status and diagnostic text. CTest's
+    # PASS_REGULAR_EXPRESSION alone overrides a failing solver exit status.
+    function(apxchol_cli_test name fixture status output)
+        add_test(NAME ${name} COMMAND "${CMAKE_COMMAND}"
+            "-DCLI=$<TARGET_FILE:apxchol>"
+            "-DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${fixture}.mtx"
+            "-DEXPECT_STATUS=${status}" "-DEXPECT_OUTPUT=${output}"
+            "-DCLI_ARGS=${ARGN}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/check_cli.cmake")
+        set_tests_properties(${name} PROPERTIES TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=4")
+    endfunction()
 
-apxchol_cli_test(cli_pattern_adjacency_converges path5_pattern 0 "ADJACENCY graph")
-apxchol_cli_test(cli_disconnected_adjacency_converges disconnected_paths_pattern 0
-    "projected random RHS independently over 2 connected components")
-apxchol_cli_test(cli_laplacian_converges path5_laplacian 0 "LAPLACIAN/SDDM operator")
-apxchol_cli_test(cli_sddm_converges path5_sddm 0 "LAPLACIAN/SDDM operator")
-apxchol_cli_test(cli_nearly_sddm_converges path5_nearly_sddm 0 "LAPLACIAN/SDDM operator")
-apxchol_cli_test(cli_explicit_adjacency_on_laplacian path5_laplacian 0 "ADJACENCY graph"
-    --input-kind adjacency)
-apxchol_cli_test(cli_ambiguous_input_is_rejected ambiguous 2 "cannot tell whether this matrix is")
-apxchol_cli_test(cli_forced_wrong_kind_is_refused path5_pattern 2 "Condition FAILED: positive diagonal"
-    --input-kind laplacian)
-# Enum transformations must not widen the CLI to accept raw numeric values.
-apxchol_cli_test(cli_numeric_input_kind_is_rejected path5_pattern 105 "not in"
-    --input-kind 0)
+    apxchol_cli_test(cli_pattern_adjacency_converges path5_pattern 0 "ADJACENCY graph")
+    apxchol_cli_test(cli_disconnected_adjacency_converges disconnected_paths_pattern 0
+        "projected random RHS independently over 2 connected components")
+    apxchol_cli_test(cli_laplacian_converges path5_laplacian 0 "LAPLACIAN/SDDM operator")
+    apxchol_cli_test(cli_sddm_converges path5_sddm 0 "LAPLACIAN/SDDM operator")
+    apxchol_cli_test(cli_nearly_sddm_converges path5_nearly_sddm 0 "LAPLACIAN/SDDM operator")
+    apxchol_cli_test(cli_explicit_adjacency_on_laplacian path5_laplacian 0 "ADJACENCY graph"
+        --input-kind adjacency)
+    apxchol_cli_test(cli_ambiguous_input_is_rejected ambiguous 2 "cannot tell whether this matrix is")
+    apxchol_cli_test(cli_forced_wrong_kind_is_refused path5_pattern 2 "Condition FAILED: positive diagonal"
+        --input-kind laplacian)
+    # Enum transformations must not widen the CLI to accept raw numeric values.
+    apxchol_cli_test(cli_numeric_input_kind_is_rejected path5_pattern 105 "not in"
+        --input-kind 0)
 
-# Complete solve-route CLI contract: the CPU choice is usable in every build,
-# and CLI enum transformations must not admit numeric or unknown selectors.
-apxchol_cli_test(cli_backend_cpu_converges path5_sddm 0 "backend: +cpu" --backend cpu)
-# Auto keeps scalar systems on CPU in every build. CUDA builds with a visible
-# device route larger inputs, including path5, to the GPU.
-apxchol_cli_test(cli_backend_auto_scalar_uses_cpu scalar_sddm 0 "backend: +cpu")
-if (NOT APXCHOL_DEVICE STREQUAL "CUDA")
-    apxchol_cli_test(cli_backend_auto_tiny_uses_cpu path5_sddm 0 "backend: +cpu")
-endif()
-apxchol_cli_test(cli_numeric_backend_is_rejected path5_sddm 105 "not in" --backend 0)
-apxchol_cli_test(cli_invalid_backend_is_rejected path5_sddm 105 "not in" --backend hybrid)
-if (APXCHOL_DEVICE STREQUAL "CPU")
-    apxchol_cli_test(cli_unavailable_gpu_backend_is_rejected path5_sddm 2
-        "GPU route requested but GPU support is not built" --backend gpu)
-endif()
+    # Complete solve-route CLI contract: the CPU choice is usable in every build,
+    # and CLI enum transformations must not admit numeric or unknown selectors.
+    apxchol_cli_test(cli_backend_cpu_converges path5_sddm 0 "backend: +cpu" --backend cpu)
+    # Auto keeps scalar systems on CPU in every build. CUDA builds with a visible
+    # device route larger inputs, including path5, to the GPU.
+    apxchol_cli_test(cli_backend_auto_scalar_uses_cpu scalar_sddm 0 "backend: +cpu")
+    if (NOT APXCHOL_DEVICE STREQUAL "CUDA")
+        apxchol_cli_test(cli_backend_auto_tiny_uses_cpu path5_sddm 0 "backend: +cpu")
+    endif()
+    apxchol_cli_test(cli_numeric_backend_is_rejected path5_sddm 105 "not in" --backend 0)
+    apxchol_cli_test(cli_invalid_backend_is_rejected path5_sddm 105 "not in" --backend hybrid)
+    if (APXCHOL_DEVICE STREQUAL "CPU")
+        apxchol_cli_test(cli_unavailable_gpu_backend_is_rejected path5_sddm 2
+            "GPU route requested but GPU support is not built" --backend gpu)
+    endif()
 
-apxchol_cli_test(cli_thread_budget path5_sddm 0 "backend: +cpu" --backend cpu --threads 2)
-apxchol_cli_test(cli_negative_thread_budget path5_sddm 105 "not in range" --threads -1)
-apxchol_cli_test(cli_zero_iteration_budget path5_sddm 1
-    "did not reach tol .* in 0 iterations" --backend cpu --maxiter 0)
-apxchol_cli_test(cli_output_failure path5_sddm 2
-    "cannot write solution to" --backend cpu -o "${CMAKE_CURRENT_BINARY_DIR}")
-apxchol_cli_test(cli_output_success path5_sddm 0
-    "solution written to" --backend cpu -o "${CMAKE_CURRENT_BINARY_DIR}/cli-solution.mtx")
-if (APXCHOL_DEVICE STREQUAL "CPU")
-    set(cli_backend_label omp)
-else()
-    string(TOLOWER "${APXCHOL_DEVICE}" cli_backend_label)
+    apxchol_cli_test(cli_thread_budget path5_sddm 0 "backend: +cpu" --backend cpu --threads 2)
+    apxchol_cli_test(cli_negative_thread_budget path5_sddm 105 "not in range" --threads -1)
+    apxchol_cli_test(cli_zero_iteration_budget path5_sddm 1
+        "did not reach tol .* in 0 iterations" --backend cpu --maxiter 0)
+    apxchol_cli_test(cli_output_failure path5_sddm 2
+        "cannot write solution to" --backend cpu -o "${CMAKE_CURRENT_BINARY_DIR}")
+    apxchol_cli_test(cli_output_success path5_sddm 0
+        "solution written to" --backend cpu -o "${CMAKE_CURRENT_BINARY_DIR}/cli-solution.mtx")
+    if (APXCHOL_DEVICE STREQUAL "CPU")
+        set(cli_backend_label omp)
+    else()
+        string(TOLOWER "${APXCHOL_DEVICE}" cli_backend_label)
+    endif()
+    apxchol_cli_test(cli_build_backend path5_sddm 0
+        "SpTRSV backend: ${cli_backend_label}" --version)
 endif()
-apxchol_cli_test(cli_build_backend path5_sddm 0
-    "SpTRSV backend: ${cli_backend_label}" --version)
