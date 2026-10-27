@@ -664,7 +664,9 @@ TEST_F(MetalDevice, EarlyExitsTruthful) {
         SCOPED_TRACE(int(storage));
         apxchol::solve_options options;
         options.factor_opts.factor_storage = storage;
-        const apxchol::metal_solver slv(A, options);
+        options.backend = apxchol::solve_backend::gpu;
+        const apxchol::solver slv(A, options);
+        ASSERT_EQ(slv.backend(), apxchol::solve_backend::gpu);
         const Eigen::VectorXd b = rhs(A.rows(), 1, true);
         const apxchol::solve_result none = slv.solve(b, 1e-8, 0);
         EXPECT_EQ(none.iterations, 0);
@@ -677,10 +679,29 @@ TEST_F(MetalDevice, EarlyExitsTruthful) {
         EXPECT_LT((seeded.x - guess).norm(), 1e-12);
         EXPECT_NEAR(seeded.residual, true_residual(A, b, seeded.x), 1e-12);
 
-        for (int limit : {1, 4, 5}) {
+        for (int limit : {0, 1, 4, 5}) {
             const auto limited = slv.solve(b, 1e-30, limit);
             EXPECT_EQ(limited.iterations, limit);
             EXPECT_NEAR(limited.residual, true_residual(A, b, limited.x), 1e-12);
+            Eigen::MatrixXd B = b.replicate(1, 4), initial = Eigen::MatrixXd::Zero(A.rows(), 4);
+            B.col(0).setZero();
+            B.col(1) = A * guess;
+            initial.col(1) = guess;
+            const apxchol::const_matrix_view warm(initial);
+            Eigen::MatrixXd storage = Eigen::MatrixXd::Constant(2 * A.rows(), 4, 77.0);
+            using Stride = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
+            Eigen::Map<Eigen::MatrixXd, 0, Stride> X(storage.data(), A.rows(), 4,
+                                                   Stride(2 * A.rows(), 2));
+            const auto panel = slv.solve(B, X, 1e-8, limit, &warm);
+            ASSERT_EQ(panel.columns.size(), 4u);
+            for (int q = 0; q < 4; ++q) {
+                EXPECT_LE(panel.columns[q].iterations, limit);
+                if (q < 2) EXPECT_EQ(panel.columns[q].iterations, 0);
+                const double residual = q == 0 ? X.col(q).norm() : true_residual(A, B.col(q), X.col(q));
+                EXPECT_NEAR(panel.columns[q].residual, residual, 1e-12);
+            }
+            for (Eigen::Index i = 1; i < storage.rows(); i += 2)
+                EXPECT_TRUE((storage.row(i).array() == 77.0).all());
         }
 
         const Eigen::VectorXd zero = Eigen::VectorXd::Zero(A.rows());

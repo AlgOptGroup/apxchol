@@ -17,7 +17,7 @@ template<class Wide, class Scalar>
 struct solve_state {
     Wide rz, rr, thr;
     Scalar alpha, beta;
-    unsigned active, iters;
+    unsigned active, iters, tolerance_stop;
 };
 
 template<class Wide, class Scalar>
@@ -53,7 +53,10 @@ APXCHOL_GPU_FUNCTION State advance(Math math, State st, unsigned mode, Wide t,
         st.rr = t;
         st.iters = iteration;
         if (!math.valid_residual(t)) st.active = 0;
-        else if (math.converged(t, st.thr)) st.active = 0;
+        else if (math.converged(t, st.thr)) {
+            st.active = 0;
+            st.tolerance_stop = 1;
+        }
     }
     return st;
 }

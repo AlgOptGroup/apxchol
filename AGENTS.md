@@ -45,7 +45,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 ## Determinism and numerical invariants
 
 - Public solver preconditioner application rejects non-finite inputs and centers Laplacian input/output on every call; only internal PCG uses periodic centering. All backends derive `converged` from the original-system exit residual and effective tolerance, with verification included in Solve timing.
-- Solves stop on tolerance, the iteration budget or numerical breakdown. Residual growth or a temporary plateau is not a stopping condition.
+- Solves stop on verified tolerance, the iteration budget or numerical breakdown. A failed original-residual check after apparent convergence can continue within the remaining budget; breakdown does not restart. Residual growth or a temporary plateau is not a stopping condition.
 - Canonical neighbors sort by weight, then vertex. Preserve ordered duplicate sums, exact cumulative weights, `upper_bound` sampling and per-elimination random streams.
 - OpenMP work uses the actual team size, never the requested one; every logical range must execute under reduced or nested teams. Caller-operator loops split work with `detail::work_balanced_range`; reductions stay thread-ordered.
 - Partitioner conflict resolution is deterministic for a given graph, context and team size. Symmetric-input pairing shortcuts must preserve results bit for bit. Prune skipping must retain its full-walk audit for hidden eligible vertices; it need not reproduce the same factor as full pruning.

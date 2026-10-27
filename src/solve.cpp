@@ -3,6 +3,7 @@
 #include "apxchol/solver/detail/thread_budget.h"
 #include "apxchol/solver/detail/lower_triangle_csr.h"
 #include "apxchol/solver/detail/gpu_scaling.h"
+#include "apxchol/solver/detail/pcg_restart.h"
 #include "apxchol/csc_work.h"
 #include "apxchol/operator_class.h"
 #include "host_spmv.h"
@@ -651,8 +652,10 @@ void cpu_solver::solve_impl(const Eigen::VectorXd &b, Eigen::Ref<Eigen::VectorXd
     detail::resolve_solve_parameters(tol, max_iter, opts_.tol, opts_.max_iter);
     const const_matrix_view initial(x0 ? *x0 : b);
     detail::check_matrix_views(b, x, n_, x0 ? &initial : nullptr);
-    solve_panel<1>(b.data(), x.data(), &res, res.timings, tol, max_iter, x0 ? x0->data() : nullptr);
-    check_solution<1>(b, x.data(), &res, res.timings, tol);
+    std::array<bool, 1> tolerance_stops{};
+    solve_panel<1>(b.data(), x.data(), &res, res.timings, tol, max_iter,
+                   x0 ? x0->data() : nullptr, &tolerance_stops);
+    finish_solution<1>(b, x.data(), &res, res.timings, tol, max_iter, tolerance_stops);
 }
 
 template<int C>
@@ -701,9 +704,44 @@ void cpu_solver::check_solution(const_matrix_view B, const double* x,
     if (opts_.collect_timings) { timings("exit_check"); timings.ascend(); }
 }
 
+template<int C>
+void cpu_solver::finish_solution(const_matrix_view B, double* x, solve_result* results,
+                                 checkpoint& timings, double tol, int max_iter,
+                                 std::array<bool, C> tolerance_stops) const {
+    check_solution<C>(B, x, results, timings, tol);
+    for (int c = 0; c < C; ++c) {
+        auto& result = results[c];
+        Eigen::Index progress = result.iterations;
+        const auto restart = [&] {
+            return detail::pcg_restart(tolerance_stops[c], result.converged,
+                result.residual, progress, max_iter - result.iterations);
+        };
+        if (!restart()) continue;
+        Eigen::VectorXd current(n_);
+        for (Eigen::Index i = 0; i < n_; ++i) current[i] = x[i * C + c];
+        while (restart()) {
+            solve_result attempt;
+            std::array<bool, 1> stopped{};
+            z_.resize(n_);
+            z_ = B.col(c);
+            solve_panel<1>(z_.data(), current.data(), &attempt, timings, tol,
+                           max_iter - result.iterations, current.data(), &stopped);
+            check_solution<1>(B.col(c), current.data(), &attempt, timings, tol);
+            progress = attempt.iterations;
+            result.iterations += progress;
+            result.residual = attempt.residual;
+            result.converged = attempt.converged;
+            tolerance_stops[c] = stopped[0];
+        }
+        for (Eigen::Index i = 0; i < n_; ++i) x[i * C + c] = current[i];
+    }
+}
+
 template <int C>
 void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, checkpoint& timings, double tol,
-                             int max_iter, const double *x0) const {
+                             int max_iter, const double *x0,
+                             std::array<bool, C>* tolerance_stops) const {
+    if (tolerance_stops) tolerance_stops->fill(false);
     static_assert(C > 0 && C <= 8);
     const Eigen::Index n = n_;
     for (int c = 0; c < C; c++) {
@@ -730,7 +768,7 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
     }
     const bool any_warm = std::any_of(warm.begin(), warm.end(), [](bool v) { return v; });
     if (any_warm) {
-        std::copy_n(x0, n * C, x);
+        if (x0 != x) std::copy_n(x0, n * C, x);
         if (op_fp32_)
             (void)panel_spmv<C>(Lrm_f_, x, Ap, part);
         else
@@ -776,7 +814,7 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
             if (x0) scaled_x0.col(c) *= scales[c];
         }
         solve_panel<C>(scaled_b.data(), x, results, timings, tol, max_iter,
-                        x0 ? scaled_x0.data() : nullptr);
+                        x0 ? scaled_x0.data() : nullptr, tolerance_stops);
         for (Eigen::Index i = 0; i < n; ++i)
             for (int c = 0; c < C; ++c) {
                 double& value = x[i * C + c];
@@ -880,8 +918,11 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
                 continue;
             results[c].iterations = i + 1;
             results[c].residual = std::sqrt(rr[c]) / norm[c];
-            if (!std::isfinite(results[c].residual) || results[c].residual < tol)
+            if (!std::isfinite(results[c].residual) || results[c].residual < tol) {
+                if (tolerance_stops)
+                    (*tolerance_stops)[c] = std::isfinite(results[c].residual);
                 active[c] = false;
+            }
         }
         if (!any_active())
             break;
@@ -978,9 +1019,11 @@ batch_solve_result cpu_solver::solve_batch(const_matrix_view B, matrix_view X, d
     for_rhs_panels(
         B, X, X0, z_, panel_x_,
         [&]<int C>(Eigen::Index first, const double *b, double *x, const double *x0) {
-            solve_panel<C>(b, x, result.columns.data() + first, result.timings, tol, max_iter, x0);
-            check_solution<C>(B.middleCols(first, C), x, result.columns.data() + first,
-                              result.timings, tol);
+            std::array<bool, C> tolerance_stops{};
+            solve_panel<C>(b, x, result.columns.data() + first, result.timings, tol, max_iter,
+                           x0, &tolerance_stops);
+            finish_solution<C>(B.middleCols(first, C), x, result.columns.data() + first,
+                               result.timings, tol, max_iter, tolerance_stops);
         },
         timing ? &result.timings : nullptr);
     return result;

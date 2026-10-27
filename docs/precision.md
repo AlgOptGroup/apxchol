@@ -34,10 +34,10 @@ the device, Metal on the host. Verification uses the original symmetric
 operator (canonical lower-triangle coefficients) and unmodified RHS, before
 any preconditioner lumping.
 
-The reported residual can exceed tolerance even after the recursive stopping
-test passes. Verification does not add retries or iterations; check the returned
-`converged` flag. CUDA retains one extra FP64 RHS vector per allocated panel
-column for this check.
+If a recursive tolerance stop fails this check, the solver can continue from
+the current solution within the remaining iteration budget. Numerical breakdown
+does not restart. Check the returned `converged` flag. CUDA retains one extra
+FP64 RHS vector per allocated panel column for verification.
 
 ## Scaled FP16 contract
 
