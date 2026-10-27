@@ -84,6 +84,18 @@ ctest --test-dir build --output-on-failure
 The CLI also accepts adjacency matrices. `--random-rhs` generates a test RHS;
 [`--help`](docs/building.md#command-line-use) lists the available controls.
 
+## Performance
+
+Batching reuses work across right-hand sides. On a 1.13-million-row YouTube
+Laplacian, four-column solves were 2.1× faster than separate calls on CPU and
+1.7× faster on Metal. These measurements use the same factor for each comparison.
+
+![YouTube batching speedups on Apple M1 Max](docs/performance/youtube.svg)
+
+See [current CPU/Metal runner measurements and the full methodology](docs/performance.md).
+The small benchmarks regenerate on each `main` commit; the larger comparison
+above is dated separately. Results depend on the matrix, hardware and settings.
+
 ## Learn more
 
 - [Choosing a backend, reusing factors and checking results](docs/usage.md)

@@ -14,6 +14,7 @@ MATLAB / Octave <octave/README>
 Precision and convergence <docs/precision>
 Saving and loading <docs/serialization>
 Extending the solver <docs/extending>
+Performance results <docs/performance>
 Benchmarking <benchmarks/README>
 Contributing <CONTRIBUTING>
 ```
