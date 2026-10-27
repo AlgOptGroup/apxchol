@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 project(apxchol_installed_consumer LANGUAGES CXX)
 
 find_package(apxchol CONFIG REQUIRED)
-add_executable(apxchol_installed_consumer ../../examples/basic_solve.cpp)
+add_executable(apxchol_installed_consumer consumer.cpp)
 target_link_libraries(apxchol_installed_consumer PRIVATE apxchol::core)
 
 enable_testing()

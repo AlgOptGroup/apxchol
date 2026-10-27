@@ -8,6 +8,7 @@
 
 Using the solver <docs/usage>
 Building and installation <docs/building>
+Native C++ SDK archives <docs/sdk>
 Python <python/README>
 MATLAB / Octave <octave/README>
 Precision and convergence <docs/precision>
