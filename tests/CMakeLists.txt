@@ -35,6 +35,7 @@ add_executable(unit_tests
         test_operator_class.cpp
         test_solve_routes.cpp
         test_solver.cpp
+        test_solver_archive.cpp
         test_cuda_device_scope.cpp
         test_permuted_operator.cpp
         test_metal_schedule.cpp
@@ -63,6 +64,7 @@ endif()
 target_link_libraries(unit_tests PRIVATE
         apxchol_mtx_input
         GTest::gtest_main
+        ZLIB::ZLIB
 )
 
 include(GoogleTest)
