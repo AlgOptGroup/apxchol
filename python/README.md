@@ -1,12 +1,12 @@
 # apxchol for Python
 
 Solve sparse Laplacian and SDDM systems with reusable approximate-Cholesky
-factors. NumPy and SciPy are required.
+factors. NumPy is required. Install the SciPy extra for sparse-matrix helpers.
 
 ## Install and solve
 
 ```bash
-python -m pip install apxchol
+python -m pip install "apxchol[scipy]"
 ```
 
 For an unreleased checkout, use the [source installation](#build-from-source)
@@ -20,7 +20,8 @@ GPU backend; no CUDA Toolkit or Homebrew installation is needed.
 | Linux | x86-64-v2 or newer | NVIDIA CUDA |
 | macOS 15+ | Apple silicon (arm64) | Apple Metal |
 
-Wheels support CPython 3.11–3.15.
+Wheels support CPython 3.11–3.15 and PyPy 7.3.23 (Python 3.11, `pp73`).
+On PyPy, install `apxchol` and use the [NumPy-only interface](#numpy-only-input).
 
 ```python
 import apxchol
@@ -56,6 +57,21 @@ changing the input. Supply the full symmetric matrix, including both
 entries of each off-diagonal pair. Complex inputs are rejected, even with
 zero imaginary parts.
 
+### NumPy-only input
+
+`python -m pip install apxchol` installs the solver without SciPy. Supply the
+three zero-based CSC arrays directly; all usual solver options still apply:
+
+```python
+solver = apxchol.Solver.from_csc(data, indices, indptr, backend="auto")
+result = solver.solve(b)
+```
+
+The matrix is square with `len(indptr) - 1` rows. Integer indices may be 32- or
+64-bit; the native importer sorts columns and sums duplicate entries. SciPy
+is needed for `factorize(A)`, `laplacian`, `aslinearoperator`, and sparse factor
+exports. NumPy-only solves and preconditioner application do not import it.
+
 ## Reuse, batches and initial guesses
 
 Subsequent solves reuse the factor and workspace:
@@ -90,6 +106,26 @@ compiled tolerance and iteration defaults.
 
 Overlapping inputs are copied before writing `out`. Use separate solver
 instances for concurrent calls; each solver shares mutable workspace.
+
+## Save and reload
+
+Save a reusable solver's operator and factor, then choose the solve backend
+when loading. These methods also work without SciPy:
+
+```python
+solver.save("system.apxchol")
+restored = apxchol.Solver.load("system.apxchol", backend="cpu")
+result = restored.solve(b)
+```
+
+Saving requires `keep_factor=True`, the reusable solver's default. It creates
+a new file and refuses to replace an existing one. The archive stores the
+original operator and FP32 factor; RHSs, initial guesses and device workspace
+are not saved. Loading adopts the factor without repeating factorization.
+
+`backend="auto"` adopts on CPU; `backend="gpu"` uploads to a compatible GPU.
+Storage and preparation options use the same defaults as construction. Pass
+`lump_max_mass` again if the saved operator requires positive-entry lumping.
 
 ## Setup options
 
@@ -176,7 +212,7 @@ The native library's wide-index build options do not enlarge this binding.
 From a repository checkout, install a development build and run its tests:
 
 ```bash
-python -m pip install -e './python[test]'
+python -m pip install -e './python[test,scipy]'
 python -m pytest python/tests -v
 ```
 
