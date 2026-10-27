@@ -62,6 +62,7 @@ jobs:
     needs: [wheels, pypy, cli, sdk]
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
+    environment: pypi
     permissions:
       contents: write
     steps:
