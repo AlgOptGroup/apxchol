@@ -2,7 +2,7 @@
 
 ## Dependencies
 
-CPU builds require CMake 3.20+, GCC or Clang with C++23 and OpenMP, and Eigen.
+CPU builds require CMake 3.20+, GCC or Clang with C++23 and OpenMP, and zlib headers.
 CMake uses an installed Eigen package when available and fetches it otherwise.
 Windows builds with MSVC or `clang-cl` are not supported.
 On x86-64, the minimum target is x86-64-v2.
@@ -27,6 +27,20 @@ ctest --test-dir build --output-on-failure
 The default build is CPU-only. Add `-DAPXCHOL_DEVICE=CUDA` or
 `-DAPXCHOL_DEVICE=METAL` at configuration to include that GPU backend as well.
 The same executable still supports CPU solves.
+
+## CLI archives
+
+Download `cli-*` artifacts from a successful [CI run](https://github.com/AlgOptGroup/apxchol/actions/workflows/ci.yml);
+new [releases](https://github.com/AlgOptGroup/apxchol/releases) attach the archives directly.
+Linux archives require x86-64-v2, glibc 2.28+ and system C++/GCC runtimes. macOS
+archives require Apple silicon and macOS 15+, and include CPU and Metal routes.
+Verify the matching `.sha256` file with `sha256sum -c` (Linux) or `shasum -a 256 -c`
+(macOS), extract the archive, then run its `bin/apxchol --help`. Keep `bin/` and
+`lib/` together; OpenMP and redistribution notices are included. macOS binaries
+are ad-hoc signed, not notarized; Gatekeeper may require manual approval.
+
+For a source build, `cmake --install build --component cli --prefix /path/to/prefix`
+installs the executable using your system runtime libraries.
 
 ## Python source installation
 
@@ -63,8 +77,21 @@ project's scope. Set `APXCHOL_DEVICE` when configuring the consuming project.
 For distribution, set `APXCHOL_NATIVE_ARCH=OFF`; CUDA consumers must also
 choose `CMAKE_CUDA_ARCHITECTURES` instead of its `native` default.
 
-Adding the repository root with `add_subdirectory` also
-includes the CLI and, by default, tests and examples.
+Alternatively, embed the repository root directly:
+
+```cmake
+add_subdirectory(path/to/apxchol)
+target_link_libraries(my_program PRIVATE apxchol::core)
+```
+
+Root embedding defaults to the portable library only. Set `APXCHOL_BUILD_CLI`,
+`APXCHOL_BUILD_TESTS` or `APXCHOL_BUILD_EXAMPLES` before `add_subdirectory` to opt
+into those targets. CLI dependencies are fetched only when the CLI is enabled;
+tests with the CLI disabled still include the operator-input unit tests.
+
+For CUDA or Metal, enable `CUDA` or `OBJCXX` in the consuming parent before
+`add_subdirectory`, for example with `project(my_project LANGUAGES CXX CUDA)`.
+The top-level helper above enables the selected language for you.
 
 For a separately installed SDK, use:
 
@@ -83,7 +110,8 @@ cmake --install build-sdk
 
 Configure the consuming project with `-DCMAKE_PREFIX_PATH=/path/to/prefix`.
 If apxchol fetched Eigen, the install includes its headers. Otherwise, the
-consumer must also provide Eigen. A CUDA SDK consumer needs the CUDA Toolkit.
+consumer must also provide Eigen. Static SDK consumers also need zlib; CUDA
+SDK consumers need the CUDA Toolkit.
 Use compatible compiler, standard-library and OpenMP runtime settings.
 
 `ExternalProject_Add` builds in a separate project. Use it to build/install
@@ -100,11 +128,12 @@ backend selection and factor storage are runtime settings; see the
 | Option | Default | Meaning |
 |---|---|---|
 | `APXCHOL_DEVICE` | `CPU` | `CPU` only, or CPU plus `CUDA` / `METAL` |
-| `APXCHOL_NATIVE_ARCH` | ON for root/helper/local Python; OFF for SDK/wheels | Tune for the build machine; turn OFF for distribution |
+| `APXCHOL_NATIVE_ARCH` | ON for standalone root/helper/local Python; OFF for root embedding/SDK/wheels | Tune for the build machine; turn OFF for distribution |
 | `APXCHOL_POOL_FP32` | ON | Store mutable graph weights in FP32; OFF uses FP64 |
 | `APXCHOL_INDEX_WIDTH` | `32` | `32`, `64_EDGES` or `64`; see layouts below |
-| `APXCHOL_BUILD_TESTS` | ON in root build | Build the test suite |
-| `APXCHOL_BUILD_EXAMPLES` | ON in root build | Build the examples |
+| `APXCHOL_BUILD_CLI` | ON standalone; OFF when embedded | Build the CLI and its input/logging dependencies |
+| `APXCHOL_BUILD_TESTS` | ON standalone; OFF when embedded | Build the test suite |
+| `APXCHOL_BUILD_EXAMPLES` | ON standalone; OFF when embedded | Build the examples |
 
 The index setting selects one of three layouts:
 

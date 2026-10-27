@@ -10,7 +10,19 @@ also runs the examples. Run one test while iterating with
 `./build/tests/unit_tests --gtest_filter='FactorizeTest.PermutationIsValid'`.
 
 CI builds `tests/cmake_consumer` to check the
-[CMake consumer](docs/building.md#use-from-cmake) requirements with warnings as errors.
+[CMake consumer](docs/building.md#use-from-cmake) requirements with warnings as errors. The root-embedding
+consumer reuses the same alignment and original-residual checks:
+
+```sh
+cmake -S tests/cmake_subdirectory -B build-subdirectory
+cmake --build build-subdirectory -j2
+ctest --test-dir build-subdirectory --output-on-failure
+```
+
+To check native tests without CLI dependencies, repeat in a fresh build directory
+with `-DAPXCHOL_BUILD_TESTS=ON -DAPXCHOL_BUILD_CLI=OFF`. The same consumer fixture
+supports `-DAPXCHOL_DEVICE=CUDA` or `METAL`, enabling the GPU language in its
+parent scope before embedding.
 The [workflow](.github/workflows/ci.yml) defines compiler and backend coverage;
 the CUDA job compiles without running device tests.
 
@@ -28,7 +40,12 @@ pytest python/tests
 
 The release version is set in `cmake/apxchol_version.cmake`; native builds and
 Python packages share it. PyPI publication requires a matching `v<version>`
-GitHub release tag. Manually running the publish workflow only builds the wheels.
+GitHub release tag. Manually running the publish workflow builds artifacts without publishing them.
+
+The [CLI workflow](.github/workflows/cli.yml) sets up each platform and calls
+`.github/scripts/build-cli.sh`: normal CMake install, OpenMP/notices, tar and checksum.
+`tests/check_cli_archive.py` checks relocation and the existing SDDM fixture on CPU
+and Metal. The version comes from the same CMake source used by wheels.
 
 ## Documentation
 

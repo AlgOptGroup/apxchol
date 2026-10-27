@@ -1,0 +1,52 @@
+name: CLI archives
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            name: linux-x86_64-cpu
+          - runner: macos-15
+            name: macos-arm64-metal
+    env:
+      IMAGE: quay.io/pypa/manylinux_2_28_x86_64@sha256:53390351aeb4688114b02c36a23b3e6ce1166ee9b7afc5df1a4f776354fc764c
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/ccache
+        with:
+          key: cli-${{ matrix.name }}
+      - name: Linux install and archive
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p "$CCACHE_DIR" dist
+          docker run --rm --cpus=2 --memory=4g --memory-swap=4g -w /project \
+            -v "$PWD:/project" -v "$CCACHE_DIR:/ccache" -e CCACHE_DIR=/ccache -e CCACHE_MAXSIZE \
+            -e CMAKE_C_COMPILER_LAUNCHER -e CMAKE_CXX_COMPILER_LAUNCHER \
+            "$IMAGE" timeout 600 bash -euc '
+              export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=/project
+              dnf install -y clang-21.1.8-1.module_el8.10.0+4172+b6b13d75 libomp-devel-21.1.8-1.module_el8.10.0+4172+b6b13d75 ccache
+              bash .github/scripts/build-cli.sh'
+          docker run --rm --network=none --cpus=2 --memory=4g \
+            -v "$PWD/dist:/artifacts:ro" -v "$PWD/tests/check_cli_archive.py:/check.py:ro" \
+            -v "$PWD/tests/fixtures/path5_sddm.mtx:/matrix.mtx:ro" "$IMAGE" \
+            timeout 120 bash -ec '/opt/python/cp311-cp311/bin/python /check.py /artifacts/*.tar.gz /matrix.mtx cpu'
+      - name: macOS install and archive
+        if: runner.os == 'macOS'
+        run: |
+          test "$(sw_vers -productVersion | cut -d. -f1)" = 15
+          brew install libomp ccache
+          bash .github/scripts/build-cli.sh
+          python3 tests/check_cli_archive.py dist/*.tar.gz tests/fixtures/path5_sddm.mtx cpu gpu
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error

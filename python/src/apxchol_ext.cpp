@@ -136,6 +136,7 @@ public:
         : slv_(csc_to_eigen(indptr, indices, data), parse_options(options)) {}
 
     Eigen::Index rows() const { return slv_.rows(); }
+    Eigen::Index operator_nnz() const { return slv_.operator_nnz(); }
     const char* backend() const {
         return slv_.backend() == apxchol::solve_backend::cpu ? "cpu" : "gpu";
     }
@@ -334,6 +335,7 @@ PYBIND11_MODULE(_apxchol, m) {
              py::arg("x0") = py::none(), py::arg("out") = py::none())
         .def("apply", &Solver::apply, py::arg("r"))
         .def("rows", &Solver::rows)
+        .def("operator_nnz", &Solver::operator_nnz)
         .def("backend", &Solver::backend)
         .def("sddm", &Solver::sddm)
         .def("factor_storage_dtype", &Solver::factor_storage_dtype)

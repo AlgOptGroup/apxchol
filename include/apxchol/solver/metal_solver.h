@@ -13,6 +13,7 @@
 namespace apxchol {
 
 class metal_solver {
+    friend struct detail::solver_archive_access;
 public:
     struct statistics {
         Eigen::Index n = 0;
