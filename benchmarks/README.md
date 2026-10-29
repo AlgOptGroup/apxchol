@@ -142,10 +142,55 @@ On a multi-socket machine, constrain the available CPUs when you want to test
 one socket. Otherwise a thread-count comparison can also change memory
 locality. Record that CPU set and the OpenMP settings with the results.
 
+## Euler RTX 4090 nodes
+
+These settings let the CPU and CUDA benchmark builds and every series run on
+ETH Euler's `eu-g6` nodes (2 × EPYC 9554, 8 × RTX 4090) in October 2026.
+
+- Compile C, C++ and the nvcc host side with clang 19.1.3 from the 2025-06
+  stack; keep `stack/2024-05 gcc/13.2.0` loaded for its runtime libraries.
+  nvcc 13.4 with a gcc 13.2 host silently compiles `-std=c++23` as C++17
+  (`__cplusplus` 201703), so `std::span` and `std::bit_cast` disappear.
+- Pass `-DCMAKE_CUDA_FLAGS=--ftz=false`, link LLVM `libomp`
+  (`-DOpenMP_omp_LIBRARY=…/libomp.so`) and set `CMAKE_BUILD_RPATH` to the LLVM,
+  gcc 13.2 and CUDA library directories.
+- Give each build tree its own `FETCHCONTENT_BASE_DIR`. A shared one builds
+  Hypre in one place, and a CUDA configure leaks a CUDA `libHYPRE.a` into the
+  CPU link.
+- AMGCL needs Boost headers; CMake does not find them unless given
+  `-DBoost_DIR=<2024-05 stack>/boost-1.83.0-…/lib/cmake/Boost-1.83.0`. Check for
+  "Boost found — AMGCL solver enabled" in the configure output.
+- With libomp, do not set `KMP_AFFINITY=norespect` in a shared (non-exclusive)
+  allocation: libomp then binds outside the job's cgroup and aborts with
+  `pthread_setaffinity_np` EINVAL. These builds link libomp only.
+- Request GPUs as `--gpus=rtx_4090:N --constraint=cuda13` with the group's
+  account; `--mem=0` is rejected, and `--mem-per-cpu` above about 2.9 GB does
+  not fit the 384 GB nodes at 128 cores. Each socket is split into eight
+  8-core NUMA domains, so choose cores from the job's allowed set, not from
+  NUMA node 0.
+- The login nodes are Intel Broadwell; `-march=native` binaries built on the
+  compute nodes do not run there.
+
 ## Solvers
 
 Hypre/BoomerAMG and AMGCL have CPU/CUDA series; AC/AC2 are Julia references.
 RCHOL/pRCHOL retain upstream factors with labelled MKL or portable PCG.
+
+RCHOL prints progress to `std::cout`, and pRCHOL does so from its worker
+threads. The adapters silence it with a stateless `discard_streambuf`
+([src/discard_streambuf.h](src/discard_streambuf.h)). The earlier shared
+`std::ostringstream` let those threads grow one buffer concurrently and
+corrupt the heap: rchol_par crashed in 4 of 20 Euler runs, and laptop cells
+show the same "double free or corruption" and signal 11. `contract_discard_streambuf`
+exercises the redirect with 64 writers.
+
+In device mode Hypre reads IJ `SetValues`/`GetValues` arrays as device memory.
+The GPU adapter stages them through Hypre's allocator. Passing host arrays only
+worked where the GPU can address pageable host memory (HMM drivers, GH200); on
+Euler's RTX 4090 nodes it failed in Hypre's device-to-device `cudaMemcpy`
+("invalid argument"), followed by a CUB `exclusive_scan` "invalid device
+ordinal". The staging copies are charged to Hypre GPU setup, like the rest of
+the conversion.
 
 [ParAC Graph/Physics](patches/parac/) separates common input reading and final
 interchange from CPU Graph/AMD algorithm preparation, while retaining required
