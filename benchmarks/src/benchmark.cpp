@@ -2216,6 +2216,38 @@ static void configure_boomeramg(HYPRE_Solver amg, bool gpu) {
 
 // Build a Hypre IJ matrix from Eigen sparse matrix. Caller must
 // HYPRE_IJMatrixDestroy after use.
+// With HYPRE_MEMORY_DEVICE, IJ SetValues/GetValues read and write their index
+// and value arrays as device memory. Host pointers only work where the GPU can
+// address pageable host memory (HMM drivers, GH200); elsewhere hypre's
+// device-to-device copy fails with "invalid argument". This stages one host
+// array through hypre's allocator in device mode and passes it through on host.
+template <class T>
+class hypre_array {
+public:
+    hypre_array(T* host, std::size_t n) : host_(host), n_(n) {
+        HYPRE_MemoryLocation location = HYPRE_MEMORY_HOST;
+        HYPRE_GetMemoryLocation(&location);
+        if (location == HYPRE_MEMORY_DEVICE && n_ > 0) {
+            device_ = hypre_TAlloc(T, n_, HYPRE_MEMORY_DEVICE);
+            hypre_TMemcpy(device_, host_, T, n_, HYPRE_MEMORY_DEVICE, HYPRE_MEMORY_HOST);
+        }
+    }
+    hypre_array(const hypre_array&) = delete;
+    hypre_array& operator=(const hypre_array&) = delete;
+    ~hypre_array() { if (device_) hypre_TFree(device_, HYPRE_MEMORY_DEVICE); }
+
+    T* get() { return device_ ? device_ : host_; }
+    // After a GetValues into get(): bring the device copy back to the host array.
+    void copy_to_host() {
+        if (device_) hypre_TMemcpy(host_, device_, T, n_, HYPRE_MEMORY_HOST, HYPRE_MEMORY_DEVICE);
+    }
+
+private:
+    T* host_;
+    std::size_t n_;
+    T* device_ = nullptr;
+};
+
 static HYPRE_IJMatrix eigen_to_hypre_ij(const Eigen::SparseMatrix<double>& L) {
     HYPRE_Int n = static_cast<HYPRE_Int>(L.rows());
     HYPRE_IJMatrix A;
@@ -2245,7 +2277,10 @@ static HYPRE_IJMatrix eigen_to_hypre_ij(const Eigen::SparseMatrix<double>& L) {
             ++off;
         }
     }
-    HYPRE_IJMatrixSetValues(A, n, ncols.data(), rows.data(), cols.data(), vals.data());
+    hypre_array<HYPRE_Int> ncols_in(ncols.data(), ncols.size()), rows_in(rows.data(), rows.size()),
+        cols_in(cols.data(), cols.size());
+    hypre_array<double> vals_in(vals.data(), vals.size());
+    HYPRE_IJMatrixSetValues(A, n, ncols_in.get(), rows_in.get(), cols_in.get(), vals_in.get());
     HYPRE_IJMatrixAssemble(A);
     return A;
 }
@@ -2450,11 +2485,16 @@ static BenchResult run_hypre_boomeramg_gpu(
 
     std::vector<HYPRE_Int> idx(m);
     std::iota(idx.begin(), idx.end(), 0);
-    HYPRE_IJVectorSetValues(bij, m, idx.data(), bsub.data());
-    std::vector<double> zero(m, 0.0);
-    HYPRE_IJVectorSetValues(xij, m, idx.data(), zero.data());
-    HYPRE_IJVectorAssemble(bij);
-    HYPRE_IJVectorAssemble(xij);
+    hypre_array<HYPRE_Int> idx_in(idx.data(), idx.size());
+    {   // staged inputs are released after assembly, before VRAM is sampled
+        hypre_array<double> b_in(bsub.data(), static_cast<std::size_t>(bsub.size()));
+        HYPRE_IJVectorSetValues(bij, m, idx_in.get(), b_in.get());
+        std::vector<double> zero(m, 0.0);
+        hypre_array<double> zero_in(zero.data(), zero.size());
+        HYPRE_IJVectorSetValues(xij, m, idx_in.get(), zero_in.get());
+        HYPRE_IJVectorAssemble(bij);
+        HYPRE_IJVectorAssemble(xij);
+    }
 
     HYPRE_ParVector parB, parX;
     HYPRE_IJVectorGetObject(bij, (void**)&parB);
@@ -2501,7 +2541,9 @@ static BenchResult run_hypre_boomeramg_gpu(
             HYPRE_Int used = 0;
             HYPRE_PCGGetNumIterations(pcg, &used);
             current.resize(m);
-            HYPRE_IJVectorGetValues(xij, m, idx.data(), current.data());
+            hypre_array<double> x_out(current.data(), static_cast<std::size_t>(m));
+            HYPRE_IJVectorGetValues(xij, m, idx_in.get(), x_out.get());
+            x_out.copy_to_host();
             return static_cast<int>(used);
         });
     r.solve_time = t.elapsed();
