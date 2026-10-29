@@ -177,20 +177,24 @@ Hypre/BoomerAMG and AMGCL have CPU/CUDA series; AC/AC2 are Julia references.
 RCHOL/pRCHOL retain upstream factors with labelled MKL or portable PCG.
 
 RCHOL prints progress to `std::cout`, and pRCHOL does so from its worker
-threads. The adapters silence it with a stateless `discard_streambuf`
-([src/discard_streambuf.h](src/discard_streambuf.h)). The earlier shared
-`std::ostringstream` let those threads grow one buffer concurrently and
-corrupt the heap: rchol_par crashed in 4 of 20 Euler runs, and laptop cells
-show the same "double free or corruption" and signal 11. `contract_discard_streambuf`
-exercises the redirect with 64 writers.
+threads. The adapters silence it with `discard_cout`, a scoped stateless
+buffer ([src/discard_streambuf.h](src/discard_streambuf.h)) that also restores
+`std::cout` if RCHOL throws. The earlier shared `std::ostringstream` let those
+threads grow one buffer concurrently and corrupt the heap. In October 2026
+Euler diagnostics rchol_par crashed in 4 of 20 runs, and the archived laptop
+cells record the same "double free or corruption" and signal 11.
+`contract_discard_streambuf` runs 64 writers through the guard.
 
-In device mode Hypre reads IJ `SetValues`/`GetValues` arrays as device memory.
-The GPU adapter stages them through Hypre's allocator. Passing host arrays only
-worked where the GPU can address pageable host memory (HMM drivers, GH200); on
-Euler's RTX 4090 nodes it failed in Hypre's device-to-device `cudaMemcpy`
+When Hypre holds device memory, IJ `SetValues`/`GetValues` read and write
+their index and value arrays as device memory. The adapters stage those
+arrays through Hypre's allocator in that case and pass host arrays otherwise,
+so CPU-only Hypre builds are unchanged. Host arrays only worked where the GPU
+can address pageable host memory (HMM drivers, GH200). On Euler's RTX 4090
+nodes in October 2026 they failed in Hypre's device-to-device `cudaMemcpy`
 ("invalid argument"), followed by a CUB `exclusive_scan` "invalid device
-ordinal". The staging copies are charged to Hypre GPU setup, like the rest of
-the conversion.
+ordinal". Input staging and the solution buffer are charged to Hypre GPU
+setup; each solve attempt's copy of the solution back to the host is charged
+to Solve.
 
 [ParAC Graph/Physics](patches/parac/) separates common input reading and final
 interchange from CPU Graph/AMD algorithm preparation, while retaining required

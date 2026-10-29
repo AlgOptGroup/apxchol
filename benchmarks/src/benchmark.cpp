@@ -1398,11 +1398,8 @@ static BenchResult run_rchol(
     SparseCSR A = eigen_to_csr(Lfac);
     SparseCSR G;
     {
-        std::streambuf* old = std::cout.rdbuf();
-        discard_streambuf devnull;
-        std::cout.rdbuf(&devnull);
+        discard_cout quiet;
         rchol(A, G);
-        std::cout.rdbuf(old);
     }
     // PCG runs entirely in permuted space: Lp = P·L·Pᵀ (unshifted, for SpMV),
     // bp = P·b; the RCHOL preconditioner G is the factor of P·(L+εI)·Pᵀ. These
@@ -1510,9 +1507,7 @@ static BenchResult run_rchol_parallel(
     std::vector<size_t> perm;
 
     {
-        std::streambuf* old = std::cout.rdbuf();
-        discard_streambuf devnull;
-        std::cout.rdbuf(&devnull);
+        discard_cout quiet;
         int nthreads = forced_threads > 0 ? forced_threads : std::thread::hardware_concurrency();
         if (nthreads < 1) nthreads = 4;
         // Round down to nearest power of 2 (RCHOL requires it)
@@ -1523,7 +1518,6 @@ static BenchResult run_rchol_parallel(
         if (nthreads < 1) nthreads = 1;
         r.solver_name = "pRCHOL+PCG [Chen20;par] t=" + std::to_string(nthreads);
         rchol(A, G, perm, nthreads);
-        std::cout.rdbuf(old);
     }
     // rchol(A,G,perm,t) hands back its own nested-dissection ordering; upstream's
     // ex_laplace_parallel.cpp:38-46 then reorders BOTH the operator and the RHS with
@@ -2227,7 +2221,9 @@ public:
     hypre_array(T* host, std::size_t n) : host_(host), n_(n) {
         HYPRE_MemoryLocation location = HYPRE_MEMORY_HOST;
         HYPRE_GetMemoryLocation(&location);
-        if (location == HYPRE_MEMORY_DEVICE && n_ > 0) {
+        // The handle defaults to HYPRE_MEMORY_DEVICE even in CPU-only builds;
+        // stage only where that location is backed by device memory.
+        if (hypre_GetActualMemLocation(location) == hypre_MEMORY_DEVICE && n_ > 0) {
             device_ = hypre_TAlloc(T, n_, HYPRE_MEMORY_DEVICE);
             hypre_TMemcpy(device_, host_, T, n_, HYPRE_MEMORY_DEVICE, HYPRE_MEMORY_HOST);
         }
@@ -2486,7 +2482,7 @@ static BenchResult run_hypre_boomeramg_gpu(
     std::vector<HYPRE_Int> idx(m);
     std::iota(idx.begin(), idx.end(), 0);
     hypre_array<HYPRE_Int> idx_in(idx.data(), idx.size());
-    {   // staged inputs are released after assembly, before VRAM is sampled
+    {   // staged b and x0 are released after assembly; idx stays for GetValues
         hypre_array<double> b_in(bsub.data(), static_cast<std::size_t>(bsub.size()));
         HYPRE_IJVectorSetValues(bij, m, idx_in.get(), b_in.get());
         std::vector<double> zero(m, 0.0);
@@ -2530,6 +2526,10 @@ static BenchResult run_hypre_boomeramg_gpu(
         (HYPRE_PtrToSolverFcn)HYPRE_BoomerAMGSetup,
         amg);
     HYPRE_ParCSRPCGSetup(pcg, parA, parB, parX);
+    // Solution staging is allocated once, in setup; each solve attempt only
+    // gathers into it and copies it back.
+    std::vector<double> x_host(m);
+    hypre_array<double> x_out(x_host.data(), x_host.size());
     r.setup_time = t.elapsed();
 
     t.start();
@@ -2540,10 +2540,9 @@ static BenchResult run_hypre_boomeramg_gpu(
             HYPRE_ParCSRPCGSolve(pcg, parA, parB, parX);
             HYPRE_Int used = 0;
             HYPRE_PCGGetNumIterations(pcg, &used);
-            current.resize(m);
-            hypre_array<double> x_out(current.data(), static_cast<std::size_t>(m));
             HYPRE_IJVectorGetValues(xij, m, idx_in.get(), x_out.get());
             x_out.copy_to_host();
+            current = Eigen::Map<const Eigen::VectorXd>(x_host.data(), m);
             return static_cast<int>(used);
         });
     r.solve_time = t.elapsed();
