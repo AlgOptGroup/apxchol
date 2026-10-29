@@ -1,0 +1,36 @@
+# Changelog
+
+## Unreleased (since v0.2.2)
+
+### Solver and factorization
+- New trace-cycle clique sampler (`--sampler trace_cycle`) on CPU and GPU; GKS stays the default.
+- Faster setup: one AoS graph throughout factorization, incremental degrees, and parallel residual sparsification.
+- Inputs are validated by operator class; nearly-SDDM inputs are repaired by M-matrix lumping.
+- Right-hand sides can be solved in batches on CPU and GPU.
+- `apxchol::solver` owns a reusable factorization for repeated solves and can be saved to and loaded from portable archives.
+
+### GPU backends
+- CUDA setup, factorization and PCG run entirely on the device, with a sync-free dataflow triangular solve and optional fp16 factor storage.
+- New Apple Metal backend for single right-hand-side solves.
+- `solve_options.backend` (`--backend auto|cpu|gpu`) selects a complete CPU or GPU route and never falls back silently.
+
+### API and CLI changes
+- Breaking: runtime environment variables are replaced by explicit solver options.
+- Breaking: the CUDA build no longer uses cuSPARSE or cuBLAS, and the level-set GPU triangular solve is removed.
+- Breaking: forward-star and indexed pooled graph storage and the standalone analysis/setup tools are retired.
+- Breaking: `APXCHOL_INDEX_WIDTH=32|64_EDGES|64` replaces the `APXCHOL_64BIT_*_INDICES` build options.
+- Breaking: bindings no longer accept an adjacency matrix as if it were the operator; form the Laplacian with `apxchol.laplacian(Adj)` or `apxchol_laplacian(Adj)`. The CLI detects adjacency `.mtx` input and builds its Laplacian; `--input-kind` overrides the detection. Previously both solved adjacency input as the operator and failed without a clear error.
+- The v1 API compatibility scope is documented.
+- Python wheels for CPython 3.11+ on Linux and macOS arm64 (GPU wheels select the backend at runtime), standalone CLI archives, and MATLAB/Octave batched solves with save/load.
+
+### Benchmarks
+- The benchmark harness checks every result against the original system's residual and reports setup, solve and memory separately.
+- Published results now come from CSCS Daint; laptop results are archived.
+
+### Fixes
+- Reported residuals are now correct on early solve exits.
+- Fixed SDDM misclassification of exact Laplacians.
+- CPU solves rescale right-hand sides of extreme magnitude; operators whose scale is not representable in FP32 factor storage are still rejected.
+- Parallel factorization handles a shrinking OpenMP team, and parallel vertex selection on the same graph is reproducible at a fixed thread count.
+
+Full history: https://github.com/AlgOptGroup/apxchol/compare/v0.2.2...main
