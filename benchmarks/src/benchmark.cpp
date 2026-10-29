@@ -78,6 +78,7 @@
 
 #include "graphs.h"
 #include "mmio.h"
+#include "discard_streambuf.h"
 
 // The operator class apxchol is defined on: scan_operator / require_operator /
 // the M-matrix lumping ceiling. The benchmark asserts a matrix declared
@@ -182,14 +183,6 @@ static apxchol::factor_options v1_factor_options(const V1Combo& combo,
 // compiling THIS file, a runtime probe of the OpenMP runtime this process
 // actually loaded, or a string the build system passed down at compile time.
 // Nothing is guessed: what cannot be established reads `unknown`.
-
-// RCHOL prints progress to std::cout, from its worker threads in the parallel
-// variant. Silencing it through a shared std::ostringstream raced those writers
-// on one growing buffer and corrupted the heap; this buffer keeps no state.
-struct discard_streambuf : std::streambuf {
-    int_type overflow(int_type c) override { return traits_type::not_eof(c); }
-    std::streamsize xsputn(const char*, std::streamsize n) override { return n; }
-};
 
 static const char* build_compiler() {
 #if defined(__clang__)          // must precede __GNUC__: clang defines both
