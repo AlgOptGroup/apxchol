@@ -582,3 +582,10 @@ target_compile_features(v1_config_tests PRIVATE cxx_std_23)
 target_compile_definitions(v1_config_tests PRIVATE HAVE_APXCHOL_V1)
 target_link_libraries(v1_config_tests PRIVATE bench_input apxchol_v1 ${CMAKE_DL_LIBS})
 add_test(NAME contract_v1_configs COMMAND v1_config_tests)
+
+# RCHOL's stdout silencing must tolerate the parallel variant's worker threads.
+find_package(Threads REQUIRED)
+add_executable(discard_streambuf_tests tests/test_discard_streambuf.cpp)
+target_include_directories(discard_streambuf_tests PRIVATE src)
+target_link_libraries(discard_streambuf_tests PRIVATE Threads::Threads)
+add_test(NAME contract_discard_streambuf COMMAND discard_streambuf_tests)
