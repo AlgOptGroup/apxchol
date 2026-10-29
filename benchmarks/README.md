@@ -127,6 +127,11 @@ comments, Pages or README measurements.
   a lower bound on one solve. Preserve failure, nonconvergence, timeout, unsupported,
   unattempted and missing statuses. Unknown memory is not zero.
 - Pin CPU affinity; record requested/effective threads, placement, source/binary hashes, compiler/runtime, warmups and retained receipts. See [thread placement](#thread-placement) below.
+- `campaign_extract.py STORE --matrices ... --source-commit ...` turns a cell store
+  into a public JSON summary. Its denominator is every listed matrix times every
+  series in the store; missing cells are listed. It keeps each non-complete cell's
+  last error line and process cap, and binds hardware, toolchains, binary and
+  matrix hashes.
 
 ## Thread placement
 
