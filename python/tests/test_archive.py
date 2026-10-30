@@ -21,7 +21,6 @@ def test_numpy_archive_round_trip(tmp_path):
     assert restored.backend == "cpu"
     assert restored.shape == original.shape
     assert restored.factor_nnz == original.factor_nnz
-    assert restored.fill_ratio == original.fill_ratio
     np.testing.assert_array_equal(restored.P, original.P)
     for width in (1, 4, 16):
         check_solve_and_apply(restored, width)
