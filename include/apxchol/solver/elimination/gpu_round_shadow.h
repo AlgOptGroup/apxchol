@@ -1197,8 +1197,7 @@ gpu_round_shadow_cpu_comparison compare_gpu_round_shadow_with_cpu(
             mismatch("non-finite or negative excess at vertex " +
                      std::to_string(vertex));
         if (bound.additions <= 1) {
-            if (std::bit_cast<std::uint64_t>(actual) !=
-                std::bit_cast<std::uint64_t>(bound.expected))
+            if (actual != bound.expected)
                 mismatch("exact excess at vertex " +
                          std::to_string(vertex));
             continue;

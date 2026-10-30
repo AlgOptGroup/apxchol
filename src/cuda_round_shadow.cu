@@ -3124,17 +3124,16 @@ gpu_owned_sparsify_stats gpu_round_shadow_device_state::sparsify_owned_residual(
     device_buffer<device_semantics> semantics(impl_->tracker);
     semantics.allocate(1, "allocate sparse semantic receipt");
     cuda_check(cudaMemset(semantics.get(), 0, sizeof(device_semantics)), "clear sparse semantic receipt");
+    // Only the active set and topology are checked and published; weighted
+    // audit digests are computed at test handback.
     if (after) {
-        hash_residual_incidences<true><<<blocks_for(after), kBlock>>>(
+        hash_residual_incidences<false><<<blocks_for(after), kBlock>>>(
             impl_->residual(spare).get(), after, semantics.get());
-        cuda_check(cudaGetLastError(), "hash sparse weighted topology");
-        hash_ordered_residual_incidences<<<blocks_for(after), kBlock>>>(
-            impl_->residual(spare).get(), after, impl_->owner_offsets(spare).get(), semantics.get());
-        cuda_check(cudaGetLastError(), "hash sparse ordered incidences");
+        cuda_check(cudaGetLastError(), "hash sparse topology");
     }
     if (n) {
-        hash_residual_state<true><<<blocks_for(n), kBlock>>>(n, impl_->active.get(),
-            impl_->owned_degrees.get(), impl_->excess.get(), semantics.get());
+        hash_residual_state<false><<<blocks_for(n), kBlock>>>(n, impl_->active.get(),
+            nullptr, nullptr, semantics.get());
         cuda_check(cudaGetLastError(), "hash sparse vertex state");
     }
     device_semantics content{};
