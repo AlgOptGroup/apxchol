@@ -1268,10 +1268,10 @@ struct solver::impl {
 
     // The only argument checks and panel loop of every solve: the routes
     // trust what reaches them. tol and max_iter are resolved. Returns the
-    // call's wall-clock seconds.
+    // wall-clock seconds since start, taken when the public call began.
     double solve(const_matrix_view B, matrix_view X, const const_matrix_view* X0,
-                 std::span<solve_result> results, double tol, int max_iter) {
-        const auto start = std::chrono::steady_clock::now();
+                 std::span<solve_result> results, double tol, int max_iter,
+                 std::chrono::steady_clock::time_point start) {
         const auto scope = calls.enter();
         const detail::thread_budget threads(num_threads);
         check_matrix_views(B, X, rows(), X0);
@@ -1383,32 +1383,35 @@ solver& solver::operator=(const solver& other) {
 
 solve_result solver::solve(const Eigen::VectorXd& b, double tol, int max_iter,
                            const Eigen::VectorXd* x0) {
+    const auto start = std::chrono::steady_clock::now();
     impl_->resolve(tol, max_iter);
     if (b.size() != rows()) throw std::invalid_argument("solver::solve: RHS length mismatch");
     solve_result result;
     result.x.resize(rows());
     const const_matrix_view initial(x0 ? *x0 : b);
     result.solve_seconds = impl_->solve(b, result.x, x0 ? &initial : nullptr, {&result, 1},
-                                        tol, max_iter);
+                                        tol, max_iter, start);
     return result;
 }
 
 solve_result solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
                            double tol, int max_iter, const Eigen::VectorXd* x0) {
+    const auto start = std::chrono::steady_clock::now();
     impl_->resolve(tol, max_iter);
     solve_result result;
     const const_matrix_view initial(x0 ? *x0 : b);
     result.solve_seconds = impl_->solve(b, x, x0 ? &initial : nullptr, {&result, 1},
-                                        tol, max_iter);
+                                        tol, max_iter, start);
     return result;
 }
 
 batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X, double tol, int max_iter,
                                        const const_matrix_view *X0) {
+    const auto start = std::chrono::steady_clock::now();
     impl_->resolve(tol, max_iter);
     batch_solve_result result;
     result.columns.resize(B.cols());
-    result.solve_seconds = impl_->solve(B, X, X0, result.columns, tol, max_iter);
+    result.solve_seconds = impl_->solve(B, X, X0, result.columns, tol, max_iter, start);
     return result;
 }
 
