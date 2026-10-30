@@ -85,7 +85,9 @@ ctest --test-dir build --output-on-failure
 ./build/apxchol matrix.mtx --rhs rhs.mtx -o solution.mtx
 ```
 
-The CLI also accepts adjacency matrices. `--random-rhs` generates a test RHS;
+The CLI reads the matrix as `A`; `--input-kind adjacency` forms the Laplacian of an
+adjacency matrix. An `--rhs` file with several columns is solved as one batch.
+`--random-rhs` generates a test RHS;
 [`--help`](docs/building.md#command-line-use) lists the available controls.
 
 ## Performance

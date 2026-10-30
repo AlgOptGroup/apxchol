@@ -57,13 +57,14 @@ native build dependencies above.
 
 ```bash
 ./build/apxchol matrix.mtx --rhs rhs.mtx -o solution.mtx
-./build/apxchol matrix.mtx --random-rhs --tol 1e-8
+./build/apxchol graph.mtx --input-kind adjacency --random-rhs --tol 1e-8
 ./build/apxchol --help
 ```
 
 Supply `--rhs` for your actual problem or `--random-rhs` for an experiment.
-The CLI detects adjacency matrices and forms their graph Laplacian;
-`--input-kind` overrides detection. The website's command-line reference is
+An `--rhs` file with `k` columns is solved as one batch, and `-o` writes an
+`n` by `k` solution. The input is read as `A`; pass `--input-kind adjacency`
+to solve the Laplacian of a graph adjacency matrix. The website's command-line reference is
 generated from `--help`, so it lists every option for that revision.
 
 ## Use from CMake

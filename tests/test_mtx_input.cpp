@@ -1,6 +1,6 @@
 // Tests for the CLI's Laplacian-vs-adjacency input interpretation
-// (src/mtx_input.h): the human-facing layer that decides how to READ a .mtx
-// file and prints its decision, with --input-kind to override it.
+// (src/mtx_input.h): the human-facing layer that reads a .mtx file as the
+// operator unless --input-kind says otherwise, and prints how it read it.
 //
 // The LIBRARY-side counterpart -- asserting the operator class rather than
 // guessing at it -- lives in test_operator_class.cpp. Note the split: reading

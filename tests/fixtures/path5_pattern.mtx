@@ -1,7 +1,8 @@
 %%MatrixMarket matrix coordinate pattern symmetric
 % Unweighted path graph 1-2-3-4-5, as SuiteSparse ships graph adjacency
-% matrices: pattern field, no diagonal. The CLI must read this as an
-% ADJACENCY matrix and solve L = D - A, not as an assembled operator.
+% matrices: pattern field, no diagonal. With --input-kind adjacency the CLI
+% solves L = D - A; by default it reads the file as the operator and must
+% reject it with a hint naming --input-kind adjacency.
 5 5 4
 2 1
 3 2

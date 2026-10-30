@@ -11,7 +11,7 @@ struct run_config {
     std::optional<std::string> rhs_path;     // --rhs file
     bool random_rhs = false;                 // --random-rhs (explicit opt-in)
     std::optional<std::string> output_path;  // nullopt → don't write solution
-    input_kind input = input_kind::automatic;  // --input-kind
+    input_kind input = input_kind::laplacian;  // --input-kind
 
     solve_options solve_opts;
 };

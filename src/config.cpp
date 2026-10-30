@@ -49,9 +49,9 @@ run_config parse_args(int argc, char* argv[]) {
     std::string rhs_str, output_str;
 
     CLI::App app{"Solve a Laplacian or SDDM system Ax = b via approximate Cholesky + PCG. "
-                 "The input .mtx may be an assembled Laplacian/SDDM operator or a graph "
-                 "adjacency/pattern matrix; which one is auto-detected and reported (see "
-                 "--input-kind), and Laplacian vs SDDM is auto-detected within the solver"};
+                 "The input .mtx is the operator A; for a graph adjacency/pattern matrix, "
+                 "pass --input-kind adjacency to solve its Laplacian L = D - A. "
+                 "Laplacian vs SDDM is detected within the solver"};
 
     // ── version ──
     app.add_flag_callback("-V,--version", []() {
@@ -74,7 +74,8 @@ run_config parse_args(int argc, char* argv[]) {
     // the excludes keep the "not both" error message specific.
     auto* rhs_group = app.add_option_group("Right-hand side (exactly one required)");
     auto* rhs_opt = rhs_group->add_option("--rhs", rhs_str,
-                   "RHS vector in MatrixMarket format")
+                   "RHS in dense MatrixMarket format: an n-vector, or an n x k matrix "
+                   "whose k columns are solved as one batch")
         ->check(CLI::ExistingFile);
     auto* rand_flag = rhs_group->add_flag("--random-rhs", cfg.random_rhs,
                  "Generate a random RHS, compatible with Laplacian components (uses --seed)");
@@ -84,17 +85,17 @@ run_config parse_args(int argc, char* argv[]) {
 
     // ── how to read the input matrix ──
     app.add_option("--input-kind", cfg.input,
-                   "How to read the input file: 'laplacian' = an already-assembled "
-                   "Laplacian/SDDM operator, solved as given; 'adjacency' = a graph "
-                   "adjacency/pattern matrix, from which L = D - A is assembled "
-                   "(edge weight |value|, self-loops dropped); 'auto' = decide from "
-                   "the off-diagonal signs and the diagonal, and refuse if ambiguous")
-        ->default_str("auto")
+                   "How to read the input file: 'laplacian' (default) = the operator A, "
+                   "an assembled Laplacian/SDDM matrix solved as given; 'adjacency' = a "
+                   "graph adjacency/pattern matrix, from which L = D - A is assembled "
+                   "(edge weight |value|, self-loops dropped); 'auto' = guess from the "
+                   "off-diagonal signs and the diagonal, and refuse if ambiguous")
+        ->default_str("laplacian")
         ->transform(CLI::IsMember(input_kind_map) & CLI::Transformer(input_kind_map));
 
     // ── output ──
     app.add_option("-o,--output", output_str,
-                   "Write solution vector to MatrixMarket file");
+                   "Write the solution to a dense MatrixMarket file (n x k for an n x k RHS)");
 
     app.add_option("--sampler", cfg.solve_opts.factor_opts.sampler,
                    "Clique sampler: gks or trace_cycle")

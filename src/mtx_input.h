@@ -9,16 +9,12 @@
 ///     off-diagonals) — the operator is L = D - A, which must be assembled
 ///     first.
 ///
-/// The solver validates assembled operators. The CLI detects adjacency input
-/// and assembles L = D - A before passing it to the operator contract.
-///
-/// This module is the CLI's HUMAN-FACING interpretation layer, and nothing
-/// else compiles it. It may guess, because it prints the guess and takes
-/// `--input-kind` to override it. The in-memory bindings (python/, octave/)
-/// deliberately do NOT share it: a library caller does not reliably see what
-/// we print, so the library asserts the operator class instead of guessing at
-/// it -- see include/apxchol/operator_class.h, which every surface (this one
-/// included, one layer down) goes through.
+/// The CLI reads the file as the operator unless `--input-kind adjacency`
+/// asks it to assemble L = D - A first, matching the bindings. `--input-kind
+/// auto` is an explicit opt-in to guessing; it prints the guess. The solver
+/// validates the resulting operator -- see include/apxchol/operator_class.h,
+/// whose error names `--input-kind adjacency` when the file looks like an
+/// adjacency matrix.
 ///
 /// Everything here depends on Eigen only, so the unit tests can link it.
 
@@ -30,8 +26,8 @@ namespace apxchol {
 
 /// How the CLI should interpret the matrix it just read.
 enum class input_kind {
-    automatic,  ///< decide from the matrix itself (the default)
-    laplacian,  ///< already an assembled Laplacian / SDDM operator
+    automatic,  ///< decide from the matrix itself (explicit opt-in)
+    laplacian,  ///< already an assembled Laplacian / SDDM operator (the default)
     adjacency,  ///< a graph adjacency / pattern matrix; assemble L = D - A
 };
 

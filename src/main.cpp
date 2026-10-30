@@ -9,6 +9,50 @@
 
 using namespace apxchol;
 
+namespace {
+
+template<class Dense>
+void write_solution(const std::string& path, const Dense& x) {
+    std::ofstream f(path, std::ios_base::binary);
+    fast_matrix_market::write_matrix_market_eigen_dense(f, x);
+    f.close();
+    if (!f)
+        throw std::runtime_error("cannot write solution to " + path);
+    spdlog::info("solution written to {}", path);
+}
+
+// An n x k RHS file: one reusable solver, one batched solve over its columns.
+int solve_batch(const Eigen::SparseMatrix<double>& L, const Eigen::MatrixXd& B,
+                const run_config& cfg, input_kind kind, const input_scan& scan) {
+    checkpoint setup;
+    const solver owner(L, cfg.solve_opts, cfg.solve_opts.collect_timings ? &setup : nullptr);
+    Eigen::MatrixXd X(B.rows(), B.cols());
+    const auto res = owner.solve(B, X);
+
+    spdlog::info("backend:    {}", owner.backend() == solve_backend::gpu ? "gpu" : "cpu");
+    spdlog::info("columns:    {}", B.cols());
+    Eigen::Index failed = 0;
+    for (std::size_t c = 0; c < res.columns.size(); ++c) {
+        const auto& col = res.columns[c];
+        spdlog::info("column {}: iterations {}, residual {}{}", c, col.iterations,
+                     col.residual, col.converged ? "" : " (did not converge)");
+        failed += !col.converged;
+    }
+    if (cfg.solve_opts.collect_timings)
+        spdlog::info("timings:\n{}\n{}", setup.report(), res.timings.report());
+
+    if (cfg.output_path)
+        write_solution(*cfg.output_path, X);
+
+    if (failed)
+        spdlog::error("{} of {} columns did not reach tol {} within {} iterations.{}",
+                      failed, B.cols(), cfg.solve_opts.tol, cfg.solve_opts.max_iter,
+                      diagnose_failure(kind, scan));
+    return failed ? 1 : 0;
+}
+
+} // namespace
+
 // Exit codes: 0 = converged to --tol, 1 = did not converge, 2 = input/output
 // error. Argument-parse failures use CLI11's own codes (see parse_args).
 int main(int argc, char* argv[]) try {
@@ -43,12 +87,18 @@ int main(int argc, char* argv[]) try {
     Eigen::VectorXd b;
     if (cfg.rhs_path) {
         spdlog::debug("loading RHS from {}", *cfg.rhs_path);
-        std::ifstream f(*cfg.rhs_path);
-        fast_matrix_market::read_matrix_market_eigen_dense(f, b);
-        if (b.size() != L.rows()) {
-            spdlog::error("RHS length {} does not match n = {}", b.size(), L.rows());
+        Eigen::MatrixXd B;
+        {
+            std::ifstream f(*cfg.rhs_path);
+            fast_matrix_market::read_matrix_market_eigen_dense(f, B);
+        }
+        if (B.rows() != L.rows()) {
+            spdlog::error("RHS length {} does not match n = {}", B.rows(), L.rows());
             return 2;
         }
+        if (B.cols() > 1)
+            return solve_batch(L, B, cfg, kind, scan);
+        b = B.col(0);
     } else {
         // parse_args requires exactly one of --rhs / --random-rhs.
         spdlog::debug("generating random test RHS");
@@ -73,14 +123,8 @@ int main(int argc, char* argv[]) try {
     if (cfg.solve_opts.collect_timings)
         spdlog::info("timings:\n{}", res.timings.report());
 
-    if (cfg.output_path) {
-        std::ofstream f(*cfg.output_path, std::ios_base::binary);
-        fast_matrix_market::write_matrix_market_eigen_dense(f, res.x);
-        f.close();
-        if (!f)
-            throw std::runtime_error("cannot write solution to " + *cfg.output_path);
-        spdlog::info("solution written to {}", *cfg.output_path);
-    }
+    if (cfg.output_path)
+        write_solution(*cfg.output_path, res.x);
 
     if (!res.converged)
         spdlog::error("did not reach tol {} in {} iterations (residual {}).{}",

@@ -78,7 +78,7 @@ input_kind resolve_input_kind(input_kind requested, const input_scan& s,
 
     // ── Explicit request: honour it, but say when it looks wrong ──
     if (requested == input_kind::laplacian) {
-        reason = "--input-kind laplacian";
+        reason = "--input-kind laplacian, the default";
         if (s.diag_pos == 0 && s.n > 0)
             reason += "; WARNING none of the " + std::to_string(s.n) +
                       " rows carries a positive diagonal entry, which a "

@@ -18,9 +18,10 @@ Python accepts SciPy sparse matrices and arrays. It converts them to CSC
 entries. Supply the full symmetric matrix, not just one triangle. Format conversion
 does not invent missing symmetric entries.
 
-The CLI can detect adjacency input and construct its Laplacian. Use
-`--input-kind` to choose explicitly. Library bindings treat the input as `A`
-and do not guess whether it is an adjacency matrix.
+Every interface treats the input as `A` and never guesses. On the CLI,
+`--input-kind adjacency` forms the Laplacian of an adjacency file. Without it,
+an adjacency file fails operator validation with an error that suggests that
+option.
 
 ## Choosing CPU or GPU
 
