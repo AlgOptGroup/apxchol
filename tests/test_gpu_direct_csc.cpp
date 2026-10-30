@@ -326,11 +326,9 @@ TEST(GpuDirectCsc, InvalidNumericalInputsFailWithoutPublishingAnInitialSnapshot)
         const double reg = fault == 3 ? std::numeric_limits<double>::infinity() : 0.0;
         EXPECT_THROW((void)apxchol::detail::gpu_initial_owned_csc_for_test(A, reg), std::invalid_argument);
     }
-#ifdef APXCHOL_POOL_FP32
     const double overflow = 2.0 * static_cast<double>(std::numeric_limits<float>::max());
     auto A = make_matrix(2, {{0,1,overflow}});
     EXPECT_THROW((void)apxchol::detail::gpu_initial_owned_csc_for_test(A), std::invalid_argument);
-#endif
 #endif
 }
 

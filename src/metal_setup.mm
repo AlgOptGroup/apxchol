@@ -103,8 +103,8 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
     @autoreleasepool {
         validate_factor_options(options.factor_opts);
         if (!metal_setup_options_supported(options.factor_opts))
-            throw std::invalid_argument("Metal device setup currently requires FP32 graph storage "
-                                        "and default block-greedy GKS options");
+            throw std::invalid_argument("Metal device setup currently requires default "
+                                        "block-greedy GKS options");
         auto& cached = pipelines_for(device);
         if (cp) {
             cp->descend("setup");

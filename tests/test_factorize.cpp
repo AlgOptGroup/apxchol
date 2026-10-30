@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "grid_laplacian.h"
+#include "test_rhs.h"
 #include "scoped_omp_threads.h"
 #include <array>
 #include <bit>
@@ -359,61 +360,6 @@ void expect_same_factor(const apxchol::factorization& a,
         << what << ": factor values differ";
 }
 
-#if !defined(APXCHOL_POOL_FP32)
-// Parallel FP64 graph updates may change later sampling, including structure.
-// Check the actual rebuilt factor and solve the original system with that
-// factor; comparing two independent rebuilds is not a numerical accuracy test.
-// Exportable factorization uses these host updates in CUDA builds too; the
-// adopting solver installs this actual factor through the normal solve path.
-void expect_valid_rebuilt_laplacian_factor(
-        const Eigen::SparseMatrix<double>& A,
-        const apxchol::factorization& F) {
-    const auto n = static_cast<apxchol::node_index>(A.rows());
-    ASSERT_GT(n, 1u);
-    ASSERT_FALSE(F.sddm);
-    ASSERT_EQ(F.L.rows(), n);
-    ASSERT_EQ(F.perm.size(), n);
-    ASSERT_EQ(F.L.outer_.size(), static_cast<std::size_t>(n) + 1);
-    ASSERT_EQ(F.L.outer_.front(), 0u);
-    ASSERT_EQ(F.L.inner_.size(), F.L.nonZeros());
-    ASSERT_EQ(F.L.vals_.size(), F.L.nonZeros());
-    std::vector<bool> seen(n, false);
-    for (const auto v : F.perm) {
-        ASSERT_LT(v, n);
-        ASSERT_FALSE(seen[v]);
-        seen[v] = true;
-    }
-    for (apxchol::node_index col = 0; col < n; ++col) {
-        const auto begin = F.L.outer_[col], end = F.L.outer_[col + 1];
-        ASSERT_LE(begin, end);
-        ASSERT_LE(end, F.L.nonZeros());
-        if (col + 1 < n) {
-            ASSERT_LT(begin, end);
-            EXPECT_EQ(F.L.inner_[begin], col);
-            EXPECT_GT(F.L.vals_[begin], 0.0f);
-        }
-        for (auto p = begin; p < end; ++p) {
-            EXPECT_GE(F.L.inner_[p], col);
-            EXPECT_LT(F.L.inner_[p], n);
-            EXPECT_TRUE(std::isfinite(F.L.vals_[p]));
-        }
-    }
-    if (::testing::Test::HasFailure()) return;
-    const auto b = apxchol::generate_test_rhs(n);
-    apxchol::solver solver(A, F, {.tol = 1e-8, .max_iter = 500});
-    const auto first = solver.solve(b);
-    const auto repeated = solver.solve(b);
-    ASSERT_TRUE(first.x.allFinite());
-    EXPECT_LE(first.iterations, 500);
-    EXPECT_LT(first.residual, 1e-8);
-    EXPECT_LT((A * first.x - b).norm() / b.norm(), 1e-8);
-    // Same owned factor and RHS retain the exact solve-repeatability contract.
-    EXPECT_EQ(first.iterations, repeated.iterations);
-    EXPECT_EQ(first.residual, repeated.residual);
-    EXPECT_TRUE((first.x.array() == repeated.x.array()).all());
-}
-#endif
-
 template<class Partitioner>
 void expect_same_graph_selection(
         const apxchol::graph& snapshot,
@@ -727,13 +673,8 @@ TEST(VecPoolAos, ParallelRebuiltFactorsPreserveSolveContract) {
         L, opts);
     const auto repeated = apxchol::factorize(
         L, opts);
-#if !defined(APXCHOL_POOL_FP32)
-    ASSERT_NO_FATAL_FAILURE(expect_valid_rebuilt_laplacian_factor(L, baseline));
-    ASSERT_NO_FATAL_FAILURE(expect_valid_rebuilt_laplacian_factor(L, repeated));
-#else
     expect_same_factor(baseline, repeated,
                        "AoS preassigned endpoint offsets at T=16");
-#endif
     // Exact production slot/scatter coverage lives in
     // GpuRoundShadowReference.ParallelProductionApplyMatchesTheCanonicalReference.
 }
@@ -1022,17 +963,9 @@ TEST(FactorizeDeterminism, ParallelRebuiltFactorsPreserveSolveContract) {
         opts.is_select = sel;
         const auto ref = apxchol::factorize(L, opts);
         ASSERT_GT(ref.L.nonZeros(), 70000) << sel;   // the parallel path really ran
-#if !defined(APXCHOL_POOL_FP32)
-        ASSERT_NO_FATAL_FAILURE(expect_valid_rebuilt_laplacian_factor(L, ref));
-#endif
         for (int rep = 1; rep <= 3; ++rep) {
             const auto F = apxchol::factorize(L, opts);
-#if !defined(APXCHOL_POOL_FP32)
-            SCOPED_TRACE(std::string(sel) + " rep " + std::to_string(rep));
-            ASSERT_NO_FATAL_FAILURE(expect_valid_rebuilt_laplacian_factor(L, F));
-#else
             expect_same_factor(ref, F, std::string(sel) + " rep " + std::to_string(rep));
-#endif
             if (::testing::Test::HasFatalFailure()) return;
         }
     }
@@ -1105,49 +1038,49 @@ protected:
 
 TEST_F(SolveTest, PathGraphConverges) {
     auto L = path_laplacian(50);
-    auto b = apxchol::generate_test_rhs(50);
+    auto b = apxchol::test::random_rhs(50);
     auto res = this->solve_with(L, b);
     EXPECT_LT(res.residual, 1e-5);
 }
 
 TEST_F(SolveTest, GridGraphConverges) {
     auto L = grid_laplacian(10, 10);
-    auto b = apxchol::generate_test_rhs(100);
+    auto b = apxchol::test::random_rhs(100);
     auto res = this->solve_with(L, b);
     EXPECT_LT(res.residual, 1e-5);
 }
 
 TEST_F(SolveTest, StarGraphConverges) {
     auto L = star_laplacian(30);
-    auto b = apxchol::generate_test_rhs(30);
+    auto b = apxchol::test::random_rhs(30);
     auto res = this->solve_with(L, b);
     EXPECT_LT(res.residual, 1e-5);
 }
 
 TEST_F(SolveTest, CycleGraphConverges) {
     auto L = cycle_laplacian(50);
-    auto b = apxchol::generate_test_rhs(50);
+    auto b = apxchol::test::random_rhs(50);
     auto res = this->solve_with(L, b);
     EXPECT_LT(res.residual, 1e-5);
 }
 
 TEST_F(SolveTest, WeightedGridConverges) {
     auto L = weighted_grid_laplacian(10, 10, 100.0, 1.0);
-    auto b = apxchol::generate_test_rhs(100);
+    auto b = apxchol::test::random_rhs(100);
     auto res = this->solve_with(L, b, 1e-6, 1000);
     EXPECT_LT(res.residual, 1e-4);
 }
 
 TEST_F(SolveTest, LargerGridConverges) {
     auto L = grid_laplacian(20, 20);
-    auto b = apxchol::generate_test_rhs(400);
+    auto b = apxchol::test::random_rhs(400);
     auto res = this->solve_with(L, b, 1e-6, 1000);
     EXPECT_LT(res.residual, 1e-5);
 }
 
 TEST_F(SolveTest, SolutionSatisfiesSystem) {
     auto L = grid_laplacian(10, 10);
-    auto b = apxchol::generate_test_rhs(100);
+    auto b = apxchol::test::random_rhs(100);
     auto res = this->solve_with(L, b, 1e-8);
 
     Eigen::VectorXd Lx = L * res.x;
@@ -1160,7 +1093,7 @@ TEST_F(SolveTest, SolutionSatisfiesSystem) {
 
 TEST_F(SolveTest, DeterministicWithSameSeed) {
     auto L = grid_laplacian(8, 8);
-    auto b = apxchol::generate_test_rhs(64);
+    auto b = apxchol::test::random_rhs(64);
 
     auto r1 = this->solve_with(L, b);
     auto r2 = this->solve_with(L, b);
@@ -1172,7 +1105,7 @@ TEST_F(SolveTest, DeterministicWithSameSeed) {
 
 TEST(Solve, TimingsReported) {
     auto L = grid_laplacian(10, 10);
-    auto b = apxchol::generate_test_rhs(100);
+    auto b = apxchol::test::random_rhs(100);
     auto res = apxchol::solve(L, b);
     EXPECT_GT(res.timings.total("setup"), 0.0);
     // CPU triangular solves are timed under pcg.solve; GPU-resident PCG
@@ -1293,7 +1226,7 @@ TEST(Grounding, PublicApplyIsIndependentOfCallOrderAndPanelWidth) {
 
 TEST(PcgFusion, RepeatedSolvesBitIdenticalLaplacian) {
     auto L = grid_laplacian(320, 320);
-    auto b = apxchol::generate_test_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows());
     expect_repeated_solves_bit_identical(L, b, /*laplacian=*/true);
 }
 
@@ -1312,7 +1245,7 @@ TEST(PcgFusion, RepeatedSolvesBitIdenticalSDDM) {
 // into the answer.
 TEST(Grounding, LaplacianSolutionIsMinNorm) {
     auto L = grid_laplacian(60, 60);
-    auto b = apxchol::generate_test_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows());
     apxchol::solve_options opts;
     opts.tol = 1e-8; opts.max_iter = 500; opts.factor_opts.seed = 42;
     opts.backend = apxchol::solve_backend::cpu;
@@ -1339,7 +1272,7 @@ TEST(Grounding, LaplacianSolutionIsMinNorm) {
 }
 
 // Build a weighted grid Laplacian DIRECTLY from fp64 triplets. Deliberately
-// bypasses weighted_grid_laplacian/graph: under APXCHOL_POOL_FP32 the graph
+// bypasses weighted_grid_laplacian/graph: the graph
 // edge pool stores weights in fp32, so routing the weights through graph
 // would silently quantize them and mask the regression tested below.
 static Eigen::SparseMatrix<double> fp64_weighted_grid_laplacian(
@@ -1367,7 +1300,7 @@ static Eigen::SparseMatrix<double> fp64_weighted_grid_laplacian(
 
 // Regression (fp32-quantized wdeg vs exact diag): make_graph used to compute
 // the excess test's weighted degree by re-walking the stored edge weights,
-// which are fp32-quantized under APXCHOL_POOL_FP32. Exact fp64 diag minus a
+// which are fp32-quantized. Exact fp64 diag minus a
 // quantized wdeg left phantom excess ≈1e-8·diag — above the 1e-12 gate — so a
 // pure Laplacian whose weights are not fp32-representable (0.01, 2/101) was
 // misclassified as SDDM. The excess must come from the exact fp64 input.
@@ -1420,7 +1353,7 @@ static const StrategyCombo all_combos[] = {
 TEST_P(StrategyConvergenceTest, GridConverges) {
     auto [is, name] = GetParam();
     auto L = grid_laplacian(15, 15);
-    auto b = apxchol::generate_test_rhs(225);
+    auto b = apxchol::test::random_rhs(225);
     auto res = apxchol::solve(L, b,
         {.tol = 1e-6, .max_iter = 1000,
          .factor_opts = {.seed = 42, .is_select = is}});
@@ -1495,7 +1428,7 @@ TEST(FactorQualityTest, SddmGrid20Tree) {
 // ─── Exact-clique-at-low-degree option ──────────────────────────────────────
 TEST(ExactCliqueOption, Grid40_FewerItersThanSampled) {
     auto L = grid_laplacian(40, 40);
-    auto b = apxchol::generate_test_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows());
     apxchol::factor_options opts;
     opts.seed = 42;
     opts.is_select = "block_greedy";
@@ -1607,7 +1540,7 @@ TEST(ResidualSparsifyGate, DuplicateHeavyIndexedGraphConvergesWithEitherSetting)
             for (int duplicate = 0; duplicate < 4; ++duplicate)
                 graph.add_edge(u, v, 0.25 * (1 + (u + v + duplicate) % 7));
     const auto L = apxchol::laplacian(graph);
-    const auto b = apxchol::generate_test_rhs(n);
+    const auto b = apxchol::test::random_rhs(n);
     apxchol::factor_options options;
     options.parallel_residual_threshold = 5;
     options.min_is_fraction = 0.5;
@@ -1681,7 +1614,7 @@ TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
     constexpr int n = 60;
     constexpr size_t thresh = 5;
     const auto L = clique_laplacian(n);
-    const auto b = apxchol::generate_test_rhs(L.rows());
+    const auto b = apxchol::test::random_rhs(L.rows());
 
     // Several seeds: the loop must reach the threshold under every one of them.
     // On a clique BK's sample is empty with probability (1-p)^n ~ 3% per round

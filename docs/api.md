@@ -17,8 +17,6 @@ The [partitioner and eliminator extension contracts](extending.md), and the
 graph/context operations they require, are **experimental**: they may change in
 minor 1.x releases, and each change is noted in the [changelog](../CHANGELOG.md).
 
-`generate_test_rhs` is a test and diagnostic helper outside this promise.
-
 Numerical results and performance may change within the documented
 [precision and convergence contracts](precision.md). This compatibility
 policy begins with v1.0; it does not apply to earlier prereleases.

@@ -4,13 +4,38 @@
 #include "mtx_input.h"
 #include <fast_matrix_market/app/Eigen.hpp>
 #include <spdlog/spdlog.h>
-#include <cstdlib>
+#include <cmath>
+#include <cstdint>
 #include <fstream>
+#include <random>
 #include <stdexcept>
 
 using namespace apxchol;
 
 namespace {
+
+// Zero-mean, unit-norm RHS that is the same on every platform for a given seed:
+// mt19937_64 output is fully specified, and the sums use explicit fma in order.
+Eigen::VectorXd random_rhs(Eigen::Index n, std::uint64_t seed) {
+    std::mt19937_64 rng(seed);
+    Eigen::VectorXd b(n);
+    double sum = 0.0;
+    for (Eigen::Index i = 0; i < n; ++i) {
+        b[i] = static_cast<double>(rng() >> 11) * 0x1p-52 - 1.0;  // uniform in [-1, 1)
+        sum += b[i];
+    }
+    const double mean = n > 0 ? sum / static_cast<double>(n) : 0.0;
+    double squares = 0.0;
+    for (Eigen::Index i = 0; i < n; ++i) {
+        b[i] -= mean;
+        squares = std::fma(b[i], b[i], squares);
+    }
+    if (squares > 0.0) {
+        const double norm = std::sqrt(squares);
+        for (Eigen::Index i = 0; i < n; ++i) b[i] /= norm;
+    }
+    return b;
+}
 
 template<class Dense>
 void write_solution(const std::string& path, const Dense& x) {
@@ -105,8 +130,7 @@ int main(int argc, char* argv[]) try {
     } else {
         // parse_args requires exactly one of --rhs / --random-rhs.
         spdlog::debug("generating random test RHS");
-        std::srand(cfg.solve_opts.factor_opts.seed);  // Eigen::Random uses rand()
-        b = generate_test_rhs(L.rows());
+        b = random_rhs(L.rows(), cfg.solve_opts.factor_opts.seed);
         if (graph ||
             (scan.excess_rows == 0 && scan.deficient_rows == 0)) {
             const Eigen::Index components =

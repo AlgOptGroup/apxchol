@@ -5,7 +5,9 @@
 
 int main() {
     auto L = grid_laplacian(100);                       // 10,000 × 10,000
-    Eigen::VectorXd b = apxchol::generate_test_rhs(L.rows());
+    Eigen::VectorXd b = Eigen::VectorXd::Zero(L.rows());   // unit source and sink
+    b(0) = 1.0;
+    b(L.rows() - 1) = -1.0;
 
     // One-shot: factorize + PCG in one call.
     auto res = apxchol::solve(L, b, {.tol = 1e-8, .max_iter = 500});

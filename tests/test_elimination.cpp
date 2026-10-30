@@ -470,9 +470,7 @@ TEST(CycleSampler, RejectsNonpositiveAndNonfinitePoolEdges) {
         EXPECT_THROW(detail::require_pool_edge(value),std::domain_error);
     EXPECT_NO_THROW(detail::require_pool_edge(std::numeric_limits<detail::pool_value_t>::denorm_min()));
     EXPECT_NO_THROW(detail::require_pool_edge(std::numeric_limits<detail::pool_value_t>::max()));
-    if constexpr (sizeof(detail::pool_value_t)<sizeof(double)) {
-        EXPECT_THROW(detail::require_pool_edge(double(std::numeric_limits<detail::pool_value_t>::max())*2),std::domain_error);
-    }
+    EXPECT_THROW(detail::require_pool_edge(double(std::numeric_limits<detail::pool_value_t>::max())*2),std::domain_error);
 }
 
 TEST(CycleSampler, G3CircuitRepresentableSubnormalParent) {
@@ -491,9 +489,7 @@ TEST(CycleSampler, G3CircuitRepresentableSubnormalParent) {
     auto parent=std::find_if(edges.begin(),edges.end(),[](const auto& edge){return edge.u==639860;});
     ASSERT_NE(parent,edges.end());
     EXPECT_GT(static_cast<detail::pool_value_t>(parent->w),0);
-    if constexpr(sizeof(detail::pool_value_t)==4) {
-        EXPECT_EQ(std::fpclassify(static_cast<detail::pool_value_t>(parent->w)),FP_SUBNORMAL);
-    }
+    EXPECT_EQ(std::fpclassify(static_cast<detail::pool_value_t>(parent->w)),FP_SUBNORMAL);
 }
 
 TEST(CycleSampler, G3CircuitZeroRoundingUsesOriginalGksSeed) {
@@ -502,23 +498,17 @@ TEST(CycleSampler, G3CircuitZeroRoundingUsesOriginalGksSeed) {
         {642504,3.755542722575982e-13},{641515,1.8731658769788402e-10}};
     constexpr double D=21959.66929534227;
     detail::trace_cycle_plan plan;plan.prepare(n);ASSERT_EQ(plan.cut,2u);
-    if constexpr(sizeof(detail::pool_value_t)==4) {
-        EXPECT_EQ(static_cast<detail::pool_value_t>(plan.parent_weight(n,D,0,1)),0);
-        EXPECT_EQ(static_cast<detail::pool_value_t>(plan.parent_weight(n,D,0,4)),0);
-        for(std::uint64_t seed : {5420014876489129564ULL,0ULL,1ULL,42ULL}) {
-            auto copy=n;std::vector<deferred_edge> expected,got;
-            tree_elimination{}.sample_clique(copy,D,seed,edge_emitter(expected));
-            tree_elimination{.sampler=clique_sampler::trace_cycle}.sample_clique(n,D,seed,edge_emitter(got));
-            ASSERT_EQ(got.size(),expected.size());
-            for(std::size_t i=0;i<got.size();++i) {
-                EXPECT_EQ(got[i].u,expected[i].u);EXPECT_EQ(got[i].v,expected[i].v);
-                EXPECT_DOUBLE_EQ(got[i].w,expected[i].w);
-            }
-            EXPECT_EQ(static_cast<detail::pool_value_t>(got.front().w),0);
+    EXPECT_EQ(static_cast<detail::pool_value_t>(plan.parent_weight(n,D,0,1)),0);
+    EXPECT_EQ(static_cast<detail::pool_value_t>(plan.parent_weight(n,D,0,4)),0);
+    for(std::uint64_t seed : {5420014876489129564ULL,0ULL,1ULL,42ULL}) {
+        auto copy=n;std::vector<deferred_edge> expected,got;
+        tree_elimination{}.sample_clique(copy,D,seed,edge_emitter(expected));
+        tree_elimination{.sampler=clique_sampler::trace_cycle}.sample_clique(n,D,seed,edge_emitter(got));
+        ASSERT_EQ(got.size(),expected.size());
+        for(std::size_t i=0;i<got.size();++i) {
+            EXPECT_EQ(got[i].u,expected[i].u);EXPECT_EQ(got[i].v,expected[i].v);
+            EXPECT_DOUBLE_EQ(got[i].w,expected[i].w);
         }
-    } else {
-        std::vector<deferred_edge> got;
-        ASSERT_NO_THROW((tree_elimination{.sampler=clique_sampler::trace_cycle}.sample_clique(n,D,42,edge_emitter(got))));
-        EXPECT_EQ(got.size(),5u);
+        EXPECT_EQ(static_cast<detail::pool_value_t>(got.front().w),0);
     }
 }

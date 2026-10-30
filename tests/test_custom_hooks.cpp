@@ -6,6 +6,7 @@
 #include "apxchol/solver/sptrsv/omp.h"
 #include <gtest/gtest.h>
 #include "grid_laplacian.h"
+#include "test_rhs.h"
 #include <algorithm>
 #include <limits>
 #include <span>
@@ -69,7 +70,7 @@ const apxchol::solve_options on_cpu{.backend = apxchol::solve_backend::cpu};
 
 TEST(CustomEliminator, ExactCliqueConverges) {
     auto L = grid_laplacian(20, 20);
-    auto b = apxchol::generate_test_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows());
 
     // Matrix-level convenience overload (graph built internally).
     auto F = apxchol::factorize(L, exact_clique_eliminator{});
@@ -82,7 +83,7 @@ TEST(CustomEliminator, ExactCliqueConverges) {
 
 TEST(CustomEliminator, LambdaViaAsEliminator) {
     auto L = grid_laplacian(15, 15);
-    auto b = apxchol::generate_test_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows());
 
     // Same exact-clique rule, expressed as a lambda.
     auto F = apxchol::factorize(L, apxchol::as_eliminator(
@@ -105,7 +106,7 @@ TEST(CustomEliminator, ExactCliqueFactorIsExact) {
     // With the exact clique rule the factorization is exact Cholesky:
     // P^T L L^T P == A up to roundoff (no sampling at all).
     auto A = grid_laplacian(8, 8);
-    auto b = apxchol::generate_test_rhs(A.rows());
+    auto b = apxchol::test::random_rhs(A.rows());
     auto solve_once = [&](apxchol::factor_storage_type storage) {
         auto F = apxchol::factorize(A, exact_clique_eliminator{});
         apxchol::solve_options options;
@@ -127,7 +128,7 @@ TEST(CustomEliminator, ExactCliqueFactorIsExact) {
 TEST(CustomPartitioner, StatefulInstanceConverges) {
     const int k = 20;
     auto L = grid_laplacian(k, k);
-    auto b = apxchol::generate_test_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows());
 
     priority_partitioner part;
     part.priority.resize(size_t(k) * k);
@@ -146,7 +147,7 @@ TEST(CustomPartitioner, StatefulInstanceConverges) {
 
 TEST(CustomPartitioner, LambdaViaAsPartitioner) {
     auto L = grid_laplacian(15, 15);
-    auto b = apxchol::generate_test_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows());
 
     // Trivial-but-valid rule: greedily select an independent set in the
     // natural active order (the selection answers membership queries).
@@ -171,7 +172,7 @@ TEST(CustomPartitioner, LambdaViaAsPartitioner) {
 
 TEST(SetFactor, ExternalFactorizationInPreconditioner) {
     auto L = grid_laplacian(15, 15);
-    auto b = apxchol::generate_test_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows());
 
     auto F = apxchol::factorize(L);
 
@@ -198,7 +199,7 @@ TEST(KeepFactor, ValuesSurviveWhenRequested) {
 
 TEST(InitialGuess, ExactX0ConvergesImmediately) {
     auto L = grid_laplacian(15, 15);
-    auto b = apxchol::generate_test_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows());
 
     apxchol::solver slv(L, on_cpu);
     auto ref = slv.solve(b, 1e-10, 1000);
@@ -215,7 +216,7 @@ TEST(InitialGuess, ExactX0ConvergesImmediately) {
 
 TEST(OutputMemory, SolveIntoCallerBuffer) {
     auto L = grid_laplacian(15, 15);
-    auto b = apxchol::generate_test_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows());
     apxchol::solver slv(L, on_cpu);
 
     auto ref = slv.solve(b);
@@ -231,7 +232,7 @@ TEST(OutputMemory, SolveIntoCallerBuffer) {
 
 TEST(SolveHonesty, ZeroIterationSolveDoesNotClaimConvergence) {
     auto L = grid_laplacian(10, 10);
-    auto b = apxchol::generate_test_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows());
     apxchol::solver slv(L, on_cpu);
 
     // max_iter = 0: no PCG update ran, so the reported relative residual must

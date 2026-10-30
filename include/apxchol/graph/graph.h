@@ -26,9 +26,9 @@ namespace detail {
 struct residual_coalescer;
 }
 
-// Residual-pool edge weight storage type. fp32 under -DAPXCHOL_POOL_FP32 (ON by
-// default; pass =OFF for fp64). The residual graph is a MULTIGRAPH: adjacency writes
-// APPEND new edges and weights are never re-summed in place (the per-vertex
+// Residual-pool edge weights are stored in fp32. The residual graph is a
+// MULTIGRAPH: adjacency writes APPEND new edges and weights are never
+// re-summed in place (the per-vertex
 // dedup/weighted-degree aggregation is done transiently in fp64 at read), so each
 // stored weight is a TERMINAL write -- fp32 is safe (verified: PCG iters/residual
 // unchanged across IPM incl. high-DR, social, grid). fp32 halves the 16 B edge
@@ -377,12 +377,9 @@ private:
         std::iota(order.begin(), order.end(), std::size_t{0});
         std::vector<std::size_t> scratch(order.size());
         auto weight_key = [&](std::size_t index) -> std::uint64_t {
-            if constexpr (sizeof(detail::pool_value_t) == 4)
-                return (~static_cast<std::uint64_t>(
-                    std::bit_cast<std::uint32_t>(static_cast<float>(
-                        items[index].weight)))) & 0xffffffffULL;
-            else
-                return ~std::bit_cast<std::uint64_t>(items[index].weight);
+            return (~static_cast<std::uint64_t>(
+                std::bit_cast<std::uint32_t>(static_cast<float>(
+                    items[index].weight)))) & 0xffffffffULL;
         };
         constexpr unsigned key_bits = 8 * sizeof(detail::pool_value_t);
         constexpr unsigned pass_bits = 12;

@@ -46,9 +46,7 @@ gpu_round_shadow_input make_input(node_index n, const std::vector<edge>& edges) 
 }
 
 std::uint64_t bucket(double w) {
-    if constexpr (sizeof(pool_value_t) == 4)
-        return (~std::uint64_t(std::bit_cast<std::uint32_t>(static_cast<float>(w))) & 0xffffffffULL) >> 20;
-    else return (~std::bit_cast<std::uint64_t>(w)) >> 52;
+    return (~std::uint64_t(std::bit_cast<std::uint32_t>(static_cast<float>(w))) & 0xffffffffULL) >> 20;
 }
 double draw(node_index u, node_index v, std::uint64_t seed) {
     std::uint64_t x = seed ^ (std::uint64_t(u) * 0x9E3779B97F4A7C15ULL)

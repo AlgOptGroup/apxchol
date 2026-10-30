@@ -49,8 +49,7 @@ input_scan scan_input(const Eigen::SparseMatrix<double>& M);
 
 /// Project `b` onto the range of a graph Laplacian by subtracting its mean
 /// independently on every connected component of `L`. Returns the component
-/// count. A connected matrix leaves `b` byte-for-byte unchanged, preserving
-/// the historical --random-rhs stream on the common case.
+/// count. A connected matrix leaves `b` byte-for-byte unchanged.
 ///
 /// The caller must already know that `L` is a pure Laplacian. Applying this to
 /// an SDDM/SPD operator would change a perfectly valid right-hand side.

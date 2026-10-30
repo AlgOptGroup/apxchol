@@ -30,10 +30,6 @@ inline double metal_degree_quantile(double quantile) {
 }
 
 inline bool metal_setup_options_supported(const factor_options &options) {
-#ifndef APXCHOL_POOL_FP32
-    (void)options;
-    return false;
-#else
     const double quantile = metal_degree_quantile(options.partition.degree_quantile);
     return sizeof(node_index) == sizeof(std::uint32_t) &&
            options.cpu_schedule == cpu_sptrsv_schedule::automatic &&
@@ -43,7 +39,6 @@ inline bool metal_setup_options_supported(const factor_options &options) {
            options.partition.degree_tiebreak &&
            options.residual_peel == residual_peel_strategy::natural &&
            quantile > 0 && quantile < 1;
-#endif
 }
 
 inline bool metal_setup_input_supported(const Eigen::SparseMatrix<double> &A) {

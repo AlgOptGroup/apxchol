@@ -395,14 +395,8 @@ __device__ unsigned long long double_bits(double value) {
 }
 
 __device__ unsigned long long stored_weight_bits(double value) {
-    const pool_value_t stored = static_cast<pool_value_t>(value);
-#if defined(APXCHOL_POOL_FP32)
     return static_cast<unsigned long long>(
-        __float_as_uint(static_cast<float>(stored)));
-#else
-    return static_cast<unsigned long long>(
-        __double_as_longlong(static_cast<double>(stored)));
-#endif
+        __float_as_uint(static_cast<pool_value_t>(value)));
 }
 
 __device__ unsigned long long next_random(unsigned long long& state) {
@@ -1386,11 +1380,7 @@ __global__ void csc_initial_incidences_warp(
                 ptr, idx, thrust::counting_iterator<int>{0}, static_cast<int>(v), u, k, paired)];
             if (!paired) atomicOr(status, 2u);
             else {
-#ifdef APXCHOL_POOL_FP32
                 const pool_value_t weight = __double2float_rn(original);
-#else
-                const double weight = original;
-#endif
                 if (!isfinite(weight) || weight < 0.0) atomicOr(status, 1u);
                 const std::uint32_t out = slot_begin + written + rank;
                 if (out >= slot_end) atomicOr(status, 4u);

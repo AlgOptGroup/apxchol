@@ -393,12 +393,7 @@ gpu_round_shadow_ordered_residual_hash(
 }
 
 inline std::uint64_t gpu_round_shadow_pool_bits(double value) noexcept {
-    const pool_value_t stored = static_cast<pool_value_t>(value);
-#if defined(APXCHOL_POOL_FP32)
-    return std::bit_cast<std::uint32_t>(stored);
-#else
-    return std::bit_cast<std::uint64_t>(stored);
-#endif
+    return std::bit_cast<std::uint32_t>(static_cast<pool_value_t>(value));
 }
 
 inline std::uint64_t gpu_round_shadow_factor_bits(

@@ -1438,10 +1438,4 @@ solve_result solve(const Eigen::SparseMatrix<double>& L, const Eigen::VectorXd& 
     return result;
 }
 
-Eigen::VectorXd generate_test_rhs(Eigen::Index n) {
-    Eigen::VectorXd b = Eigen::VectorXd::Random(n);
-    b.array() -= b.mean();
-    return b.normalized();
-}
-
 } // namespace apxchol

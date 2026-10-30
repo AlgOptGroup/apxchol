@@ -49,12 +49,18 @@ run_config parse_args(int argc, char* argv[]) {
 
     // ── version ──
     app.add_flag_callback("-V,--version", []() {
+#if defined(APXCHOL_USE_CUDA)
+        const char* device = "cuda";
+#elif defined(APXCHOL_USE_METAL)
+        const char* device = "metal";
+#else
+        const char* device = "cpu";
+#endif
         std::printf("apxchol %s (commit %s)\n"
                     "  index widths: %d-bit vertex / %d-bit edge (unsigned)\n"
-                    "  SpTRSV backend: %s\n",
+                    "  device: %s\n",
                     APXCHOL_VERSION, APXCHOL_GIT_SHA,
-                    APXCHOL_NODE_INDEX_BITS, APXCHOL_EDGE_INDEX_BITS,
-                    APXCHOL_SPTRSV_BACKEND);
+                    APXCHOL_NODE_INDEX_BITS, APXCHOL_EDGE_INDEX_BITS, device);
         std::exit(0);
     }, "Print version and build info");
 
@@ -72,7 +78,8 @@ run_config parse_args(int argc, char* argv[]) {
                    "whose k columns are solved as one batch")
         ->check(CLI::ExistingFile);
     auto* rand_flag = rhs_group->add_flag("--random-rhs", cfg.random_rhs,
-                 "Generate a random RHS, compatible with Laplacian components (uses --seed)");
+                 "Generate a random RHS, compatible with Laplacian components; the same "
+                 "on every platform for a given --seed");
     rhs_opt->excludes(rand_flag);
     rand_flag->excludes(rhs_opt);
     rhs_group->require_option(1);

@@ -194,11 +194,6 @@ if (APXCHOL_BUILD_CLI)
         "array real general\n5 3\n")
     apxchol_cli_rhs_test(cli_single_column_rhs_file path5_rhs1 0
         "iterations: [0-9]+" "array real general\n5 1\n")
-    if (APXCHOL_DEVICE STREQUAL "CPU")
-        set(cli_backend_label omp)
-    else()
-        string(TOLOWER "${APXCHOL_DEVICE}" cli_backend_label)
-    endif()
-    apxchol_cli_test(cli_build_backend path5_sddm 0
-        "SpTRSV backend: ${cli_backend_label}" --version)
+    string(TOLOWER "${APXCHOL_DEVICE}" cli_device)
+    apxchol_cli_test(cli_build_backend path5_sddm 0 "device: ${cli_device}" --version)
 endif()

@@ -1,12 +1,11 @@
 # Precision and factor storage
 
-Precision is chosen separately for graph storage, the assembled factor, the
-installed triangular-solve arrays, and the outer iteration. A build with
-`APXCHOL_POOL_FP32=OFF` is not an all-FP64 solver.
+Graph storage, the assembled factor, the installed triangular-solve arrays and
+the outer iteration each have their own precision.
 
 | Stage | Representation | Reason |
 |---|---|---|
-| Mutable residual graph | FP32 weights by default; optional FP64 weights | Storage/bandwidth versus rounding during factor construction |
+| Mutable residual graph | FP32 weights; reads aggregate in FP64 | Storage and bandwidth; each stored weight is written once |
 | Assembled factor | FP32 values | Shared factor/export representation |
 | CPU triangular solves | FP32 storage by default; optional scaled FP16 off-diagonals | FP16 requires efficient conversion; CPU arithmetic remains FP64 |
 | CUDA triangular solves | Scaled FP16 off-diagonals by default; FP32 alternative | Reduced value traffic; GPU triangular-solve arithmetic is FP32 |
@@ -95,8 +94,8 @@ Metal rejects inputs outside these ranges:
 ## Accuracy and configuration choice
 
 FP16 applies to the installed triangular-solve arrays, not the mutable graph
-or assembled/exported factor. Graph weights use FP32 by default; FP64 pool
-storage is an optional reference. Scaled FP16 graph storage is not supported.
+or assembled/exported factor. Graph weights always use FP32; scaled FP16 graph
+storage is not supported.
 
 Low-precision preconditioning can retain final solution accuracy while changing
 iteration count. Select precision using original-system residuals, total solve

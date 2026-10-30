@@ -38,9 +38,7 @@ struct owned_sparsify_forest {
     __device__ Edge edge(unsigned i) const { const auto e = edges[i]; return {unsigned(e.owner), unsigned(e.neighbor), e.weight}; }
     __device__ unsigned label(unsigned i) const { return labels[i]; }
     __device__ unsigned bucket(double weight) const {
-        if constexpr (sizeof(pool_value_t) == 4)
-            return residual_sparsify::bucket(__float_as_uint(float(weight)));
-        else return residual_sparsify::bucket(std::uint64_t(__double_as_longlong(weight)));
+        return residual_sparsify::bucket(__float_as_uint(float(weight)));
     }
     __device__ void offer(unsigned i, unsigned bucket, unsigned ordinal) const {
         atomicMin(best + i, static_cast<unsigned long long>(residual_sparsify::priority(bucket, ordinal)));

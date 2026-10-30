@@ -34,11 +34,7 @@ namespace detail {
 // the default directed-incidence layout can store {target, weight}
 // directly in its adjacency slabs without introducing a graph/incidence
 // include cycle.
-#ifdef APXCHOL_POOL_FP32
 using pool_value_t = float;
-#else
-using pool_value_t = double;
-#endif
 
 struct directed_pool_edge {
     node_index to;
