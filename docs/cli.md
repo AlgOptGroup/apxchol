@@ -26,9 +26,9 @@ Pass exactly one of:
 The CLI prints the selected backend, iterations and residual for each column,
 and a timing breakdown; `-q` prints errors only. The exit status is 0 when
 every column converges, 1 when a column misses the tolerance (the solution is
-still written), and 2 when the input is rejected or the solution cannot be
-written. Invalid options, including a missing input file, exit with a nonzero
-CLI11 error code.
+still written), and 2 when the input or an option value is rejected or the
+solution cannot be written. Options the parser rejects, such as an unknown
+value or a missing input file, exit with a nonzero CLI11 error code.
 
 Common options:
 
