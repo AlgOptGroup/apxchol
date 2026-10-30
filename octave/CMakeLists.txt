@@ -35,5 +35,6 @@ else()
     set(CMAKE_CXX_CREATE_SHARED_MODULE
         "\"${CMAKE_COMMAND}\" -E env \"CC=${CMAKE_C_COMPILER}\" \"CXX=${CMAKE_CXX_COMPILER}\" \"CXXFLAGS=\" 'LDFLAGS=${octave_ldflags} <LINK_LIBRARIES>' \"${MKOCTFILE}\" --mex <LINK_FLAGS> <OBJECTS> -o <TARGET>")
 endif()
+# private/ keeps the raw handle interface callable only from the wrappers.
 set_target_properties(apxchol_mex PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/private")
