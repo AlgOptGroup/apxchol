@@ -22,7 +22,7 @@
 - Breaking: `APXCHOL_DEVICE=CPU|CUDA|METAL` replaces `APXCHOL_USE_CUDA`, which now stops configuration with a message. The runtime `factor_storage` option replaces `APXCHOL_SPTRSV_FP32`.
 - Breaking: a parent project that adds apxchol with `add_subdirectory` builds only the portable library by default; the CLI, tests, examples and native tuning are opt-in there.
 - Breaking: the Python default `maxiter` is now the native default, 200 (was 500).
-- Breaking: Python `Solver.solve` and `solve` take `rtol` as the second argument; the `tol` alias is removed.
+- Breaking: Python `Solver.solve` and `solve` use `rtol` for the tolerance parameter; the `tol` alias is removed.
 - Breaking: removed from Python: `apxchol.solver`, `Solver.aspreconditioner` (use `aslinearoperator`), the `storage` and `stagnation_window` options, and the `luby` and `rootset` partitioners.
 - Breaking: Python 3.10 is no longer supported.
 - Breaking: removed CLI flags `--stagnation-window`, `--graph-storage`, `--fs-compact` and `--fs-filter-append`.
