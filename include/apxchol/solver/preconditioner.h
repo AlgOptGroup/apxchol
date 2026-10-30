@@ -216,7 +216,7 @@ public:
                     static_cast<std::size_t>(F_.L.nonZeros()),
                     static_cast<unsigned long long>(trsv_.stored_nnz()),
                     trsv_.adopted_device_factor() ? 1 : 0, trsv_.fp16() ? 1 : 0,
-                    F_.L.inner_.size() * sizeof(node_index) + F_.L.vals_.size() * sizeof(factor_value_t),
+                    F_.L.row_indices().size() * sizeof(node_index) + F_.L.values().size() * sizeof(factor_value_t),
                     trsv_.adoption_host_download_bytes(), drop.rel,
                     static_cast<unsigned long long>(drop.dropped_threshold),
                     static_cast<unsigned long long>(drop.dropped_flush));
@@ -241,7 +241,7 @@ public:
                 throw std::invalid_argument("CUDA cannot adopt a scalar Laplacian factor");
         }
 #endif
-        else if (F.L.nonZeros() > 0 && F.L.vals_.empty())
+        else if (F.L.nonZeros() > 0 && !F.L.has_values())
             throw std::invalid_argument("apx_cholesky::set_factor: factorization values were released");
         n_ = static_cast<Eigen::Index>(F.L.rows());
         F_ = std::move(F);
@@ -336,7 +336,7 @@ private:
         // path setup_consuming has normally done this already; idempotent.)
         // set_keep_factor(true) skips the free for callers that export L.
         if (!keep_factor_)
-            F_.L.release_values();
+            detail::sparse_csc_access::release_values(F_.L);
 
         m_factorizationIsOk = true;
         m_info = Eigen::Success;

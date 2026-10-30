@@ -138,8 +138,19 @@ Custom partitioner and eliminator overloads are described in the
 
 `L` stores FP32 lower-triangular columns in compressed sparse column (CSC)
 form, with each diagonal first. `perm[original_vertex]` gives its elimination
-position. Keep `L`, the permutation, operator kind and round metadata together
-when handing a factor to another solver.
+position.
+
+```{doxygenclass} apxchol::sparse_csc
+:members: rows, cols, nonZeros, has_values, col_ptrs, row_indices, values
+```
+
+`sparse_csc` is a read-only view: `col_ptrs()`, `row_indices()` and `values()`
+return spans over the factor's own arrays. A solver that does not keep factor
+values releases the row indices and values after setup; `has_values()` is then
+false, and the column pointers remain.
+
+Keep `L`, the permutation, operator kind and round metadata together when
+handing a factor to another solver.
 
 A solver can also retain a factor built on CUDA or Metal: enable
 `keep_factor_values` before construction, then read `solver.factor()`.

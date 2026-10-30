@@ -237,7 +237,7 @@ public:
     }
 
     // nnz of the lower-triangular factor G (diagonal included). Survives
-    // release_values() — the column pointers are always retained.
+    // released values — the column pointers are always retained.
     std::int64_t factor_nnz() const {
         return static_cast<std::int64_t>(factor().L.nonZeros());
     }
@@ -247,7 +247,7 @@ public:
     py::tuple factor_csc() const {
         const apxchol::factorization& F = factor();
         const std::int64_t nnz = static_cast<std::int64_t>(F.L.nonZeros());
-        if (nnz > 0 && F.L.vals_.empty())
+        if (nnz > 0 && !F.L.has_values())
             throw std::runtime_error(
                 "factor values not retained; construct with keep_factor=True");
 
@@ -258,11 +258,14 @@ public:
         auto* ip = indptr.mutable_data();
         auto* ii = indices.mutable_data();
         auto* dd = data.mutable_data();
+        const auto outer = F.L.col_ptrs();
+        const auto inner = F.L.row_indices();
+        const auto vals = F.L.values();
         for (std::int64_t c = 0; c <= ncol; ++c)
-            ip[c] = static_cast<std::int64_t>(F.L.outer_[static_cast<std::size_t>(c)]);
+            ip[c] = static_cast<std::int64_t>(outer[static_cast<std::size_t>(c)]);
         for (std::int64_t k = 0; k < nnz; ++k) {
-            ii[k] = static_cast<std::int32_t>(F.L.inner_[static_cast<std::size_t>(k)]);
-            dd[k] = F.L.vals_[static_cast<std::size_t>(k)];
+            ii[k] = static_cast<std::int32_t>(inner[static_cast<std::size_t>(k)]);
+            dd[k] = vals[static_cast<std::size_t>(k)];
         }
         return py::make_tuple(indptr, indices, data);
     }

@@ -1486,10 +1486,10 @@ factorization factorize_impl(const Eliminator& elim,
                 "host_metadata_bytes=%zu raw_factor_nnz=%zu "
                 "host_factor_entry_download_bytes=%zu host_factor_entry_omitted_bytes=%zu\n",
                 keep_factor ? "retained" : "omitted",
-                result.L.inner_.capacity() * sizeof(node_index) +
-                    result.L.vals_.capacity() * sizeof(factor_value_t),
+                detail::sparse_csc_access::inner(result.L).capacity() * sizeof(node_index) +
+                    detail::sparse_csc_access::vals(result.L).capacity() * sizeof(factor_value_t),
                 result.perm.size() * sizeof(node_index) +
-                    result.L.outer_.size() * sizeof(edge_index),
+                    result.L.col_ptrs().size() * sizeof(edge_index),
                 static_cast<std::size_t>(result.L.nonZeros()),
                 keep_factor ? omitted_payload_bytes : 0,
                 keep_factor ? 0 : omitted_payload_bytes);

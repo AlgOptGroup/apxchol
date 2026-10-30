@@ -24,6 +24,8 @@
 #include "apxchol/solver/metal_solver.h"
 #endif
 
+using csc_access = apxchol::detail::sparse_csc_access;
+
 namespace {
 using Sparse = Eigen::SparseMatrix<double>;
 
@@ -212,13 +214,13 @@ TEST(Solver, CpuOwnerAdoptsAnIndependentFactorAndAppliesIt) {
     }
     const auto& actual = owner->factor();
     ASSERT_EQ(actual.L.nonZeros(), expected.L.nonZeros());
-    ASSERT_EQ(actual.L.outer_.size(), expected.L.outer_.size());
-    ASSERT_EQ(actual.L.inner_.size(), expected.L.inner_.size());
-    ASSERT_EQ(actual.L.vals_.size(), expected.L.vals_.size());
+    ASSERT_EQ(csc_access::outer(actual.L).size(), csc_access::outer(expected.L).size());
+    ASSERT_EQ(csc_access::inner(actual.L).size(), csc_access::inner(expected.L).size());
+    ASSERT_EQ(csc_access::vals(actual.L).size(), csc_access::vals(expected.L).size());
     EXPECT_EQ(actual.perm, expected.perm);
-    EXPECT_TRUE(same_bytes(actual.L.outer_.data(), expected.L.outer_.data(), actual.L.outer_.size()));
-    EXPECT_TRUE(same_bytes(actual.L.inner_.data(), expected.L.inner_.data(), actual.L.inner_.size()));
-    EXPECT_TRUE(same_bytes(actual.L.vals_.data(), expected.L.vals_.data(), actual.L.vals_.size()));
+    EXPECT_TRUE(same_bytes(csc_access::outer(actual.L).data(), csc_access::outer(expected.L).data(), csc_access::outer(actual.L).size()));
+    EXPECT_TRUE(same_bytes(csc_access::inner(actual.L).data(), csc_access::inner(expected.L).data(), csc_access::inner(actual.L).size()));
+    EXPECT_TRUE(same_bytes(csc_access::vals(actual.L).data(), csc_access::vals(expected.L).data(), csc_access::vals(actual.L).size()));
     const apxchol::cpu_solver reference(matrix, expected, options);
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), -1.0, 2.0);
     const auto applied = owner->apply(rhs);
@@ -973,13 +975,13 @@ TEST(Solver, GpuOwnerPreservesStorageAndAdoptsItsFactor) {
         EXPECT_EQ(adopted.factor_storage(), storage);
         const auto& retained = adopted.factor();
         EXPECT_EQ(retained.sddm, exported.sddm);
-        EXPECT_EQ(retained.L.n_, exported.L.n_);
+        EXPECT_EQ(retained.L.rows(), exported.L.rows());
         EXPECT_EQ(retained.perm, exported.perm);
-        EXPECT_EQ(retained.L.outer_, exported.L.outer_);
-        EXPECT_EQ(retained.L.inner_, exported.L.inner_);
-        ASSERT_EQ(retained.L.vals_.size(), exported.L.vals_.size());
-        EXPECT_TRUE(same_bytes(retained.L.vals_.data(), exported.L.vals_.data(),
-                               retained.L.vals_.size()));
+        EXPECT_EQ(csc_access::outer(retained.L), csc_access::outer(exported.L));
+        EXPECT_EQ(csc_access::inner(retained.L), csc_access::inner(exported.L));
+        ASSERT_EQ(csc_access::vals(retained.L).size(), csc_access::vals(exported.L).size());
+        EXPECT_TRUE(same_bytes(csc_access::vals(retained.L).data(), csc_access::vals(exported.L).data(),
+                               csc_access::vals(retained.L).size()));
         const auto result = owner->solve(rhs);
         const auto expected = adopted.solve(rhs);
         EXPECT_EQ(result.backend, apxchol::solve_backend::gpu);
