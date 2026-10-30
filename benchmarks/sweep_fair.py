@@ -62,9 +62,10 @@ WARMUP = 0
 THREADS = 16
 # 30 min/cell: the >=1e8-nnz giants (com-Orkut apxchol ~170s/rep x3, BoomerAMG
 # mega-hub setup, RCHOL fill blowup) can legitimately exceed the old 1200s.
-TIMEOUT = 1800
-TIMEOUT_MULT = 10      # competitor wall-clock cap = TIMEOUT_MULT x GPU-apxchol's total time
-TIMEOUT_FLOOR = 60     # ...but never below this (so fast matrices still give solvers room)
+TIMEOUT = 1800         # per-solve competitor cap when no apxchol reference exists
+CAP_FACTOR = 20        # per-solve cap = CAP_FACTOR x the best same-device apxchol total
+CAP_FLOOR_S = 30       # ...never below this, so noise on tiny matrices does not cut a run
+CAP_STARTUP_S = 300    # per-process allowance for startup and input parsing, outside the cap
 # Per-benchmark host-memory cap (GB), CPU only. A runaway solver -- e.g. serial RCHOL's
 # natural-order fill blowup on the 237M-nnz com-Orkut hit 110GB RSS and OOM-killed the
 # desktop (2026-06-12) -- gets an address-space ceiling via `ulimit -v`, so it dies with
@@ -218,7 +219,7 @@ def emit(family, mid, solver, config, status, metrics, extra_meta=None,
             **(julia_toolchain() if solver in JULIA_SOLVERS else build_toolchain())}
     return rc.emit_cell(family, mid, solver, config, status, metrics, THREADS, DEVICE, prov,
                         matrix_meta=meta or None,
-                        timeout_cap_s=timeout_cap_s if status == "timeout" else None)
+                        timeout_cap_s=timeout_cap_s if status in ("timeout", "exceeded_cap") else None)
 
 def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout=None, ground=None,
             mid=None):
@@ -511,18 +512,42 @@ def step(family, mid, solver, config, runner, label, timeout_cap_s=TIMEOUT):
           f"total={m.get('total_s','-') if m else '-'}", flush=True)
     return st, m
 
-def gpu_apx_total(family, mid):
-    """GPU time of the declared apxchol default used to derive competitor caps.
+def solve_cap(apx_totals):
+    """Per-solve competitor cap from this device's complete apxchol totals.
 
-    This is intentionally one fixed configuration, not the fastest selector in the
-    store. None means the CPU pass must fall back to the same declared default on
-    its own device."""
-    cell = rc.stored_cell(family, mid, "apxchol_v1", APX_DEFAULT_CONFIG,
-                        THREADS, "gpu")
-    if (cell is not None and cell.get("status") == "complete"
-            and rc.cell_is_current(cell, rc.git_sha())):
-        return cell.get("metrics", {}).get("total_s")
-    return None
+    The capped quantity is a run's setup + solve as its solver reports them;
+    process startup, input parsing and CUDA/Julia initialization are excluded.
+    Without a reference the cap is TIMEOUT."""
+    totals = [t for t in apx_totals if isinstance(t, (int, float)) and t > 0]
+    return max(CAP_FACTOR * min(totals), CAP_FLOOR_S) if totals else float(TIMEOUT)
+
+
+def _repeat_totals(m):
+    """Every measured repetition's setup + solve total, warmups included."""
+    totals = [m["total_s"]] if isinstance(m.get("total_s"), (int, float)) else []
+    for line in m.get("repeat_receipts") or []:
+        hit = re.search(r"\btotal_s=([0-9.eE+-]+)", line)
+        if hit:
+            totals.append(float(hit.group(1)))
+    return totals
+
+
+def capped(result, cap):
+    """Report a run over the per-solve cap as `exceeded_cap`, never as a time.
+
+    A process killed at its cap-derived deadline is also exceeded_cap. The
+    measured timings stay in `capped_timings` as raw evidence only."""
+    st, m = result[0], dict(result[1] or {})
+    extra = result[2] if len(result) > 2 else None
+    over = st == "timeout" or (st in {"complete", "not_converged"}
+                               and any(t > cap for t in _repeat_totals(m)))
+    if over:
+        timing = {k: m.pop(k) for k in ("setup_s", "solve_s", "total_s", "us_per_nnz") if k in m}
+        if timing:
+            m["capped_timings"] = timing
+        st = "exceeded_cap"
+    m.update(cap_s=cap, cap_factor=CAP_FACTOR, cap_floor_s=CAP_FLOOR_S)
+    return (st, m, extra) if extra is not None else (st, m)
 
 def do_matrix(mid, family, source, spec, is2d, n, reg):
     kind = rc.kind_of(mid)         # declared, never guessed; raises if missing
@@ -531,62 +556,58 @@ def do_matrix(mid, family, source, spec, is2d, n, reg):
     if PARAC_ONLY:                 # --parac-only: ParAC and nothing else
         run_parac(mid); return
     margs=rc.margs_for(mid)
-    # The competitor wall-clock cap is TIMEOUT_MULT x GPU-apxchol's total time -- the
-    # declared apxchol default is the universal reference, so "10x of GPU apxchol" is the
-    # same bar on both axes (the charts clamp+mark anything slower at that cap). A
-    # competitor exceeding it is recorded as status 'timeout' (a TERMINAL status,
-    # distinct from blank = not-tested), so one slow solver on a giant doesn't stall the
-    # sweep. Falls back to same-device apxchol when the GPU axis hasn't run this matrix
-    # yet (run GPU before CPU so the cap is the intended GPU reference).
-    def comp_timeout(t_apx_same):
-        if NO_CAP:
-            return NOCAP_TIMEOUT          # uncapped: only the sane outer ceiling applies
-        ref = gpu_apx_total(family, mid) or t_apx_same
-        return int(min(TIMEOUT, max(TIMEOUT_FLOOR, TIMEOUT_MULT * (ref or TIMEOUT/TIMEOUT_MULT))))
+    # Competitor caps are relative to apxchol on the same matrix and device: a run
+    # whose setup + solve exceeds CAP_FACTOR x the best apxchol total is recorded
+    # as exceeded_cap (a terminal status), never as a time. Each process is killed
+    # once all its repetitions could have used the cap plus a startup allowance.
+    def process_timeout(cap, runs):
+        return int(runs * cap + CAP_STARTUP_S) if not NO_CAP else NOCAP_TIMEOUT
     if DEVICE == "gpu":
-        t_apx = None
+        apx_totals = []
         for solver,config in APX_GPU:
-            _,m = step(family,mid,solver,config, lambda s=solver,c=config: run_cpp(margs,s,c,reg,family,mid=mid), config)
-            if config == APX_DEFAULT_CONFIG and m and m.get("total_s"):
-                t_apx = m["total_s"]
-        to = comp_timeout(t_apx)
+            st,m = step(family,mid,solver,config, lambda s=solver,c=config: run_cpp(margs,s,c,reg,family,mid=mid), config)
+            if st == "complete" and m:
+                apx_totals.append(m.get("total_s"))
+        cap = solve_cap(apx_totals)
+        to = process_timeout(cap, WARMUP + REPS)
         comp = list(COMP_GPU)
         for solver in comp:
             if solver == "hypre_boomeramg_gpu":
                 # default (Hypre defaults) + CoarsenCutFactor 'cut' (hub->F-point),
                 # charted as two GPU series like the CPU axis -- cut is the fix on the
                 # mega-hub social giants, a no-op on grids/IPM.
-                step(family,mid,solver,"", lambda s=solver: run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), solver,
-                     timeout_cap_s=to)
+                step(family,mid,solver,"", lambda s=solver: capped(run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), cap), solver,
+                     timeout_cap_s=cap)
                 step(family,mid,solver,"cut",
-                     lambda s=solver: run_cpp(margs,s,"cut",reg,family,boomeramg_cfg="cut",timeout=to,mid=mid), solver+"/cut",
-                     timeout_cap_s=to)
+                     lambda s=solver: capped(run_cpp(margs,s,"cut",reg,family,boomeramg_cfg="cut",timeout=to,mid=mid), cap), solver+"/cut",
+                     timeout_cap_s=cap)
             else:
-                step(family,mid,solver,"", lambda s=solver: run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), solver,
-                     timeout_cap_s=to)
+                step(family,mid,solver,"", lambda s=solver: capped(run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), cap), solver,
+                     timeout_cap_s=cap)
         if RUN_PARAC:
             run_parac(mid)
         return  # no Julia on the GPU axis
-    t_apx = None
+    apx_totals = []
     for solver,config in APX:
-        _,m = step(family,mid,solver,config, lambda s=solver,c=config: run_cpp(margs,s,c,reg,family,mid=mid), config)
-        if config == APX_DEFAULT_CONFIG and m and m.get("total_s"):
-            t_apx = m["total_s"]
-    to = comp_timeout(t_apx)
+        st,m = step(family,mid,solver,config, lambda s=solver,c=config: run_cpp(margs,s,c,reg,family,mid=mid), config)
+        if st == "complete" and m:
+            apx_totals.append(m.get("total_s"))
+    cap = solve_cap(apx_totals)
+    to = process_timeout(cap, WARMUP + REPS)
     for solver in COMP:
         if solver == "hypre_boomeramg":
             # Two series: classical default + CoarsenCutFactor 'cut' (hub->F-point).
             # The cut variant is a no-op on uniform-degree grids/IPM and the fix on
             # mega-hub social graphs (com-Youtube/as-Skitter), so charting both shows
             # the methodology point instead of letting default blow up the timeout.
-            step(family,mid,solver,"", lambda s=solver: run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), solver,
-                 timeout_cap_s=to)
+            step(family,mid,solver,"", lambda s=solver: capped(run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), cap), solver,
+                 timeout_cap_s=cap)
             step(family,mid,solver,"cut",
-                 lambda s=solver: run_cpp(margs,s,"cut",reg,family,boomeramg_cfg="cut",timeout=to,mid=mid), solver+"/cut",
-                 timeout_cap_s=to)
+                 lambda s=solver: capped(run_cpp(margs,s,"cut",reg,family,boomeramg_cfg="cut",timeout=to,mid=mid), cap), solver+"/cut",
+                 timeout_cap_s=cap)
         else:
-            step(family,mid,solver,"", lambda s=solver: run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), solver,
-                 timeout_cap_s=to)
+            step(family,mid,solver,"", lambda s=solver: capped(run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), cap), solver,
+                 timeout_cap_s=cap)
     # AC/AC2 read the DUMPED operator — the same seam every other external solver
     # goes through — so their cells demonstrably solve the same system as the
     # in-process ones instead of re-deriving one from the registry file.
@@ -595,9 +616,10 @@ def do_matrix(mid, family, source, spec, is2d, n, reg):
         if dumped:
             for s in JULIA:
                 step(family,mid,s,"",
-                     lambda ss=s, cap=to: run_julia(
-                         dumped, ss, rc.class_of(mid), timeout=cap),
-                     s, timeout_cap_s=to)
+                     lambda ss=s: capped(run_julia(
+                         dumped, ss, rc.class_of(mid),
+                         timeout=process_timeout(cap + CAP_STARTUP_S, REPS)), cap),
+                     s, timeout_cap_s=cap)
         else:
             print(f"   {'AC/AC2':24} SKIP (operator dump failed)")
     if RUN_PARAC:      # ParAC graph+physics (resume-safe; the runner skips done cells)
