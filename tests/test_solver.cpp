@@ -341,11 +341,15 @@ TEST(Solver, CopiesShareTheFactorAndSolveInParallel) {
     std::optional<apxchol::solver> original(std::in_place, matrix, options);
     const apxchol::cpu_solver cpu(matrix, options);
     constexpr int callers = 4;
-    std::vector<Eigen::VectorXd> rhs, solved, applied;
+    // Two independent parallel factorizations need not match bit for bit, so
+    // each object family is compared with references from its own source.
+    std::vector<Eigen::VectorXd> rhs, solved, applied, cpu_solved, cpu_applied;
     for (int t = 0; t < callers; ++t) {
         rhs.push_back(Eigen::VectorXd::LinSpaced(matrix.rows(), t + 1.0, -2.0 * t));
         solved.push_back(original->solve(rhs.back()).x);
         applied.push_back(original->apply(rhs.back()));
+        cpu_solved.push_back(cpu.solve(rhs.back()).x);
+        cpu_applied.push_back(cpu.apply(rhs.back()));
     }
     const Eigen::MatrixXd panel = Eigen::MatrixXd::Ones(matrix.rows(), 3);
     Eigen::MatrixXd expected_panel(matrix.rows(), 3);
@@ -380,9 +384,9 @@ TEST(Solver, CopiesShareTheFactorAndSolveInParallel) {
         for (int t = 0; t < callers; ++t) {
             EXPECT_EQ(x[t], solved[t]);
             EXPECT_EQ(z[t], applied[t]);
-            EXPECT_EQ(y[t], solved[t]);
-            EXPECT_EQ(w[t], applied[t]);
-            EXPECT_EQ(v[t], applied[t]);
+            EXPECT_EQ(y[t], cpu_solved[t]);
+            EXPECT_EQ(w[t], cpu_applied[t]);
+            EXPECT_EQ(v[t], cpu_applied[t]);
             EXPECT_EQ(batch[t], expected_panel);
         }
     }
@@ -400,10 +404,10 @@ TEST(Solver, CopiesShareTheFactorAndSolveInParallel) {
     EXPECT_EQ(&assigned.factor(), shared_factor);
     EXPECT_EQ(&assigned_cpu.preconditioner().trsv(), &cpu.preconditioner().trsv());
     EXPECT_EQ(assigned.solve(rhs[1]).x, solved[1]);
-    EXPECT_EQ(assigned_cpu.solve(rhs[1]).x, solved[1]);
+    EXPECT_EQ(assigned_cpu.solve(rhs[1]).x, cpu_solved[1]);
     preconditioners[0].compute(other_matrix);
     EXPECT_NE(&preconditioners[0].trsv(), &cpu.preconditioner().trsv());
-    EXPECT_EQ(cpu.preconditioner().solve(rhs[2]), applied[2]);
+    EXPECT_EQ(cpu.preconditioner().solve(rhs[2]), cpu_applied[2]);
 }
 
 TEST(Solver, CpuOwnerAdoptsAnIndependentFactorAndAppliesIt) {
