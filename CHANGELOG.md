@@ -38,7 +38,6 @@
 
 ### Benchmarks
 - The benchmark harness checks every result against the original system's residual and reports setup, solve and memory separately.
-- The performance page states the measurement contract and includes a dated CPU/Metal batching case study on Apple M1 Max.
 
 ### Fixes
 - Reported residuals are now correct on early solve exits.
