@@ -26,7 +26,7 @@ void write_solution(const std::string& path, const Dense& x) {
 int solve_batch(const Eigen::SparseMatrix<double>& L, const Eigen::MatrixXd& B,
                 const run_config& cfg, bool graph, const input_scan& scan) {
     checkpoint setup;
-    const solver owner(L, cfg.solve_opts, cfg.solve_opts.collect_timings ? &setup : nullptr);
+    solver owner(L, cfg.solve_opts, cfg.solve_opts.collect_timings ? &setup : nullptr);
     Eigen::MatrixXd X(B.rows(), B.cols());
     const auto res = owner.solve(B, X);
 
