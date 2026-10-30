@@ -6,12 +6,12 @@
 - New trace-cycle clique sampler (`--sampler trace_cycle`) on CPU and GPU; GKS stays the default.
 - Faster setup: one AoS graph throughout factorization, incremental degrees, and parallel residual sparsification.
 - Inputs are validated by operator class; nearly-SDDM inputs are repaired by M-matrix lumping.
-- Right-hand sides can be solved in batches on CPU and GPU.
+- Batched solves take any number of right-hand sides on CPU, CUDA and Metal, processed in panels of up to eight columns on CPU and four on GPU.
 - `apxchol::solver` owns a reusable factorization for repeated solves and can be saved to and loaded from portable archives.
 
 ### GPU backends
 - CUDA setup, factorization and PCG run entirely on the device, with a sync-free dataflow triangular solve and optional fp16 factor storage.
-- New Apple Metal backend for single right-hand-side solves.
+- New Apple Metal backend: setup, factorization and PCG run on the device, for single and batched solves.
 - `solve_options.backend` (`--backend auto|cpu|gpu`) selects a complete CPU or GPU route and never falls back silently.
 
 ### API and CLI changes
@@ -23,6 +23,8 @@
 - The v1 API compatibility scope is documented.
 - The partitioner and eliminator extension interfaces are experimental in 1.x and may change in minor releases.
 - Python wheels for CPython 3.11+ on Linux and macOS arm64 (GPU wheels select the backend at runtime), standalone CLI archives, and MATLAB/Octave batched solves with save/load.
+- Wheels declare `License-Expression: BSD-3-Clause` and take the root LICENSE at build time; minimum scikit-build-core is 0.11.
+- Relicensed from BSD-4-Clause to BSD-3-Clause.
 
 ### Benchmarks
 - The benchmark harness checks every result against the original system's residual and reports setup, solve and memory separately.
