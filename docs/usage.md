@@ -162,7 +162,8 @@ residual and how rounding affects it.
 
 To use apxchol as the preconditioner of another Krylov solver (Eigen, SciPy,
 PETSc, MKL's reverse-communication interface), apply it with C++
-`solver.apply(r)` (vectors or matrices) or Python `solver.aslinearoperator()`.
+`solver.apply(r)` for vectors or `solver.apply(R, Z)` for matrices, using
+`const_matrix_view` and `matrix_view`, or Python `solver.aslinearoperator()`.
 Each application computes `z = M^{-1} r` with the prepared factor; the other
 solver controls the iteration and its stopping test.
 
