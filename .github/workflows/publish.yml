@@ -1,7 +1,8 @@
 # Python wheel, standalone CLI and native SDK publishing (no sdist — python/CMakeLists.txt references
 # ../src, so the package only builds from a full checkout).
 # Trigger: publishing a GitHub release (or manual dispatch to dry-run the artifact
-# jobs). Uses PyPI Trusted Publishing (OIDC), configured on pypi.org under
+# jobs). A prerelease builds everything and attaches the CLI and SDK archives,
+# but does not upload to PyPI. Uses PyPI Trusted Publishing (OIDC), configured on pypi.org under
 # "Publishing" with: owner=AlgOptGroup, repo=apxchol,
 # workflow=publish.yml, environment=pypi. No API tokens needed.
 name: publish-pypi
@@ -44,8 +45,9 @@ jobs:
   publish:
     name: upload to PyPI (wheels only)
     needs: [wheels, pypy, cli, sdk]
-    # workflow_dispatch only builds artifacts; uploads happen on a release.
-    if: github.event_name == 'release'
+    # workflow_dispatch only builds artifacts; PyPI uploads happen on a final
+    # release. A PyPI version can be uploaded only once.
+    if: github.event_name == 'release' && !github.event.release.prerelease
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
