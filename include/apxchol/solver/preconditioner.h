@@ -221,8 +221,7 @@ public:
                 throw std::invalid_argument("GPU route requires a unique nonempty device-owned factor");
         }
 #endif
-        n_ = A.rows();
-        install_factor(std::move(next));
+        install_factor(std::move(next), A.rows());
 #if defined(APXCHOL_USE_CUDA)
         if constexpr (on_gpu) {
             // Complete the adopted factor's queued setup work before returning.
@@ -276,17 +275,17 @@ public:
             throw std::invalid_argument("apx_cholesky::set_factor: factorization values were released");
         auto next = std::make_shared<installed>();
         next->F = std::move(F);
-        n_ = static_cast<Eigen::Index>(next->F.L.rows());
+        const auto n = static_cast<Eigen::Index>(next->F.L.rows());
         m_analysisIsOk = true;
         m_isInitialized = true;
-        install_factor(std::move(next));
+        install_factor(std::move(next), n);
         return *this;
     }
 
 private:
     /// Shared tail of factorize()/set_factor(): SpTRSV setup from next->F,
     /// then publish next as this object's read-only installed state.
-    void install_factor(std::shared_ptr<installed> next) {
+    void install_factor(std::shared_ptr<installed> next, Eigen::Index n) {
         auto& F = next->F;
         auto& trsv = next->trsv;
 #if defined(APXCHOL_USE_CUDA)
@@ -300,13 +299,13 @@ private:
                     "GPU route requires a unique nonempty device-owned factor");
         }
 #endif
-        scratch_.resize(n_);
+        scratch_.resize(n);
         if constexpr (!on_gpu) {
             // Second scratch buffer (CPU path only, +8n bytes RSS): receives the
             // transpose-solve output so the final unpermute gathers straight from
             // it, eliminating the serial full-n `scratch_ = x` staging copy that
             // _solve_impl used to pay per PCG iteration.
-            scratch2_.resize(n_);
+            scratch2_.resize(n);
         }
 
         // SpTRSV setup (CPU schedules / GPU dataflow preparation) is setup work:
@@ -314,7 +313,7 @@ private:
         if (cp_) { cp_->descend("setup"); cp_->tick(); }
         if constexpr (!on_gpu) {
             // Laplacians leave the grounded last row/column unused.
-            const node_index factor_dim = static_cast<node_index>(F.sddm ? n_ : n_ - 1);
+            const node_index factor_dim = static_cast<node_index>(F.sddm ? n : n - 1);
             // Round-as-level: hand the SpTRSV the per-round IS-column boundaries so it
             // builds level sets straight off the elimination rounds (same-round IS
             // columns are mutually independent -> one level) instead of two O(nnz)
@@ -357,7 +356,7 @@ private:
                     std::move(*F.research_device_factor), opts_);
                 F.research_device_factor.reset();
             } else {
-                trsv.setup(F.L, static_cast<node_index>(F.sddm ? n_ : n_ - 1), opts_);
+                trsv.setup(F.L, static_cast<node_index>(F.sddm ? n : n - 1), opts_);
             }
         }
 #endif
@@ -373,6 +372,8 @@ private:
         if (!keep_factor_)
             F.L.release_values();
 
+        // Publish the dimension with the state, so a failed install keeps both.
+        n_ = n;
         installed_ = std::move(next);
         if constexpr (!on_gpu) barrier_ = installed_->trsv.make_workspace();
         m_factorizationIsOk = true;

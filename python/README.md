@@ -108,9 +108,9 @@ compiled tolerance and iteration defaults.
 Overlapping inputs are copied before writing `out`. Factorization, `solve`
 and `apply` release the GIL while they run native code; reading the input
 matrix holds it. A call made while another thread uses the same solver raises
-`RuntimeError`. To solve in parallel, give each thread `copy.copy(solver)`,
-which shares the factor and allocates only new workspace, or pass all
-right-hand sides to one `solve(B)`.
+`RuntimeError`. For CPU solvers, give each thread `copy.copy(solver)`, which
+shares the factor and allocates only new workspace. GPU-backed solvers cannot
+be copied; pass all right-hand sides to one `solve(B)`.
 
 ## Save and reload
 

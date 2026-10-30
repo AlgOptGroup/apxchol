@@ -217,12 +217,14 @@ void expect_busy(const std::function<void()>& call) {
     }
 }
 
-// Two threads call one object until one call is rejected. Accepted calls must
-// match their serial results.
+// Two threads start together and call one object until one call is rejected.
+// Accepted calls must match their serial results.
 void expect_overlap_rejected(const std::function<void()>& call) {
     std::atomic<bool> rejected = false;
+    std::latch start(2);
     const auto run = [&] {
-        for (int i = 0; i < 100000 && !rejected; ++i) {
+        start.arrive_and_wait();
+        for (int i = 0; i < 1000 && !rejected; ++i) {
             try {
                 call();
             } catch (const std::runtime_error& error) {
@@ -279,14 +281,55 @@ TEST(Solver, OverlappingCallsOnOneOwnerThrow) {
     });
     // A solve and an application share the preconditioner workspace.
     std::atomic<bool> rejected = false;
+    std::latch start(2);
     std::thread solver_thread([&] {
-        for (int i = 0; i < 100000 && !rejected; ++i)
-            try { EXPECT_EQ(cpu.solve(rhs).x, solved); } catch (const std::runtime_error&) { rejected = true; }
+        start.arrive_and_wait();
+        for (int i = 0; i < 1000 && !rejected; ++i)
+            try {
+                EXPECT_EQ(cpu.solve(rhs).x, solved);
+            } catch (const std::runtime_error& error) {
+                EXPECT_STREQ(error.what(), busy_message);
+                rejected = true;
+            }
     });
-    for (int i = 0; i < 100000 && !rejected; ++i)
-        try { EXPECT_EQ(cpu.preconditioner().solve(rhs), applied); } catch (const std::runtime_error&) { rejected = true; }
+    start.arrive_and_wait();
+    for (int i = 0; i < 1000 && !rejected; ++i)
+        try {
+            EXPECT_EQ(cpu.preconditioner().solve(rhs), applied);
+        } catch (const std::runtime_error& error) {
+            EXPECT_STREQ(error.what(), busy_message);
+            rejected = true;
+        }
     solver_thread.join();
     EXPECT_TRUE(rejected);
+}
+
+TEST(Solver, RefactoringOneCopyKeepsTheOthersAndFailuresKeepTheOldFactor) {
+    const scoped_omp_threads threads(1);
+    const Sparse small = operator_matrix(64), large = operator_matrix(200);
+    apxchol::apx_cholesky original;
+    original.compute(small);
+    apxchol::apx_cholesky copy = original;
+    const Eigen::VectorXd r = Eigen::VectorXd::LinSpaced(small.rows(), 1.0, 2.0);
+    const Eigen::VectorXd expected = original.solve(r);
+    const auto* shared = &original.factor();
+    ASSERT_EQ(&copy.factor(), shared);
+
+    // A new factor replaces only this copy's shared state.
+    copy.compute(large);
+    EXPECT_EQ(copy.rows(), large.rows());
+    EXPECT_NE(&copy.factor(), shared);
+    EXPECT_EQ(original.rows(), small.rows());
+    EXPECT_EQ(&original.factor(), shared);
+    EXPECT_EQ(Eigen::VectorXd(original.solve(r)), expected);
+
+    // A failed refactor keeps the old factor and its dimension.
+    Sparse asymmetric = large;
+    asymmetric.coeffRef(0, 1) = 5.0;
+    EXPECT_THROW(original.compute(asymmetric), std::invalid_argument);
+    EXPECT_EQ(original.rows(), small.rows());
+    EXPECT_EQ(&original.factor(), shared);
+    EXPECT_EQ(Eigen::VectorXd(original.solve(r)), expected);
 }
 
 TEST(Solver, CopiesShareTheFactorAndSolveInParallel) {

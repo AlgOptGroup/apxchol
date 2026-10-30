@@ -876,3 +876,18 @@ def test_archive_restores_scipy_helpers(tmp_path):
     result = restored.solve(rhs)
     assert result.converged
     assert np.linalg.norm(A @ result.x - rhs) / np.linalg.norm(rhs) <= 1e-8
+
+
+def test_copy_keeps_subclass_attributes():
+    import copy
+
+    class Tagged(apxchol.Solver):
+        pass
+
+    L = grid2d_laplacian(8)
+    solver = Tagged(L, backend="cpu")
+    solver.tag = "kept"
+    clone = copy.copy(solver)
+    assert type(clone) is Tagged and clone.tag == "kept"
+    b = np.sin(np.arange(L.shape[0])); b -= b.mean()
+    np.testing.assert_array_equal(clone.solve(b).x, solver.solve(b).x)

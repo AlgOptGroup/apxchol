@@ -1060,7 +1060,7 @@ public:
     /// (L L^T)^-1 either way. See the file header, storage contract.
     /// Valid in place (x_in == y_out).
     template<int Columns = 1>
-    void forward_solve(const double* x_in, double* y_out) const {
+    void forward_solve(const double* x_in, double* y_out) {
         solve_dispatch<fwd_dir, Columns>(x_in, y_out, critical_barrier_);
     }
 
@@ -1069,13 +1069,14 @@ public:
     /// scaled once per column by inv_scale_[j]^2), i.e. z = L^-T y as before;
     /// D = I on the fp32 storage. Valid in place (x_in == y_out).
     template<int Columns = 1>
-    void transpose_solve(const double* x_in, double* y_out) const {
+    void transpose_solve(const double* x_in, double* y_out) {
         solve_dispatch<bck_dir, Columns>(x_in, y_out, critical_barrier_);
     }
 
-    /// Mutable synchronization state of one caller's solves. The overloads
-    /// above use this object's own and must not overlap; callers sharing one
-    /// omp_sptrsv between threads pass a workspace each from make_workspace().
+    /// Mutable synchronization state of one caller's solves. The non-const
+    /// overloads above use this object's own; callers sharing a const
+    /// omp_sptrsv, such as solver copies, pass a workspace each from
+    /// make_workspace().
     using solve_workspace = detail::critical_weak_barrier;
     solve_workspace make_workspace() const {
         solve_workspace workspace;

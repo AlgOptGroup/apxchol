@@ -183,8 +183,10 @@ public:
         }
         auto out = output_array(r, py::none());
         auto z = mutable_matrix(out);
-        py::gil_scoped_release release;
-        slv_.apply(matrix(r), z);
+        {
+            py::gil_scoped_release release;
+            slv_.apply(matrix(r), z);
+        }
         return out;
     }
 

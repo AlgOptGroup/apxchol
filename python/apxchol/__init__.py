@@ -166,6 +166,7 @@ class Solver:
         while this solver is in use. GPU-backed solvers cannot be copied.
         """
         copy = type(self).__new__(type(self))
+        copy.__dict__.update(self.__dict__)
         copy._initialize(self._impl.__copy__(), self._keep_factor)
         return copy
 
