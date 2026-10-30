@@ -15,6 +15,7 @@
 #include <system_error>
 #include <vector>
 #include <barrier>
+#include <sys/stat.h>
 
 namespace {
 using namespace apxchol;
@@ -325,6 +326,17 @@ TEST_F(SolverArchive, ExistingFilesAndReleasedFactorsAreRejected) {
     solver released(A, opts);
     EXPECT_THROW(save_solver(directory / "released.apxchol", released), std::invalid_argument);
     EXPECT_FALSE(std::filesystem::exists(directory / "released.apxchol"));
+}
+
+TEST_F(SolverArchive, NewArchivesFollowTheUmask) {
+    const mode_t previous = umask(022);
+    save_solver(directory / "shared.apxchol", original);
+    umask(previous);
+    struct stat info {};
+    ASSERT_EQ(stat((directory / "shared.apxchol").c_str(), &info), 0);
+    EXPECT_EQ(info.st_mode & 0777, 0644);
+    for (const auto& entry : std::filesystem::directory_iterator(directory))
+        EXPECT_NE(entry.path().filename().string().rfind(".apxchol-", 0), 0u) << entry.path();
 }
 
 TEST_F(SolverArchive, RejectsNullCharactersInPaths) {

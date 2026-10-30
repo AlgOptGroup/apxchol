@@ -10,11 +10,13 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <random>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <fcntl.h>
 #include <unistd.h>
 
 namespace apxchol {
@@ -32,12 +34,21 @@ void check_path(const std::filesystem::path& path) {
 struct temporary_file {
     std::string name;
     int fd = -1;
-    explicit temporary_file(const std::filesystem::path& destination)
-        : name((destination.parent_path() / ".apxchol-XXXXXX").string()) {
+    // open() with mode 0666 applies the caller's umask, as for any new file;
+    // mkstemp would always create 0600.
+    explicit temporary_file(const std::filesystem::path& destination) {
         if (std::filesystem::exists(std::filesystem::symlink_status(destination)))
             throw std::runtime_error("solver archive: destination already exists");
-        fd = mkstemp(name.data());
-        if (fd < 0) throw std::system_error(errno, std::generic_category(), "create archive temporary");
+        std::random_device random;
+        for (int attempt = 0; attempt < 100 && fd < 0; ++attempt) {
+            char suffix[17];
+            std::snprintf(suffix, sizeof suffix, "%08x%08x", random(), random());
+            name = (destination.parent_path() / (std::string(".apxchol-") + suffix)).string();
+            fd = ::open(name.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+            if (fd < 0 && errno != EEXIST)
+                throw std::system_error(errno, std::generic_category(), "create archive temporary");
+        }
+        if (fd < 0) throw std::system_error(EEXIST, std::generic_category(), "create archive temporary");
     }
     std::FILE* open() {
         auto* file = fdopen(fd, "wb+");
