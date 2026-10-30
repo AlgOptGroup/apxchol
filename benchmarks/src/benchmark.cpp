@@ -44,6 +44,7 @@
 #include <sstream>
 #include <fstream>
 #include <cmath>
+#include <cstdint>
 #include <cctype>
 #include <cstdio>
 #include <set>
@@ -3002,6 +3003,16 @@ int main(int argc, char** argv) try {
             Eigen::SparseMatrix<double> G(cn, cn);
             G.setFromTriplets(trips.begin(), trips.end());
             Lc = G;
+            // Component index i is original vertex comp[i]: int64 cn, then the
+            // 0-based original ids, so a caller can slice an original-space RHS.
+            std::ofstream ids(args.dump_mtx + ".ids", std::ios::binary);
+            const std::int64_t count = cn;
+            ids.write(reinterpret_cast<const char*>(&count), sizeof(count));
+            for (const int v : comp) {
+                const std::int64_t id = v;
+                ids.write(reinterpret_cast<const char*>(&id), sizeof(id));
+            }
+            if (!ids) { std::cerr << "failed writing " << args.dump_mtx << ".ids\n"; return 1; }
             std::cerr << "[component-dump] rank " << rank << " / " << comps.size()
                       << " components: " << cn << " / " << L.rows() << " nodes\n";
         } else {
