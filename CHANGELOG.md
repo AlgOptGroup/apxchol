@@ -39,5 +39,6 @@
 - CPU solves rescale right-hand sides of extreme magnitude; operators whose scale is not representable in FP32 factor storage are still rejected.
 - Parallel factorization handles a shrinking OpenMP team, and parallel vertex selection on the same graph is reproducible at a fixed thread count.
 - Concurrent calls on one solver no longer corrupt each other's results: a call made while another thread uses the same `solver`, `cpu_solver` or `apx_cholesky` throws. CPU solvers can be copied cheaply, sharing the factor, for one solver per thread (`copy.copy` in Python), and Python releases the GIL during factorization, `solve` and `apply`.
+- The CLI rejects an empty matrix and RHS files with no rows or columns with an error (exit 2); it used to crash.
 
 Full history: https://github.com/AlgOptGroup/apxchol/compare/v0.2.2...main

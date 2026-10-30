@@ -105,6 +105,11 @@ TEST(Solver, CpuInterfacesRejectEmptyOperator) {
     EXPECT_THROW(preconditioner.compute(empty), std::invalid_argument);
 }
 
+TEST(Solver, TestRhsOfAnEmptySystemIsEmpty) {
+    EXPECT_EQ(apxchol::generate_test_rhs(0).size(), 0);
+    EXPECT_THROW(apxchol::generate_test_rhs(-1), std::invalid_argument);
+}
+
 TEST(Solver, EigenConjugateGradientUsesPreconditioner) {
     const scoped_omp_threads threads(1);
     const auto options = cpu_options();
