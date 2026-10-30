@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Regression tests for the retained benchmark runners and scaling plots."""
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -440,24 +441,64 @@ class CellSchemaTest(unittest.TestCase):
                 self.assertTrue(sweep_fair.cell_done("audit", "m", "amgcl", ""))
 
 
-class CapReferenceTest(unittest.TestCase):
-    def test_gpu_cap_reference_uses_declared_default_not_fastest_selector(self):
-        with tempfile.TemporaryDirectory() as store, mock.patch.object(rc, "CELLS", store):
-            base = dict(family="audit", mid="m", solver="apxchol_v1", status="complete",
-                        threads=16, device="gpu", prov={"git_sha": rc.git_sha()})
-            rc.emit_cell(config=sweep_fair.APX_DEFAULT_CONFIG,
-                         metrics={"total_s": 10.0, "stop_contract": "original-v1", "execution_route": "gpu"}, **base)
-            rc.emit_cell(config="greedy+tree[vec_pool]", metrics={"total_s": 1.0, "stop_contract": "original-v1", "execution_route": "gpu"}, **base)
-            self.assertEqual(sweep_fair.gpu_apx_total("audit", "m"), 10.0)
+class RelativeCapTest(unittest.TestCase):
+    def test_cap_is_factor_times_best_same_device_apxchol_with_floor(self):
+        self.assertEqual(sweep_fair.solve_cap([3.0, 2.0, None]), 2.0 * sweep_fair.CAP_FACTOR)
+        self.assertEqual(sweep_fair.solve_cap([0.01]), sweep_fair.CAP_FLOOR_S)
+        self.assertEqual(sweep_fair.solve_cap([]), float(sweep_fair.TIMEOUT))
 
-    def test_gpu_cap_reference_uses_campaign_thread_count(self):
-        with tempfile.TemporaryDirectory() as store, \
-             mock.patch.object(rc, "CELLS", store), \
-             mock.patch.object(sweep_fair, "THREADS", 72):
-            rc.emit_cell("audit", "m", "apxchol_v1",
-                         sweep_fair.APX_DEFAULT_CONFIG, "complete",
-                         {"total_s": 7.2, "stop_contract": "original-v1", "execution_route": "gpu"}, 72, "gpu", {"git_sha": rc.git_sha()})
-            self.assertEqual(sweep_fair.gpu_apx_total("audit", "m"), 7.2)
+    def test_run_over_cap_is_a_status_not_a_time(self):
+        receipts = ["BENCH_REPEAT phase=warmup index=1 total_s=5.0 solver=\"x\"",
+                    "BENCH_REPEAT phase=retained index=1 total_s=50.0 solver=\"x\""]
+        st, m = sweep_fair.capped(("complete", {"total_s": 5.0, "setup_s": 1.0,
+                                                "repeat_receipts": receipts}), 40.0)
+        self.assertEqual(st, "exceeded_cap")
+        self.assertNotIn("total_s", m)
+        self.assertEqual(m["capped_timings"]["total_s"], 5.0)
+        self.assertEqual(m["cap_s"], 40.0)
+
+    def test_killed_run_is_exceeded_cap_and_keeps_extra(self):
+        result = sweep_fair.capped(("timeout", None, {"na_reason": "killed"}), 40.0)
+        self.assertEqual(result[0], "exceeded_cap")
+        self.assertEqual(result[2], {"na_reason": "killed"})
+
+    def test_run_within_cap_keeps_its_times(self):
+        st, m = sweep_fair.capped(("complete", {"total_s": 3.0}), 40.0)
+        self.assertEqual((st, m["total_s"], m["cap_s"]), ("complete", 3.0, 40.0))
+
+    def test_exceeded_cap_cells_record_their_cap_and_are_terminal(self):
+        with tempfile.TemporaryDirectory() as store, mock.patch.object(rc, "CELLS", store):
+            with self.assertRaises(ValueError):
+                rc.emit_cell("audit", "m", "amgcl", "", "exceeded_cap", {}, 16, "cpu",
+                             {"git_sha": rc.git_sha()})
+            rc.emit_cell("audit", "m", "amgcl", "", "exceeded_cap", {"cap_s": 40.0}, 16, "cpu",
+                         {"git_sha": rc.git_sha()}, timeout_cap_s=40.0)
+            self.assertTrue(rc.cell_done("audit", "m", "amgcl", "", 16, "cpu"))
+            self.assertFalse(rc.cell_done("audit", "m", "amgcl", "", 16, "cpu", rerun_timeouts=True))
+
+
+class SourceIdentityTest(unittest.TestCase):
+    SHA = "1c4abb35f1cf08276bc9dc65534dbfb6d2b66059"
+
+    def setUp(self):
+        rc.git_sha.cache_clear()            # git_sha is cached per process
+        self.addCleanup(rc.git_sha.cache_clear)
+
+    def head(self, out):
+        return mock.patch.object(rc, "sh", return_value=mock.Mock(stdout=out))
+
+    def test_tarball_source_uses_declared_commit(self):
+        with self.head(""), mock.patch.dict(os.environ, {"APXCHOL_SOURCE_COMMIT": self.SHA}):
+            self.assertEqual(rc.git_sha(), self.SHA)
+
+    def test_declared_commit_must_match_checkout_and_be_full(self):
+        with self.head("0" * 40 + "\n"), mock.patch.dict(os.environ, {"APXCHOL_SOURCE_COMMIT": self.SHA}):
+            with self.assertRaises(ValueError):
+                rc.git_sha()
+        rc.git_sha.cache_clear()
+        with self.head(""), mock.patch.dict(os.environ, {"APXCHOL_SOURCE_COMMIT": "1c4abb35"}):
+            with self.assertRaises(ValueError):
+                rc.git_sha()
 
 
 class FairSweepSelectionTest(unittest.TestCase):

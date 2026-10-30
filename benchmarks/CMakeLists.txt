@@ -284,6 +284,8 @@ if (BUILD_GPU_RCHOL)
                     ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0006-separate-graph-algorithm-preparation.patch
             COMMAND git apply
                     ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0007-original-residual-stopping.patch
+            COMMAND git apply
+                    ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0008-benchmark-io-portable-solve-and-by-value-kernels.patch
     )
     FetchContent_Declare(fast_matrix_market
         GIT_REPOSITORY https://github.com/alugowski/fast_matrix_market.git
@@ -321,10 +323,35 @@ if (BUILD_GPU_RCHOL)
     _parac_require_marker(_parac_cpu_solver "APX stop contract: original-v1" "patch 0007")
     _parac_require_marker(_parac_gpu_solver "APX stop contract: original-v1" "patch 0007")
     _parac_require_marker(_parac_gpu_driver "APX CUDA init time:" "patch 0004")
+    _parac_require_marker(_parac_cpu_solver "APXCHOL_PARAC_PORTABLE_CPP" "patch 0008")
+    _parac_require_marker(_parac_gpu_solver "apx_io::write_xb" "patch 0008")
+    file(READ "${gpu_rchol_SOURCE_DIR}/gpu_implementation/driver_physics.cu" _parac_gpu_physics)
+    _parac_require_marker(_parac_gpu_physics
+        "input_check_last(sparse_matrix_device<type_int, type_data> spmat" "patch 0008")
+
+    # CPU solve backend: AUTO keeps upstream's oneMKL RCI loop when MKL LP64 is
+    # found and otherwise builds patch 0008's serial portable translation.
+    set(APXCHOL_PARAC_CPU_BACKEND "auto" CACHE STRING
+        "ParAC CPU solve backend: auto, mkl-rci or portable-cpp")
+    set_property(CACHE APXCHOL_PARAC_CPU_BACKEND PROPERTY STRINGS auto mkl-rci portable-cpp)
+    set(_parac_cpu_backend "${APXCHOL_PARAC_CPU_BACKEND}")
+    if (_parac_cpu_backend STREQUAL "auto")
+        if (HAVE_MKL AND MKL_LP64)
+            set(_parac_cpu_backend "mkl-rci")
+        else()
+            set(_parac_cpu_backend "portable-cpp")
+        endif()
+    endif()
+    if (NOT _parac_cpu_backend MATCHES "^(mkl-rci|portable-cpp)$")
+        message(FATAL_ERROR "APXCHOL_PARAC_CPU_BACKEND must be auto, mkl-rci or portable-cpp")
+    endif()
+    if (_parac_cpu_backend STREQUAL "mkl-rci" AND NOT (HAVE_MKL AND MKL_LP64))
+        message(FATAL_ERROR "ParAC mkl-rci backend requested, but oneMKL LP64 was not found")
+    endif()
 
     # CPU driver (experiment/ — includes MKL PCG solve). LP64: unlike RCHOL's pcg.hpp
     # this driver uses MKL's default 32-bit MKL_INT, so it must NOT get the ILP64 layer.
-    if (HAVE_MKL AND MKL_LP64)
+    if (OpenMP_CXX_FOUND)
         add_executable(gpu_rchol_cpu_driver
             ${gpu_rchol_SOURCE_DIR}/experiment/driver_local.cpp
         )
@@ -333,20 +360,24 @@ if (BUILD_GPU_RCHOL)
             ${gpu_rchol_SOURCE_DIR}/experiment
             ${gpu_rchol_SOURCE_DIR}/cpu_implementation
             ${fast_matrix_market_SOURCE_DIR}/include
-            ${MKL_INCLUDE}
         )
-        target_link_libraries(gpu_rchol_cpu_driver PRIVATE
-            OpenMP::OpenMP_CXX ${MKL_LIBRARIES_LP64}
-        )
+        target_link_libraries(gpu_rchol_cpu_driver PRIVATE OpenMP::OpenMP_CXX)
+        if (_parac_cpu_backend STREQUAL "mkl-rci")
+            target_compile_definitions(gpu_rchol_cpu_driver PRIVATE APXCHOL_PARAC_MKL_RCI)
+            target_include_directories(gpu_rchol_cpu_driver PRIVATE ${MKL_INCLUDE})
+            target_link_libraries(gpu_rchol_cpu_driver PRIVATE ${MKL_LIBRARIES_LP64})
+        else()
+            target_compile_definitions(gpu_rchol_cpu_driver PRIVATE APXCHOL_PARAC_PORTABLE_CPP)
+        endif()
         # Upstream relies on transitive standard headers for INT_MAX/int64_t.
         # Supply them as build flags, without rewriting its source tree.
         # Keep each -include pair in one SHELL group: CMake otherwise de-duplicates
         # the repeated `-include` token and leaves `cstdint` as a bogus input file.
         target_compile_options(gpu_rchol_cpu_driver PRIVATE
             -O3 -w "SHELL:-include climits" "SHELL:-include cstdint")
-        message(STATUS "GPU RCHOL CPU driver enabled (experiment/driver_local.cpp)")
+        message(STATUS "GPU RCHOL CPU driver enabled: ParAC backend=${_parac_cpu_backend}")
     else()
-        message(STATUS "GPU RCHOL CPU driver needs MKL (LP64) — skipped")
+        message(STATUS "GPU RCHOL CPU driver needs OpenMP — skipped")
     endif()
 
     # GPU driver (needs CUDA). The convergence test remains upstream: the runner

@@ -1,0 +1,731 @@
+From: apxchol benchmark maintainers
+Subject: [PATCH 8] Benchmark explicit RHS, solution output, portable CPU solve
+ and producer permutation records
+
+Applies after 0001-0007. Nothing changes unless selected:
+- CPU driver: APXCHOL_PARAC_MKL_RCI (upstream oneMKL RCI path) or
+  APXCHOL_PARAC_PORTABLE_CPP (serial C++ CSR/PCG translation of that loop,
+  restored from b4a61899 and given patch 0007's original-residual stopping).
+- PARAC_RHS_FILE (read before main) replaces the generated RHS in the CPU and
+  GPU solves; PARAC_XB_FILE receives x and b after the timed solve.
+- PARAC_WRITE_PERM=1 makes graph/physics producers record the composite
+  permutation and producer input beside their output.
+- Physics GPU: two kernels took the device-pointer descriptor by reference,
+  i.e. through host memory. That works only where the GPU can address pageable
+  host memory (HMM, GH200) and faults on RTX 4090 nodes without HMM (illegal
+  memory access). Pass it by value; same reads.
+---
+diff --git a/cpu_implementation/apx_io.hpp b/cpu_implementation/apx_io.hpp
+new file mode 100644
+index 0000000..22e385a
+--- /dev/null
++++ b/cpu_implementation/apx_io.hpp
+@@ -0,0 +1,68 @@
++#pragma once
++// Benchmark-only input/output, enabled by environment variables and never timed.
++//   PARAC_RHS_FILE  (int64 n, double b[n]) in the order the driver solves (after
++//                   its permutation and any trim). Read during static
++//                   initialization, before every timer; the solve copies it
++//                   where it would otherwise generate its own RHS.
++//   PARAC_XB_FILE   receives (int64 n, double x[n], double b[n]) after the timed
++//                   solve, for grading outside the driver.
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <vector>
++
++namespace apx_io {
++
++[[noreturn]] inline void fail(const char *what, const char *path) {
++    std::fprintf(stderr, "APX io error: %s: %s\n", what, path ? path : "");
++    std::exit(3);
++}
++
++inline const std::vector<double> &explicit_rhs() {
++    static const std::vector<double> rhs = [] {
++        std::vector<double> values;
++        const char *path = std::getenv("PARAC_RHS_FILE");
++        if (!path || !*path) return values;
++        std::FILE *file = std::fopen(path, "rb");
++        if (!file) fail("cannot open RHS", path);
++        std::int64_t n = -1;
++        if (std::fread(&n, sizeof n, 1, file) != 1 || n < 1) fail("bad RHS header", path);
++        values.resize(static_cast<std::size_t>(n));
++        if (std::fread(values.data(), sizeof(double), values.size(), file) != values.size())
++            fail("truncated RHS", path);
++        char extra;
++        if (std::fread(&extra, 1, 1, file) != 0) fail("trailing RHS data", path);
++        std::fclose(file);
++        return values;
++    }();
++    return rhs;
++}
++
++// Load before main(), so no timed interval contains the file read.
++inline const bool preloaded = (explicit_rhs(), true);
++
++// Replace a generated RHS with the explicit one when configured.
++template <class T> bool fill_rhs(T *b, std::size_t n) {
++    const auto &rhs = explicit_rhs();
++    if (rhs.empty()) return false;
++    if (rhs.size() != n) fail("RHS length differs from the solved system", std::getenv("PARAC_RHS_FILE"));
++    for (std::size_t i = 0; i < n; ++i) b[i] = static_cast<T>(rhs[i]);
++    return true;
++}
++
++template <class T> void write_xb(const T *x, const T *b, std::size_t n) {
++    const char *path = std::getenv("PARAC_XB_FILE");
++    if (!path || !*path) return;
++    std::FILE *file = std::fopen(path, "wb");
++    if (!file) fail("cannot open x/b output", path);
++    const std::int64_t count = static_cast<std::int64_t>(n);
++    std::vector<double> buffer(n);
++    bool ok = std::fwrite(&count, sizeof count, 1, file) == 1;
++    for (const T *source : {x, b}) {
++        for (std::size_t i = 0; i < n; ++i) buffer[i] = static_cast<double>(source[i]);
++        ok = ok && std::fwrite(buffer.data(), sizeof(double), n, file) == n;
++    }
++    if (std::fclose(file) != 0 || !ok) fail("cannot write x/b output", path);
++}
++
++} // namespace apx_io
+diff --git a/cpu_implementation/write_graph.jl b/cpu_implementation/write_graph.jl
+index 03ac372..dc88fbe 100644
+--- a/cpu_implementation/write_graph.jl
++++ b/cpu_implementation/write_graph.jl
+@@ -24,6 +24,20 @@ function remove_diagonal(G)
+     return G
+ end
+ 
++# Benchmark-only: with PARAC_WRITE_PERM=1, record the composite permutation q
++# (G_new = G[q, q] before any ground augmentation) and the producer input
++# beside the output, so solutions can be graded against the original operator.
++function apx_write_perm(output::String, input::String, q)
++    get(ENV, "PARAC_WRITE_PERM", "") == "1" || return
++    open(output * ".perm", "w") do io
++        write(io, Int64(length(q)))
++        write(io, Vector{Int64}(q))
++    end
++    # The caller may pass a symlink it removes afterwards; record its target.
++    # In-memory calls (the JIT warmup) have no input file.
++    write(output * ".perm.src", ispath(input) ? realpath(input) : input)
++end
++
+ function graph_produce(path::String, method::String)
+     
+     G = MatrixMarket.mmread(path * ".mtx")
+@@ -49,9 +63,11 @@ end
+ function graph_share(path::String, G::SparseMatrixCSC, method::String; input_transform_s=0.0)
+     ordering_start = time()
+     G = spdiagm(-sum(G, dims=1)[:]) + G
++    q = nothing
+     if method == "nnz-sort"
+         p = randperm(size(G, 1))
+         G = G[p, p]
++        q = p
+ 
+         #G.nzval .= abs.(G.nzval)
+         nnz_col = Vector{Int64}()
+@@ -64,6 +80,7 @@ function graph_share(path::String, G::SparseMatrixCSC, method::String; input_tra
+         println("sort time: ", time() - t1)
+         #p = amd(G)
+         G_new = G[p, p]
++        q = q[p]
+     elseif method == "amd"
+         t1 = time()
+         p = amd(G)
+@@ -99,6 +116,9 @@ function graph_share(path::String, G::SparseMatrixCSC, method::String; input_tra
+     end
+ 
+     serialization_s = time() - serialization_start
++    apx_write_perm(path * Dict("nnz-sort" => "-nnz-sorted.mtx", "amd" => "-amd.mtx",
++                               "random" => "-rand.mtx", "nd" => "-nd.mtx")[method],
++                   path * ".mtx", q === nothing ? p : q)
+     println(path * " finished")
+     cleanup_start = time()
+     GC.gc()
+@@ -143,9 +163,11 @@ function physics_produce(path::String, method::String; negate::Bool=false)
+     end
+ 
+ 
++    q = nothing
+     if method == "nnz-sort"
+         p = randperm(size(G, 1))
+         G = G[p, p]
++        q = p
+ 
+         #G.nzval .= abs.(G.nzval)
+         nnz_col = Vector{Int64}()
+@@ -160,6 +182,7 @@ function physics_produce(path::String, method::String; negate::Bool=false)
+         println("sort time: ", time() - t1)
+         #p = amd(G)
+         G_new = G[p, p]
++        q = q[p]
+     elseif method == "amd"
+         t1 = time()
+         p = amd(G)
+@@ -214,6 +237,9 @@ function physics_produce(path::String, method::String; negate::Bool=false)
+     else
+         throw("specified permutation not implemented")
+     end
++    apx_write_perm(path * Dict("nnz-sort" => "-nnz-sorted.mtx", "amd" => "-amd.mtx",
++                               "random" => "-rand.mtx", "nd" => "-nd")[method],
++                   path * ".mtx", q === nothing ? p : q)
+     
+ end
+ 
+diff --git a/experiment/custom_cg.hpp b/experiment/custom_cg.hpp
+index d236604..aef4256 100644
+--- a/experiment/custom_cg.hpp
++++ b/experiment/custom_cg.hpp
+@@ -1,7 +1,16 @@
+ #include <limits>
+ #include <cstdlib>
++#if defined(APXCHOL_PARAC_PORTABLE_CPP) && defined(APXCHOL_PARAC_MKL_RCI)
++#error "select exactly one ParAC CPU solve backend"
++#elif defined(APXCHOL_PARAC_PORTABLE_CPP)
++#include "portable_pcg.hpp"
++#elif defined(APXCHOL_PARAC_MKL_RCI)
+ #include <mkl.h>
+ #include <mkl_spblas.h>
++#else
++#error "select exactly one ParAC CPU solve backend"
++#endif
++#include "apx_io.hpp"
+ #include "auxilliary.hpp"
+ #include <random>
+ // #include <vector>
+@@ -81,6 +90,75 @@ void example_pcg_solver(custom_space::sparse_matrix<type_int, type_data> &A, cus
+ 
+     printf("trimmed laplacian nnz: %d, trimmed factor nnz: %d\n", A.nonZeros(), M.nonZeros());
+     type_int n = A.rows();
++#if defined(APXCHOL_PARAC_PORTABLE_CPP)
++    std::cout << "ParAC CPU solve backend: portable-cpp" << std::endl;
++    const apxchol::parac_portable::csr_view<type_int, type_data> matrix{
++        static_cast<std::size_t>(n),
++        std::span<const type_int>(A.col_ptrs.data(), A.col_ptrs.size()),
++        std::span<const type_int>(A.row_indices.data(), A.row_indices.size()),
++        std::span<const type_data>(A.values.data(), A.values.size())};
++    const apxchol::parac_portable::csr_view<type_int, type_data> upper{
++        static_cast<std::size_t>(n),
++        std::span<const type_int>(M.col_ptrs.data(), M.col_ptrs.size()),
++        std::span<const type_int>(M.row_indices.data(), M.row_indices.size()),
++        std::span<const type_data>(M.values.data(), M.values.size())};
++
++    // Keep ParAC's original RHS construction, including the unused first vector.
++    std::vector<type_data> dummy(n);
++    generate_zero_sum_vector(dummy.data(), n, 0);
++    std::vector<type_data> b(n);
++    generate_zero_sum_vector(b.data(), n, 0);
++    std::cout << "APX explicit RHS: " << apx_io::fill_rhs(b.data(), n) << std::endl;
++
++    const double apx_target = std::getenv("PARAC_TARGET_TOL")
++        ? std::atof(std::getenv("PARAC_TARGET_TOL")) : 1e-8;
++    (void)rel_tol; // superseded by the explicit original-relative target
++    double apx_bnorm_sq = 0.0;
++    for (type_int i = 0; i < n; ++i) apx_bnorm_sq += b[i] * b[i];
++    const double apx_bnorm = std::sqrt(apx_bnorm_sq);
++    // Workspace construction precedes the solve timer, as MKL's handles do.
++    apxchol::parac_portable::pcg_solver<type_int, type_data> solver(
++        matrix, upper, std::span<const type_data>(diagonal, static_cast<std::size_t>(n)), b);
++    double apx_check_seconds = 0.0;
++    double apx_true_residual = std::numeric_limits<double>::infinity();
++    int apx_checks = 0;
++    int apx_checked_iteration = -1;
++    auto apx_check = [&](int iteration) {
++        const auto begin = std::chrono::high_resolution_clock::now();
++        apx_true_residual = apxchol::parac_portable::true_relative_residual(
++            matrix, solver.solution(), std::span<const type_data>(b.data(), b.size()));
++        apx_check_seconds += std::chrono::duration<double>(
++            std::chrono::high_resolution_clock::now()-begin).count();
++        ++apx_checks; apx_checked_iteration = iteration;
++        return std::isfinite(apx_true_residual) && apx_true_residual <= apx_target;
++    };
++    auto start = std::chrono::high_resolution_clock::now();
++    auto end = std::chrono::high_resolution_clock::now();
++    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
++    std::cout << "Inspector time taken: " << duration.count() << " milliseconds" << std::endl;
++
++    start = std::chrono::high_resolution_clock::now();
++    const auto result = solver.run(max_iter, apx_target * apx_bnorm, [&](int iteration) {
++        return apx_check(iteration) || !std::isfinite(apx_true_residual) || apx_checks >= 8;
++    });
++    if (apx_checked_iteration != result.iterations) apx_check(result.iterations); // final/capped result
++    const double apx_solve_seconds = std::chrono::duration<double>(
++        std::chrono::high_resolution_clock::now()-apx_solve_begin).count();
++    std::cout << "Converged. Iterations: " << result.iterations
++              << ", Final residual norm: " << result.recurrence_residual_norm << "\n";
++    std::cout << "APX stop contract: original-v1\n";
++    std::cout << "APX stop checks: " << apx_checks << "\n";
++    std::cout << "APX stop check seconds: " << apx_check_seconds << "\n";
++    std::cout << "APX original solve seconds: " << apx_solve_seconds << "\n";
++    end = std::chrono::high_resolution_clock::now();
++    duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
++    std::cout << "Solve time taken: " << duration.count() << " milliseconds" << std::endl;
++    apx_io::write_xb(solver.solution().data(), b.data(), static_cast<std::size_t>(n));
++    printf("rhs norm: %.17e\n", apx_bnorm);
++    printf("relative residual: %.17e\n", apx_true_residual);
++    std::cout << "\n";
++#else
++    std::cout << "ParAC CPU solve backend: mkl-rci" << std::endl;
+     // omp_set_num_threads(1);
+     // mkl_set_num_threads(32);
+ 
+@@ -103,6 +181,7 @@ void example_pcg_solver(custom_space::sparse_matrix<type_int, type_data> &A, cus
+     generate_zero_sum_vector(dummy.data(), n, 0);
+     std::vector<type_data> b(n);
+     generate_zero_sum_vector(b.data(), n, 0);
++    std::cout << "APX explicit RHS: " << apx_io::fill_rhs(b.data(), n) << std::endl;
+     if(is_graph)
+     {
+         // printf("using rhs generated by multiply\n");
+@@ -280,6 +359,7 @@ void example_pcg_solver(custom_space::sparse_matrix<type_int, type_data> &A, cus
+     duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+ 
+     std::cout << "Solve time taken: " << duration.count() << " milliseconds" << std::endl;
++    apx_io::write_xb(x.data(), b.data(), static_cast<std::size_t>(n));
+ 
+     double norm_rhs = cblas_dnrm2(n, b.data(), 1);
+     printf("rhs norm: %.17e\n", norm_rhs);
+@@ -295,5 +375,6 @@ void example_pcg_solver(custom_space::sparse_matrix<type_int, type_data> &A, cus
+     // for (double val : x)
+     //     std::cout << val << " ";
+     std::cout << "\n";
++#endif
+ }
+ 
+diff --git a/experiment/portable_pcg.hpp b/experiment/portable_pcg.hpp
+new file mode 100644
+index 0000000..e8b378e
+--- /dev/null
++++ b/experiment/portable_pcg.hpp
+@@ -0,0 +1,382 @@
++#pragma once
++
++#include <algorithm>
++#include <cmath>
++#include <cstddef>
++#include <limits>
++#include <span>
++#include <stdexcept>
++#include <string>
++#include <type_traits>
++#include <vector>
++
++namespace apxchol::parac_portable {
++
++// Non-owning view of the arrays ParAC already materializes for MKL.  Despite
++// the upstream sparse_matrix member names (col_ptrs/row_indices), both A and U
++// are passed to MKL as CSR, and U is stored explicitly as a unit upper factor.
++template <class Index, class Scalar> struct csr_view {
++  std::size_t rows = 0;
++  std::span<const Index> row_offsets;
++  std::span<const Index> column_indices;
++  std::span<const Scalar> values;
++};
++
++struct pcg_result {
++  std::vector<double> x;
++  int iterations = 0;
++  // sqrt(r^T M^-1 r): the quantity oneMKL RCI exposes through sqrt(dpar[4])
++  // when preconditioning is enabled, and therefore the quantity upstream
++  // ParAC prints and checks.
++  double recurrence_residual_norm = 0.0;
++  bool reached_tolerance = false;
++};
++
++struct pcg_status {
++  int iterations = 0;
++  // See pcg_result::recurrence_residual_norm.
++  double recurrence_residual_norm = 0.0;
++  bool reached_tolerance = false;
++};
++
++namespace detail {
++
++template <class Index> std::size_t checked_size(Index value, const char *what) {
++  static_assert(std::is_integral_v<Index>, "CSR indices must be integral");
++  if constexpr (std::is_signed_v<Index>) {
++    if (value < 0)
++      throw std::invalid_argument(std::string(what) + " is negative");
++  }
++  using unsigned_index = std::make_unsigned_t<Index>;
++  const auto unsigned_value = static_cast<unsigned_index>(value);
++  if constexpr (sizeof(unsigned_index) > sizeof(std::size_t)) {
++    if (unsigned_value > std::numeric_limits<std::size_t>::max())
++      throw std::invalid_argument(std::string(what) + " does not fit size_t");
++  }
++  return static_cast<std::size_t>(unsigned_value);
++}
++
++template <class Index, class Scalar>
++void validate_csr(const csr_view<Index, Scalar> &matrix, const char *name) {
++  static_assert(std::is_floating_point_v<Scalar>,
++                "ParAC portable CSR values must be floating point");
++  if (matrix.row_offsets.size() != matrix.rows + 1)
++    throw std::invalid_argument(std::string(name) +
++                                " row-offset length is not n+1");
++  if (matrix.column_indices.size() != matrix.values.size())
++    throw std::invalid_argument(std::string(name) +
++                                " column/value lengths differ");
++  if (matrix.row_offsets.empty() ||
++      checked_size(matrix.row_offsets.front(), name) != 0)
++    throw std::invalid_argument(std::string(name) +
++                                " first row offset is not zero");
++
++  std::size_t previous = 0;
++  for (std::size_t row = 0; row < matrix.rows; ++row) {
++    const std::size_t begin = checked_size(matrix.row_offsets[row], name);
++    const std::size_t end = checked_size(matrix.row_offsets[row + 1], name);
++    if (begin != previous || end < begin || end > matrix.values.size())
++      throw std::invalid_argument(std::string(name) +
++                                  " has invalid row offsets");
++    for (std::size_t entry = begin; entry < end; ++entry) {
++      if (checked_size(matrix.column_indices[entry], name) >= matrix.rows)
++        throw std::invalid_argument(std::string(name) +
++                                    " column index is out of range");
++      if (!std::isfinite(static_cast<double>(matrix.values[entry])))
++        throw std::invalid_argument(std::string(name) +
++                                    " contains a non-finite value");
++    }
++    previous = end;
++  }
++  if (previous != matrix.values.size())
++    throw std::invalid_argument(std::string(name) +
++                                " final row offset does not equal nnz");
++}
++
++template <class Index, class Scalar>
++void validate_unit_upper(const csr_view<Index, Scalar> &upper) {
++  validate_csr(upper, "ParAC U");
++  for (std::size_t row = 0; row < upper.rows; ++row) {
++    const std::size_t begin = checked_size(upper.row_offsets[row], "ParAC U");
++    const std::size_t end = checked_size(upper.row_offsets[row + 1], "ParAC U");
++    bool found_diagonal = false;
++    std::size_t previous_column = 0;
++    bool first = true;
++    for (std::size_t entry = begin; entry < end; ++entry) {
++      const std::size_t column =
++          checked_size(upper.column_indices[entry], "ParAC U");
++      if (column < row)
++        throw std::invalid_argument("ParAC U contains a lower entry");
++      if (!first && column <= previous_column)
++        throw std::invalid_argument(
++            "ParAC U columns are not strictly increasing");
++      first = false;
++      previous_column = column;
++      if (column == row) {
++        if (static_cast<double>(upper.values[entry]) != 1.0)
++          throw std::invalid_argument("ParAC U diagonal is not exactly one");
++        found_diagonal = true;
++      }
++    }
++    if (!found_diagonal)
++      throw std::invalid_argument("ParAC U row is missing its unit diagonal");
++  }
++}
++
++template <class Scalar>
++void validate_diagonal(std::span<const Scalar> diagonal, std::size_t rows) {
++  if (diagonal.size() != rows)
++    throw std::invalid_argument("ParAC D length differs from n");
++  for (const Scalar entry : diagonal) {
++    if (!std::isfinite(static_cast<double>(entry)))
++      throw std::invalid_argument("ParAC D contains a non-finite value");
++  }
++}
++
++inline double dot(std::span<const double> lhs, std::span<const double> rhs) {
++  double sum = 0.0;
++  for (std::size_t i = 0; i < lhs.size(); ++i)
++    sum += lhs[i] * rhs[i];
++  return sum;
++}
++
++template <class Index, class Scalar>
++void csr_spmv_unchecked(const csr_view<Index, Scalar> &matrix,
++                        std::span<const double> x, std::span<double> result) {
++  for (std::size_t row = 0; row < matrix.rows; ++row) {
++    const std::size_t begin = static_cast<std::size_t>(matrix.row_offsets[row]);
++    const std::size_t end =
++        static_cast<std::size_t>(matrix.row_offsets[row + 1]);
++    double sum = 0.0;
++    for (std::size_t entry = begin; entry < end; ++entry) {
++      const std::size_t column =
++          static_cast<std::size_t>(matrix.column_indices[entry]);
++      sum += static_cast<double>(matrix.values[entry]) * x[column];
++    }
++    result[row] = sum;
++  }
++}
++
++template <class Index, class Scalar>
++void apply_preconditioner_unchecked(const csr_view<Index, Scalar> &upper,
++                                    std::span<const Scalar> diagonal,
++                                    std::span<const double> residual,
++                                    std::span<double> work,
++                                    std::span<double> result) {
++  // U^T y = r.  Scattering rows of CSR(U) visits every contribution to a
++  // destination in increasing source-row order.
++  std::copy(residual.begin(), residual.end(), work.begin());
++  for (std::size_t row = 0; row < upper.rows; ++row) {
++    const double solved = work[row]; // explicit diagonal is exactly one
++    const std::size_t begin = static_cast<std::size_t>(upper.row_offsets[row]);
++    const std::size_t end =
++        static_cast<std::size_t>(upper.row_offsets[row + 1]);
++    for (std::size_t entry = begin; entry < end; ++entry) {
++      const std::size_t column =
++          static_cast<std::size_t>(upper.column_indices[entry]);
++      if (column > row)
++        work[column] -= static_cast<double>(upper.values[entry]) * solved;
++    }
++  }
++
++  // Preserve upstream's singular-graph convention: a zero D entry is left
++  // unchanged rather than divided.  Nonzero entries follow y /= D exactly.
++  for (std::size_t row = 0; row < upper.rows; ++row) {
++    const double value = static_cast<double>(diagonal[row]);
++    if (value != 0.0)
++      work[row] /= value;
++  }
++
++  // U z = y.  Rows are independent once later unknowns have been solved.
++  for (std::size_t reverse = upper.rows; reverse > 0; --reverse) {
++    const std::size_t row = reverse - 1;
++    double solved = work[row];
++    const std::size_t begin = static_cast<std::size_t>(upper.row_offsets[row]);
++    const std::size_t end =
++        static_cast<std::size_t>(upper.row_offsets[row + 1]);
++    for (std::size_t entry = begin; entry < end; ++entry) {
++      const std::size_t column =
++          static_cast<std::size_t>(upper.column_indices[entry]);
++      if (column > row)
++        solved -= static_cast<double>(upper.values[entry]) * result[column];
++    }
++    result[row] = solved; // explicit diagonal is exactly one
++  }
++}
++
++} // namespace detail
++
++template <class Index, class Scalar>
++void csr_spmv(const csr_view<Index, Scalar> &matrix, std::span<const double> x,
++              std::span<double> result) {
++  detail::validate_csr(matrix, "ParAC A");
++  if (x.size() != matrix.rows || result.size() != matrix.rows)
++    throw std::invalid_argument("ParAC SpMV vector length differs from n");
++  detail::csr_spmv_unchecked(matrix, x, result);
++}
++
++template <class Index, class Scalar>
++void apply_preconditioner(
++    const csr_view<Index, Scalar> &upper,
++    std::span<const std::type_identity_t<Scalar>> diagonal,
++    std::span<const double> residual, std::span<double> work,
++    std::span<double> result) {
++  detail::validate_unit_upper(upper);
++  detail::validate_diagonal(diagonal, upper.rows);
++  if (diagonal.size() != upper.rows || residual.size() != upper.rows ||
++      work.size() != upper.rows || result.size() != upper.rows)
++    throw std::invalid_argument(
++        "ParAC preconditioner vector length differs from n");
++  detail::apply_preconditioner_unchecked(upper, diagonal, residual, work,
++                                         result);
++}
++
++// Prepared outside the measured solve interval, just like upstream's MKL path:
++// CSR handles/RCI vectors are created before its timer, while its initial A*x
++// request, the first preconditioner application, and every PCG iteration are
++// inside it.
++template <class Index, class Scalar> class pcg_solver {
++public:
++  pcg_solver(const csr_view<Index, Scalar> &matrix,
++             const csr_view<Index, Scalar> &upper,
++             std::span<const std::type_identity_t<Scalar>> diagonal,
++             std::span<const std::type_identity_t<Scalar>> rhs)
++      : matrix_(matrix), upper_(upper), diagonal_(diagonal), rhs_(matrix.rows),
++        x_(matrix.rows, 0.0), residual_(matrix.rows),
++        preconditioned_(matrix.rows), direction_(matrix.rows),
++        product_(matrix.rows), work_(matrix.rows) {
++    detail::validate_csr(matrix_, "ParAC A");
++    detail::validate_unit_upper(upper_);
++    detail::validate_diagonal(diagonal_, matrix_.rows);
++    if (matrix_.rows != upper_.rows || rhs.size() != matrix_.rows)
++      throw std::invalid_argument("ParAC portable PCG dimensions differ");
++    for (std::size_t i = 0; i < matrix_.rows; ++i)
++      rhs_[i] = static_cast<double>(rhs[i]);
++  }
++
++  // Explicit serial preconditioned CG translation of ParAC's MKL-RCI loop with
++  // patch 0007's original-system stopping. With preconditioning enabled,
++  // oneMKL RCI stores r^T M^-1 r in dpar[4]; patch 0007 compares its square
++  // root against `threshold` (= target * ||b||) and, when it passes, asks
++  // `check()` for the original residual. check() returns true to stop (the
++  // original target was met, the residual is non-finite, or the check budget
++  // is spent); otherwise the threshold tightens tenfold, exactly as patch 0007
++  // multiplies dpar[0] by 0.01, and iteration continues.
++  template <class Check>
++  pcg_status run(int max_iterations, double threshold, Check &&check) {
++    if (ran_)
++      throw std::logic_error("ParAC portable PCG workspace was reused");
++    ran_ = true;
++    if (max_iterations < 0)
++      throw std::invalid_argument("ParAC max_iterations is negative");
++    if (!std::isfinite(threshold) || threshold < 0.0)
++      throw std::invalid_argument(
++          "ParAC threshold is not finite and nonnegative");
++
++    pcg_status output;
++
++    // The first timed dcg() call requests A*x even though upstream's x is
++    // zero. Reproduce that request and form r=b-Ax before preconditioning;
++    // keeping it is part of matching the original solve-time boundary.
++    detail::csr_spmv_unchecked(matrix_, x_, product_);
++    for (std::size_t i = 0; i < matrix_.rows; ++i)
++      residual_[i] = rhs_[i] - product_[i];
++    detail::apply_preconditioner_unchecked(upper_, diagonal_, residual_, work_,
++                                           preconditioned_);
++    double rho = detail::dot(residual_, preconditioned_);
++    if (!std::isfinite(rho) || rho < 0.0)
++      throw std::runtime_error("ParAC portable PCG broke down at initial rTz");
++    output.recurrence_residual_norm = std::sqrt(rho);
++    if (max_iterations == 0)
++      return output;
++    if (rho == 0.0)
++      throw std::runtime_error("ParAC portable PCG broke down at initial rTz");
++    direction_ = preconditioned_;
++
++    while (output.iterations < max_iterations) {
++      detail::csr_spmv_unchecked(matrix_, direction_, product_);
++      const double denominator = detail::dot(direction_, product_);
++      if (!std::isfinite(denominator) || denominator == 0.0)
++        throw std::runtime_error("ParAC portable PCG broke down at pTAp");
++      const double alpha = rho / denominator;
++      if (!std::isfinite(alpha))
++        throw std::runtime_error(
++            "ParAC portable PCG produced a non-finite alpha");
++
++      for (std::size_t i = 0; i < matrix_.rows; ++i) {
++        x_[i] += alpha * direction_[i];
++        residual_[i] -= alpha * product_[i];
++      }
++      ++output.iterations;
++      // MKL requests preconditioning before its user stop request and
++      // updates dpar[4] to r^T M^-1 r. This includes the final converged
++      // or max-iteration step, so the triangular solves stay timed.
++      detail::apply_preconditioner_unchecked(upper_, diagonal_, residual_,
++                                             work_, preconditioned_);
++      const double next_rho = detail::dot(residual_, preconditioned_);
++      if (!std::isfinite(next_rho) || next_rho < 0.0)
++        throw std::runtime_error("ParAC portable PCG broke down at rTz");
++      output.recurrence_residual_norm = std::sqrt(next_rho);
++      if (output.recurrence_residual_norm <= threshold) {
++        output.reached_tolerance = true;
++        if (check(output.iterations))
++          break;
++        threshold *= 0.1;
++      }
++      if (output.iterations == max_iterations)
++        break;
++
++      if (!std::isfinite(rho) || rho == 0.0)
++        throw std::runtime_error("ParAC portable PCG broke down at rTz");
++      const double beta = next_rho / rho;
++      if (!std::isfinite(beta))
++        throw std::runtime_error(
++            "ParAC portable PCG produced a non-finite beta");
++      for (std::size_t i = 0; i < matrix_.rows; ++i)
++        direction_[i] = preconditioned_[i] + beta * direction_[i];
++      rho = next_rho;
++    }
++
++    return output;
++  }
++
++  const std::vector<double> &solution() const noexcept { return x_; }
++
++private:
++  csr_view<Index, Scalar> matrix_;
++  csr_view<Index, Scalar> upper_;
++  std::span<const Scalar> diagonal_;
++  std::vector<double> rhs_;
++  std::vector<double> x_;
++  std::vector<double> residual_;
++  std::vector<double> preconditioned_;
++  std::vector<double> direction_;
++  std::vector<double> product_;
++  std::vector<double> work_;
++  bool ran_ = false;
++};
++
++template <class Index, class Scalar>
++double
++true_relative_residual(const csr_view<Index, Scalar> &matrix,
++                       std::span<const double> x,
++                       std::span<const std::type_identity_t<Scalar>> rhs) {
++  detail::validate_csr(matrix, "ParAC A");
++  if (x.size() != matrix.rows || rhs.size() != matrix.rows)
++    throw std::invalid_argument("ParAC residual vector length differs from n");
++  std::vector<double> product(matrix.rows);
++  detail::csr_spmv_unchecked(matrix, x, product);
++  double residual_sq = 0.0;
++  double rhs_sq = 0.0;
++  for (std::size_t i = 0; i < matrix.rows; ++i) {
++    const double b = static_cast<double>(rhs[i]);
++    const double residual = product[i] - b;
++    residual_sq += residual * residual;
++    rhs_sq += b * b;
++  }
++  if (rhs_sq == 0.0)
++    return residual_sq == 0.0 ? 0.0 : std::numeric_limits<double>::infinity();
++  return std::sqrt(residual_sq / rhs_sq);
++}
++
++} // namespace apxchol::parac_portable
+diff --git a/gpu_implementation/driver_physics.cu b/gpu_implementation/driver_physics.cu
+index df04698..49ceb3e 100644
+--- a/gpu_implementation/driver_physics.cu
++++ b/gpu_implementation/driver_physics.cu
+@@ -1592,7 +1592,7 @@ void segment_sort_indices(type_int *csr_col_ind, type_int *csr_rowptr, type_data
+ 
+ 
+ template <typename type_int, typename type_data>
+-__global__ void input_check_last(sparse_matrix_device<type_int, type_data> &spmat, type_int *csr_row_ptr)
++__global__ void input_check_last(sparse_matrix_device<type_int, type_data> spmat, type_int *csr_row_ptr)
+ {
+     
+     int bid = blockIdx.x;
+@@ -1641,7 +1641,7 @@ __global__ void revert_from_prefix(type_int *csr_row_ptr, type_int *ref, type_in
+ 
+ // copy the original input into a new location with the last row removed
+ template <typename type_int, typename type_data>
+-__global__ void input_lap_construct_csr(sparse_matrix_device<type_int, type_data> &spmat, type_int *csr_row_ptr, type_int *csr_col_ind, type_data *csr_val)
++__global__ void input_lap_construct_csr(sparse_matrix_device<type_int, type_data> spmat, type_int *csr_row_ptr, type_int *csr_col_ind, type_data *csr_val)
+ {
+     
+     int bid = blockIdx.x;
+diff --git a/gpu_implementation/solver.hpp b/gpu_implementation/solver.hpp
+index db80a0c..2110b60 100644
+--- a/gpu_implementation/solver.hpp
++++ b/gpu_implementation/solver.hpp
+@@ -1,3 +1,4 @@
++#include "apx_io.hpp"
+ #include <limits>
+ #include <stdexcept>
+ #include "auxilliary.hpp"
+@@ -442,6 +443,7 @@ int prepare_and_solve(sparse_matrix_device<type_int, type_data> &laplacian, type
+     
+     // use random zero-sum vector as rightside for both physics and graph
+     generate_zero_sum_vector<type_data>(rightside, num_cols, 0);
++    std::cout << "APX explicit RHS: " << apx_io::fill_rhs(rightside, num_cols) << std::endl;
+     cudaMemcpy(rightside_device, rightside, num_cols * sizeof(type_data), cudaMemcpyHostToDevice);
+     // if(physics)
+     // {
+@@ -607,6 +609,7 @@ int prepare_and_solve(sparse_matrix_device<type_int, type_data> &laplacian, type
+     std::cout << "APX stop check seconds: " << apx_check_seconds << "\n";
+     std::cout << "APX GPU solve phase time: " << apx_gpu_solve_duration.count()
+               << " seconds" << std::endl;
++    apx_io::write_xb(apx_solution.data(), rightside, num_cols);
+     
+     CHECK_CUSPARSE( cusparseSpMV(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                                  &one, laplacian_des, vec_x, &zero, vec_init_left, CUDA_R_64F,

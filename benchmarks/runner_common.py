@@ -115,7 +115,19 @@ def sh(cmd, timeout=1800, env=None, mem_cap_gb=None):
 # ── provenance ──────────────────────────────────────────────────────────────────
 @functools.cache
 def git_sha():
-    return sh(f"git -C {ROOT} rev-parse HEAD", timeout=30).stdout.strip()
+    """The measured source revision.
+
+    A checkout reports its HEAD. A source tree without .git (a campaign
+    tarball) declares its revision in APXCHOL_SOURCE_COMMIT, a full 40-hex
+    object id; when both exist they must agree. Empty means unknown, which no
+    stored cell can match on resume."""
+    declared = os.environ.get("APXCHOL_SOURCE_COMMIT", "").strip()
+    if declared and not re.fullmatch(r"[0-9a-f]{40}", declared):
+        raise ValueError("APXCHOL_SOURCE_COMMIT must be a full 40-hex commit id")
+    head = sh(f"git -C {ROOT} rev-parse HEAD", timeout=30).stdout.strip()
+    if declared and head and head != declared:
+        raise ValueError(f"APXCHOL_SOURCE_COMMIT {declared} differs from checkout HEAD {head}")
+    return head or declared
 
 
 def cell_meets_contract(cell):
@@ -136,7 +148,7 @@ def cell_meets_contract(cell):
             or not isinstance(provenance.get("git_sha"), str)
             or not provenance["git_sha"].strip()):
         return False
-    if status == "timeout":
+    if status in ("timeout", "exceeded_cap"):
         return timeout_cap({"timeout_cap_s": cell.get("timeout_cap_s")}) is not None
     if status in {"complete", "not_converged"}:
         if metrics.get("stop_contract") != "original-v1":
@@ -875,7 +887,8 @@ def classify(m, tol):
 # Schema 2 adds top-level `timeout_cap_s` to timeout outcomes. A timeout is only a
 # numerical lower bound when the exact wall-clock cap used for that invocation is
 # persisted with the cell; reconstructing it later can silently change the bound.
-DEFAULT_TERMINAL = frozenset({"complete", "not_converged", "failed", "timeout", "oom"})
+DEFAULT_TERMINAL = frozenset({"complete", "not_converged", "failed", "timeout", "oom",
+                              "exceeded_cap"})
 
 def timeout_cap(cell):
     """Return a persisted per-solve lower-bound cap, otherwise None."""
@@ -911,11 +924,11 @@ def emit_cell(family, mid, solver, config, status, metrics, threads, device, pro
     operator it actually assembled (parse_matrix_meta). It is filled from the
     registry when the caller passes nothing, so no cell can be written without
     saying which system it solved."""
-    if status == "timeout":
+    if status in ("timeout", "exceeded_cap"):
         if timeout_cap({"timeout_cap_s": timeout_cap_s}) is None:
-            raise ValueError("timeout cells require a positive timeout_cap_s")
+            raise ValueError(f"{status} cells require a positive timeout_cap_s")
     elif timeout_cap_s is not None:
-        raise ValueError("timeout_cap_s is only valid for status='timeout'")
+        raise ValueError("timeout_cap_s is only valid for status 'timeout' or 'exceeded_cap'")
 
     path = cell_path(family, mid, solver, config, threads, device)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -925,7 +938,7 @@ def emit_cell(family, mid, solver, config, status, metrics, threads, device, pro
     cell = {"cell": {"config": config, "device": device, "family": family, "matrix_id": mid,
                      "solver": solver, "threads": threads}, "matrix_meta": meta,
             "metrics": metrics or {}, "provenance": prov, "schema": 2, "status": status}
-    if status == "timeout":
+    if status in ("timeout", "exceeded_cap"):
         cell["timeout_cap_s"] = timeout_cap({"timeout_cap_s": timeout_cap_s})
     with open(path, "w") as handle:
         json.dump(cell, handle, indent=2)
@@ -976,7 +989,7 @@ def cell_done(family, mid, solver, config, threads, device,
     if not cell_is_current(cell, git_sha()):
         return False
     status = cell["status"]
-    return status in terminal and not (rerun_timeouts and status == "timeout")
+    return status in terminal and not (rerun_timeouts and status in ("timeout", "exceeded_cap"))
 
 
 # ── peak-VRAM sidecar (GPU axis) ────────────────────────────────────────────────

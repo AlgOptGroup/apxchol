@@ -123,9 +123,17 @@ comments, Pages or README measurements.
   retroactively add/subtract a modeled checking cost.
 - Select one coherent median-total repetition after explicit warmups; never select
   timing fields independently or minimize across configurations.
+- Competitor caps are per solve and relative to apxchol on the same matrix and
+  device: `cap = max(20 x best complete apxchol total, 30 s)`, or 1800 s without
+  a reference. The capped quantity is setup + solve as reported, excluding
+  process startup, input parsing and CUDA/Julia initialization. A repetition
+  over the cap, or a process killed at `runs x cap + 300 s`, is `exceeded_cap`:
+  a status, never a time. Its measured times stay only in `capped_timings`.
 - Whole-cell deadlines may cover calibration and all repetitions: a timeout is **not**
-  a lower bound on one solve. Preserve failure, nonconvergence, timeout, unsupported,
-  unattempted and missing statuses. Unknown memory is not zero.
+  a lower bound on one solve. Preserve failure, nonconvergence, timeout,
+  exceeded_cap, unsupported, unattempted and missing statuses. Unknown memory is not zero.
+- A source tree without `.git` declares its revision in `APXCHOL_SOURCE_COMMIT`
+  (40 hex); cells record it and resume matches it.
 - Pin CPU affinity; record requested/effective threads, placement, source/binary hashes, compiler/runtime, warmups and retained receipts. See [thread placement](#thread-placement) below.
 
 ## Thread placement

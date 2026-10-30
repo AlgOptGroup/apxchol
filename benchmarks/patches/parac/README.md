@@ -2,9 +2,9 @@
 
 Upstream [Parallel-Randomized-Cholesky](https://github.com/Tianyu-Liang/Parallel-Randomized-Cholesky),
 pinned `44ef39d2f5c2c52aa577f58f005d62f2675cefbc`. The benchmark owns preparation,
-configuration and grading; seven patches expose existing controls, complete timing
-boundaries, original-residual stopping, one producer reduction fix and Graph
-preparation accounting.
+configuration and grading; eight patches expose existing controls, complete timing
+boundaries, original-residual stopping, one producer reduction fix, Graph
+preparation accounting, benchmark input/output hooks and one GPU memory fix.
 
 ## Patch stack
 
@@ -17,11 +17,24 @@ preparation accounting.
 | [0005](0005-compensate-physics-global-sum.patch) | Neumaier compensation for the Physics global-sum branch decision. Preserve both ±1e-9 thresholds, ordering, per-column sums and sampling. |
 | [0006](0006-separate-graph-algorithm-preparation.patch) | Share the existing Graph producer with an in-memory entry; return disjoint transform, ordering/permutation, serialization and cleanup intervals. |
 | [0007](0007-original-residual-stopping.patch) | Check the original residual at native exits, continue with retained state and a bounded total iteration count, and report the measured stopping cost. CPU uses explicit `PARAC_TARGET_TOL`; retained runs no longer use calibration probes. |
+| [0008](0008-benchmark-io-portable-solve-and-by-value-kernels.patch) | Select the CPU solve backend explicitly (oneMKL RCI, or a serial portable C++ translation with 0007's stopping); optional explicit RHS (`PARAC_RHS_FILE`) and solution output (`PARAC_XB_FILE`) outside timing; optional producer permutation records (`PARAC_WRITE_PERM=1`); pass the GPU Physics descriptor to two kernels by value (below). |
 
 0005 corrects cancellation that falsely rejected large grids. It does not prove
 row-wise diagonal dominance or repair arbitrary operators. Do not reassociate
 its error-recovery expressions with fast-math. Historical caches must not be
 retroactively labelled as produced by the patch.
+
+## GPU Physics on GPUs without HMM
+
+Upstream `driver_physics.cu` passes the `sparse_matrix_device` descriptor (a
+struct of sizes and device pointers) to two kernels, `input_check_last` and
+`input_lap_construct_csr`, **by reference**. The kernel then receives the
+address of a host stack object. A GPU can dereference that only when it can
+address pageable host memory: with HMM or on GH200, where it works. On RTX 4090
+nodes without HMM it faults with an illegal memory access, and the driver still
+exits 0. Patch 0008 passes the descriptor by value; both kernels only read it, so
+the computation is unchanged. CMake requires the by-value signature. Daint
+results (GH200) were not affected. The Graph driver has no such kernel.
 
 ## Build
 
