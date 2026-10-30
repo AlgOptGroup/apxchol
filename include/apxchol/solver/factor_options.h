@@ -81,8 +81,9 @@ struct factor_options {
     /// Seed for factor construction; see the precision guide for repeatability limits.
     unsigned seed = 42;
     /// Minimum diagonal excess of the preconditioner, as a fraction of each
-    /// diagonal after lump_max_mass lumping. The operator is not modified.
-    /// Zero disables it.
+    /// diagonal after lump_max_mass lumping. Excess below 1e-12 of the diagonal
+    /// counts as zero first, as row-sum rounding noise. The operator is not
+    /// modified. Zero disables it.
     double regularization = 0;
     /// Allowed positive off-diagonal mass fraction in [0, 1]. Zero rejects it.
     /// Accepted positive entries are moved to the preconditioner's diagonal.
