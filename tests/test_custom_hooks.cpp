@@ -64,6 +64,8 @@ static_assert(apxchol::partitioner<priority_partitioner>);
 
 using vp_graph = apxchol::graph;
 
+const apxchol::solve_options on_cpu{.backend = apxchol::solve_backend::cpu};
+
 TEST(CustomEliminator, ExactCliqueConverges) {
     auto L = grid_laplacian(20, 20);
     auto b = apxchol::generate_test_rhs(L.rows());
@@ -72,7 +74,7 @@ TEST(CustomEliminator, ExactCliqueConverges) {
     auto F = apxchol::factorize(L, exact_clique_eliminator{});
     EXPECT_GT(F.L.nonZeros(), 0u);
 
-    apxchol::cpu_solver slv(L, std::move(F));
+    apxchol::solver slv(L, std::move(F));
     auto res = slv.solve(b, 1e-8, 500);
     EXPECT_LT(res.residual, 1e-8);
 }
@@ -92,7 +94,7 @@ TEST(CustomEliminator, LambdaViaAsEliminator) {
                 }
         }));
 
-    apxchol::cpu_solver slv(L, std::move(F));
+    apxchol::solver slv(L, std::move(F));
     auto res = slv.solve(b, 1e-8, 500);
     EXPECT_LE(res.iterations, kExactFactorMaxIters);   // exact factor
     EXPECT_LT(res.residual, 1e-8);
@@ -108,7 +110,7 @@ TEST(CustomEliminator, ExactCliqueFactorIsExact) {
         auto F = apxchol::factorize(std::move(G), exact_clique_eliminator{});
         apxchol::solve_options options;
         options.factor_opts.factor_storage = storage;
-        apxchol::cpu_solver slv(A, std::move(F), options);
+        apxchol::solver slv(A, std::move(F), options);
         return slv.solve(b, 1e-12, 50);
     };
     for (bool fp16 : {false, true}) {
@@ -137,7 +139,7 @@ TEST(CustomPartitioner, StatefulInstanceConverges) {
     auto F = apxchol::factorize(L, std::move(part));
     EXPECT_FALSE(F.rounds.empty());
 
-    apxchol::cpu_solver slv(L, std::move(F));
+    apxchol::solver slv(L, std::move(F));
     auto res = slv.solve(b, 1e-8, 500);
     EXPECT_LT(res.residual, 1e-8);
 }
@@ -162,7 +164,7 @@ TEST(CustomPartitioner, LambdaViaAsPartitioner) {
         });
 
     auto F = apxchol::factorize(L, std::move(part));
-    apxchol::cpu_solver slv(L, std::move(F));
+    apxchol::solver slv(L, std::move(F));
     auto res = slv.solve(b, 1e-8, 500);
     EXPECT_LT(res.residual, 1e-8);
 }
@@ -184,13 +186,14 @@ TEST(SetFactor, ExternalFactorizationInPreconditioner) {
 TEST(KeepFactor, ValuesSurviveWhenRequested) {
     auto L = grid_laplacian(10, 10);
     apxchol::solve_options opts;
+    opts.backend = apxchol::solve_backend::cpu;
 
-    apxchol::cpu_solver released(L, opts);
-    EXPECT_TRUE(released.preconditioner().factor().L.vals_.empty());
+    apxchol::solver released(L, opts);
+    EXPECT_TRUE(released.factor().L.vals_.empty());
 
     opts.keep_factor_values = true;
-    apxchol::cpu_solver kept(L, opts);
-    const auto& FL = kept.preconditioner().factor().L;
+    apxchol::solver kept(L, opts);
+    const auto& FL = kept.factor().L;
     EXPECT_EQ(FL.vals_.size(), size_t(FL.nonZeros()));
     EXPECT_EQ(FL.inner_.size(), size_t(FL.nonZeros()));
 }
@@ -199,7 +202,7 @@ TEST(InitialGuess, ExactX0ConvergesImmediately) {
     auto L = grid_laplacian(15, 15);
     auto b = apxchol::generate_test_rhs(L.rows());
 
-    apxchol::cpu_solver slv(L);
+    apxchol::solver slv(L, on_cpu);
     auto ref = slv.solve(b, 1e-10, 1000);
     ASSERT_LT(ref.residual, 1e-10);
 
@@ -215,7 +218,7 @@ TEST(InitialGuess, ExactX0ConvergesImmediately) {
 TEST(OutputMemory, SolveIntoCallerBuffer) {
     auto L = grid_laplacian(15, 15);
     auto b = apxchol::generate_test_rhs(L.rows());
-    apxchol::cpu_solver slv(L);
+    apxchol::solver slv(L, on_cpu);
 
     auto ref = slv.solve(b);
     Eigen::VectorXd x(L.rows());
@@ -231,7 +234,7 @@ TEST(OutputMemory, SolveIntoCallerBuffer) {
 TEST(SolveHonesty, ZeroIterationSolveDoesNotClaimConvergence) {
     auto L = grid_laplacian(10, 10);
     auto b = apxchol::generate_test_rhs(L.rows());
-    apxchol::cpu_solver slv(L);
+    apxchol::solver slv(L, on_cpu);
 
     // max_iter = 0: no PCG update ran, so the reported relative residual must
     // be the honest ||b - A*0|| / ||b|| = 1, never the field's 0.0 default.
@@ -242,7 +245,7 @@ TEST(SolveHonesty, ZeroIterationSolveDoesNotClaimConvergence) {
 
 TEST(SolveHonesty, ZeroRhsResetsReusedResult) {
     const auto L = grid_laplacian(3, 3);
-    apxchol::cpu_solver solver(L);
+    apxchol::solver solver(L, on_cpu);
     const Eigen::VectorXd b = Eigen::VectorXd::Zero(L.rows());
     apxchol::solve_result result;
     result.x = Eigen::VectorXd::Ones(L.rows());
@@ -259,7 +262,7 @@ TEST(SolveHonesty, ZeroRhsResetsReusedResult) {
 
 TEST(SolveHonesty, ZeroRhsResetsReusedResultWithWarmStart) {
     const auto L = grid_laplacian(3, 3);
-    apxchol::cpu_solver solver(L);
+    apxchol::solver solver(L, on_cpu);
     const Eigen::VectorXd b = Eigen::VectorXd::Zero(L.rows());
     const Eigen::VectorXd x0 = Eigen::VectorXd::LinSpaced(L.rows(), -2.0, 2.0);
     apxchol::solve_result result;
@@ -276,10 +279,10 @@ TEST(SolveHonesty, ZeroRhsResetsReusedResultWithWarmStart) {
 
 TEST(SetFactor, ReleasedFactorIsRejected) {
     auto L = grid_laplacian(10, 10);
-    apxchol::cpu_solver slv(L);  // default: factor values released after setup
+    apxchol::solver slv(L, on_cpu);  // default: factor values released after setup
 
     apxchol::apx_cholesky M;
-    EXPECT_THROW(M.set_factor(slv.preconditioner().factor()),
+    EXPECT_THROW(M.set_factor(slv.factor()),
                  std::invalid_argument);
 }
 

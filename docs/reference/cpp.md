@@ -179,18 +179,6 @@ CPU/GPU solve and final residual verification.
 | `factor()` | Read the retained factor and metadata |
 | `rows()`, `cols()`, `info()` | Query dimensions and Eigen setup status |
 
-### CPU-specific owner
-
-`cpu_solver` remains available for code that needs its direct
-`preconditioner()` accessor. It provides the same solve/apply operations as
-`solver`, but always runs on CPU. Prefer
-`solver(A, opts)` with `opts.backend = solve_backend::cpu` for ordinary use.
-
-```{doxygenclass} apxchol::cpu_solver
-:members: cpu_solver, preconditioner
-:undoc-members:
-```
-
 ## One-shot solve and availability
 
 ```{doxygenfunction} apxchol::solve

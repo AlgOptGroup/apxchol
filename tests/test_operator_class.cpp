@@ -32,6 +32,7 @@
 #include "apxchol/operator_class.h"
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"
+#include "apxchol/solver/detail/cpu_route.h"
 
 using apxchol::kDefaultLumpMassCeiling;
 using apxchol::lump_positive_offdiagonals;
@@ -48,6 +49,8 @@ using Trip   = Eigen::Triplet<double>;
 /// Assembled Laplacian of a rows x cols 4-neighbour grid, both triangles
 /// stored. Pure Laplacian: every row sums to zero.
 using apxchol::test::grid_laplacian;
+
+const apxchol::solve_options on_cpu{.backend = apxchol::solve_backend::cpu};
 
 /// Grid Laplacian + a uniform diagonal excess: a genuine SDDM operator.
 Sparse grid_sddm(int rows, int cols, double shift = 0.05) {
@@ -83,7 +86,7 @@ Sparse nearly_sddm(int rows, int cols, int flips, double shift = 0.05) {
     return A;
 }
 
-/// Tiny strictly diagonally-dominant operator for probing cpu_solver's SpMV
+/// Tiny strictly diagonally-dominant operator for probing the CPU route's SpMV
 /// storage. `upper_01_delta` changes only A(0,1); values within the operator
 /// symmetry tolerance are accepted, while selfadjointView<Lower> semantics
 /// must still source both mirrored slots from A(1,0).
@@ -593,7 +596,7 @@ TEST(SpmvLrmBuild, AcceptedNearSymmetryStillUsesCanonicalLowerValues) {
 
     const Eigen::VectorXd x0 = spmv_probe_x();
     const Eigen::VectorXd b = spmv_probe_b();
-    const apxchol::cpu_solver slv(A);
+    const apxchol::solver slv(A, on_cpu);
     const auto res = slv.solve(b, 1e-15, 0, &x0);
     EXPECT_EQ(res.iterations, 0);
     EXPECT_EQ(res.residual, 0.0);
@@ -630,7 +633,7 @@ TEST(SpmvLrmBuild, BitIdenticalFastPathAndWorkSplitApplyTheExactOperator) {
     for (int threads : {1, 3, 16}) {
         omp_set_num_threads(threads);
         SCOPED_TRACE(threads);
-        const apxchol::cpu_solver slv(A);
+        const apxchol::solver slv(A, on_cpu);
         const auto res = slv.solve(b, 1e-15, 0, &x0);
         EXPECT_EQ(res.iterations, 0);
         EXPECT_EQ(res.residual, 0.0);
@@ -648,7 +651,7 @@ TEST(SpmvLrmBuild, OwnedFp32CopySurvivesCallerMutationAndDestruction) {
 
     const Eigen::VectorXd x0 = spmv_probe_x();
     const Eigen::VectorXd b = spmv_probe_b();
-    const apxchol::cpu_solver slv(*A);
+    const apxchol::solver slv(*A, on_cpu);
 
     for (int k = 0; k < A->outerSize(); ++k)
         for (Sparse::InnerIterator it(*A, k); it; ++it)
@@ -681,7 +684,8 @@ TEST(SpmvLrmBuild, BalancedDuplicateMultiplicitiesUseGeneralFallback) {
     x0 << 8.0, -4.0, 2.0;
     const Eigen::VectorXd b = A.selfadjointView<Eigen::Lower>() * x0;
 
-    const apxchol::cpu_solver slv(A, std::move(F));
+    // solver(A, F) rejects this input, so probe the unvalidated CPU route.
+    const apxchol::detail::cpu_route slv(A, std::move(F));
     const auto result = slv.solve(b, 1e-15, 0, &x0);
     EXPECT_EQ(result.iterations, 0);
     EXPECT_EQ(result.residual, 0.0);
@@ -708,27 +712,37 @@ TEST(SpmvLrmBuild, UnsortedCompressedInputUsesGeneralFallback) {
     }
 
     const Eigen::VectorXd x0 = spmv_probe_x();
-    const apxchol::cpu_solver slv(unsorted, std::move(F));
+    // solver(A, F) rejects this input, so probe the unvalidated CPU route.
+    const apxchol::detail::cpu_route slv(unsorted, std::move(F));
     const auto result = slv.solve(spmv_probe_b(), 1e-15, 0, &x0);
     EXPECT_EQ(result.iterations, 0);
     EXPECT_EQ(result.residual, 0.0);
 }
 
-TEST(SpmvLrmBuild, OneTriangleCustomOperatorKeepsGeneralFallback) {
-    // The adopting constructor historically accepts a one-triangle operator.
-    // It has no reusable CSC-as-CSR layout, so it must retain the general
-    // lower-reflection build while full symmetric inputs take the direct path.
-    const Sparse A = spmv_probe_sddm();
+TEST(SpmvLrmBuild, OneSidedExplicitZeroKeepsGeneralFallback) {
+    // An explicit zero stored in one triangle passes operator validation but
+    // leaves no reusable CSC-as-CSR layout, so it must take the general
+    // lower-reflection build while the same operator without it is copied directly.
+    const std::vector<Trip> entries{
+        {0, 0, 4.0}, {1, 1, 4.0}, {2, 2, 4.0}, {3, 3, 4.0},
+        {1, 0, -1.0}, {0, 1, -1.0}, {2, 1, -1.5}, {1, 2, -1.5},
+        {3, 2, -0.5}, {2, 3, -0.5},
+    };
+    Sparse A(4, 4);
+    A.setFromTriplets(entries.begin(), entries.end());
+    A.makeCompressed();
     auto F = apxchol::factorize(A);
     auto F_for_direct = F;
-    Sparse lower = A.triangularView<Eigen::Lower>();
-    lower.makeCompressed();
-    ASSERT_LT(lower.nonZeros(), A.nonZeros());
+    Sparse padded = A;
+    padded.coeffRef(0, 3) = 0.0;
+    padded.makeCompressed();
+    ASSERT_EQ(padded.nonZeros(), A.nonZeros() + 1);
 
-    const Eigen::VectorXd x0 = spmv_probe_x();
-    const Eigen::VectorXd b = spmv_probe_b();
-    const apxchol::cpu_solver direct(A, std::move(F_for_direct));
-    const apxchol::cpu_solver reflected(lower, std::move(F));
+    Eigen::VectorXd x0(4);
+    x0 << 8.0, -4.0, 2.0, 1.0;
+    const Eigen::VectorXd b = A * x0;
+    const apxchol::solver direct(A, std::move(F_for_direct), on_cpu);
+    const apxchol::solver reflected(padded, std::move(F), on_cpu);
     const auto res = reflected.solve(b, 1e-15, 0, &x0);
     EXPECT_EQ(res.iterations, 0);
     EXPECT_EQ(res.residual, 0.0);
@@ -736,8 +750,8 @@ TEST(SpmvLrmBuild, OneTriangleCustomOperatorKeepsGeneralFallback) {
     // More than the exact-x0 probe: with one identical factor installed in
     // both solvers, the direct and reflected operator representations must
     // drive the entire PCG recurrence bit-identically.
-    Eigen::VectorXd rhs(3);
-    rhs << 1.0, -2.0, 3.0;
+    Eigen::VectorXd rhs(4);
+    rhs << 1.0, -2.0, 3.0, 0.5;
     const auto direct_res = direct.solve(rhs, 1e-12, 50);
     const auto reflected_res = reflected.solve(rhs, 1e-12, 50);
     EXPECT_EQ(direct_res.iterations, reflected_res.iterations);
@@ -753,8 +767,9 @@ TEST(MMatrixLumping, OperatorIsBitIdenticalAfterPreconditionerConstruction) {
     Sparse A = nearly_sddm(20, 20, 12);
     const raw_snapshot snap(A);
 
-    const apxchol::cpu_solver slv(A, {.tol = 1e-8, .max_iter = 200});
-    ASSERT_GT(slv.preconditioner().factor().lumped_offdiag, 0)
+    const apxchol::solver slv(A, {.tol = 1e-8, .max_iter = 200,
+                                  .backend = apxchol::solve_backend::cpu});
+    ASSERT_GT(slv.factor().lumped_offdiag, 0)
         << "the test matrix did not actually trigger lumping";
     EXPECT_TRUE(snap.identical_to(A))
         << "preconditioner construction modified the caller's operator";

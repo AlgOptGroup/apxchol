@@ -103,9 +103,7 @@ auto batch = solver.solve(B, X);
 ```
 
 One-shot `apxchol::solve(A, b)` uses the same backend selection. For explicit
-CPU execution, set `solve_options.backend = solve_backend::cpu`. Use
-`cpu_solver` only when you need its direct `preconditioner()` accessor;
-see the [C++ reference](reference/cpp.md#cpu-specific-owner).
+CPU execution, set `solve_options.backend = solve_backend::cpu`.
 
 ## Binding capabilities
 
@@ -187,7 +185,7 @@ and the operator, which are read-only after setup, and allocates only its
 own workspace. Copy a solver once per thread, with `solver copy = original;`
 in C++ or `copy.copy(solver)` in Python, and the copies solve in parallel
 with the same results as serial calls. Copies stay valid after the original
-is destroyed. This covers `solver`, `cpu_solver` and `apx_cholesky`; a new
+is destroyed. This covers `solver` and `apx_cholesky`; a new
 factor installed in one copy of an `apx_cholesky` leaves the others unchanged.
 GPU solvers cannot be copied: construct one per thread, or batch the
 right-hand sides. A `metal_solver` used directly must not be called

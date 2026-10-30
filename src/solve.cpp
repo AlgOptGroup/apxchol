@@ -1,4 +1,5 @@
 #include "apxchol/solver/solve.h"
+#include "apxchol/solver/detail/cpu_route.h"
 #include "apxchol/solver/detail/solve_backend.h"
 #include "apxchol/solver/detail/thread_budget.h"
 #include "apxchol/solver/detail/lower_triangle_csr.h"
@@ -161,14 +162,15 @@ inline operator_storage_properties scan_operator_storage(
 // symmetry tolerance; an upper slot therefore takes the value of its lower
 // partner instead of blindly copying the caller's upper value.
 //
-// The destination owns all three arrays. cpu_solver is reusable and may
+// The destination owns all three arrays. The CPU route is reusable and may
 // outlive (or be used after mutation of) the constructor's L, so a persistent
 // Eigen::Map over the caller's storage would be a lifetime bug.
 //
 // Returns false when the full stored pattern is not symmetric. The caller then
-// rebuilds from the lower triangle, preserving the custom-factor constructor's
-// historical support for one-triangle operators. A successful return produces
-// exactly the sorted CSR structure/value sequence of that general rebuild.
+// rebuilds from the lower triangle, e.g. for explicit zeros stored in one
+// triangle only or for duplicate or unsorted entries. A successful return
+// produces exactly the sorted CSR structure/value sequence of that general
+// rebuild.
 template<class S>
 bool copy_symmetric_csc_as_owned_csr(
         const Eigen::SparseMatrix<double>& L,
@@ -510,25 +512,25 @@ void for_rhs_panels(const_matrix_view B, matrix_view X, const const_matrix_view 
         panel.template operator()<1>();
 }
 
-// Shared constructor preamble of both cpu_solver constructors.
-void prepare_cpu_solver(const solve_options& opts) {
+// Shared constructor preamble of both cpu_route constructors.
+void prepare_cpu_route(const solve_options& opts) {
     detail::validate_solve_options(opts);
     if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu)
-        throw std::invalid_argument("cpu_solver requires the CPU backend");
+        throw std::invalid_argument("the CPU route requires the CPU backend");
     ensure_eigen_parallel();
 }
 
 } // namespace
 
-// ── cpu_solver: factor + operator built once, PCG-solve many b ──────────────────
+// ── cpu_route: factor + operator built once, PCG-solve many b ───────────────────
 // Checkpoint placement here defines the setup/solve timing split used by the
 // benchmark suite; keep the operation order and checkpoint labels stable.
 
-cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
-                       const solve_options& opts, checkpoint* cp)
+detail::cpu_route::cpu_route(const Eigen::SparseMatrix<double>& L,
+                             const solve_options& opts, checkpoint* cp)
     : opts_(opts), n_(L.rows()) {
     const detail::thread_budget threads(opts_.num_threads);
-    prepare_cpu_solver(opts_);
+    prepare_cpu_route(opts_);
     if (!opts_.collect_timings) cp = nullptr;
 
     // Build preconditioner.
@@ -550,16 +552,16 @@ cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
     precond_.set_checkpoint(nullptr);
 }
 
-cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
-                       factorization F,
-                       const solve_options& opts, checkpoint* cp)
+detail::cpu_route::cpu_route(const Eigen::SparseMatrix<double>& L,
+                             factorization F,
+                             const solve_options& opts, checkpoint* cp)
     : opts_(opts), n_(L.rows()) {
     const detail::thread_budget threads(opts_.num_threads);
-    prepare_cpu_solver(opts_);
+    prepare_cpu_route(opts_);
     if (!opts_.collect_timings) cp = nullptr;
 
     if (static_cast<Eigen::Index>(F.L.rows()) != n_)
-        throw std::invalid_argument("cpu_solver: factorization dimension mismatch");
+        throw std::invalid_argument("solver: factorization dimension mismatch");
     precond_.set_keep_factor(opts_.keep_factor_values);
     if (cp) precond_.set_checkpoint(cp);
     precond_.set_options(opts_.factor_opts);
@@ -569,12 +571,12 @@ cpu_solver::cpu_solver(const Eigen::SparseMatrix<double>& L,
     precond_.set_checkpoint(nullptr);
 }
 
-void cpu_solver::build_operator(const Eigen::SparseMatrix<double>& L,
-                                checkpoint* cp) {
+void detail::cpu_route::build_operator(const Eigen::SparseMatrix<double>& L,
+                                       checkpoint* cp) {
     // Build an owned row-major FULL symmetric operator for parallel SpMV.
     // The common full-symmetric CSC needs no histogram/scatter/sort: its three
-    // arrays already have the CSR layout. A lower-triangle/custom input takes
-    // the retained general selfadjoint(Lower) reconstruction below.
+    // arrays already have the CSR layout. Other stored patterns take the
+    // general selfadjoint(Lower) reconstruction below.
     const bool pcg_trace_outer = opts_.factor_opts.verbose;
     auto next = std::make_shared<pcg_operator>();
     auto& op = *next;
@@ -612,9 +614,9 @@ void cpu_solver::build_operator(const Eigen::SparseMatrix<double>& L,
 
         if (!copied) {
             // General parallel selfadjoint(Lower) → full symmetric CSR
-            // fallback. This preserves support for the adopting constructor's
-            // one-triangle operator without taxing the validated/full common
-            // path with atomics, a prefix sum, or per-row sorting.
+            // fallback. It handles the uncommon stored patterns without
+            // taxing the full symmetric common path with atomics, a prefix
+            // sum, or per-row sorting.
             if (op.fp32)
                 Eigen::SparseMatrix<float, Eigen::RowMajor>().swap(op.Lrm_f);
 
@@ -647,10 +649,10 @@ void cpu_solver::build_operator(const Eigen::SparseMatrix<double>& L,
     op_ = std::move(next);
 }
 
-cpu_solver::cpu_solver(const cpu_solver& other)
+detail::cpu_route::cpu_route(const cpu_route& other)
     : opts_(other.opts_), precond_(other.precond_), op_(other.op_), n_(other.n_) {}
 
-cpu_solver& cpu_solver::operator=(const cpu_solver& other) {
+detail::cpu_route& detail::cpu_route::operator=(const cpu_route& other) {
     if (this != &other) {
         opts_ = other.opts_;
         precond_ = other.precond_;
@@ -662,9 +664,9 @@ cpu_solver& cpu_solver::operator=(const cpu_solver& other) {
     return *this;
 }
 
-void cpu_solver::solve_impl(const Eigen::VectorXd &b, Eigen::Ref<Eigen::VectorXd> x,
-                            solve_result &res, double tol, int max_iter,
-                            const Eigen::VectorXd *x0) const {
+void detail::cpu_route::solve_impl(const Eigen::VectorXd &b, Eigen::Ref<Eigen::VectorXd> x,
+                                   solve_result &res, double tol, int max_iter,
+                                   const Eigen::VectorXd *x0) const {
     const auto scope = precond_.calls_.enter();
     const detail::thread_budget threads(opts_.num_threads);
     detail::resolve_solve_parameters(tol, max_iter, opts_.tol, opts_.max_iter);
@@ -676,9 +678,9 @@ void cpu_solver::solve_impl(const Eigen::VectorXd &b, Eigen::Ref<Eigen::VectorXd
 }
 
 template<int C>
-void cpu_solver::check_solution(const_matrix_view B, const double* x,
-                                solve_result* results, checkpoint& timings,
-                                double tol) const {
+void detail::cpu_route::check_solution(const_matrix_view B, const double* x,
+                                       solve_result* results, checkpoint& timings,
+                                       double tol) const {
     if (opts_.collect_timings) { timings.descend("pcg"); timings.tick(); }
     auto* product = Ap_.data();
     using Panel = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
@@ -722,8 +724,8 @@ void cpu_solver::check_solution(const_matrix_view B, const double* x,
 }
 
 template<int C>
-void cpu_solver::finish_solution(const_matrix_view B, double* x, solve_result* results,
-                                 checkpoint& timings, double tol, int max_iter) const {
+void detail::cpu_route::finish_solution(const_matrix_view B, double* x, solve_result* results,
+                                        checkpoint& timings, double tol, int max_iter) const {
     std::array<bool, C> tolerance_stops;
     for (int c = 0; c < C; ++c)
         tolerance_stops[c] = std::isfinite(results[c].residual) && results[c].residual < tol;
@@ -755,8 +757,8 @@ void cpu_solver::finish_solution(const_matrix_view B, double* x, solve_result* r
 }
 
 template <int C>
-void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, checkpoint& timings, double tol,
-                             int max_iter, const double *x0) const {
+void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *results, checkpoint& timings, double tol,
+                                    int max_iter, const double *x0) const {
     static_assert(C > 0 && C <= 8);
     const Eigen::Index n = n_;
     for (int c = 0; c < C; c++) {
@@ -983,43 +985,43 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
     }
 }
 
-Eigen::VectorXd cpu_solver::apply(const Eigen::VectorXd& r) const {
+Eigen::VectorXd detail::cpu_route::apply(const Eigen::VectorXd& r) const {
     const detail::thread_budget threads(opts_.num_threads);
     if (r.size() != n_ || !r.allFinite())
-        throw std::invalid_argument("cpu_solver::apply: RHS must be finite and match the operator size");
+        throw std::invalid_argument("solver::apply: RHS must be finite and match the operator size");
     return precond_.solve(r);
 }
 
-void cpu_solver::solve(const Eigen::VectorXd& b, solve_result& res,
-                       double tol, int max_iter,
-                       const Eigen::VectorXd* x0) const {
+void detail::cpu_route::solve(const Eigen::VectorXd& b, solve_result& res,
+                              double tol, int max_iter,
+                              const Eigen::VectorXd* x0) const {
     if (b.size() != n_)
-        throw std::invalid_argument("cpu_solver::solve: RHS length mismatch");
+        throw std::invalid_argument("solver::solve: RHS length mismatch");
     if (&b == &res.x || x0 == &res.x)
         throw std::invalid_argument("solver: output must not overlap RHS or warm start");
     res.x.resize(n_);
     solve_impl(b, res.x, res, tol, max_iter, x0);
 }
 
-solve_result cpu_solver::solve(const Eigen::VectorXd& b, double tol, int max_iter,
-                               const Eigen::VectorXd* x0) const {
+solve_result detail::cpu_route::solve(const Eigen::VectorXd& b, double tol, int max_iter,
+                                      const Eigen::VectorXd* x0) const {
     solve_result res;
     solve(b, res, tol, max_iter, x0);
     return res;
 }
 
-solve_result cpu_solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
-                               double tol, int max_iter,
-                               const Eigen::VectorXd* x0) const {
+solve_result detail::cpu_route::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
+                                      double tol, int max_iter,
+                                      const Eigen::VectorXd* x0) const {
     if (x.size() != n_)
-        throw std::invalid_argument("cpu_solver::solve: output x length mismatch");
+        throw std::invalid_argument("solver::solve: output x length mismatch");
     solve_result res;
     solve_impl(b, x, res, tol, max_iter, x0);
     return res;
 }
 
-batch_solve_result cpu_solver::solve_batch(const_matrix_view B, matrix_view X, double tol,
-                                           int max_iter, const const_matrix_view *X0) const {
+batch_solve_result detail::cpu_route::solve_batch(const_matrix_view B, matrix_view X, double tol,
+                                                  int max_iter, const const_matrix_view *X0) const {
     const auto scope = precond_.calls_.enter();
     const detail::thread_budget threads(opts_.num_threads);
     detail::resolve_solve_parameters(tol, max_iter, opts_.tol, opts_.max_iter);
@@ -1041,12 +1043,12 @@ batch_solve_result cpu_solver::solve_batch(const_matrix_view B, matrix_view X, d
     return result;
 }
 
-void cpu_solver::apply(const_matrix_view R, matrix_view Z) const {
+void detail::cpu_route::apply(const_matrix_view R, matrix_view Z) const {
     const auto scope = precond_.calls_.enter();
     const detail::thread_budget threads(opts_.num_threads);
     detail::check_matrix_views(R, Z, n_);
     if (!R.allFinite())
-        throw std::invalid_argument("cpu_solver::apply: RHS must be finite");
+        throw std::invalid_argument("solver::apply: RHS must be finite");
     for_rhs_panels(R, Z, nullptr, z_, panel_x_,
                    [&]<int C>(Eigen::Index, const double *r, double *z, const double *) {
                        precond_.apply_columns<C>(r, z);
@@ -1118,7 +1120,7 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
 }
 
 struct solver::impl {
-    using owner_type = std::variant<cpu_solver
+    using owner_type = std::variant<detail::cpu_route
 #if defined(APXCHOL_USE_CUDA)
         , detail::gpu_solve_session
 #elif defined(APXCHOL_USE_METAL)
@@ -1136,13 +1138,13 @@ struct solver::impl {
     detail::call_guard calls;
 
     detail::call_guard::scope enter() const {
-        if (std::holds_alternative<cpu_solver>(owner)) return {};
+        if (std::holds_alternative<detail::cpu_route>(owner)) return {};
         return calls.enter();
     }
 
     static owner_type copy_owner(const owner_type& owner) {
-        if (const auto* cpu = std::get_if<cpu_solver>(&owner))
-            return owner_type(std::in_place_type<cpu_solver>, *cpu);
+        if (const auto* cpu = std::get_if<detail::cpu_route>(&owner))
+            return owner_type(std::in_place_type<detail::cpu_route>, *cpu);
         throw std::runtime_error("solver: a GPU solver cannot be copied; construct one per thread");
     }
 
@@ -1173,8 +1175,8 @@ struct solver::impl {
 #else
         (void)route;
 #endif
-        if (F) return owner_type(std::in_place_type<cpu_solver>, A, std::move(*F), opts, cp);
-        return owner_type(std::in_place_type<cpu_solver>, A, opts, cp);
+        if (F) return owner_type(std::in_place_type<detail::cpu_route>, A, std::move(*F), opts, cp);
+        return owner_type(std::in_place_type<detail::cpu_route>, A, opts, cp);
     }
 
     impl(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
@@ -1208,7 +1210,7 @@ void detail::solver_archive_access::restore_input_entries(solver& owner, Eigen::
     owner.impl_->operator_entries = entries;
 }
 
-Eigen::SparseMatrix<double> detail::solver_archive_access::original_operator(const cpu_solver& owner) {
+Eigen::SparseMatrix<double> detail::solver_archive_access::original_operator(const cpu_route& owner) {
     if (owner.op_->fp32)
         return archive_operator_csc(static_cast<int>(owner.n_), owner.op_->Lrm_f.outerIndexPtr(),
             owner.op_->Lrm_f.innerIndexPtr(), owner.op_->Lrm_f.valuePtr());
@@ -1278,7 +1280,7 @@ solve_result solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd>
     const auto scope = impl_->enter();
     const const_matrix_view initial(x0 ? *x0 : b);
     detail::check_matrix_views(b, x, rows(), x0 ? &initial : nullptr);
-    if (const auto* cpu = std::get_if<cpu_solver>(&impl_->owner))
+    if (const auto* cpu = std::get_if<detail::cpu_route>(&impl_->owner))
         return cpu->solve(b, x, tol, max_iter, x0);
     auto result = solve(b, tol, max_iter, x0);
     x = result.x;
@@ -1301,7 +1303,7 @@ batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X, doubl
     const detail::thread_budget threads(impl_->num_threads);
     detail::resolve_solve_parameters(tol, max_iter, impl_->tol, impl_->max_iter);
     detail::check_matrix_views(B, X, rows(), X0);
-    if (const auto *cpu = std::get_if<cpu_solver>(&impl_->owner))
+    if (const auto *cpu = std::get_if<detail::cpu_route>(&impl_->owner))
         return cpu->solve(B, X, tol, max_iter, X0);
     batch_solve_result result;
     result.columns.reserve(B.cols());
@@ -1347,7 +1349,7 @@ void solver::apply(const_matrix_view R, matrix_view Z) const {
     const auto scope = impl_->enter();
     const detail::thread_budget threads(impl_->num_threads);
     detail::check_matrix_views(R, Z, rows());
-    if (const auto *cpu = std::get_if<cpu_solver>(&impl_->owner))
+    if (const auto *cpu = std::get_if<detail::cpu_route>(&impl_->owner))
         return cpu->apply(R, Z);
     for (Eigen::Index c = 0; c < R.cols(); ++c)
         Z.col(c) = apply(Eigen::VectorXd(R.col(c)));
@@ -1362,7 +1364,7 @@ const factorization& solver::factor() const {
 Eigen::Index solver::rows() const { return static_cast<Eigen::Index>(factor().perm.size()); }
 Eigen::Index solver::operator_nnz() const { return impl_->operator_entries; }
 solve_backend solver::backend() const {
-    return std::holds_alternative<cpu_solver>(impl_->owner)
+    return std::holds_alternative<detail::cpu_route>(impl_->owner)
         ? solve_backend::cpu : solve_backend::gpu;
 }
 factor_storage_type solver::factor_storage() const {

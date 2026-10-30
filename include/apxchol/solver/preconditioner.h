@@ -28,7 +28,7 @@
 
 namespace apxchol {
 
-class cpu_solver;
+namespace detail { class cpu_route; }
 
 // ── Deterministic parallel-reduction scaffolding ─────────────────────────────
 // Shared by the fused vector passes of the preconditioner (below) and of the
@@ -424,7 +424,7 @@ public:
     }
 
 private:
-    friend class ::apxchol::cpu_solver;
+    friend class ::apxchol::detail::cpu_route;
 
     void reset_apply_count() const noexcept { apply_count_ = 0; }
 
@@ -577,7 +577,7 @@ private:
 
     // Weak-barrier state of the CPU triangular solves; unused on the GPU.
     omp_sptrsv::solve_workspace barrier_;
-    // Entered by every public application and by the owning cpu_solver's
+    // Entered by every public application and by the owning CPU route's
     // calls, which share the workspace above.
     call_guard calls_;
 };
@@ -587,7 +587,7 @@ using gpu_preconditioner = basic_apx_cholesky<cuda_sptrsv, setup_route::gpu>;
 #endif
 } // namespace detail
 
-// Eigen and cpu_solver always execute a complete CPU route, including in a
+// Eigen and solver's CPU route stay entirely on CPU, including in a
 // CUDA-enabled build. GPU PCG owns its internal device preconditioner separately.
 using apx_cholesky = detail::basic_apx_cholesky<omp_sptrsv, detail::setup_route::cpu>;
 

@@ -49,7 +49,7 @@ public:
     /// x0 (nullptr = zero) must have length n. b must be finite.
     solve_result solve(const Eigen::VectorXd& b, double tol = -1.0, int max_iter = -1,
                        const Eigen::VectorXd* x0 = nullptr) const;
-    /// Append solve timings to an existing result, as cpu_solver does.
+    /// Append solve timings to an existing result, as solver does.
     void solve(const Eigen::VectorXd& b, solve_result& result, double tol = -1.0,
                int max_iter = -1, const Eigen::VectorXd* x0 = nullptr) const;
 

@@ -565,7 +565,7 @@ TEST_F(MetalDevice, ApplyAgreesWithCpuApply) {
         SCOPED_TRACE(shift == 0.0 ? "Laplacian" : "SDDM");
         const Sparse A = grid(40, 40, shift);
         apxchol::factorization F = apxchol::factorize(A);
-        const apxchol::cpu_solver cpu(A, apxchol::factorization(F));
+        const apxchol::solver cpu(A, apxchol::factorization(F));
         const apxchol::metal_solver gpu(A, std::move(F));
         const Eigen::VectorXd r = rhs(A.rows(), 3, shift == 0.0);
         // The CPU's center-k schedule centres only some applications; centre
@@ -584,7 +584,7 @@ TEST_F(MetalDevice, ApplyAgreesWithCpuApply) {
 
 TEST_F(MetalDevice, GridLaplacianOriginalResidual) {
     const Sparse A = grid(48, 48);
-    const apxchol::cpu_solver cpu(A);
+    const apxchol::solver cpu(A, {.backend = apxchol::solve_backend::cpu});
     const apxchol::metal_solver gpu(A);
     const Eigen::VectorXd b = rhs(A.rows(), 2, true);
     for (const double tol : {1e-8, 1e-10}) {
@@ -1467,10 +1467,10 @@ TEST_F(MetalDevice, ExportedRoundsAreIndependentCpuLevels) {
             for (auto p = F.L.outer_[col] + 1; p < F.L.outer_[col + 1]; ++p)
                 EXPECT_GT(levels[F.L.inner_[p]], levels[col]);
 
-        const apxchol::cpu_solver grouped(A, F);
+        const apxchol::solver grouped(A, F);
         auto ungrouped = F;
         ungrouped.rounds.clear();
-        const apxchol::cpu_solver reference(A, std::move(ungrouped));
+        const apxchol::solver reference(A, std::move(ungrouped));
         const auto b = rhs(A.rows(), 3, kind == 0);
         const auto expected = reference.apply(b);
         EXPECT_LT((grouped.apply(b) - expected).norm() / expected.norm(), 1e-12);
