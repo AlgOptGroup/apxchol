@@ -1,5 +1,6 @@
 """Render public benchmark summaries; raw measurements remain downloadable JSON."""
 import argparse
+import collections
 import json
 from pathlib import Path
 import shutil
@@ -87,6 +88,82 @@ def historical(data, output):
     save(fig, output / "youtube.svg")
 
 
+SOLVERS = {"ac": "Julia AC", "ac2": "Julia AC2", "amgcl": "AMGCL", "amgcl_cuda": "AMGCL",
+           "hypre_boomeramg": "BoomerAMG", "hypre_boomeramg_gpu": "BoomerAMG", "rchol": "RCHOL",
+           "rchol_par": "pRCHOL", "cmg_packed": "CMG (packed)", "cmg_matlab": "CMG (MATLAB)",
+           "parac": "ParAC Graph", "parac_graph": "ParAC Graph", "parac_physics": "ParAC Physics"}
+MARKS = {"failed": "fail", "not_converged": "nc", "timeout": "t/o", "exceeded_cap": "cap", "oom": "oom",
+         "n/a": "n/a", "missing": "—"}
+
+
+def series_label(cell):
+    if cell["solver"] == "apxchol_v1":
+        config = cell["config"].split("[")[0].replace("bg+", "").replace("trace_cycle", "trace-cycle")
+        return "apxchol " + config.replace("/gpu-owned-q0", " q0.").replace("tree", "GKS")
+    name = SOLVERS.get(cell["solver"], cell["solver"])
+    extra = [v for v in (cell.get("variant"), "" if cell["config"] in ("", "original-operator") else cell["config"]) if v]
+    return name + (f" ({', '.join(extra)})" if extra else "")
+
+
+def ratios(data, device):
+    """Total time relative to the best apxchol series on the same matrix and device."""
+    cells = [c for c in data["cells"] if c["device"] == device]
+    cells += [dict(m, status="missing") for m in data["missing"] if m.get("device") == device]
+    best = {}
+    for c in cells:
+        if c["solver"] == "apxchol_v1" and c["meets_tolerance"]:
+            best[c["matrix"]] = min(best.get(c["matrix"], np.inf), c["total_s"])
+    table = {}
+    for c in cells:
+        ok = c["status"] == "complete" and c.get("meets_tolerance") and c["matrix"] in best
+        table[series_label(c), c["matrix"]] = c["total_s"] / best[c["matrix"]] if ok else MARKS.get(c["status"], c["status"])
+    return table
+
+
+def campaign(data, platform, output):
+    """One headline strip and one full grid per device; every planned cell appears in the grid."""
+    for device in sorted({c["device"] for c in data["cells"]}):
+        table = ratios(data, device)
+        rows = sorted({s for s, _ in table}, key=lambda s: (not s.startswith("apxchol"), s))
+        matrices = list(dict.fromkeys(c["matrix"] for c in data["cells"] if c["device"] == device))
+        competitors = [s for s in rows if not s.startswith("apxchol")]
+        fig, ax = plt.subplots(figsize=(7.5, .45 * len(competitors) + 1.2), layout="constrained")
+        for y, s in enumerate(competitors):
+            values = [v for (r, _), v in table.items() if r == s and not isinstance(v, str)]
+            marks = collections.Counter(v for (r, _), v in table.items() if r == s and isinstance(v, str))
+            ax.plot(values, np.full(len(values), y), "o", color=COLORS[0], alpha=.6, markersize=4)
+            if values:
+                ax.plot(np.median(values), y, "|", color="#111111", markersize=14, markeredgewidth=2)
+            if marks:
+                ax.annotate(", ".join(f"{n} {m}" for m, n in sorted(marks.items())), (1.01, y), xycoords=("axes fraction", "data"),
+                            va="center", fontsize=8, color=COLORS[1])
+        ax.axvline(1, color="#666666", linewidth=.8)
+        ax.set_xscale("log")
+        ax.set_yticks(range(len(competitors)), competitors)
+        ax.invert_yaxis()
+        ax.set_xlabel("one-RHS time (setup + solve) relative to apxchol; right of 1 = apxchol faster")
+        ax.grid(axis="x", alpha=.15)
+        ax.set_title(f"{platform} {device.upper()}: dots are matrices, bars are medians", fontsize=10)
+        save(fig, output / f"{platform.lower()}-{device}.svg")
+
+        grid = np.full((len(rows), len(matrices)), np.nan)
+        fig, ax = plt.subplots(figsize=(.42 * len(matrices) + 3, .3 * len(rows) + 1.6), layout="constrained")
+        for i, s in enumerate(rows):
+            for j, m in enumerate(matrices):
+                v = table.get((s, m), "—")
+                if isinstance(v, str):
+                    ax.text(j, i, v, ha="center", va="center", fontsize=6, color="#444444")
+                else:
+                    grid[i, j] = np.log10(v)
+                    ax.text(j, i, f"{v:.0f}" if v >= 10 else f"{v:.2g}", ha="center", va="center", fontsize=6,
+                            color="white" if abs(grid[i, j]) > .8 else "black")
+        ax.imshow(grid, cmap="PuOr", vmin=-1.5, vmax=1.5, aspect="auto")
+        ax.set_xticks(range(len(matrices)), matrices, rotation=60, ha="right", fontsize=7)
+        ax.set_yticks(range(len(rows)), rows, fontsize=7)
+        ax.set_title(f"{platform} {device.upper()}: one-RHS time relative to the best apxchol series", fontsize=10)
+        save(fig, output / f"{platform.lower()}-{device}-cells.svg")
+
+
 def render(report_paths, output, revision=None):
     output.mkdir(parents=True, exist_ok=True)
     reports = [json.loads(path.read_text()) for path in report_paths]
@@ -124,7 +201,11 @@ if __name__ == "__main__":
     parser.add_argument("output", type=Path)
     parser.add_argument("reports", nargs="*", type=Path)
     parser.add_argument("--historical", type=Path)
+    parser.add_argument("--campaign", nargs=2, metavar=("PLATFORM", "EXTRACT"))
     args = parser.parse_args()
+    if args.campaign:
+        campaign(json.loads(Path(args.campaign[1]).read_text()), args.campaign[0], args.output)
+        raise SystemExit
     render(args.reports, args.output)
     if args.historical:
         historical(json.loads(args.historical.read_text()), args.output)
