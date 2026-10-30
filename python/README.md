@@ -70,7 +70,7 @@ result = solver.solve(b)
 
 The matrix is square with `len(indptr) - 1` rows. Integer indices may be 32- or
 64-bit; the native importer sorts columns and sums duplicate entries. SciPy
-is needed for `factorize(A)`, `laplacian`, `aslinearoperator`, and sparse factor
+is needed for `factorize(A)`, `as_operator`, `aslinearoperator`, and sparse factor
 exports. NumPy-only solves and preconditioner application do not import it.
 
 ## Reuse, batches and initial guesses
@@ -163,7 +163,7 @@ support fewer construction choices.
 | `residual_peel` | Residual pivot order: `"natural"`, `"min_degree"` or `"bk_serial"` |
 | `cpu_schedule` | CPU triangular-solve scheduling: `"auto"` or `"levels"` |
 | `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
-| `regularization` | Nonnegative diagonal fraction added during factor construction; `0` disables it |
+| `regularization` | Minimum diagonal excess of the preconditioner, as a fraction of each diagonal; rows that already exceed it are unchanged, and `A` is not modified; `0` disables it |
 | `lump_max_mass` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
 | `verbose` | Print setup diagnostics; off by default |
 

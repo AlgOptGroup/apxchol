@@ -80,8 +80,9 @@ struct partition_options {
 struct factor_options {
     /// Seed for factor construction; see the precision guide for repeatability limits.
     unsigned seed = 42;
-    /// Nonnegative diagonal regularization, as a fraction of each input diagonal.
-    /// Zero disables it; only the preconditioner changes.
+    /// Minimum diagonal excess of the preconditioner, as a fraction of each
+    /// input diagonal. Rows that already exceed it are unchanged, and the
+    /// operator is not modified. Zero disables it.
     double regularization = 0;
     /// Allowed positive off-diagonal mass fraction in [0, 1]. Zero rejects it.
     /// Accepted positive entries are moved to the preconditioner's diagonal.
