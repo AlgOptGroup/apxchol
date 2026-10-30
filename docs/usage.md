@@ -96,8 +96,8 @@ For C++:
 #include "apxchol.h"
 apxchol::solver solver(A);
 auto result = solver.solve(b, 1e-8);
-// Negative tolerance/budget arguments keep this solver's defaults.
-auto warm = solver.solve(b2, -1, -1, &result.x);
+// std::nullopt keeps this solver's tolerance or iteration budget.
+auto warm = solver.solve(b2, std::nullopt, std::nullopt, &result.x);
 Eigen::MatrixXd X(B.rows(), B.cols());
 auto batch = solver.solve(B, X);
 ```

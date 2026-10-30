@@ -1252,7 +1252,7 @@ TEST_F(MetalDevice, ScalarAndPanelOutputsRejectInputAliasing) {
     result.x = b;
     EXPECT_THROW(direct.solve(result.x, result), std::invalid_argument);
     EXPECT_EQ(result.x, b);
-    EXPECT_THROW(direct.solve(b, result, -1, -1, &result.x), std::invalid_argument);
+    EXPECT_THROW(direct.solve(b, result, std::nullopt, std::nullopt, &result.x), std::invalid_argument);
     EXPECT_EQ(result.x, b);
     result.x.resize(1);
     EXPECT_THROW(direct.solve(b, result, 0), std::invalid_argument);
@@ -1265,7 +1265,7 @@ TEST_F(MetalDevice, ScalarAndPanelOutputsRejectInputAliasing) {
     EXPECT_THROW(owner.solve(B, B), std::invalid_argument);
     EXPECT_EQ(B, X);
     const apxchol::const_matrix_view guess(X);
-    EXPECT_THROW(owner.solve(B, X, -1, -1, &guess), std::invalid_argument);
+    EXPECT_THROW(owner.solve(B, X, std::nullopt, std::nullopt, &guess), std::invalid_argument);
     EXPECT_EQ(X, B);
     Eigen::MatrixXd wrong(A.rows() - 1, 4);
     EXPECT_THROW(owner.solve(B, wrong), std::invalid_argument);

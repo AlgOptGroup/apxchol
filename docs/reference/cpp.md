@@ -34,7 +34,9 @@ use them when tolerance and iteration-budget arguments are omitted.
 ### Solve options
 
 These defaults apply to each solve. A call may override the tolerance and
-iteration budget without rebuilding the factor.
+iteration budget without rebuilding the factor; an omitted or `std::nullopt`
+argument keeps the default, and an explicit invalid value throws
+`std::invalid_argument`.
 
 ```{doxygenstruct} apxchol::solve_options
 :members: tol, max_iter, keep_factor_values, factor_opts, backend, num_threads, collect_timings
