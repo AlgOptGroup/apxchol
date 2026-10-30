@@ -27,13 +27,14 @@
 - Breaking: Python 3.10 is no longer supported.
 - Breaking: removed CLI flags `--stagnation-window`, `--graph-storage`, `--fs-compact` and `--fs-filter-append`.
 - Breaking: the CLI and bindings no longer accept an adjacency matrix as if it were the operator. Previously both solved adjacency input as the operator and failed without a clear error; now validation rejects it and the error suggests the conversion.
-- New `apxchol.as_operator(M)`, `apxchol_as_operator(M)` and CLI `--convert-input`: a valid operator is used unchanged, a matrix with no negative off-diagonal entry becomes its graph Laplacian `L = D - M` (self-loops cancel), and anything else is an error.
+- New `apxchol.as_operator(M)`, `apxchol_as_operator(M)` and CLI `--convert-input`: a finite symmetric matrix with at least one off-diagonal entry, all of them positive, becomes its graph Laplacian `L = D - M` (self-loops cancel), any other finite symmetric matrix is used as given and checked by the solver, and asymmetric or non-finite input is an error.
 - The CLI solves an `n` by `k` `--rhs` file as one batch, writes an `n` by `k` solution with `-o`, and logs iterations and residuals per column.
 - The v1 API compatibility scope is documented.
 - The partitioner and eliminator extension interfaces are experimental in 1.x and may change in minor releases.
 - Python wheels for CPython 3.11+ on Linux and macOS arm64 (GPU wheels select the backend at runtime), standalone CLI archives, and MATLAB/Octave batched solves with save/load.
 - Wheels declare `License-Expression: BSD-3-Clause` and take the root LICENSE at build time; minimum scikit-build-core is 0.11.
 - Relicensed from BSD-4-Clause to BSD-3-Clause.
+- Breaking: `solver::solve()` and `solver::apply()` are non-const because they use the solver's workspace; concurrent non-const calls on one solver are not allowed.
 
 ### Benchmarks
 - The benchmark harness checks every result against the original system's residual and reports setup, solve and memory separately.
@@ -44,6 +45,8 @@
 - Fixed SDDM misclassification of exact Laplacians.
 - CPU solves rescale right-hand sides of extreme magnitude; operators whose scale is not representable in FP32 factor storage are still rejected.
 - Parallel factorization handles a shrinking OpenMP team, and parallel vertex selection on the same graph is reproducible at a fixed thread count.
+- Concurrent calls on one solver no longer corrupt each other's results: a call made while another thread uses the same `solver`, `cpu_solver` or `apx_cholesky` throws. CPU solvers can be copied cheaply, sharing the factor, for one solver per thread (`copy.copy` in Python), and Python releases the GIL during factorization, `solve` and `apply`.
+- The CLI rejects an empty matrix and RHS files with no rows or columns with an error (exit 2); it used to crash.
 
 Full history: https://github.com/AlgOptGroup/apxchol/compare/v0.2.2...main
 

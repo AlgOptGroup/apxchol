@@ -136,9 +136,9 @@ if (APXCHOL_BUILD_CLI)
     apxchol_cli_test(cli_sddm_converges path5_sddm 0 "LAPLACIAN/SDDM operator")
     apxchol_cli_test(cli_nearly_sddm_converges path5_nearly_sddm 0 "LAPLACIAN/SDDM operator")
     apxchol_cli_test(cli_convert_keeps_laplacian path5_laplacian 0
-        "LAPLACIAN/SDDM operator.*already a valid operator" --convert-input)
+        "LAPLACIAN/SDDM operator.*not a graph adjacency matrix" --convert-input)
     apxchol_cli_test(cli_convert_keeps_sddm path5_sddm 0
-        "LAPLACIAN/SDDM operator.*already a valid operator" --convert-input)
+        "LAPLACIAN/SDDM operator.*not a graph adjacency matrix" --convert-input)
     apxchol_cli_test(cli_convert_adjacency path5_adjacency 0 "ADJACENCY graph" --convert-input)
     apxchol_cli_test(cli_convert_adjacency_with_self_loops path5_adjacency_loops 0
         "ADJACENCY graph" --convert-input)
@@ -146,7 +146,7 @@ if (APXCHOL_BUILD_CLI)
     apxchol_cli_test(cli_disconnected_adjacency_converges disconnected_paths_pattern 0
         "projected random RHS independently over 2 connected components" --convert-input)
     apxchol_cli_test(cli_convert_mixed_signs_is_rejected ambiguous 2
-        "not a graph adjacency matrix either" --convert-input)
+        "not a graph adjacency matrix.*Condition FAILED: positive diagonal" --convert-input)
     apxchol_cli_test(cli_input_kind_is_removed path5_laplacian 109 "--input-kind"
         --input-kind operator)
 
@@ -194,6 +194,19 @@ if (APXCHOL_BUILD_CLI)
         "array real general\n5 3\n")
     apxchol_cli_rhs_test(cli_single_column_rhs_file path5_rhs1 0
         "iterations: [0-9]+" "array real general\n5 1\n")
+    # Empty inputs are rejected before any solve.
+    function(apxchol_cli_rhs_error_test name rhs output)
+        add_test(NAME ${name} COMMAND "${CMAKE_COMMAND}"
+            "-DCLI=$<TARGET_FILE:apxchol>"
+            "-DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/path5_sddm.mtx"
+            "-DRHS=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${rhs}.mtx"
+            "-DEXPECT_STATUS=2" "-DEXPECT_OUTPUT=${output}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/check_cli.cmake")
+        set_tests_properties(${name} PROPERTIES TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=4")
+    endfunction()
+    apxchol_cli_rhs_error_test(cli_rhs_without_columns path5_rhs_no_columns "RHS file has no columns")
+    apxchol_cli_rhs_error_test(cli_rhs_without_rows rhs_no_rows "RHS length 0 does not match n = 5")
+    apxchol_cli_test(cli_empty_matrix empty 2 "matrix is empty")
     if (APXCHOL_DEVICE STREQUAL "CPU")
         set(cli_backend_label omp)
     else()
