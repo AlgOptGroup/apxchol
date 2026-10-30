@@ -15,7 +15,8 @@ GUIDES = ["README.md", "CHANGELOG.md", "python/README.md", "octave/README.md", "
           "docs/usage.md", "docs/building.md", "docs/batching.md", "docs/serialization.md",
           "docs/sdk.md", "docs/performance.md", "docs/install.md", "docs/quickstart.md",
           "docs/cli.md", "docs/cpp.md", "docs/examples.md", "docs/input-formats.md",
-          "docs/citing.md"]
+          "docs/citing.md", "docs/performance-euler.md", "docs/performance-daint.md",
+          "docs/performance-mac.md"]
 PAGES = {name: name for name in GUIDES}
 PAGES.update({"README.md": "_readme.md", "docs/index.md": "index.md",
               "docs/reference/cpp.md": "docs/reference/cpp.md",
