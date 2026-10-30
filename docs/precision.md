@@ -5,7 +5,7 @@ the outer iteration each have their own precision.
 
 | Stage | Representation | Reason |
 |---|---|---|
-| Mutable residual graph | FP32 weights; reads aggregate in FP64 | Storage and bandwidth; each stored weight is written once |
+| Mutable residual graph | FP32 weights; reads aggregate in FP64 | Storage and bandwidth; elimination appends weights; late residuals may be coalesced once |
 | Assembled factor | FP32 values | Shared factor/export representation |
 | CPU triangular solves | FP32 storage by default; optional scaled FP16 off-diagonals | FP16 requires efficient conversion; CPU arithmetic remains FP64 |
 | CUDA triangular solves | Scaled FP16 off-diagonals by default; FP32 alternative | Reduced value traffic; GPU triangular-solve arithmetic is FP32 |
