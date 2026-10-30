@@ -13,6 +13,8 @@
 #include <stdexcept>
 #include <string_view>
 
+#include "apxchol/detail/option_names.h"
+
 // TODO: use std::float16_t once Clang defines __STDCPP_FLOAT16_T__
 // and libc++ provides <stdfloat> in our supported toolchains.
 // https://github.com/llvm/llvm-project/issues/105196
@@ -23,11 +25,14 @@ enum class factor_storage_type { automatic, fp16, fp32 };
 
 namespace detail {
 
+inline constexpr std::array<option_name<factor_storage_type>, 3> factor_storage_names{{
+    {"auto", factor_storage_type::automatic},
+    {"float16", factor_storage_type::fp16},
+    {"float32", factor_storage_type::fp32},
+}};
+
 inline factor_storage_type parse_factor_storage(std::string_view value) {
-    if (value == "auto") return factor_storage_type::automatic;
-    if (value == "float16") return factor_storage_type::fp16;
-    if (value == "float32") return factor_storage_type::fp32;
-    throw std::invalid_argument("factor storage must be auto, float16 or float32");
+    return parse_option_name(factor_storage_names, value, "factor storage");
 }
 
 inline bool resolve_fp16_storage(factor_storage_type storage, bool default_fp16) {

@@ -85,7 +85,8 @@ private members. C++ headers are under `include/`; [API scope](docs/api.md)
 defines the public interface. The CPU compiled core is `factorization.cpp`,
 `operator_class.cpp` and `solve.cpp` in `src/`.
 
-Register new partitioners in `partitioner_list.h`. The working graph uses
+Register new partitioners in `partitioner_list.h`, with a matching
+`partitioner_kind` value and name in `factor_options.h`. The working graph uses
 directed AoS adjacency. Preserve deterministic neighbor ordering, sampling
 streams and thread-team behavior. Consult the
 rationale in `factor_options.h` and the [precision contract](docs/precision.md)

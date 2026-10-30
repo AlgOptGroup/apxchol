@@ -685,7 +685,7 @@ private:
         if constexpr (kScaled)
             transpose(csc_col_ptr_.data(), csc_row_idx_.data(), csc_vals.data());
 
-        build_schedule(options.cpu_schedule, mark);
+        build_schedule(options.experimental.cpu_schedule, mark);
         ready_ = true;
     }
 

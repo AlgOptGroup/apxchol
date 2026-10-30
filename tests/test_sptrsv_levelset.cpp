@@ -308,7 +308,7 @@ TEST(SpTRSVRoundRanges, PreserveOldLevelSlotsAndRowOrderAtEmptyBoundaries) {
 
 TEST(SpTRSVRoundRanges, ImplicitPeelIsByteEquivalentToMaterializedFallback) {
     apxchol::factor_options options{.drop_tolerance = 0};
-    options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+    options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
     set_threads(4);
 
     std::vector<node_index> logical_bounds;
@@ -361,7 +361,7 @@ TEST(SpTRSVRoundRanges, ImplicitPeelIsByteEquivalentToMaterializedFallback) {
 TEST(SpTRSVRoundRanges, PostSetupBoundsMutationDoesNotChangeActiveSchedule) {
     apxchol::factor_options options{.drop_tolerance = 0};
     options.factor_storage = apxchol::factor_storage_type::fp32;
-    options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+    options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
     set_threads(4);
 
     std::vector<node_index> bounds;
@@ -399,7 +399,7 @@ TEST(SpTRSVRoundRanges, EmptyFirstTailRangePreservesHybridBoundary) {
 
     apxchol::omp_sptrsv level_reference;
     {
-        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+        options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
         level_reference.set_round_bounds(bounds);
         level_reference.setup(L, L.rows(), options);
     }
@@ -407,7 +407,7 @@ TEST(SpTRSVRoundRanges, EmptyFirstTailRangePreservesHybridBoundary) {
 
     apxchol::omp_sptrsv hybrid;
     {
-        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
+        options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
         hybrid.set_round_bounds(bounds);
         hybrid.setup(L, L.rows(), options);
     }
@@ -487,13 +487,13 @@ TEST(CriticalSchedule, HybridRunsFatPrefixAndCriticalThinTailByteIdentically) {
 
     apxchol::omp_sptrsv levels;
     {
-        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+        options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
         levels.set_round_bounds(bounds);
         levels.setup(L, L.rows(), options);
     }
     apxchol::omp_sptrsv hybrid;
     {
-        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
+        options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
         hybrid.set_round_bounds(bounds);
         hybrid.setup(L, L.rows(), options);
     }
@@ -536,13 +536,13 @@ TEST(CriticalSchedule, HybridPreservesFp16Arithmetic) {
 
     apxchol::omp_sptrsv levels;
     {
-        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+        options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
         levels.set_round_bounds(bounds);
         levels.setup(L, L.rows(), options);
     }
     apxchol::omp_sptrsv hybrid;
     {
-        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
+        options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
         hybrid.set_round_bounds(bounds);
         hybrid.setup(L, L.rows(), options);
     }
@@ -571,13 +571,13 @@ TEST(CriticalSchedule, HybridLimitsArePureLevelsAndPureCritical) {
         const auto x = random_x(L.rows(), 554);
         apxchol::omp_sptrsv levels;
         {
-            options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+            options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
             levels.set_round_bounds(bounds);
             levels.setup(L, L.rows(), options);
         }
         apxchol::omp_sptrsv hybrid;
         {
-            options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
+            options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
             hybrid.set_round_bounds(bounds);
             hybrid.setup(L, L.rows(), options);
         }
@@ -593,13 +593,13 @@ TEST(CriticalSchedule, HybridLimitsArePureLevelsAndPureCritical) {
         const auto x = random_x(L.rows(), 556);
         apxchol::omp_sptrsv levels;
         {
-            options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+            options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
             levels.set_round_bounds(bounds);
             levels.setup(L, L.rows(), options);
         }
         apxchol::omp_sptrsv hybrid;
         {
-            options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
+            options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
             hybrid.set_round_bounds(bounds);
             hybrid.setup(L, L.rows(), options);
         }
@@ -616,7 +616,7 @@ TEST(CriticalSchedule, HybridLimitsArePureLevelsAndPureCritical) {
 TEST(CriticalSchedule, AutoUsesThinSuffixAboveSerialThreshold) {
     apxchol::factor_options options{.drop_tolerance = 0};
     options.factor_storage = apxchol::factor_storage_type::fp32;
-    options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
+    options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
     std::vector<node_index> bounds;
     const sparse_csc L = make_round(130, 1024, 111, bounds);
     ASSERT_GT(L.rows(), apxchol::kSpTRSVOMPThreshold);
@@ -641,7 +641,7 @@ TEST(CriticalSchedule, AutoUsesThinSuffixAboveSerialThreshold) {
 
 TEST(SpTRSVLevelset, SmallFactorsSkipParallelScheduling) {
     apxchol::factor_options options{.drop_tolerance = 0};
-    options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
+    options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
     set_threads(4);
     for (const char* storage : {"float32", "float16"}) {
         if (std::string_view(storage) == "float16" && !apxchol::omp_sptrsv::fp16_supported())
@@ -671,7 +671,7 @@ TEST(SpTRSVLevelset, SmallFactorsSkipParallelScheduling) {
 TEST(SpTRSVLevelset, GroundingPreservesOuterTeamAndHonorsChangedLimit) {
     apxchol::factor_options options{.drop_tolerance = 0};
     options.factor_storage = apxchol::factor_storage_type::fp32;
-    options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
+    options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
     options.verbose = true;
     std::vector<node_index> bounds;
     const sparse_csc L11 = make_round(1024, 8, 114, bounds);
@@ -720,12 +720,12 @@ TEST(CriticalSchedule, HybridGroupsInteriorThinRounds) {
     set_threads(4);
     apxchol::omp_sptrsv levels, hybrid;
     {
-        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+        options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
         levels.set_round_bounds(bounds);
         levels.setup(L, L.rows(), options);
     }
     {
-        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
+        options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
         hybrid.set_round_bounds(bounds);
         hybrid.setup(L, L.rows(), options);
     }
