@@ -116,9 +116,7 @@ comments, Pages or README measurements.
     device or driver, PID not listed), the baseline is unavailable with a reason in
     `vram_unavailable`, and the deltas are absent. A device-wide number is never
     substituted. Older binaries' device-wide `solve_vram_mb` is not stored.
-- Peak GPU memory comes only from a separate, untimed run: `VramSampler` polls
-  `nvidia-smi --query-compute-apps=gpu_bus_id,pid,used_memory` for the PID and
-  device in that run's receipt and reports peak - baseline. Polling during a timed
+- The runners do not report peak GPU memory. Polling `nvidia-smi` during a timed
   C++ or ParAC call perturbs its setup, so timed runs never poll.
 
 ### Backend and factor accounting

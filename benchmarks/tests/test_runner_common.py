@@ -194,29 +194,6 @@ class GpuMemoryTest(unittest.TestCase):
             "vram_baseline_mb": None, "vram_unavailable": "Insufficient Permissions",
             "gpu_other_processes": 2, "gpu_other_mb": 640.0, "gpu_shared": True})
 
-    def test_sampler_reports_peak_above_baseline_for_the_receipt_process(self):
-        polls = [
-            "00000000:01:00.0, 4242, 300\n00000000:01:00.0, 99, 5000\n",
-            "00000000:01:00.0, 4242, 1262\n00000000:02:00.0, 4242, 9000\n",
-            "00000000:01:00.0, 4242, 400\n00000000:01:00.0, 4243, [N/A]\n",
-        ]
-        sampler = rc.VramSampler()
-        for out in polls:
-            with mock.patch.object(rc.subprocess, "run",
-                                   return_value=SimpleNamespace(stdout=out)) as run:
-                sampler._poll()
-            self.assertIn("--query-compute-apps=gpu_bus_id,pid,used_memory", run.call_args.args[0])
-        self.assertEqual(sampler.peak_vram_mb(GPU_RECEIPT), 1024.0)
-
-    def test_sampler_never_guesses(self):
-        sampler = rc.VramSampler()
-        self.assertIsNone(sampler.peak_vram_mb(GPU_RECEIPT))          # PID never listed
-        sampler.peaks[("00000000:01:00.0", 7)] = 500.0
-        self.assertIsNone(sampler.peak_vram_mb(
-            "[bench] gpu_memory pid=7 bus_id=00000000:01:00.0 baseline_mib=unavailable "
-            "reason=pid_not_listed other_processes=0 other_mib=0.0\n"))
-        self.assertIsNone(rc.VramSampler(enabled=False).peak_vram_mb(GPU_RECEIPT))
-
     def test_old_rows_do_not_invent_route_and_unknown_routes_fail(self):
         old = "v1,m,4,12,1,2,3,7,1e-9,1,2,original-v1,2,0.25"
         self.assertNotIn("execution_route", rc.parse_csv(old + "\n"))

@@ -14,13 +14,11 @@ sweep_fair.py / parac_runner.py / thread_scaling.py:
                    status set as a PARAMETER (the per-runner sets deliberately
                    differ: parac_runner retries failed/timeout, sweep_fair doesn't).
   - parse_csv/classify  the benchmark-binary CSV row -> metrics dict + status.
-  - VramSampler    untimed nvidia-smi peak-VRAM sidecar thread (GPU axis), matched
-                   to the benchmark's PID and device from its gpu_memory receipt.
   - ParAC constants + the AMD-reorder cache path helper.
 
 All runners (sweep_fair, thread_scaling, parac_runner) import these helpers rather than carrying their own copies.
 """
-import functools, hashlib, json, math, os, re, shlex, signal, subprocess, tempfile, threading
+import functools, hashlib, json, math, os, re, shlex, signal, subprocess, tempfile
 from pathlib import Path
 
 try:
@@ -1032,65 +1030,6 @@ def cell_done(family, mid, solver, config, threads, device,
         return False
     status = cell["status"]
     return status in terminal and not (rerun_timeouts and status in ("timeout", "exceeded_cap"))
-
-
-# ── peak-VRAM sidecar (GPU axis) ────────────────────────────────────────────────
-class VramSampler:
-    """Untimed whole-run PEAK device memory of one benchmark process.
-
-    A background thread polls `nvidia-smi --query-compute-apps=gpu_bus_id,pid,used_memory`
-    and keeps each (device, pid) maximum. `peak_vram_mb(stderr)` then selects the
-    process and device named by the binary's `[bench] gpu_memory` receipt and returns
-    peak - baseline, the same NVML per-process quantity and baseline as the binary's
-    setup_vram_mb/solve_vram_mb. Polling perturbs timings: use it only in a separate,
-    untimed run, never around a timed one. enabled=False = no-op (CPU axis).
-    """
-    def __init__(self, enabled=True, period=0.05):
-        self.enabled = enabled; self.period = period
-        self.peaks = {}; self._stop = threading.Event(); self._t = None
-
-    def _query(self):
-        try:
-            out = subprocess.run(
-                ["nvidia-smi", "--query-compute-apps=gpu_bus_id,pid,used_memory",
-                 "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=10).stdout
-        except Exception:
-            return []
-        rows = []
-        for ln in out.splitlines():
-            parts = [x.strip() for x in ln.split(",")]
-            if len(parts) < 3: continue
-            try: rows.append((parts[0].upper(), int(parts[1]), float(parts[2])))
-            except ValueError: pass          # "[N/A]": not attributable, not zero
-        return rows
-
-    def _poll(self):
-        for bus, pid, mib in self._query():
-            if mib > self.peaks.get((bus, pid), -1.0):
-                self.peaks[(bus, pid)] = mib
-
-    def _loop(self):
-        while not self._stop.is_set():
-            self._poll()
-            self._stop.wait(self.period)
-
-    def __enter__(self):
-        if self.enabled:
-            self._t = threading.Thread(target=self._loop, daemon=True); self._t.start()
-        return self
-
-    def __exit__(self, *a):
-        self._stop.set()
-        if self._t: self._t.join(timeout=1.0)
-
-    def peak_vram_mb(self, stderr):
-        """Peak MiB above the binary's own baseline, or None when unavailable."""
-        r = _gpu_memory_receipt(stderr)
-        if not self.enabled or r is None or r["baseline"] is None:
-            return None
-        peak = self.peaks.get((r["bus_id"], r["pid"]))
-        return None if peak is None else round(peak - r["baseline"], 1)
 
 
 # ── ParAC (external checkout) constants ─────────────────────────────────────────
