@@ -409,6 +409,9 @@ bool is_graph_adjacency(const Eigen::SparseMatrix<double>& M) {
         return false;
     } catch (const std::invalid_argument& e) {
         const operator_scan s = scan_operator(M);
+        if (s.nonfinite > 0 || s.asymmetric > 0)
+            throw std::invalid_argument(std::string(e.what()) +
+                " A graph adjacency matrix must also be finite and symmetric.");
         const Eigen::Index negative = s.offdiag_nnz - s.offdiag_pos;
         if (negative == 0 && s.square()) return true;
         throw std::invalid_argument(

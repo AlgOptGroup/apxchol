@@ -10,7 +10,9 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Core>
@@ -134,6 +136,29 @@ TEST(AsOperatorRule, NonnegativeOffDiagonalsAreAGraph) {
     Sparse loops = grid_adjacency(6, 6);    // self-loops, as a pattern file has
     for (int i = 0; i < loops.rows(); ++i) loops.coeffRef(i, i) = 1.0;
     EXPECT_TRUE(is_graph_adjacency(loops));
+}
+
+TEST(AsOperatorRule, AsymmetricOrNonFiniteInputRaises) {
+    Sparse asymmetric(3, 3);                // edge 0 -> 1 without 1 -> 0
+    std::vector<Trip> t{{0, 1, 1.0}, {1, 2, 1.0}, {2, 1, 1.0}};
+    asymmetric.setFromTriplets(t.begin(), t.end());
+    Sparse nan = grid_adjacency(3, 3);
+    nan.coeffRef(0, 1) = std::numeric_limits<double>::quiet_NaN();
+    Sparse inf = grid_adjacency(3, 3);
+    inf.coeffRef(1, 0) = inf.coeffRef(0, 1) = std::numeric_limits<double>::infinity();
+    for (const auto& [M, condition] : {std::pair{asymmetric, "symmetry"},
+                                       std::pair{nan, "finite values"},
+                                       std::pair{inf, "finite values"}}) {
+        try {
+            (void)is_graph_adjacency(M);
+            ADD_FAILURE() << "expected " << condition << " to be refused";
+        } catch (const std::invalid_argument& e) {
+            const std::string msg = e.what();
+            EXPECT_NE(msg.find(std::string("Condition FAILED: ") + condition),
+                      std::string::npos) << msg;
+            EXPECT_NE(msg.find("must also be finite and symmetric"), std::string::npos) << msg;
+        }
+    }
 }
 
 TEST(AsOperatorRule, MixedSignsRaise) {
