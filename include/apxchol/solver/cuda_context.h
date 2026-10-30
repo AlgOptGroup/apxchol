@@ -13,7 +13,7 @@
 /// while the host-side elimination (~0.5 s) runs; `ensure_context()` blocks
 /// until it exists and returns the seconds the caller spent waiting -- which is
 /// the honest cost of device init as seen by the solve, and goes to its own
-/// `cuda_init` checkpoint label (see `detail::basic_apx_cholesky::install_factor`).
+/// `cuda_init` checkpoint label (see `detail::basic_preconditioner::install_factor`).
 ///
 /// WHAT THE OVERLAP IS WORTH. Context creation is CPU work, not a sleep, so it
 /// competes with the OpenMP elimination and the net saving is bounded by
