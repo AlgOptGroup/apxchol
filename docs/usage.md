@@ -175,3 +175,13 @@ workloads may use fewer threads.
 The setting also covers CPU work in a GPU build; it does not control GPU
 threadgroups. More CPU threads need not be faster. To choose which cores run those CPU workers,
 see [thread placement](../benchmarks/README.md#thread-placement).
+
+## Thread safety
+
+A solver can be shared between threads. Calls on one solver (`solve`,
+`apply` and batch solves) run one at a time because they reuse its
+workspace, and each returns the same result as when called alone. To solve
+in parallel, give each thread its own solver; independent solvers do not
+share state. In C++ this covers `solver`, `cpu_solver` and `apx_cholesky`;
+a `metal_solver` used directly must not be called concurrently. Python
+releases the GIL during setup, `solve` and `apply`.

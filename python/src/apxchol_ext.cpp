@@ -131,12 +131,13 @@ apxchol::solve_options parse_options(const py::dict& d) {
     return so;
 }
 
-// Python marshalling around the common solver.
+// Python marshalling around the common solver. Native setup, solves and
+// applications release the GIL; the solver serializes calls on one instance.
 class Solver {
 public:
     Solver(py::array indptr, py::array indices, py::array data,
            const py::dict& options)
-        : slv_(csc_to_eigen(indptr, indices, data), parse_options(options)) {}
+        : slv_(setup(csc_to_eigen(indptr, indices, data), parse_options(options))) {}
 
     void save(const std::filesystem::path& path) const {
         py::gil_scoped_release release;
@@ -170,10 +171,19 @@ public:
 
     py::object apply(Array r) const {
         r = checked_rhs(r);
-        if (r.ndim() == 1)
-            return py::cast(slv_.apply(r.cast<Eigen::VectorXd>()));
+        if (r.ndim() == 1) {
+            const auto rhs = r.cast<Eigen::VectorXd>();
+            Eigen::VectorXd z;
+            {
+                py::gil_scoped_release release;
+                z = slv_.apply(rhs);
+            }
+            return py::cast(std::move(z));
+        }
         auto out = output_array(r, py::none());
-        slv_.apply(matrix(r), mutable_matrix(out));
+        auto z = mutable_matrix(out);
+        py::gil_scoped_release release;
+        slv_.apply(matrix(r), z);
         return out;
     }
 
@@ -204,9 +214,13 @@ public:
         if (b.ndim() == 1) {
             Eigen::VectorXd x0v;
             if (!x0.is_none()) x0v = guess.cast<Eigen::VectorXd>();
+            const auto rhs = b.cast<Eigen::VectorXd>();
             Eigen::Map<Eigen::VectorXd> x(output.mutable_data(), rows());
-            const auto res = slv_.solve(b.cast<Eigen::VectorXd>(), x, tol, maxiter,
-                                       x0.is_none() ? nullptr : &x0v);
+            apxchol::solve_result res;
+            {
+                py::gil_scoped_release release;
+                res = slv_.solve(rhs, x, tol, maxiter, x0.is_none() ? nullptr : &x0v);
+            }
             out["iters"] = static_cast<int>(res.iterations);
             out["residual"] = res.residual;
             out["converged"] = res.converged;
@@ -214,9 +228,11 @@ public:
             apxchol::batch_solve_result res;
             auto x = mutable_matrix(output);
             if (x0.is_none()) {
+                py::gil_scoped_release release;
                 res = slv_.solve(matrix(b), x, tol, maxiter);
             } else {
                 apxchol::const_matrix_view x0m = matrix(guess);
+                py::gil_scoped_release release;
                 res = slv_.solve(matrix(b), x, tol, maxiter, &x0m);
             }
             const auto count = b.shape(1);
@@ -279,6 +295,12 @@ public:
 
 private:
     explicit Solver(apxchol::solver owner) : slv_(std::move(owner)) {}
+
+    static apxchol::solver setup(const Eigen::SparseMatrix<double>& A,
+                                 const apxchol::solve_options& options) {
+        py::gil_scoped_release release;
+        return apxchol::solver(A, options);
+    }
 
     static bool same_shape(const py::array& a, const py::array& b) {
         return a.ndim() == b.ndim() && std::equal(a.shape(), a.shape() + a.ndim(), b.shape());

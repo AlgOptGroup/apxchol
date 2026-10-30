@@ -117,8 +117,7 @@ public:
                double tol = -1.0, int max_iter = -1,
                const Eigen::VectorXd* x0 = nullptr) const;
     /// Overwrite caller-provided x; supply an initial guess separately in x0.
-    /// The returned result leaves x empty. Calls on one owner must not overlap,
-    /// because solves and preconditioner applications share workspace.
+    /// The returned result leaves x empty.
     solve_result solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
                        double tol = -1.0, int max_iter = -1,
                        const Eigen::VectorXd* x0 = nullptr) const;
@@ -173,8 +172,8 @@ private:
 
     solve_options opts_;
     apx_cholesky precond_;
-    // Reused PCG workspace, resized when the panel width changes.
-    // Concurrent solves on one cpu_solver are a race.
+    // Reused PCG workspace, resized when the panel width changes. Guarded by
+    // the preconditioner's call mutex, which serializes calls on one owner.
     mutable Eigen::VectorXd r_, z_, p_, Ap_, panel_x_;
     // Per-thread partial sums of the fused PCG kernels' deterministic
     // reductions (one cache line per thread; sized to the max team on use).
@@ -189,7 +188,8 @@ private:
 };
 
 /// Reusable solver owning one CPU or GPU backend, selected once at setup.
-/// Owns its input data; movable, noncopyable, and not safe for concurrent calls.
+/// Owns its input data; movable and noncopyable. Concurrent calls on one
+/// instance run one at a time; see docs/usage.md#thread-safety.
 /// Every solve verifies the returned residual against the original operator/RHS.
 /// Supplied factors use CPU in automatic mode; an explicit GPU request uploads them.
 class solver {

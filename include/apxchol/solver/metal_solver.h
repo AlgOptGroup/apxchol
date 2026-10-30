@@ -1,6 +1,7 @@
 #pragma once
 // Metal PCG with reusable factor, operator and workspace.
-// Concurrent calls on one instance are unsupported; see docs/precision.md.
+// Concurrent calls on one instance are unsupported; apxchol::solver serializes
+// them (docs/usage.md#thread-safety).
 #include "apxchol/checkpoint.h"
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"

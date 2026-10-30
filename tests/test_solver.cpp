@@ -14,6 +14,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -195,6 +196,46 @@ TEST(Solver, CpuOwnerSurvivesInputsAndMovesAndReusesItsFactor) {
         EXPECT_EQ(actual.iterations, expected.iterations);
         EXPECT_EQ(actual.residual, expected.residual);
         EXPECT_TRUE(same_bytes(actual.x.data(), expected.x.data(), actual.x.size()));
+    }
+}
+
+TEST(Solver, ConcurrentCallsOnOneOwnerMatchSerialCalls) {
+    const scoped_omp_threads threads(1);
+    const Sparse matrix = operator_matrix(3000);
+    const auto options = cpu_options();
+    const apxchol::solver owner(matrix, options);
+    const apxchol::cpu_solver cpu(matrix, options);
+    constexpr int callers = 4;
+    std::vector<Eigen::VectorXd> rhs, solved, applied, preconditioned;
+    for (int t = 0; t < callers; ++t) {
+        rhs.push_back(Eigen::VectorXd::LinSpaced(matrix.rows(), t + 1.0, -2.0 * t));
+        solved.push_back(owner.solve(rhs.back()).x);
+        applied.push_back(owner.apply(rhs.back()));
+        preconditioned.push_back(cpu.preconditioner().solve(rhs.back()));
+    }
+    const Eigen::MatrixXd panel = Eigen::MatrixXd::Ones(matrix.rows(), 3);
+    Eigen::MatrixXd expected_panel(matrix.rows(), 3);
+    cpu.solve(panel, expected_panel);
+    for (int round = 0; round < 5; ++round) {
+        std::vector<Eigen::VectorXd> x(callers), z(callers), y(callers), w(callers);
+        std::vector<Eigen::MatrixXd> batch(callers, Eigen::MatrixXd(matrix.rows(), 3));
+        std::vector<std::thread> workers;
+        for (int t = 0; t < callers; ++t)
+            workers.emplace_back([&, t] {
+                x[t] = owner.solve(rhs[t]).x;
+                z[t] = owner.apply(rhs[t]);
+                y[t] = cpu.solve(rhs[t]).x;
+                w[t] = t % 2 ? cpu.apply(rhs[t]) : cpu.preconditioner().solve(rhs[t]);
+                cpu.solve(panel, batch[t]);
+            });
+        for (auto& worker : workers) worker.join();
+        for (int t = 0; t < callers; ++t) {
+            EXPECT_EQ(x[t], solved[t]);
+            EXPECT_EQ(z[t], applied[t]);
+            EXPECT_EQ(y[t], solved[t]);
+            EXPECT_EQ(w[t], preconditioned[t]);
+            EXPECT_EQ(batch[t], expected_panel);
+        }
     }
 }
 

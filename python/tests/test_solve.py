@@ -113,6 +113,27 @@ def test_factor_reused_across_many_b():
         assert res.residual <= 1e-8
 
 
+def test_threads_sharing_one_solver_match_serial_calls():
+    from concurrent.futures import ThreadPoolExecutor
+    L = grid2d_laplacian(60)
+    solver = apxchol.factorize(L, backend="cpu", num_threads=1)
+    rhs = [np.sin(np.arange(L.shape[0]) * (k + 1)) for k in range(4)]
+    rhs = [b - b.mean() for b in rhs]
+    batch = np.column_stack(rhs[:2])
+    expected = [(solver.solve(b).x, solver.apply(b)) for b in rhs]
+    expected_batch = solver.solve(batch).x
+
+    def work(k):
+        return solver.solve(rhs[k]).x, solver.apply(rhs[k]), solver.solve(batch).x
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for _ in range(3):
+            for k, (x, z, xb) in enumerate(pool.map(work, range(4))):
+                np.testing.assert_array_equal(x, expected[k][0])
+                np.testing.assert_array_equal(z, expected[k][1])
+                np.testing.assert_array_equal(xb, expected_batch)
+
+
 def test_aslinearoperator_helps_scipy_cg():
     L = grid2d_laplacian(40)
     rng = np.random.default_rng(5)

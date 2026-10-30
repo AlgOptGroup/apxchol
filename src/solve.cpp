@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -648,6 +649,7 @@ void cpu_solver::build_operator(const Eigen::SparseMatrix<double>& L,
 void cpu_solver::solve_impl(const Eigen::VectorXd &b, Eigen::Ref<Eigen::VectorXd> x,
                             solve_result &res, double tol, int max_iter,
                             const Eigen::VectorXd *x0) const {
+    const auto lock = precond_.calls_.lock();
     const detail::thread_budget threads(opts_.num_threads);
     detail::resolve_solve_parameters(tol, max_iter, opts_.tol, opts_.max_iter);
     const const_matrix_view initial(x0 ? *x0 : b);
@@ -1002,6 +1004,7 @@ solve_result cpu_solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::Vecto
 
 batch_solve_result cpu_solver::solve_batch(const_matrix_view B, matrix_view X, double tol,
                                            int max_iter, const const_matrix_view *X0) const {
+    const auto lock = precond_.calls_.lock();
     const detail::thread_budget threads(opts_.num_threads);
     detail::resolve_solve_parameters(tol, max_iter, opts_.tol, opts_.max_iter);
     detail::check_matrix_views(B, X, n_, X0);
@@ -1023,6 +1026,7 @@ batch_solve_result cpu_solver::solve_batch(const_matrix_view B, matrix_view X, d
 }
 
 void cpu_solver::apply(const_matrix_view R, matrix_view Z) const {
+    const auto lock = precond_.calls_.lock();
     const detail::thread_budget threads(opts_.num_threads);
     detail::check_matrix_views(R, Z, n_);
     if (!R.allFinite())
@@ -1111,6 +1115,9 @@ struct solver::impl {
     int max_iter;
     int num_threads;
     bool collect_timings;
+    // Serializes calls on one solver: every owner reuses its workspace.
+    // Recursive because GPU batch solves fall back to scalar solves.
+    std::recursive_mutex calls;
 
     static owner_type make_owner(const Eigen::SparseMatrix<double>& A,
                                  const solve_options& opts, checkpoint* cp,
@@ -1211,6 +1218,7 @@ solver& solver::operator=(solver&&) noexcept = default;
 
 void solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,
                    int max_iter, const Eigen::VectorXd* x0) const {
+    const std::lock_guard lock(impl_->calls);
     const detail::thread_budget threads(impl_->num_threads);
     detail::resolve_solve_parameters(tol, max_iter, impl_->tol, impl_->max_iter);
     if (b.size() != rows()) throw std::invalid_argument("solver::solve: RHS length mismatch");
@@ -1230,6 +1238,7 @@ solve_result solver::solve(const Eigen::VectorXd& b, double tol, int max_iter,
 
 solve_result solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
                            double tol, int max_iter, const Eigen::VectorXd* x0) const {
+    const std::lock_guard lock(impl_->calls);
     const const_matrix_view initial(x0 ? *x0 : b);
     detail::check_matrix_views(b, x, rows(), x0 ? &initial : nullptr);
     if (const auto* cpu = std::get_if<cpu_solver>(&impl_->owner))
@@ -1241,6 +1250,7 @@ solve_result solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd>
 }
 
 Eigen::VectorXd solver::apply(const Eigen::VectorXd& r) const {
+    const std::lock_guard lock(impl_->calls);
     const detail::thread_budget threads(impl_->num_threads);
     if (r.size() != rows()) throw std::invalid_argument("solver::apply: RHS length mismatch");
     return std::visit([&](auto& owner) -> Eigen::VectorXd {
@@ -1250,6 +1260,7 @@ Eigen::VectorXd solver::apply(const Eigen::VectorXd& r) const {
 }
 batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X, double tol, int max_iter,
                                        const const_matrix_view *X0) const {
+    const std::lock_guard lock(impl_->calls);
     const detail::thread_budget threads(impl_->num_threads);
     detail::resolve_solve_parameters(tol, max_iter, impl_->tol, impl_->max_iter);
     detail::check_matrix_views(B, X, rows(), X0);
@@ -1296,6 +1307,7 @@ batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X, doubl
 }
 
 void solver::apply(const_matrix_view R, matrix_view Z) const {
+    const std::lock_guard lock(impl_->calls);
     const detail::thread_budget threads(impl_->num_threads);
     detail::check_matrix_views(R, Z, rows());
     if (const auto *cpu = std::get_if<cpu_solver>(&impl_->owner))

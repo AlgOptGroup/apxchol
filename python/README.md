@@ -105,8 +105,9 @@ result = solver.solve(b2, x0=first.x)
 The [native reference](https://algoptgroup.github.io/apxchol/docs/reference/cpp.html#solve-defaults) shows the
 compiled tolerance and iteration defaults.
 
-Overlapping inputs are copied before writing `out`. Use separate solver
-instances for concurrent calls; each solver shares mutable workspace.
+Overlapping inputs are copied before writing `out`. Setup, `solve` and
+`apply` release the GIL. Calls on one solver run one at a time, so use one
+solver per thread to solve in parallel.
 
 ## Save and reload
 

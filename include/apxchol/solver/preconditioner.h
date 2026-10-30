@@ -1,5 +1,6 @@
 #pragma once
 #include "apxchol/checkpoint.h"
+#include "apxchol/detail/call_mutex.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"
 #include "apxchol/solver/cuda_context.h"
 #include "apxchol/solver/factorization.h"
@@ -371,6 +372,7 @@ public:
     void _solve_impl(const auto& b, auto& x) const {
         eigen_assert(m_factorizationIsOk && "factorize() should be called first");
         const Eigen::Ref<const Eigen::VectorXd> bv(b);
+        const auto lock = calls_.lock();
         apply_columns<1>(bv.data(), x.data());
     }
 
@@ -525,6 +527,9 @@ private:
     bool m_factorizationIsOk = false;
 
     mutable Trsv trsv_;
+    // Held by every public application and by the owning cpu_solver's calls,
+    // which share the workspace above.
+    call_mutex calls_;
 };
 
 #if defined(APXCHOL_USE_CUDA)
