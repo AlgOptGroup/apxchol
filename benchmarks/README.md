@@ -132,6 +132,10 @@ comments, Pages or README measurements.
   series in the store; missing cells are listed. It keeps each non-complete cell's
   last error line and process cap, and binds hardware, toolchains, binary and
   matrix hashes.
+- `campaign_drift.py --campaign LABEL=extract.json --reference results.csv --series map.json`
+  pairs those cells with an earlier campaign's. It flags status changes,
+  iteration ratios outside each pair's bound, and times more than 2x from the
+  series' median ratio, and lists reference cells without a counterpart.
 
 ## Thread placement
 
