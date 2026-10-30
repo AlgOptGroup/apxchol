@@ -108,7 +108,7 @@ CPU execution, set `solve_options.backend = solve_backend::cpu`.
 ### Judging whether reuse pays off
 
 Setup builds the factor and prepares the backend once; each solve then pays
-only for its own iterations. Every solver reports both parts as wall-clock
+only for its own solve work. Every solver reports both parts as wall-clock
 seconds:
 
 | | C++ | Python | MATLAB/Octave |
@@ -116,10 +116,11 @@ seconds:
 | Setup | `solver.setup_seconds()` | `solver.setup_seconds` | `s.setup_seconds` |
 | One solve call | `result.solve_seconds` | `result.solve_seconds` | `res.solve_seconds` |
 
-Over `k` right-hand sides, each costs `setup_seconds / k + solve_seconds` on
-average. Reuse pays off once that is below the time of solving each system
-another way, for example with a one-shot solve or another preconditioner.
-A matrix RHS reports one `solve_seconds` for all its columns. After
+Over `k` separate one-RHS calls, each costs `setup_seconds / k + solve_seconds`
+on average. A matrix RHS reports one `solve_seconds` for all its columns, so
+one batched call of `k` columns costs `(setup_seconds + solve_seconds) / k` per
+RHS. Reuse pays off once that is below the time of solving each system
+another way, for example with a one-shot solve or another preconditioner. After
 `load`, `setup_seconds` includes reading the file, so it also shows what a
 saved solver saves over factorizing again.
 

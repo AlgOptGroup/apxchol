@@ -17,7 +17,7 @@ classdef apxchol_solver < handle
   % Matrix solves return 1-by-k status arrays. x0 is an optional initial guess
   % with the same shape as b; omitted or [] starts from zero.
   %
-  % s.setup_seconds is the wall-clock time the constructor (or load) took;
+  % s.setup_seconds is the native solver setup time (or load time);
   % compare it with res.solve_seconds to judge whether reusing the factor pays off.
   %
   % Omitted or [] solve options use the C++ defaults. rtol must be finite

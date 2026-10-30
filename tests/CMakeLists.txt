@@ -175,7 +175,7 @@ if (APXCHOL_BUILD_CLI)
     apxchol_cli_test(cli_output_success path5_sddm 0
         "solution written to" --backend cpu -o "${CMAKE_CURRENT_BINARY_DIR}/cli-solution.mtx")
     # -v prints the internal timing tree.
-    apxchol_cli_test(cli_verbose_prints_timings path5_sddm 0 "pcg" --backend cpu -v)
+    apxchol_cli_test(cli_verbose_prints_timings path5_sddm 0 "timings:" --backend cpu -v)
 
     # An n x k RHS file is solved as one batch and written back as n x k; an
     # n x 1 file keeps the scalar path and its log.
