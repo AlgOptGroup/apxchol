@@ -103,14 +103,14 @@ void expect_solution(const Sparse& matrix, const Eigen::VectorXd& rhs,
 
 TEST(Solver, BackendAvailabilityKeepsHostQueriesOnHost) {
 #if defined(APXCHOL_USE_CUDA)
-    const bool started = apxchol::cuda_ctx::detail::state().started;
+    const bool started = apxchol::detail::cuda_context::state().started;
 #endif
     EXPECT_TRUE(apxchol::backend_available(apxchol::solve_backend::cpu));
     EXPECT_TRUE(apxchol::backend_available(apxchol::solve_backend::automatic));
     EXPECT_FALSE(apxchol::backend_available(static_cast<apxchol::solve_backend>(-1)));
     EXPECT_FALSE(apxchol::backend_available(static_cast<apxchol::solve_backend>(99)));
 #if defined(APXCHOL_USE_CUDA)
-    EXPECT_EQ(apxchol::cuda_ctx::detail::state().started, started);
+    EXPECT_EQ(apxchol::detail::cuda_context::state().started, started);
     if (const char* visible = std::getenv("CUDA_VISIBLE_DEVICES");
         visible && (std::string(visible).empty() || std::string(visible) == "-1")) {
         EXPECT_FALSE(apxchol::backend_available(apxchol::solve_backend::gpu));
@@ -533,7 +533,7 @@ TEST(Solver, CpuCallerOutputAndWarmStartsUseEachOwnersStorage) {
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 0.5, 2.0);
     for (const auto storage : {apxchol::factor_storage_type::fp32,
                                apxchol::factor_storage_type::fp16}) {
-        if (storage == apxchol::factor_storage_type::fp16 && !apxchol::omp_sptrsv::fp16_supported())
+        if (storage == apxchol::factor_storage_type::fp16 && !apxchol::detail::omp_sptrsv::fp16_supported())
             continue;
         SCOPED_TRACE(static_cast<int>(storage));
         auto options = cpu_options();
@@ -604,7 +604,7 @@ TEST(Solver, CpuScalesExtremeRhsAndWarmStarts) {
     const Eigen::VectorXd unit = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     for (const auto storage : {apxchol::factor_storage_type::fp32,
                                apxchol::factor_storage_type::fp16}) {
-        if (storage == apxchol::factor_storage_type::fp16 && !apxchol::omp_sptrsv::fp16_supported())
+        if (storage == apxchol::factor_storage_type::fp16 && !apxchol::detail::omp_sptrsv::fp16_supported())
             continue;
         auto options = cpu_options();
         options.factor_opts.factor_storage = storage;
@@ -655,7 +655,7 @@ TEST(Solver, CpuPanelsScaleExceptionalColumnsIndependently) {
     const apxchol::const_matrix_view initial(guess);
     for (const auto storage : {apxchol::factor_storage_type::fp32,
                                apxchol::factor_storage_type::fp16}) {
-        if (storage == apxchol::factor_storage_type::fp16 && !apxchol::omp_sptrsv::fp16_supported())
+        if (storage == apxchol::factor_storage_type::fp16 && !apxchol::detail::omp_sptrsv::fp16_supported())
             continue;
         auto options = cpu_options();
         options.factor_opts.factor_storage = storage;

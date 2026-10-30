@@ -171,11 +171,5 @@ inline void validate_factor_options(const factor_options& options) {
         options.residual_peel != residual_peel_strategy::bk_serial)
         throw std::invalid_argument("invalid residual peel strategy");
 }
-inline void validate_graph_options(const factor_options& options) {
-    validate_factor_options(options);
-    if (options.regularization != 0 || options.lump_max_mass != kDefaultLumpMassCeiling)
-        throw std::invalid_argument("regularization and lump_max_mass require matrix input; "
-                                    "a supplied graph must already have valid positive weights");
-}
 } // namespace detail
 } // namespace apxchol

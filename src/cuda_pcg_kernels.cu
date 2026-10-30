@@ -17,7 +17,7 @@
 // reductions -- fixed grid, fixed per-thread strided assignment, fixed-order
 // warp-shuffle + shared-memory tree per block, one partial per block, fixed-
 // order single-block final reduce. No floating-point atomics anywhere.
-namespace apxchol::pcg_cuda {
+namespace apxchol::detail::cuda_pcg_kernels {
 
 namespace {
 
@@ -429,4 +429,4 @@ bool try_build_permuted_operator_csr(
     return true;
 }
 
-} // namespace apxchol::pcg_cuda
+} // namespace apxchol::detail::cuda_pcg_kernels

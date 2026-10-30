@@ -4,7 +4,7 @@
 #include "apxchol/solver/detail/metal_host.h"
 #include "../src/metal_setup_options.h"
 #include "../src/metal_setup/layout.h"
-#include "apxchol/solver/sptrsv/cuda_host.h"
+#include "apxchol/solver/sptrsv/gpu_factor_prep.h"
 
 #include <cmath>
 #include <cstdint>
@@ -197,7 +197,7 @@ TEST(MetalHost, FactorStorageRangeAndRounding) {
 }
 
 TEST(MetalHost, Float16ScaleFallbackKeepsSmallOffDiagonalFactorsFinite) {
-    namespace ch = apxchol::cuda_host;
+    namespace ch = apxchol::detail::gpu_factor_prep;
     for (const auto& [diagonal, offdiag] : std::vector<std::pair<float, float>>{
              {1, -1e-40f}, {1e20f, -1e-30f}, {1, -0.25f}}) {
         ch::csr_int<float> factor;

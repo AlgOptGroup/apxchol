@@ -65,7 +65,7 @@ public:
     // weighted-degree, conversions) compute in fp64 regardless of pool storage.
     auto neighbors(node_index v) const {
         return adj_[v] | std::views::transform(
-            [](const directed_pool_edge& i) {
+            [](const detail::directed_pool_edge& i) {
                 struct nbr { node_index to; double w; };
                 return nbr{i.to, static_cast<double>(i.w)};
             });
@@ -74,8 +74,8 @@ public:
     // ── mutation ──
 
     void add_edge(node_index u, node_index v, double w) {
-        adj_.push(u, {v, static_cast<pool_value_t>(w)});
-        adj_.push(v, {u, static_cast<pool_value_t>(w)});
+        adj_.push(u, {v, static_cast<detail::pool_value_t>(w)});
+        adj_.push(v, {u, static_cast<detail::pool_value_t>(w)});
         ++m_;
     }
 
@@ -95,7 +95,7 @@ public:
     /// into a slab already sized by adj_bulk_reserve_parallel().
     void adj_atomic_push_directed(node_index from, node_index to, double w) {
         adj_.atomic_push_reserved(
-            from, directed_pool_edge{to, static_cast<pool_value_t>(w)});
+            from, detail::directed_pool_edge{to, static_cast<detail::pool_value_t>(w)});
     }
 
     /// Directed-inline vec_pool: write an incidence at a caller-assigned
@@ -104,7 +104,7 @@ public:
                                         node_index to, double w) {
         adj_.write_reserved_at(
             from, offset,
-            directed_pool_edge{to, static_cast<pool_value_t>(w)});
+            detail::directed_pool_edge{to, static_cast<detail::pool_value_t>(w)});
     }
 
     /// Publish all preassigned suffix slots for one vec_pool vertex.
@@ -377,14 +377,14 @@ private:
         std::iota(order.begin(), order.end(), std::size_t{0});
         std::vector<std::size_t> scratch(order.size());
         auto weight_key = [&](std::size_t index) -> std::uint64_t {
-            if constexpr (sizeof(pool_value_t) == 4)
+            if constexpr (sizeof(detail::pool_value_t) == 4)
                 return (~static_cast<std::uint64_t>(
                     std::bit_cast<std::uint32_t>(static_cast<float>(
                         items[index].weight)))) & 0xffffffffULL;
             else
                 return ~std::bit_cast<std::uint64_t>(items[index].weight);
         };
-        constexpr unsigned key_bits = 8 * sizeof(pool_value_t);
+        constexpr unsigned key_bits = 8 * sizeof(detail::pool_value_t);
         constexpr unsigned pass_bits = 12;
         constexpr unsigned shift = key_bits - pass_bits;
         std::array<std::size_t, std::size_t{1} << pass_bits> counts{};
@@ -660,7 +660,7 @@ private:
                         const item& edge = items[i];
                         if (!edge.kept) continue;
                         const double inv_p = 1.0 / probability(i);
-                        const pool_value_t weight = static_cast<pool_value_t>(
+                        const detail::pool_value_t weight = static_cast<detail::pool_value_t>(
                             edge.weight * inv_p);
                         const node_index u = dense_of[edge.u];
                         const node_index v = dense_of[edge.v];
@@ -696,9 +696,9 @@ private:
                     const double inv_p = 1.0 / probability(i);
                     const double weight = edge.weight * inv_p;
                     rebuilt.adj_.push(
-                        edge.u, {edge.v, static_cast<pool_value_t>(weight)});
+                        edge.u, {edge.v, static_cast<detail::pool_value_t>(weight)});
                     rebuilt.adj_.push(
-                        edge.v, {edge.u, static_cast<pool_value_t>(weight)});
+                        edge.v, {edge.u, static_cast<detail::pool_value_t>(weight)});
                     ++rebuilt.m_;
                 }
             }
@@ -794,7 +794,7 @@ private:
     node_index n_ = 0;          // vertex count
     edge_index m_ = 0;          // edge count (can exceed 2^31)
     node_index num_active_ = 0; // active vertex count
-    directed_vec_pool_incidence adj_;
+    detail::directed_vec_pool_incidence adj_;
     // Active status is probed randomly in nearly every residual-edge scan, so
     // keep one bit per vertex rather than one byte.  Parallel elimination can
     // clear distinct vertices that share a word; all reads and clears therefore

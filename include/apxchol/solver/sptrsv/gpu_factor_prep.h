@@ -1,5 +1,6 @@
 #pragma once
-// HOST-side preparation of the GPU SpTRSV backend (cuda.h): everything
+// HOST-side preparation of the GPU SpTRSV factor, shared by the CUDA
+// backend (cuda.h) and Metal: everything
 // cuda_sptrsv::setup does to the factor BEFORE the upload -- the L11 extraction
 // into the dataflow kernels' int32 arrays, the compacting factor drop (the shared
 // factor_drop.h implementation, the same one omp_sptrsv::setup runs), the
@@ -42,7 +43,7 @@
 #include "apxchol/csc_work.h"
 #include "apxchol/solver/detail/gpu_dataflow_plan.h"
 
-namespace apxchol::cuda_host {
+namespace apxchol::detail::gpu_factor_prep {
 
 /// An owning m x m CSR (or CSC -- the same three arrays) with int32 offsets
 /// and indices, as required by the dataflow kernels, and Val values. idx / vals are
@@ -350,4 +351,4 @@ inline detail::gpu_dataflow::row_stats dataflow_row_stats(std::span<const int> r
     return s;
 }
 
-} // namespace apxchol::cuda_host
+} // namespace apxchol::detail::gpu_factor_prep

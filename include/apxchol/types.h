@@ -28,6 +28,8 @@ using edge_index = std::uint64_t;          // offsets / edge ids: widened for >4
 using edge_index = std::uint32_t;
 #endif
 
+namespace detail {
+
 // Residual-pool edge weight storage type. This lives beside the index types so
 // the default directed-incidence layout can store {target, weight}
 // directly in its adjacency slabs without introducing a graph/incidence
@@ -47,8 +49,6 @@ struct directed_pool_edge {
         return a.to < b.to || (a.to == b.to && a.w < b.w);
     }
 };
-
-namespace detail {
 
 /// splitmix64 output finalizer (Steele, Lea & Flood 2014), shared by the
 /// counter-based random streams and the entry/pair hashes.

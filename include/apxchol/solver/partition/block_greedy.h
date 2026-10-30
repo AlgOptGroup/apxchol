@@ -23,7 +23,7 @@
 
 #include <omp.h>
 
-namespace apxchol {
+namespace apxchol::detail {
 
 struct block_greedy_partitioner {
     static constexpr std::string_view name = "block_greedy";
@@ -354,4 +354,4 @@ private:
     }
 };
 
-} // namespace apxchol
+} // namespace apxchol::detail

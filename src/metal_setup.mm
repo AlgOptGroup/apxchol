@@ -182,8 +182,7 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         F.rounds.reserve(data.state->round);
         for (unsigned r = 0; r < data.state->round; ++r) {
             const unsigned first = data.round_ptr[r], last = data.round_ptr[r + 1];
-            F.rounds.push_back({n - first, last - first, std::numeric_limits<double>::quiet_NaN(),
-                F.L.outer_[last] - F.L.outer_[first], F.L.outer_[last]});
+            F.rounds.push_back({n - first, last - first});
         }
         raw = {};
         cached.finalizer.prepare_operator(input.ptr, input.idx, input.values, finalized.permutation,

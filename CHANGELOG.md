@@ -22,6 +22,10 @@
 - Breaking: `apxchol::cpu_solver` is removed; use `apxchol::solver` with `solve_backend::cpu`.
 - Breaking: `save_solver`/`load_solver` are replaced by `solver::save` and `solver::load`.
 - Breaking: `apxchol::apx_cholesky` is removed from the public API; use `apxchol::solver` (`apply` inside an external Krylov solver).
+- Breaking: the triangular solves, CUDA PCG, allocator, graph storage pools, elimination workspace, built-in partitioners and their helpers, the partitioner name list and operator validation (`operator_scan`, `require_operator`, `operator_view`, ...) move to `apxchol::detail`.
+- Breaking: the `factorize(graph, ...)` overloads are removed; pass the operator matrix to `factorize`.
+- Breaking: the partitioner interface no longer exposes `selection::reset`/`finalize`, `partition_result` or `partition_context::cp`.
+- Breaking: `factorization` drops `peak_graph_bytes` and the diagnostic `round_stats` fields `avg_deg`, `nnz_added` and `nnz_total`; its CUDA device factor is private.
 - Breaking: the CLI and bindings no longer accept an adjacency matrix as if it were the operator. Previously both solved adjacency input as the operator and failed without a clear error; now validation rejects it and the error suggests the conversion.
 - New `apxchol.as_operator(M)`, `apxchol_as_operator(M)` and CLI `--convert-input`: a valid operator is used unchanged, a matrix with no negative off-diagonal entry becomes its graph Laplacian `L = D - M` (self-loops cancel), and anything else is an error.
 - The CLI solves an `n` by `k` `--rhs` file as one batch, writes an `n` by `k` solution with `-o`, and logs iterations and residuals per column.

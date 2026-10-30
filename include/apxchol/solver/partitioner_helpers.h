@@ -20,7 +20,7 @@
 
 #include <omp.h>
 
-namespace apxchol {
+namespace apxchol::detail {
 
 /// IS degree cap threshold. When popts.degree_quantile is in (0,1), returns the
 /// degree at that quantile of the CURRENT active-degree distribution (found via
@@ -28,10 +28,10 @@ namespace apxchol {
 /// degree_multiplier × avg_degree. A quantile cap admits a fixed low-degree
 /// fraction regardless of the distribution, so it is safe on near-uniform-degree
 /// graphs where a sub-1 multiplier would exclude every vertex (IS collapse).
-inline double is_degree_threshold(std::span<const node_index> degrees,
-                                  size_t n_active, double avg_deg,
-                                  const partition_options& popts,
-                                  std::vector<node_index>& scratch) {
+inline double candidate_degree_cap(std::span<const node_index> degrees,
+                                   size_t n_active, double avg_deg,
+                                   const partition_options& popts,
+                                   std::vector<node_index>& scratch) {
     const double q = degree_quantile_or_host_default(popts.degree_quantile);
     if (q > 0.0 && q < 1.0 && n_active > 0) {
         scratch.assign(degrees.begin(), degrees.begin() + n_active);
@@ -250,4 +250,4 @@ inline double prune_and_degrees(graph& G,
     return total_degree / double(active.size());
 }
 
-} // namespace apxchol
+} // namespace apxchol::detail

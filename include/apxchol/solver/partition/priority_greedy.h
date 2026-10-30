@@ -13,7 +13,7 @@
 #include <algorithm>
 #include <atomic>
 
-namespace apxchol {
+namespace apxchol::detail {
 
 struct priority_greedy_partitioner {
     static constexpr std::string_view name = "priority_greedy";
@@ -136,4 +136,4 @@ private:
     }
 };
 
-} // namespace apxchol
+} // namespace apxchol::detail

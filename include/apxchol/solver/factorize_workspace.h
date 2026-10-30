@@ -15,7 +15,7 @@
 #include <utility>
 #include <vector>
 
-namespace apxchol {
+namespace apxchol::detail {
 
 struct factorize_workspace {
     struct per_thread {
@@ -94,4 +94,4 @@ struct factorize_workspace {
     }
 };
 
-} // namespace apxchol
+} // namespace apxchol::detail

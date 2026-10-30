@@ -112,7 +112,7 @@ void print_sptrsv_banner(bool fp16, bool verbose) {
     if (verbose)
         std::fprintf(stderr, "[apxchol] SpTRSV (%s) factor values: %s, %zu bytes/elem\n",
                      backend, fp16 ? "fp16 (per-column scaled, diagonal fp32)" : "float (fp32)",
-                     fp16 ? std::size_t(2) : sizeof(sptrsv_value_t));
+                     fp16 ? std::size_t(2) : sizeof(detail::sptrsv_value_t));
 }
 
 // One O(nnz) parallel storage scan resolves both direct-copy prerequisites.

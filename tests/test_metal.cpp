@@ -8,7 +8,7 @@
 #include "apxchol/solver/metal_solver.h"
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"
-#include "apxchol/solver/sptrsv/cuda_host.h"
+#include "apxchol/solver/sptrsv/gpu_factor_prep.h"
 #include "metal_device.h"
 #include "apxchol/solver/detail/solve_backend.h"
 
@@ -121,19 +121,19 @@ Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::Vect
     const std::size_t n = static_cast<std::size_t>(r.size());
     const bool lap = !F.sddm;
     const std::int64_t m = lap ? static_cast<std::int64_t>(n) - 1 : static_cast<std::int64_t>(n);
-    auto backward = apxchol::cuda_host::build_L11_csc_int<float>(F.L, m);
-    auto scales = apxchol::cuda_host::column_scales(backward);
-    if (fp16) apxchol::cuda_host::normalize_fp16_scales(backward, scales);
-    apxchol::cuda_host::apply_factor_drop(backward, scales, options.drop_tolerance, fp16);
+    auto backward = apxchol::detail::gpu_factor_prep::build_L11_csc_int<float>(F.L, m);
+    auto scales = apxchol::detail::gpu_factor_prep::column_scales(backward);
+    if (fp16) apxchol::detail::gpu_factor_prep::normalize_fp16_scales(backward, scales);
+    apxchol::detail::gpu_factor_prep::apply_factor_drop(backward, scales, options.drop_tolerance, fp16);
     if (fp16) {
-        const auto narrow = apxchol::cuda_host::narrow_fp16_scaled(backward, scales);
+        const auto narrow = apxchol::detail::gpu_factor_prep::narrow_fp16_scaled(backward, scales);
         for (int j = 0; j < m; ++j) {
             for (int p = backward.ptr[j]; p < backward.ptr[j + 1]; ++p)
                 backward.vals[p] = float(narrow.vals[p]) * scales[j];
             backward.vals[backward.ptr[j]] = float(double(narrow.diag[j]) * scales[j]);
         }
     }
-    const auto forward = apxchol::cuda_host::transpose_csr(backward);
+    const auto forward = apxchol::detail::gpu_factor_prep::transpose_csr(backward);
     std::vector<double> rp(n);
     for (std::size_t v = 0; v < n; ++v) rp[F.perm[v]] = r[v];
     if (lap) {
@@ -1456,9 +1456,6 @@ TEST_F(MetalDevice, ExportedRoundsAreIndependentCpuLevels) {
             const auto last = first + round.is_size;
             ASSERT_LE(last, levels.size());
             EXPECT_EQ(round.active, levels.size() - first);
-            EXPECT_TRUE(std::isnan(round.avg_deg));
-            EXPECT_EQ(round.nnz_added, F.L.outer_[last] - F.L.outer_[first]);
-            EXPECT_EQ(round.nnz_total, F.L.outer_[last]);
             std::fill(levels.begin() + first, levels.begin() + last, r);
             first = last;
         }

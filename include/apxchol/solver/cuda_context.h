@@ -47,11 +47,9 @@
 #include <thread>
 #endif
 
-namespace apxchol::cuda_ctx {
+namespace apxchol::detail::cuda_context {
 
 #if defined(APXCHOL_USE_CUDA)
-
-namespace detail {
 
 struct prewarm_state {
     std::mutex mu;
@@ -82,20 +80,18 @@ inline double force_context(int device = -1) {
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 }
 
-} // namespace detail
-
 /// Start CUDA context creation on a helper thread, once per process. Safe from
 /// any thread, any number of times, from any number of solver instances: later
 /// calls are no-ops.
 inline void prewarm() {
-    auto& s = detail::state();
+    auto& s = state();
     std::lock_guard<std::mutex> lk(s.mu);
     if (s.started) return;
     int device;
     if (cudaGetDevice(&device) != cudaSuccess) return;
     s.started = true;
     try {
-        s.worker = std::thread([&s, device] { s.ctx_seconds = detail::force_context(device); });
+        s.worker = std::thread([&s, device] { s.ctx_seconds = force_context(device); });
     } catch (...) {
         // Out of threads: fall back to lazy creation. ensure_context() still
         // establishes the context (and still reports its cost); we just do not
@@ -109,7 +105,7 @@ inline void prewarm() {
 /// when prewarm() was never called (e.g. set_factor(), which has no host work
 /// to overlap with). Idempotent; a few microseconds once the context is up.
 inline double ensure_context() {
-    auto& s = detail::state();
+    auto& s = state();
     const auto t0 = std::chrono::steady_clock::now();
     bool had_worker = false;
     {
@@ -120,7 +116,7 @@ inline double ensure_context() {
     // Retain the primary context on THIS thread too: a no-op costing
     // microseconds when the helper already created it, the full cost when
     // nothing prewarmed it.
-    const double own = detail::force_context();
+    const double own = force_context();
     const double waited =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     if (!had_worker) {
@@ -134,7 +130,7 @@ inline double ensure_context() {
 /// raw platform cost, reportable next to the (much smaller, once the prewarm
 /// works) wait time ensure_context() returns.
 inline double context_seconds() {
-    auto& s = detail::state();
+    auto& s = state();
     std::lock_guard<std::mutex> lk(s.mu);
     return s.ctx_seconds;
 }
@@ -147,4 +143,4 @@ inline double context_seconds() { return 0.0; }
 
 #endif
 
-} // namespace apxchol::cuda_ctx
+} // namespace apxchol::detail::cuda_context

@@ -142,25 +142,25 @@ cudaError_t test_context_free(void*) {
 #define cudaGetDevice test_context_get_device
 #define cudaSetDevice test_context_set_device
 #define cudaFree test_context_free
-#define cuda_ctx tested_cuda_context
+#define cuda_context tested_cuda_context
 #include "apxchol/solver/cuda_context.h"
-#undef cuda_ctx
+#undef cuda_context
 #undef cudaFree
 #undef cudaSetDevice
 #undef cudaGetDevice
 
-namespace context = apxchol::tested_cuda_context;
+namespace context = apxchol::detail::tested_cuda_context;
 
 class CudaPrewarm : public ::testing::Test {
     void SetUp() override {
-        auto& state = context::detail::state();
+        auto& state = context::state();
         state.started = false;
         state.ctx_seconds = 0;
         context_calls = {};
         context_device = 3;
     }
     void TearDown() override {
-        auto& worker = context::detail::state().worker;
+        auto& worker = context::state().worker;
         if (worker.joinable()) worker.join();
     }
 };
@@ -172,14 +172,14 @@ TEST_F(CudaPrewarm, UsesCallersDeviceAndJoinsWorker) {
     EXPECT_EQ(context_calls.sets, (std::vector<int>{3}));
     EXPECT_EQ(context_calls.frees, (std::vector<int>{3, 3}));
     EXPECT_EQ(context_device, 3);
-    EXPECT_FALSE(context::detail::state().worker.joinable());
+    EXPECT_FALSE(context::state().worker.joinable());
 }
 
 TEST_F(CudaPrewarm, FailedQueryDoesNotStartWorker) {
     context_calls.get_status = cudaErrorUnknown;
     context::prewarm();
-    EXPECT_FALSE(context::detail::state().started);
-    EXPECT_FALSE(context::detail::state().worker.joinable());
+    EXPECT_FALSE(context::state().started);
+    EXPECT_FALSE(context::state().worker.joinable());
     EXPECT_TRUE(context_calls.sets.empty());
     EXPECT_TRUE(context_calls.frees.empty());
 }

@@ -42,8 +42,8 @@ static apxchol::factorization factorize_controlled(
         apxchol::graph graph, const apxchol::factor_options& options,
         const apxchol::detail::factorization_controls& controls,
         apxchol::checkpoint* checkpoint = nullptr) {
-    apxchol::block_greedy_partitioner partitioner;
-    return apxchol::factorize_impl(apxchol::make_tree_elim(options), partitioner,
+    apxchol::detail::block_greedy_partitioner partitioner;
+    return apxchol::detail::factorize_impl(apxchol::detail::make_tree_elim(options), partitioner,
         std::move(graph), options, checkpoint, nullptr,
         apxchol::detail::setup_route::cpu, false, controls);
 }
@@ -75,7 +75,7 @@ TEST(EliminationDedup, PooledLocalHashPreservesOrderSumsAndEpochReuse) {
     graph.add_edge(0, 1, 3.0);
     graph.add_edge(0, 2, 5.0);
 
-    apxchol::factorize_workspace::per_thread scratch;
+    apxchol::detail::factorize_workspace::per_thread scratch;
     scratch.factor_entries =
         std::make_unique<std::pmr::monotonic_buffer_resource>();
     apxchol::detail::factor_col first;
@@ -193,7 +193,7 @@ TEST(PartitionerHelpers, ParallelDegreeQuantileMatchesNthElementExactly) {
             if (k >= n) k = n - 1;
             std::nth_element(reference.begin(), reference.begin() + k,
                              reference.end());
-            EXPECT_EQ(apxchol::parallel_degree_quantile(
+            EXPECT_EQ(apxchol::detail::parallel_degree_quantile(
                           degrees, n, q, histograms),
                       reference[k])
                 << "n=" << n << " q=" << q;
@@ -212,7 +212,7 @@ TEST(PartitionerHelpers, ParallelDegreeFilterPreservesCandidateOrder) {
     for (size_t i = 0; i < n; ++i)
         if (degrees[i] <= 23) expected.push_back(active[i]);
     std::vector<size_t> offsets;
-    const size_t count = apxchol::parallel_ordered_degree_filter(
+    const size_t count = apxchol::detail::parallel_ordered_degree_filter(
         active, degrees, 23, live, eligible, offsets);
     ASSERT_EQ(count, expected.size());
     EXPECT_TRUE(std::equal(expected.begin(), expected.end(), eligible.begin()));
@@ -228,7 +228,7 @@ TEST(PartitionerHelpers, ParallelActiveFilterIsStable) {
         if ((v * 17 + v / 13) % 11 < 4) expected.push_back(v);
     std::vector<apxchol::node_index> scratch;
     std::vector<size_t> offsets;
-    apxchol::parallel_stable_active_filter(
+    apxchol::detail::parallel_stable_active_filter(
         active, scratch, offsets,
         [](apxchol::node_index v) { return (v * 17 + v / 13) % 11 < 4; });
     EXPECT_EQ(active, expected);
@@ -432,9 +432,9 @@ void expect_same_graph_selection(
         auto graph = snapshot;
         auto partitioner = initial;
         apxchol::selection selected;
-        selected.reset(graph.n());
+        apxchol::detail::selection_access::reset(selected, graph.n());
         partitioner.find_partition(graph, candidates, context, selected);
-        const auto result = selected.finalize().data;
+        const auto result = apxchol::detail::selection_access::finalize(selected).data;
         ASSERT_FALSE(result.empty());
         if (repeat == 0) reference = result;
         else EXPECT_EQ(result, reference); // Exact insertion order, never sorted.
@@ -479,7 +479,8 @@ TEST_F(FactorizeTest, ParallelEliminatorFailureReachesCaller) {
     apxchol::factor_options options;
     options.omp_threshold = 0;
     options.parallel_residual_threshold = 0;
-    EXPECT_THROW(apxchol::factorize(failure_test_graph(), throwing_eliminator{}, options),
+    EXPECT_THROW(apxchol::factorize(apxchol::laplacian(failure_test_graph()), throwing_eliminator{},
+                                    options),
                  eliminator_failure);
 }
 
@@ -490,18 +491,18 @@ TEST_F(FactorizeTest, ParallelFactorAllocationFailureReachesCaller) {
     options.omp_threshold = 0;
     options.parallel_residual_threshold = 0;
     auto* previous = std::pmr::set_default_resource(std::pmr::null_memory_resource());
-    EXPECT_THROW(apxchol::factorize(std::move(graph), options), std::bad_alloc);
+    EXPECT_THROW(factorize_controlled(std::move(graph), options, {}), std::bad_alloc);
     std::pmr::set_default_resource(previous);
 }
 
 TEST(VecPoolAos, ReserveFailureReachesCallerAfterTeamJoin) {
     const scoped_threads team(2);
-    apxchol::basic_vec_pool_incidence<unsigned> pool;
+    apxchol::detail::basic_vec_pool_incidence<unsigned> pool;
     pool.init(2);
     const std::array<apxchol::node_index, 2> touched{0, 1};
     std::vector<apxchol::node_index> incoming(2, 0);
     // Reject a single oversized slab before allocating its storage.
-    incoming[0] = apxchol::segmented_pool<unsigned>::max_claim_slots() + 1;
+    incoming[0] = apxchol::detail::segmented_pool<unsigned>::max_claim_slots() + 1;
     apxchol::detail::parallel_exception error;
 #pragma omp parallel num_threads(2)
     {
@@ -515,7 +516,7 @@ TEST(VecPoolAos, ReserveFailureReachesCallerAfterTeamJoin) {
 
 TEST(VecPoolAos, ReserveAccommodatesALargerTeamThanGraphConstruction) {
     const scoped_threads team(4);
-    apxchol::basic_vec_pool_incidence<unsigned> pool;
+    apxchol::detail::basic_vec_pool_incidence<unsigned> pool;
     {
         const scoped_threads construction(1);
         pool.init(8);
@@ -552,14 +553,14 @@ TEST(VecPoolAos, ReducedEliminationTeamIgnoresInactiveWorkerScratch) {
         graph.add_edge(v, 4, 1.0);
         graph.add_edge(v, 5, 1.0);
     }
-    apxchol::factorize_workspace workspace;
+    apxchol::detail::factorize_workspace workspace;
     workspace.threads.resize(4);
     for (auto& worker : workspace.threads)
         worker.factor_entries = std::make_unique<std::pmr::monotonic_buffer_resource>();
     // A previous round used this worker; the next region will be serialized.
     workspace.threads[1].touched_buffer = {4, 5};
     workspace.reset_for_round();
-    apxchol::partition_result part;
+    apxchol::detail::partition_result part;
     part.data = {0, 1, 2, 3};
     std::vector<apxchol::detail::factor_col> columns;
     apxchol::factor_options options;
@@ -768,18 +769,20 @@ TEST(VecPoolAos, AutoIncrementalDegreesPreserveTheFactorByteForByte) {
     opts.omp_threshold = 16;
     opts.min_is_fraction = 0.0;
     using degree_cache = apxchol::detail::factorization_controls::degree_cache;
-    auto run = [&](degree_cache mode) {
+    std::vector<double> baseline_degrees;
+    auto run = [&](degree_cache mode, std::vector<double>* degrees = nullptr) {
         return factorize_controlled(apxchol::make_graph(L), opts,
-                                    {.incremental_degrees = mode});
+                                    {.incremental_degrees = mode,
+                                     .round_average_degrees = degrees});
     };
-    const auto baseline = run(degree_cache::disabled);
+    const auto baseline = run(degree_cache::disabled, &baseline_degrees);
     const auto automatic = run(degree_cache::automatic);
     const auto forced = run(degree_cache::forced);
     ASSERT_FALSE(baseline.rounds.empty());
     ASSERT_EQ(baseline.rounds.front().is_size,
               static_cast<std::size_t>(clique_count));
     EXPECT_TRUE(apxchol::detail::incremental_degree_worthwhile(
-        n, baseline.rounds.front().avg_deg,
+        n, baseline_degrees.front(),
         clique_count * (clique_size - 1), 8));
     expect_same_factor(baseline, automatic,
                        "full prune vs default incremental degrees");
@@ -814,15 +817,17 @@ TEST(VecPoolAos, IncrementalDegreeCacheDoesNotLeakIntoBkResidualLoop) {
     opts.omp_threshold = 16;
     opts.parallel_residual_threshold = 5;
     using degree_cache = apxchol::detail::factorization_controls::degree_cache;
-    auto run = [&](degree_cache mode) {
+    std::vector<double> baseline_degrees;
+    auto run = [&](degree_cache mode, std::vector<double>* degrees = nullptr) {
         return factorize_controlled(apxchol::make_graph(L), opts,
-                                    {.incremental_degrees = mode});
+                                    {.incremental_degrees = mode,
+                                     .round_average_degrees = degrees});
     };
-    const auto baseline = run(degree_cache::disabled);
+    const auto baseline = run(degree_cache::disabled, &baseline_degrees);
     const auto automatic = run(degree_cache::automatic);
     ASSERT_FALSE(baseline.rounds.empty());
     EXPECT_TRUE(apxchol::detail::incremental_degree_worthwhile(
-        n, baseline.rounds.front().avg_deg,
+        n, baseline_degrees.front(),
         small_count * (small_size - 1), 8))
         << "fixture did not activate incremental degree maintenance";
     std::size_t rounded = 0;
@@ -845,7 +850,7 @@ TEST(PruneAndDegrees, SkipAboveReportsTheRawCountAndLeavesTheVertexUnwalked) {
 
     // Raw count 8 > 4: reported as is, dead entries left in place. The others
     // are walked as usual.
-    const double skipped_average = apxchol::prune_and_degrees(
+    const double skipped_average = apxchol::detail::prune_and_degrees(
         graph, std::span<const apxchol::node_index>(active), degrees, serial, 4);
     ASSERT_EQ(degrees.size(), 3u);
     EXPECT_EQ(degrees[0], 8u);
@@ -855,11 +860,11 @@ TEST(PruneAndDegrees, SkipAboveReportsTheRawCountAndLeavesTheVertexUnwalked) {
     EXPECT_DOUBLE_EQ(skipped_average, 11.0 / 3.0);
 
     // A count AT the cutoff is walked; so is everything without a cutoff.
-    apxchol::prune_and_degrees(
+    apxchol::detail::prune_and_degrees(
         graph, std::span<const apxchol::node_index>(active), degrees, serial, 8);
     EXPECT_EQ(degrees[0], 5u);
     EXPECT_EQ(graph.adj_count(0), 5u);
-    const double full_average = apxchol::prune_and_degrees(
+    const double full_average = apxchol::detail::prune_and_degrees(
         graph, std::span<const apxchol::node_index>(active), degrees, serial);
     EXPECT_EQ(degrees[0], 5u);
     EXPECT_DOUBLE_EQ(full_average, 8.0 / 3.0);
@@ -877,7 +882,7 @@ TEST(PruneAndDegrees, AuditCountsTheEligibleVerticesASkipWouldHide) {
     std::vector<apxchol::node_index> degrees;
     constexpr std::size_t serial = std::size_t{1} << 20;
     std::size_t hidden = 99;
-    apxchol::prune_and_degrees(
+    apxchol::detail::prune_and_degrees(
         graph, std::span<const apxchol::node_index>(active), degrees, serial,
         /*skip_above=*/0, /*audit_above=*/4, /*audit_eligible=*/3, &hidden);
     EXPECT_EQ(hidden, 1u);
@@ -886,7 +891,7 @@ TEST(PruneAndDegrees, AuditCountsTheEligibleVerticesASkipWouldHide) {
     EXPECT_EQ(degrees[3], 6u);
 
     // Walked once, nothing is hidden any more.
-    apxchol::prune_and_degrees(
+    apxchol::detail::prune_and_degrees(
         graph, std::span<const apxchol::node_index>(active), degrees, serial,
         0, 4, 3, &hidden);
     EXPECT_EQ(hidden, 0u);
@@ -944,10 +949,9 @@ TEST(PruneSkip, HubGridSolvesAtEveryFactorIncludingTheAggressiveOne) {
     // raw count, dead entries included, so some round's average degree is
     // larger than the exact one.
     auto round_degrees = [&](double skip_factor) {
-        const auto f = factorize_controlled(apxchol::make_graph(A), opts.factor_opts,
-                                           {.prune_skip_factor = skip_factor});
         std::vector<double> avg;
-        for (const auto& round : f.rounds) avg.push_back(round.avg_deg);
+        factorize_controlled(apxchol::make_graph(A), opts.factor_opts,
+                             {.prune_skip_factor = skip_factor, .round_average_degrees = &avg});
         return avg;
     };
     const auto exact = round_degrees(0);
@@ -986,21 +990,21 @@ TEST(FactorizeDeterminism, SameGraphParallelSelectionIsExact) {
         for (apxchol::node_index v = 0; v < n; ++v)
             if (snapshot.is_active(v)) candidates.push_back(v);
         auto degree_graph = snapshot;
-        (void)apxchol::prune_and_degrees(
+        (void)apxchol::detail::prune_and_degrees(
             degree_graph, candidates, compact_degrees, 256);
         std::vector<apxchol::node_index> degrees(n, 0);
         for (std::size_t i = 0; i < candidates.size(); ++i)
             degrees[candidates[i]] = compact_degrees[i];
         apxchol::partition_context context{
             .options = {.degree_quantile = 0.0, .degree_multiplier = 100.0},
-            .seed = 3, .omp_threshold = 256, .cp = nullptr, .degrees = degrees,
+            .seed = 3, .omp_threshold = 256, .degrees = degrees,
         };
         expect_same_graph_selection(snapshot, candidates, context,
-                                    apxchol::block_greedy_partitioner{});
-        apxchol::priority_greedy_partitioner priority;
+                                    apxchol::detail::block_greedy_partitioner{});
+        apxchol::detail::priority_greedy_partitioner priority;
         priority.round = 3;
         expect_same_graph_selection(snapshot, candidates, context, priority);
-        apxchol::baumann_kyng_partitioner bk;
+        apxchol::detail::baumann_kyng_partitioner bk;
         bk.round = 3;
         bk.est_avg_degree = 4.0;
         expect_same_graph_selection(snapshot, candidates, context, bk);
@@ -1733,7 +1737,7 @@ TEST(BaumannKyngSeeding, Round0UsesTheSeedInsteadOfTwoMOverActive) {
         .options = {},
         .seed = 42,
         .omp_threshold = 2000,
-        .cp = nullptr,
+       
         .degrees = {},
     };
     std::vector<apxchol::node_index> active(900);
@@ -1741,13 +1745,13 @@ TEST(BaumannKyngSeeding, Round0UsesTheSeedInsteadOfTwoMOverActive) {
 
     auto is_size = [&](double seed) {
         auto G = apxchol::make_graph(L);
-        apxchol::baumann_kyng_partitioner bk;
+        apxchol::detail::baumann_kyng_partitioner bk;
         bk.est_avg_degree = seed;                   // 0 = "work it out yourself"
         apxchol::selection sel;
-        sel.reset(G.n());
+        apxchol::detail::selection_access::reset(sel, G.n());
         bk.find_partition(G, std::span<const apxchol::node_index>(active),
                           ctx, sel);
-        return sel.finalize().num_regions();
+        return apxchol::detail::selection_access::finalize(sel).data.size();
     };
 
     // Seeding a huge average degree drives p = 1/(c·d) down, so round 0 samples
@@ -1769,22 +1773,22 @@ TEST(BaumannKyngWorkHint, MatchesSelectedLiveDegreeSum) {
         .options = {},
         .seed = 42,
         .omp_threshold = 1,
-        .cp = nullptr,
+       
         .degrees = {},
     };
-    apxchol::baumann_kyng_partitioner bk;
+    apxchol::detail::baumann_kyng_partitioner bk;
     bk.est_avg_degree = 4.0;
     apxchol::selection selected;
-    selected.reset(G.n());
+    apxchol::detail::selection_access::reset(selected, G.n());
     bk.find_partition(G, active, ctx, selected);
-    const auto& part = selected.finalize();
+    const auto& part = apxchol::detail::selection_access::finalize(selected);
 
     size_t expected = 0;
     for (const auto v : part.data)
         expected += static_cast<size_t>(G.prune_and_degree(v));
     EXPECT_EQ(bk.selected_degree_work(), expected);
 
-    selected.reset(G.n());
+    apxchol::detail::selection_access::reset(selected, G.n());
     bk.find_partition(G, std::span<const apxchol::node_index>{}, ctx, selected);
     EXPECT_EQ(bk.selected_degree_work(), 0u);
 }
@@ -1806,18 +1810,18 @@ TEST(PriorityGreedy, SerialFallbackPreservesExactSelectedSetAndMaximality) {
     }
     std::vector<apxchol::node_index> candidates(n), degrees;
     std::iota(candidates.begin(), candidates.end(), apxchol::node_index{0});
-    (void)apxchol::prune_and_degrees(G, candidates, degrees, 2000);
+    (void)apxchol::detail::prune_and_degrees(G, candidates, degrees, 2000);
     apxchol::partition_context ctx{
-        .options = {}, .seed = 17, .omp_threshold = 1, .cp = nullptr,
+        .options = {}, .seed = 17, .omp_threshold = 1,
         .degrees = degrees,
     };
     auto select = [&](int passes) {
-        apxchol::priority_greedy_partitioner p;
+        apxchol::detail::priority_greedy_partitioner p;
         p.parallel_passes = passes;
         apxchol::selection selected;
-        selected.reset(n);
+        apxchol::detail::selection_access::reset(selected, n);
         p.find_partition(G, candidates, ctx, selected);
-        return selected.finalize().data;
+        return apxchol::detail::selection_access::finalize(selected).data;
     };
 
     const auto parallel = select(16);
@@ -1858,28 +1862,28 @@ TEST(PriorityGreedy, ParallelPicksExcludeSharedNeighborsAndResetScratch) {
     G.add_edge(0, 0, 1.0);      // A self incidence must not exclude its own pick.
     std::vector<apxchol::node_index> candidates(n), degrees;
     std::iota(candidates.begin(), candidates.end(), apxchol::node_index{0});
-    (void)apxchol::prune_and_degrees(G, candidates, degrees, 2000);
+    (void)apxchol::detail::prune_and_degrees(G, candidates, degrees, 2000);
     apxchol::partition_context ctx{
-        .options = {}, .seed = 17, .omp_threshold = 1, .cp = nullptr,
+        .options = {}, .seed = 17, .omp_threshold = 1,
         .degrees = degrees,
     };
     ctx.options.degree_tiebreak = true;
     std::vector<apxchol::node_index> expected(candidates.begin(),
                                              candidates.begin() + leaves);
-    apxchol::priority_greedy_partitioner p;
+    apxchol::detail::priority_greedy_partitioner p;
     p.parallel_passes = 1;
     apxchol::selection selected;
     for (int repetition = 0; repetition < 8; ++repetition) {
         // Every leaf wins in the same pass; all workers exclude the same hubs.
-        selected.reset(n);
+        apxchol::detail::selection_access::reset(selected, n);
         p.find_partition(G, candidates, ctx, selected);
-        EXPECT_EQ(selected.finalize().data, expected);
+        EXPECT_EQ(apxchol::detail::selection_access::finalize(selected).data, expected);
 
         // Reuse the same scratch with only the previously excluded hubs eligible.
-        selected.reset(n);
+        apxchol::detail::selection_access::reset(selected, n);
         const auto hubs = std::span<const apxchol::node_index>(candidates).subspan(leaves);
         p.find_partition(G, hubs, ctx, selected);
-        EXPECT_EQ(selected.finalize().data,
+        EXPECT_EQ(apxchol::detail::selection_access::finalize(selected).data,
                   (std::vector<apxchol::node_index>{leaves, leaves + 1}));
     }
 }
@@ -1911,8 +1915,8 @@ TEST(FactorAdoption, RejectsMalformedArraysPermutationAndRounds) {
         {"out-of-range row", [](F& f) { f.L.inner_[1] = 3; }},
         {"upper-triangle entry", [](F& f) { f.L.inner_[5] = 0; }},
         {"nonfinite value", [](F& f) { f.L.vals_[1] = std::numeric_limits<float>::infinity(); }},
-        {"oversized round", [](F& f) { f.rounds = {{3, 4, 0, 0, 0}}; }},
-        {"dependent round", [](F& f) { f.rounds = {{3, 2, 0, 0, 0}}; }},
+        {"oversized round", [](F& f) { f.rounds = {{3, 4}}; }},
+        {"dependent round", [](F& f) { f.rounds = {{3, 2}}; }},
     };
     for (const auto& [name, mutate] : mutations) {
         SCOPED_TRACE(name);
@@ -1930,7 +1934,7 @@ TEST(FactorAdoption, RejectsMalformedArraysPermutationAndRounds) {
 
 TEST(FactorAdoption, PreservesCustomEntriesAndRoundMetadata) {
     auto factor = custom_factor_for_adoption();
-    factor.rounds = {{3, 0, 0, 0, 0}, {3, 1, 0, 0, 0}, {2, 1, 0, 0, 0}};
+    factor.rounds = {{3, 0}, {3, 1}, {2, 1}};
     Eigen::Matrix3d lower = Eigen::Matrix3d::Zero();
     for (int col = 0; col < 3; ++col)
         for (auto p = factor.L.outer_[col]; p < factor.L.outer_[col + 1]; ++p)
@@ -1972,13 +1976,13 @@ TEST(GpuSptrsvConfiguration, UsesDataflowWithEitherStorage) {
                                apxchol::factor_storage_type::fp32,
                                apxchol::factor_storage_type::fp16}) {
         const bool fp16 = storage != apxchol::factor_storage_type::fp32;
-        EXPECT_EQ(apxchol::cuda_sptrsv::fp16_resolved(storage), fp16);
+        EXPECT_EQ(apxchol::detail::cuda_sptrsv::fp16_resolved(storage), fp16);
         apxchol::sparse_csc factor;
         factor.n_ = 1;
         factor.outer_ = {0, 1};
         factor.inner_ = {0};
         factor.vals_ = {2.0f};
-        apxchol::cuda_sptrsv trsv;
+        apxchol::detail::cuda_sptrsv trsv;
         ASSERT_NO_THROW(trsv.setup(factor, 1, {.factor_storage = storage}));
         EXPECT_STREQ(trsv.backend_name(), "dataflow");
         EXPECT_EQ(trsv.fp16(), fp16);

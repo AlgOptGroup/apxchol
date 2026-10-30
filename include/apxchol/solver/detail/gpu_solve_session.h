@@ -26,7 +26,7 @@ public:
         precond.set_keep_factor(opts.keep_factor_values);
         if (use_cp) precond.set_checkpoint(cp);
         if (F) {
-            if (F->research_device_factor)
+            if (factorization_access::device_factor(*F))
                 throw std::invalid_argument("GPU solver: supply a host factor without a device capsule");
             if (L.rows() != L.cols() || static_cast<Eigen::Index>(F->L.rows()) != L.rows())
                 throw std::invalid_argument("GPU solver: factorization dimension mismatch");

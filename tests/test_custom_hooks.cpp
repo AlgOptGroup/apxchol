@@ -106,15 +106,14 @@ TEST(CustomEliminator, ExactCliqueFactorIsExact) {
     auto A = grid_laplacian(8, 8);
     auto b = apxchol::generate_test_rhs(A.rows());
     auto solve_once = [&](apxchol::factor_storage_type storage) {
-        auto G = apxchol::make_graph(A);
-        auto F = apxchol::factorize(std::move(G), exact_clique_eliminator{});
+        auto F = apxchol::factorize(A, exact_clique_eliminator{});
         apxchol::solve_options options;
         options.factor_opts.factor_storage = storage;
         apxchol::solver slv(A, std::move(F), options);
         return slv.solve(b, 1e-12, 50);
     };
     for (bool fp16 : {false, true}) {
-        if (fp16 && !apxchol::omp_sptrsv::fp16_supported()) continue;
+        if (fp16 && !apxchol::detail::omp_sptrsv::fp16_supported()) continue;
         SCOPED_TRACE(fp16 ? "fp16 storage" : "fp32 storage");
         const auto storage = fp16 ? apxchol::factor_storage_type::fp16
                                   : apxchol::factor_storage_type::fp32;
@@ -173,8 +172,7 @@ TEST(SetFactor, ExternalFactorizationInPreconditioner) {
     auto L = grid_laplacian(15, 15);
     auto b = apxchol::generate_test_rhs(L.rows());
 
-    auto G = apxchol::make_graph(L);
-    auto F = apxchol::factorize(std::move(G));
+    auto F = apxchol::factorize(L);
 
     apxchol::solver M(L, std::move(F), on_cpu);
     Eigen::VectorXd z = M.apply(b);

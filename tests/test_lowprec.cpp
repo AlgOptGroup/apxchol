@@ -26,7 +26,7 @@ using apxchol::edge_index;
 using apxchol::factor_value_t;
 using apxchol::node_index;
 using apxchol::sparse_csc;
-using apxchol::sptrsv_value_t;
+using apxchol::detail::sptrsv_value_t;
 
 namespace {
 
@@ -139,7 +139,7 @@ TEST(FP16, StorageConversionMatchesNumericalReference) {
         const float actual = float(apxchol::detail::narrow_scaled_fp16(x, 1.0f));
         ASSERT_EQ(actual, expected) << "x=" << x;
         ASSERT_EQ(std::signbit(actual), std::signbit(expected)) << "x=" << x;
-        ASSERT_EQ(apxchol::omp_sptrsv::format_flushes<_Float16>(x, 1.0f), expected == 0.0f) << "x=" << x;
+        ASSERT_EQ(apxchol::detail::omp_sptrsv::format_flushes<_Float16>(x, 1.0f), expected == 0.0f) << "x=" << x;
     }
 }
 
@@ -156,7 +156,7 @@ TEST(FP16, DocumentedSubnormalFlushOverflowAndTies) {
         for (float sign : {-1.0f, 1.0f})
             for (float ratio : {below, normal_midpoint, std::nextafter(normal_midpoint, 1.0f)}) {
                 const float value = sign * ratio * scale;
-                EXPECT_EQ(apxchol::omp_sptrsv::format_flushes<_Float16>(value, scale),
+                EXPECT_EQ(apxchol::detail::omp_sptrsv::format_flushes<_Float16>(value, scale),
                           storage_reference(value / scale) == 0.0f);
             }
     for (float sign : {-1.0f, 1.0f}) {
@@ -275,7 +275,7 @@ std::vector<float> reference_scales(const sparse_csc& L) {
 TEST(LowPrec, SetupStoresNarrowValueOfEveryEntryAndTheColumnScales) {
     // Reuse output storage across growth and shrink as well as the serial
     // and parallel transpose paths; every new factor must overwrite it.
-    apxchol::omp_sptrsv trsv;
+    apxchol::detail::omp_sptrsv trsv;
     for (node_index m : {node_index(3000), node_index(60000), node_index(2000)}) {
         SCOPED_TRACE("m=" + std::to_string(m));
         // Wide value range so FP16_SCALED sees ratios spanning many binades
@@ -285,14 +285,14 @@ TEST(LowPrec, SetupStoresNarrowValueOfEveryEntryAndTheColumnScales) {
             if ((p % 7) == 3) L.vals_[p] = static_cast<factor_value_t>(L.vals_[p] * 1e-7);
         const std::vector<float> s = reference_scales(L);
         for (node_index j = 0; j < m; ++j)
-            ASSERT_EQ(apxchol::omp_sptrsv::column_scale(L.vals_.data(), L.outer_[j], L.outer_[j + 1]), s[j]);
+            ASSERT_EQ(apxchol::detail::omp_sptrsv::column_scale(L.vals_.data(), L.outer_[j], L.outer_[j + 1]), s[j]);
 
         trsv.setup(L, m, {.drop_tolerance = 0});
         ASSERT_EQ(trsv.csc_vals().size(), static_cast<size_t>(L.nonZeros()));
         std::uint64_t offdiag = 0;
         for (node_index j = 0; j < m; ++j)
             for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) {
-                const sptrsv_value_t expect = apxchol::omp_sptrsv::narrow_value(L.vals_[p], s[j]);
+                const sptrsv_value_t expect = apxchol::detail::omp_sptrsv::narrow_value(L.vals_[p], s[j]);
                 ASSERT_TRUE(trsv.csc_vals()[p] == expect) << "csc p=" << p;
                 if (L.inner_[p] != j) ++offdiag;
                 // CSR twin: locate (row = inner[p], col = j).
@@ -327,7 +327,7 @@ TEST(LowPrec, FlushAndSubnormalCountsAreExact) {
     L.inner_ = {0, 1, 2, 3,  1, 2,  2,  3};
     L.vals_  = {2.0f, 1.0f, 1e-6f, 1e-9f,  1.5f, -0.25f,  1.0f,  1.0f};
     {
-        apxchol::omp_sptrsv trsv;
+        apxchol::detail::omp_sptrsv trsv;
         trsv.setup(L, 4, {.drop_tolerance = 0});
         EXPECT_EQ(trsv.drop_stats().offdiag, 4u);
         EXPECT_EQ(trsv.drop_stats().dropped, 0u);
@@ -337,8 +337,8 @@ TEST(LowPrec, FlushAndSubnormalCountsAreExact) {
         EXPECT_EQ(trsv.drop_stats().factor_subnormal, 0u);   // every fp32 value here is normal
         EXPECT_EQ(trsv.drop_stats().flushed, 0u);
         EXPECT_EQ(trsv.drop_stats().subnormal, 0u);
-        EXPECT_FALSE(apxchol::omp_sptrsv::format_flushes(1e-9f, 1.0f));   // fp32's range: only 0 stores as 0
-        EXPECT_TRUE(apxchol::omp_sptrsv::format_flushes(0.0f, 1.0f));
+        EXPECT_FALSE(apxchol::detail::omp_sptrsv::format_flushes(1e-9f, 1.0f));   // fp32's range: only 0 stores as 0
+        EXPECT_TRUE(apxchol::detail::omp_sptrsv::format_flushes(0.0f, 1.0f));
         // The forward/back solves still run and are exact w.r.t. the STORED
         // values (a tiny system: check L~ y' = x against them -- the kernel
         // matrix L~: widened off-diagonals, stored_diag() diagonal; under
@@ -352,7 +352,7 @@ TEST(LowPrec, FlushAndSubnormalCountsAreExact) {
                     if (L.inner_[p] == i) {
                         const float sj =
                             1.0f;
-                        const double v = (i == j) ? apxchol::omp_sptrsv::stored_diag(L.vals_[p], sj)
+                        const double v = (i == j) ? apxchol::detail::omp_sptrsv::stored_diag(L.vals_[p], sj)
                                                   : apxchol::widen(trsv.csc_vals()[p]);
                         r -= v * y[j];
                     }
@@ -453,11 +453,11 @@ TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
         ASSERT_GT(ref.zeroed, ref.kept / 4);   // the test has teeth: a big chunk goes
 
         // Compacted factor and the equivalent zeroed reference.
-        apxchol::omp_sptrsv trsv;
+        apxchol::detail::omp_sptrsv trsv;
         trsv.setup(L, m, {.drop_tolerance = rel});
         // Reference: dense drop, the drop itself off (the zeroed entries stay
         // stored -- a stored zero solves like an absent entry).
-        apxchol::omp_sptrsv rf;
+        apxchol::detail::omp_sptrsv rf;
         rf.setup(ref.Lz, m, {.drop_tolerance = 0});
 
         // Counts.
@@ -537,13 +537,13 @@ TEST(LowPrec, FactorDropCompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
         EXPECT_LT(worst, 1e-11);
 
         // A zero threshold preserves every entry; the default matches rel above.
-        apxchol::omp_sptrsv plain;
+        apxchol::detail::omp_sptrsv plain;
         plain.setup(L, m, {.drop_tolerance = 0});
         EXPECT_EQ(plain.drop_stats().rel, 0.0);
         EXPECT_EQ(plain.drop_stats().dropped, 0u);
         EXPECT_EQ(plain.drop_stats().nnz_stored, L11_nnz);
         EXPECT_EQ(plain.stored_nnz(), L11_nnz);
-        apxchol::omp_sptrsv dflt;
+        apxchol::detail::omp_sptrsv dflt;
         dflt.setup(L, m);
         EXPECT_EQ(dflt.drop_stats().rel, apxchol::factor_options{}.drop_tolerance);
         EXPECT_EQ(dflt.stored_nnz(), ref.kept);
@@ -565,12 +565,12 @@ TEST(LowPrec, FactorDropEdgeCases) {
     ASSERT_GT(fp16_zero, 100u);
     for (double rel : {-1.0, std::nextafter(1.0, 2.0), 2.0, std::numeric_limits<double>::quiet_NaN(),
                        std::numeric_limits<double>::infinity()}) {
-        apxchol::omp_sptrsv t;
+        apxchol::detail::omp_sptrsv t;
         EXPECT_THROW(t.setup(L, 2000, {.drop_tolerance = rel}), std::invalid_argument);
     }
     for (double rel : {0.0, 1e-30}) {
         SCOPED_TRACE(rel);
-        apxchol::omp_sptrsv t;
+        apxchol::detail::omp_sptrsv t;
         t.setup(L, 2000, {.drop_tolerance = rel});
         EXPECT_EQ(t.drop_stats().dropped, 0u);
         EXPECT_EQ(t.stored_nnz(), static_cast<std::uint64_t>(L.nonZeros()));
@@ -589,12 +589,12 @@ TEST(LowPrec, FactorDropEdgeCases) {
 //     the setup still produces finite, nonzero diagonals (it THROWS
 //     otherwise -- see omp.h "DEGENERATE SCALES");
 namespace {
-bool fp16_available() { return apxchol::omp_sptrsv::fp16_supported(); }
+bool fp16_available() { return apxchol::detail::omp_sptrsv::fp16_supported(); }
 }  // namespace
 
 TEST(LowPrecFp16, StorageContractAndCompensatedDiagonal) {
     if (!fp16_available()) GTEST_SKIP() << "CPU lacks AVX/F16C";
-    apxchol::omp_sptrsv trsv;
+    apxchol::detail::omp_sptrsv trsv;
     for (node_index m : {node_index(3000), node_index(60000), node_index(2000)}) {
         SCOPED_TRACE("m=" + std::to_string(m));
         sparse_csc L = make_random_lower(m, 4.0, 77, -2.0, 2.0);
@@ -615,7 +615,7 @@ TEST(LowPrecFp16, StorageContractAndCompensatedDiagonal) {
         for (node_index j = 0; j < m; ++j) {
             double x_sum = 0.0, stored_sum = 0.0, resid = 0.0;
             for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) {
-                const _Float16 expect = apxchol::omp_sptrsv::narrow_value<_Float16>(L.vals_[p], s[j]);
+                const _Float16 expect = apxchol::detail::omp_sptrsv::narrow_value<_Float16>(L.vals_[p], s[j]);
                 ASSERT_EQ(float(trsv.csc_vals16()[p]), float(expect)) << "csc p=" << p;
                 ASSERT_EQ(std::signbit(float(trsv.csc_vals16()[p])), std::signbit(float(expect))) << "csc p=" << p;
                 EXPECT_FALSE(apxchol::is_stored_subnormal(trsv.csc_vals16()[p]));   // always flushed
@@ -637,7 +637,7 @@ TEST(LowPrecFp16, StorageContractAndCompensatedDiagonal) {
                 resid      += xv - apxchol::widen(expect);
             }
             // The compensated diagonal, and the column sum it restores.
-            const double d0 = apxchol::omp_sptrsv::stored_diag<_Float16>(L.vals_[L.outer_[j]], s[j]);
+            const double d0 = apxchol::detail::omp_sptrsv::stored_diag<_Float16>(L.vals_[L.outer_[j]], s[j]);
             ASSERT_EQ(trsv.fp16_diag()[j], static_cast<float>(d0 + resid)) << "diag " << j;
             const double abs_scale = std::fabs(d0) + std::fabs(x_sum) + 1e-300;
             worst_colsum = std::max(worst_colsum,
@@ -662,7 +662,7 @@ TEST(LowPrecFp16, DegenerateColumnScaleFallsBackToOneAndTheSetupStaysFinite) {
     L.outer_ = {0, 2, 4, 5};
     L.inner_ = {0, 2,  1, 2,  2};
     L.vals_  = {2.0f, -0.5f,  3.0f, 1e-40f,  4.0f};
-    apxchol::omp_sptrsv trsv;
+    apxchol::detail::omp_sptrsv trsv;
     ASSERT_NO_THROW(trsv.setup(L, 3, {.factor_storage = apxchol::factor_storage_type::fp16, .drop_tolerance = 0}));
     ASSERT_TRUE(trsv.fp16());
     EXPECT_EQ(trsv.drop_stats().scale_fallback, 1u);

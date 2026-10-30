@@ -22,7 +22,7 @@ using apxchol::edge_index;
 using apxchol::node_index;
 using apxchol::sparse_csc;
 using apxchol::factor_value_t;
-using apxchol::sptrsv_value_t;
+using apxchol::detail::sptrsv_value_t;
 
 // The DEFAULT storage width is fp32, and value_name / value_bytes (what the
 // verbose banner prints) report what the last setup() resolved.
@@ -37,7 +37,7 @@ TEST(SpTRSVKernels, StorageWidthFollowsTheExplicitOption) {
 
     sparse_csc L; L.n_ = 2; L.outer_ = {0, 2, 3}; L.inner_ = {0, 1, 1}; L.vals_ = {2.0f, -0.5f, 3.0f};
     {
-        apxchol::omp_sptrsv t; t.setup(L, 2);
+        apxchol::detail::omp_sptrsv t; t.setup(L, 2);
         EXPECT_FALSE(t.fp16());
         EXPECT_EQ(t.value_bytes(), 4u);
         EXPECT_STREQ(t.value_name(), "float (fp32)");
@@ -46,8 +46,8 @@ TEST(SpTRSVKernels, StorageWidthFollowsTheExplicitOption) {
     }
     {
         const apxchol::factor_options options{.factor_storage = apxchol::factor_storage_type::fp16};
-        apxchol::omp_sptrsv t;
-        if (apxchol::omp_sptrsv::fp16_supported()) {
+        apxchol::detail::omp_sptrsv t;
+        if (apxchol::detail::omp_sptrsv::fp16_supported()) {
             t.setup(L, 2, options);
             EXPECT_TRUE(t.fp16());
             EXPECT_EQ(t.value_bytes(), 2u);
@@ -87,22 +87,22 @@ namespace {
 // rescaled) for the OFF-DIAGONAL entry with value v in a column with scale s:
 // through narrow_value. On the fp32 storage this is v itself.
 double kernel_offdiag(factor_value_t v, float s, bool fp16) {
-    return fp16 ? apxchol::widen(apxchol::omp_sptrsv::narrow_value<_Float16>(v, s))
-                : apxchol::widen(apxchol::omp_sptrsv::narrow_value<float>(v, s));
+    return fp16 ? apxchol::widen(apxchol::detail::omp_sptrsv::narrow_value<_Float16>(v, s))
+                : apxchol::widen(apxchol::detail::omp_sptrsv::narrow_value<float>(v, s));
 }
 // The per-column scale the kernels' input / output carry (1.0f on fp32).
 float pair_scale(const sparse_csc& L, node_index j, bool fp16) {
     if (!fp16) return 1.0f;
-    return apxchol::omp_sptrsv::column_scale(L.vals_.data(), L.outer_[j], L.outer_[j + 1]);
+    return apxchol::detail::omp_sptrsv::column_scale(L.vals_.data(), L.outer_[j], L.outer_[j + 1]);
 }
 // What the kernels DIVIDE by for column j: the factor diagonal on fp32; on
 // fp16 the fp32 stored_diag PLUS the column's storage-rounding residual (the
 // compensation omp_sptrsv::setup applies unconditionally -- omp.h).
 double kernel_diag(const sparse_csc& L, node_index j, bool fp16) {
     const edge_index p0 = L.outer_[j];
-    if (!fp16) return apxchol::omp_sptrsv::stored_diag<float>(L.vals_[p0], 1.0f);
+    if (!fp16) return apxchol::detail::omp_sptrsv::stored_diag<float>(L.vals_[p0], 1.0f);
     const float s = pair_scale(L, j, true);
-    double d = apxchol::omp_sptrsv::stored_diag<_Float16>(L.vals_[p0], s);
+    double d = apxchol::detail::omp_sptrsv::stored_diag<_Float16>(L.vals_[p0], s);
     double resid = 0.0;
     for (edge_index p = p0 + 1; p < L.outer_[j + 1]; ++p)
         resid += static_cast<double>(L.vals_[p]) / static_cast<double>(s)
@@ -204,13 +204,13 @@ void run_kernel_precision_check() {
     for (const char* env : {"float32", "float16"})
     for (node_index m : {node_index(3000), node_index(60000) /* parallel transpose path */}) {
         const bool fp16 = std::string_view(env) == "float16";
-        if (fp16 && !apxchol::omp_sptrsv::fp16_supported()) continue;
+        if (fp16 && !apxchol::detail::omp_sptrsv::fp16_supported()) continue;
         SCOPED_TRACE("m=" + std::to_string(m) + " factor_storage=" + env);
         const apxchol::factor_options options{
             .factor_storage = fp16 ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32,
             .drop_tolerance = 0};
         sparse_csc L = make_random_lower(m, 4.0, 99);
-        apxchol::omp_sptrsv trsv;
+        apxchol::detail::omp_sptrsv trsv;
         trsv.setup(L, m, options);
         ASSERT_EQ(trsv.fp16(), fp16);
         std::mt19937 rng(7);
@@ -224,7 +224,7 @@ void run_kernel_precision_check() {
         trsv.transpose_solve(yp.data(), z.data());
         std::vector<double> ryp(m);
         for (node_index j = 0; j < m; ++j) {
-            const double r = fp16 ? apxchol::omp_sptrsv::inv_scale<_Float16>(pair_scale(L, j, true)) : 1.0;
+            const double r = fp16 ? apxchol::detail::omp_sptrsv::inv_scale<_Float16>(pair_scale(L, j, true)) : 1.0;
             ryp[j] = yp[j] * (r * r);
         }
         check_kernel_residual(L, ryp, z, /*transpose=*/true, fp16);
@@ -313,7 +313,7 @@ sparse_csc make_round_structured_lower(node_index R, node_index B, unsigned seed
 } // namespace
 
 TEST(SpTRSVKernels, SpTRSVFatLevelKernelsBothGatherFlavours) {
-    const node_index R = 8, B = 2 * apxchol::kSpTRSVOMPThreshold;   // 8 fat levels of 2048
+    const node_index R = 8, B = 2 * apxchol::detail::kSpTRSVOMPThreshold;   // 8 fat levels of 2048
     std::vector<node_index> bounds;
     const sparse_csc L = make_round_structured_lower(R, B, 4321, bounds);
     const node_index m = R * B;
@@ -334,23 +334,23 @@ TEST(SpTRSVKernels, SpTRSVFatLevelKernelsBothGatherFlavours) {
     for (auto& v : x) v = ux(rng);
     for (const char* env : {"float32", "float16"}) {
         const bool fp16 = std::string_view(env) == "float16";
-        if (fp16 && !apxchol::omp_sptrsv::fp16_supported()) continue;
+        if (fp16 && !apxchol::detail::omp_sptrsv::fp16_supported()) continue;
         SCOPED_TRACE(std::string("factor_storage=") + env);
         const apxchol::factor_options options{
             .factor_storage = fp16 ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32,
             .drop_tolerance = 0};
         std::vector<double> y_ref, z_ref;
         reference_pair(L, x, y_ref, z_ref, fp16);
-        apxchol::omp_sptrsv trsv;
+        apxchol::detail::omp_sptrsv trsv;
         trsv.set_round_bounds(bounds);
         trsv.setup(L, m, options);
         ASSERT_EQ(trsv.fp16(), fp16);
 #ifdef __x86_64__
         const bool simd = __builtin_cpu_supports("avx") && __builtin_cpu_supports("f16c")
             && __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
-        EXPECT_EQ(apxchol::omp_sptrsv::simd_fp16_kernel(), simd);
+        EXPECT_EQ(apxchol::detail::omp_sptrsv::simd_fp16_kernel(), simd);
 #else
-        EXPECT_FALSE(apxchol::omp_sptrsv::simd_fp16_kernel());
+        EXPECT_FALSE(apxchol::detail::omp_sptrsv::simd_fp16_kernel());
 #endif
         // Every level is fat (round-as-level).
         std::vector<int> sizes; std::vector<long long> work;
@@ -367,7 +367,7 @@ TEST(SpTRSVKernels, SpTRSVFatLevelKernelsBothGatherFlavours) {
         trsv.transpose_solve(yp.data(), z.data());
         std::vector<double> ryp(m);
         for (node_index j = 0; j < m; ++j) {
-            const double r = fp16 ? apxchol::omp_sptrsv::inv_scale<_Float16>(pair_scale(L, j, true)) : 1.0;
+            const double r = fp16 ? apxchol::detail::omp_sptrsv::inv_scale<_Float16>(pair_scale(L, j, true)) : 1.0;
             ryp[j] = yp[j] * (r * r);
         }
         check_kernel_residual(L, ryp, z,  /*transpose=*/true, fp16);

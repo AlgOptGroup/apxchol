@@ -25,7 +25,7 @@ namespace apxchol {
 //     lowprec.h) -- that is a per-setup choice of storage type, never a
 //     compile-time typedef.
 using factor_value_t = float;
-using sptrsv_value_t = float;
+namespace detail { using sptrsv_value_t = float; }
 
 /// Owning Compressed-Sparse-Column matrix that replaces Eigen::SparseMatrix for
 /// the factor L. We own the storage so the index width is OURS, not forced

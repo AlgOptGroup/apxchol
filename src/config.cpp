@@ -20,7 +20,7 @@ static const std::map<std::string, solve_backend> solve_backend_map = {
 static std::vector<std::string> partitioner_names() {
     return []<typename... Ps>(std::tuple<Ps...>*) {
         return std::vector<std::string>{std::string(Ps::name)...};
-    }(static_cast<partitioner_list*>(nullptr));
+    }(static_cast<detail::partitioner_list*>(nullptr));
 }
 
 static void setup_logging(bool quiet, bool verbose) {

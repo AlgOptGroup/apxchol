@@ -15,6 +15,7 @@
 
 namespace apxchol {
 
+namespace detail {
 using partitioner_list = std::tuple<
     block_greedy_partitioner,
     priority_greedy_partitioner,
@@ -22,13 +23,12 @@ using partitioner_list = std::tuple<
 >;
 
 /// Concept check: every entry in partitioner_list satisfies `partitioner`.
-namespace detail {
 template<typename... Ts>
 constexpr bool all_partitioners(std::tuple<Ts...>*) {
     return (... && partitioner<Ts>);
 }
 }
-static_assert(detail::all_partitioners(static_cast<partitioner_list*>(nullptr)),
+static_assert(detail::all_partitioners(static_cast<detail::partitioner_list*>(nullptr)),
               "every entry in partitioner_list must satisfy `partitioner`");
 
 /// Dispatch by name.  `fn` is a generic lambda
@@ -53,7 +53,7 @@ Result dispatch_partitioner(std::string_view name, Fn&& fn) {
                 "unknown partitioner: '" + std::string(name) +
                 "' - valid: " + valid);
         }
-    }(static_cast<partitioner_list*>(nullptr));
+    }(static_cast<detail::partitioner_list*>(nullptr));
     return std::move(*result);
 }
 

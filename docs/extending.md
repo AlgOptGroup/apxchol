@@ -85,7 +85,7 @@ See the header for optional `sample_bounded` and
 `residual_handoff_threshold` traits.
 
 `ctx.options` contains selection settings, `ctx.seed` supplies randomness,
-`ctx.omp_threshold` gates parallel work, and `ctx.cp` is optional profiling.
+and `ctx.omp_threshold` gates parallel work.
 The rule is called once per round and may parallelize internally. This is the
 opposite of the eliminator, whose individual calls are already parallelized.
 
@@ -109,8 +109,8 @@ edges, not current live edges.
 Partitioner instances are passed by value. Callable adapters are
 `as_partitioner` and `as_prepass_partitioner`. Direct template use requires no
 registry change; by-name CLI/binding dispatch requires adding the type to
-`partitioner_list`. [custom_order.cpp](../examples/custom_order.cpp) shows
-complete integration.
+the built-in list in `partitioner_list.h`.
+[custom_order.cpp](../examples/custom_order.cpp) shows complete integration.
 
 ## Reusing a custom factor
 
