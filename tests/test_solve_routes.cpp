@@ -59,7 +59,7 @@ std::vector<apxchol::solve_options> host_only_options() {
 } // namespace
 
 TEST(SolveRoutes, CpuPreconditionerTypeIsIndependentOfCudaBuild) {
-    static_assert(std::is_same_v<decltype(std::declval<apxchol::apx_cholesky&>().trsv()),
+    static_assert(std::is_same_v<decltype(std::declval<apxchol::detail::cpu_preconditioner&>().trsv()),
                                  const apxchol::omp_sptrsv&>);
     SUCCEED();
 }
@@ -82,11 +82,13 @@ TEST(SolveRoutes, ExplicitCpuDoesNotPrewarm) {
     EXPECT_EQ(result.backend, apxchol::solve_backend::cpu);
     EXPECT_EQ(result.solve_vram_mb, -1.0);
     expect_solution(matrix, rhs, result);
-    // A reusable solver on the CPU route stays on CPU as well.
+    // A reusable solver on the CPU route stays on CPU as well, including
+    // preconditioner applications for an external Krylov solver.
     apxchol::solver reusable(matrix, options);
     const auto reused = reusable.solve(rhs, 1e-10);
     EXPECT_EQ(reused.backend, apxchol::solve_backend::cpu);
     expect_solution(matrix, rhs, reused);
+    EXPECT_TRUE(reusable.apply(rhs).allFinite());
     const auto factor = apxchol::factorize(matrix);
     EXPECT_EQ(factor.L.vals_.size(), factor.L.nonZeros());
     EXPECT_EQ(factor.L.inner_.size(), factor.L.nonZeros());
@@ -94,10 +96,6 @@ TEST(SolveRoutes, ExplicitCpuDoesNotPrewarm) {
 #if defined(APXCHOL_USE_CUDA)
     EXPECT_FALSE(factor.research_device_factor);
 #endif
-    apxchol::apx_cholesky eigen_preconditioner;
-    eigen_preconditioner.compute(matrix);
-    const Eigen::VectorXd applied = eigen_preconditioner.solve(rhs);
-    EXPECT_TRUE(applied.allFinite());
 #if defined(APXCHOL_USE_CUDA)
     EXPECT_EQ(apxchol::cuda_ctx::detail::state().started, started);
 #endif

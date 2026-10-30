@@ -38,6 +38,31 @@ static_assert(std::is_copy_constructible_v<apxchol::solver>);
 static_assert(std::is_copy_assignable_v<apxchol::solver>);
 static_assert(noexcept(apxchol::backend_available(apxchol::solve_backend::gpu)));
 
+// The Eigen adapter from docs/usage.md#using-another-iterative-solver.
+class eigen_preconditioner : public Eigen::SparseSolverBase<eigen_preconditioner> {
+public:
+    using Scalar = double;
+    using StorageIndex = int;
+    enum { ColsAtCompileTime = Eigen::Dynamic, MaxColsAtCompileTime = Eigen::Dynamic };
+
+    void attach(const apxchol::solver& s) { solver_ = &s; m_isInitialized = true; }
+
+    // The attached solver already holds the factor.
+    template<class Matrix> eigen_preconditioner& analyzePattern(const Matrix&) { return *this; }
+    template<class Matrix> eigen_preconditioner& factorize(const Matrix&) { return *this; }
+    template<class Matrix> eigen_preconditioner& compute(const Matrix&) { return *this; }
+
+    Eigen::Index rows() const { return solver_->rows(); }
+    Eigen::Index cols() const { return solver_->rows(); }
+    Eigen::ComputationInfo info() const { return Eigen::Success; }
+
+    template<class Rhs, class Dest>
+    void _solve_impl(const Rhs& b, Dest& x) const { x = solver_->apply(b); }
+
+private:
+    const apxchol::solver* solver_ = nullptr;
+};
+
 Sparse operator_matrix(int n = 64) {
     std::vector<Eigen::Triplet<double>> entries;
     for (int i = 0; i < n; ++i) {
@@ -101,7 +126,7 @@ TEST(Solver, BackendAvailabilityKeepsHostQueriesOnHost) {
 TEST(Solver, CpuInterfacesRejectEmptyOperator) {
     const Sparse empty(0, 0);
     EXPECT_THROW(apxchol::solver(empty, cpu_options()), std::invalid_argument);
-    apxchol::apx_cholesky preconditioner;
+    apxchol::detail::cpu_preconditioner preconditioner;
     EXPECT_THROW(preconditioner.compute(empty), std::invalid_argument);
 }
 
@@ -116,8 +141,9 @@ TEST(Solver, EigenConjugateGradientUsesPreconditioner) {
         Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
         if (laplacian) rhs.array() -= rhs.mean();
 
-        Eigen::ConjugateGradient<Sparse, Eigen::Lower, apxchol::apx_cholesky> cg;
-        cg.preconditioner().set_options(options.factor_opts);
+        const apxchol::solver owner(matrix, options);
+        Eigen::ConjugateGradient<Sparse, Eigen::Lower, eigen_preconditioner> cg;
+        cg.preconditioner().attach(owner);
         cg.setTolerance(options.tol);
         cg.setMaxIterations(options.max_iter);
         cg.compute(matrix);
@@ -303,9 +329,9 @@ TEST(Solver, OverlappingCallsOnOneOwnerThrow) {
 TEST(Solver, RefactoringOneCopyKeepsTheOthersAndFailuresKeepTheOldFactor) {
     const scoped_omp_threads threads(1);
     const Sparse small = operator_matrix(64), large = operator_matrix(200);
-    apxchol::apx_cholesky original;
+    apxchol::detail::cpu_preconditioner original;
     original.compute(small);
-    apxchol::apx_cholesky copy = original;
+    apxchol::detail::cpu_preconditioner copy = original;
     const Eigen::VectorXd r = Eigen::VectorXd::LinSpaced(small.rows(), 1.0, 2.0);
     const Eigen::VectorXd expected = original.solve(r);
     const auto* shared = &original.factor();
@@ -335,7 +361,7 @@ TEST(Solver, CopiesShareTheFactorAndSolveInParallel) {
     auto options = cpu_options();
     options.num_threads = 2;
     std::optional<apxchol::solver> original(std::in_place, matrix, options);
-    apxchol::apx_cholesky preconditioner;
+    apxchol::detail::cpu_preconditioner preconditioner;
     preconditioner.set_options(options.factor_opts);
     preconditioner.compute(matrix);
     constexpr int callers = 4;
@@ -353,7 +379,7 @@ TEST(Solver, CopiesShareTheFactorAndSolveInParallel) {
     original->solve(panel, expected_panel);
 
     std::vector<apxchol::solver> owners(callers, *original);
-    std::vector<apxchol::apx_cholesky> preconditioners(callers, preconditioner);
+    std::vector<apxchol::detail::cpu_preconditioner> preconditioners(callers, preconditioner);
     for (int t = 0; t < callers; ++t) {
         EXPECT_EQ(&owners[t].factor(), &original->factor());
         EXPECT_EQ(&preconditioners[t].trsv(), &preconditioner.trsv());

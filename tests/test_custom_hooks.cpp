@@ -176,9 +176,8 @@ TEST(SetFactor, ExternalFactorizationInPreconditioner) {
     auto G = apxchol::make_graph(L);
     auto F = apxchol::factorize(std::move(G));
 
-    apxchol::apx_cholesky M;
-    M.set_factor(std::move(F));
-    Eigen::VectorXd z = M.solve(b);
+    apxchol::solver M(L, std::move(F), on_cpu);
+    Eigen::VectorXd z = M.apply(b);
     EXPECT_TRUE(z.allFinite());
     EXPECT_GT(z.norm(), 0.0);
 }
@@ -281,8 +280,7 @@ TEST(SetFactor, ReleasedFactorIsRejected) {
     auto L = grid_laplacian(10, 10);
     apxchol::solver slv(L, on_cpu);  // default: factor values released after setup
 
-    apxchol::apx_cholesky M;
-    EXPECT_THROW(M.set_factor(slv.factor()),
+    EXPECT_THROW(apxchol::solver(L, slv.factor(), on_cpu),
                  std::invalid_argument);
 }
 

@@ -21,6 +21,7 @@
 - Breaking: `APXCHOL_INDEX_WIDTH=32|64_EDGES|64` replaces the `APXCHOL_64BIT_*_INDICES` build options.
 - Breaking: `apxchol::cpu_solver` is removed; use `apxchol::solver` with `solve_backend::cpu`.
 - Breaking: `save_solver`/`load_solver` are replaced by `solver::save` and `solver::load`.
+- Breaking: `apxchol::apx_cholesky` is removed from the public API; use `apxchol::solver` (`apply` inside an external Krylov solver).
 - Breaking: the CLI and bindings no longer accept an adjacency matrix as if it were the operator. Previously both solved adjacency input as the operator and failed without a clear error; now validation rejects it and the error suggests the conversion.
 - New `apxchol.as_operator(M)`, `apxchol_as_operator(M)` and CLI `--convert-input`: a valid operator is used unchanged, a matrix with no negative off-diagonal entry becomes its graph Laplacian `L = D - M` (self-loops cancel), and anything else is an error.
 - The CLI solves an `n` by `k` `--rhs` file as one batch, writes an `n` by `k` solution with `-o`, and logs iterations and residuals per column.
@@ -39,6 +40,6 @@
 - Fixed SDDM misclassification of exact Laplacians.
 - CPU solves rescale right-hand sides of extreme magnitude; operators whose scale is not representable in FP32 factor storage are still rejected.
 - Parallel factorization handles a shrinking OpenMP team, and parallel vertex selection on the same graph is reproducible at a fixed thread count.
-- Concurrent calls on one solver no longer corrupt each other's results: a call made while another thread uses the same `solver` or `apx_cholesky` throws. CPU solvers can be copied cheaply, sharing the factor, for one solver per thread (`copy.copy` in Python), and Python releases the GIL during factorization, `solve` and `apply`.
+- Concurrent calls on one solver no longer corrupt each other's results: a call made while another thread uses the same `solver` throws. CPU solvers can be copied cheaply, sharing the factor, for one solver per thread (`copy.copy` in Python), and Python releases the GIL during factorization, `solve` and `apply`.
 
 Full history: https://github.com/AlgOptGroup/apxchol/compare/v0.2.2...main

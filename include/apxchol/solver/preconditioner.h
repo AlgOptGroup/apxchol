@@ -120,16 +120,12 @@ std::array<double, Columns> det_sum_columns(const double* v, Eigen::Index n, dou
 
 } // namespace detail
 
-/// Eigen-compatible preconditioner using approximate Cholesky factorization.
+/// Approximate Cholesky preconditioner behind solver's CPU and CUDA routes.
+/// Users apply it through solver::apply.
 ///
 /// Inherits SparseSolverBase for the standard solve() / _solve_impl() pattern.
-/// Use with Eigen's PCG:
-///   Eigen::ConjugateGradient<SpMat, Eigen::Lower, apxchol::apx_cholesky> cg;
-///   cg.compute(L);   // triggers apx_cholesky::compute(L) internally
-///   x = cg.solve(b);
-///
 /// An application made while another thread is applying the same object
-/// throws; give each thread its own copy (docs/usage.md#thread-safety).
+/// throws; copies share the installed factor.
 namespace detail {
 template<class Trsv, setup_route Route>
 class basic_apx_cholesky : public Eigen::SparseSolverBase<basic_apx_cholesky<Trsv, Route>> {
@@ -205,9 +201,9 @@ public:
     basic_apx_cholesky& factorize(const auto& A) {
         eigen_assert(m_analysisIsOk && "analyzePattern() should be called first");
         if (A.rows() == 0)
-            throw std::invalid_argument("apx_cholesky: empty operator");
+            throw std::invalid_argument("preconditioner: empty operator");
         // Only the internal device specialization may initialize CUDA. CPU
-        // factorization and Eigen/CPU callers never touch its context, even in
+        // factorization and CPU callers never touch its context, even in
         // a CUDA-enabled build. Preserve the device setup's existing prewarm.
 #if defined(APXCHOL_USE_CUDA)
         [[maybe_unused]] const auto factorize_install_begin = detail::gpu_setup_diagnostic_clock::now(opts_.verbose);
@@ -272,7 +268,7 @@ public:
         }
 #endif
         else if (F.L.nonZeros() > 0 && F.L.vals_.empty())
-            throw std::invalid_argument("apx_cholesky::set_factor: factorization values were released");
+            throw std::invalid_argument("preconditioner set_factor: factorization values were released");
         auto next = std::make_shared<installed>();
         next->F = std::move(F);
         const auto n = static_cast<Eigen::Index>(next->F.L.rows());
@@ -585,10 +581,9 @@ private:
 #if defined(APXCHOL_USE_CUDA)
 using gpu_preconditioner = basic_apx_cholesky<cuda_sptrsv, setup_route::gpu>;
 #endif
+// solver's CPU route stays entirely on CPU, including in a CUDA-enabled build.
+// GPU PCG owns its internal device preconditioner separately.
+using cpu_preconditioner = basic_apx_cholesky<omp_sptrsv, setup_route::cpu>;
 } // namespace detail
-
-// Eigen and solver's CPU route stay entirely on CPU, including in a
-// CUDA-enabled build. GPU PCG owns its internal device preconditioner separately.
-using apx_cholesky = detail::basic_apx_cholesky<omp_sptrsv, detail::setup_route::cpu>;
 
 } // namespace apxchol

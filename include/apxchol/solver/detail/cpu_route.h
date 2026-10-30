@@ -53,7 +53,7 @@ public:
     /// Inputs must be finite, for both scalar and matrix application.
     Eigen::VectorXd apply(const Eigen::VectorXd& r) const;
 
-    const apx_cholesky& preconditioner() const { return precond_; }
+    const cpu_preconditioner& preconditioner() const { return precond_; }
     /// Independent RHS columns, with bounded panel workspace. Output must not
     /// overlap the RHS or warm start. tol/max_iter apply to each column.
     template<class Input, class Output>
@@ -108,7 +108,7 @@ private:
     };
 
     solve_options opts_;
-    apx_cholesky precond_;
+    cpu_preconditioner precond_;
     // Reused PCG workspace, resized when the panel width changes. Guarded by
     // the preconditioner's call guard, which rejects overlapping calls.
     mutable Eigen::VectorXd r_, z_, p_, Ap_, panel_x_;
