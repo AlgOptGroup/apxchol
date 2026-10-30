@@ -49,6 +49,7 @@
 ### Benchmarks
 - The benchmark harness checks every result against the original system's residual and reports setup, solve and memory separately.
 - Published results now come from CSCS Daint; laptop results are archived.
+- The benchmark builds on macOS with a Metal route for apxchol (`--device metal`), with Metal warm-up excluded from setup and the factor-drop statistics in `--report-fill`.
 
 ### Fixes
 - Reported residuals are now correct on early solve exits.

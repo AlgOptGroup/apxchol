@@ -82,6 +82,33 @@ jobs:
         if: always()
         run: ccache --show-log-stats
 
+  benchmark-macos:
+    name: benchmark (macOS, Apple Clang, Metal, native contracts)
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      OMP_NUM_THREADS: '2'
+      OMP_DYNAMIC: 'FALSE'
+      CMAKE_BUILD_PARALLEL_LEVEL: '3'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: brew install libomp ninja ccache
+      - uses: ./.github/actions/ccache
+        with:
+          key: benchmark-mac-metal
+      # OpenMP_ROOT lets Hypre's own FindOpenMP see Homebrew's keg-only libomp.
+      # AMGCL is skipped (no Boost); CUDA competitors and ParAC do not build here.
+      - name: Configure + build native benchmark
+        run: |
+          cmake -S benchmarks -B build-benchmark -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DAPXCHOL_DEVICE=METAL -DAPXCHOL_NATIVE_ARCH=OFF -DBUILD_GPU_RCHOL=OFF \
+                -DOpenMP_ROOT="$(brew --prefix libomp)" -DCMAKE_DISABLE_FIND_PACKAGE_Boost=ON
+          cmake --build build-benchmark --target benchmark original_stop_tests split_components_tests v1_config_tests discard_streambuf_tests
+      - name: Run native benchmark contracts and a tiny Metal cell
+        run: ctest --test-dir build-benchmark --no-tests=error --output-on-failure --timeout 120
+      - *ccache-stats
+
   linux:
     name: Linux (${{ matrix.name }}, build + ctest)
     runs-on: ubuntu-latest

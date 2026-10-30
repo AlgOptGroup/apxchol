@@ -3,6 +3,7 @@
 #include "apxchol/detail/checkpoint.h"
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"
+#include "apxchol/solver/sptrsv/factor_drop.h"
 #import <Metal/Metal.h>
 
 namespace apxchol::detail::metal_setup {
@@ -22,6 +23,7 @@ struct resident_factor {
     id<MTLBuffer> operator_row_map = nil;
     id<MTLBuffer> operator_hi = nil, operator_lo = nil;
     factorization factor;
+    factor_drop_stats drop;
     bool half = false, operator_exact = true, operator_triangles_identical = false;
     unsigned max_operator_row = 0;
     float preconditioner_scale = 1;

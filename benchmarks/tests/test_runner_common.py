@@ -116,6 +116,46 @@ class AffinitySpecTest(unittest.TestCase):
                 "benchmark_kmp_affinity": "norespect",
             })
 
+    def test_platform_without_affinity_runs_unpinned(self):
+        with mock.patch.object(rc, "affinity_supported", return_value=False), \
+             mock.patch.object(rc.os, "cpu_count", return_value=8), \
+             mock.patch.dict(os.environ, {"GOMP_CPU_AFFINITY": "stale"}, clear=True):
+            self.assertIsNone(rc.affinity_cpus(4))
+            self.assertEqual(rc.taskset_prefix(4), "")
+            env = rc.benchmark_openmp_env(4)
+            self.assertEqual(env["OMP_NUM_THREADS"], "4")
+            for key in ("OMP_PLACES", "OMP_PROC_BIND", "KMP_AFFINITY", "GOMP_CPU_AFFINITY"):
+                self.assertNotIn(key, env)
+            self.assertEqual(rc.benchmark_openmp_provenance(4), {"benchmark_cpuset": "unpinned"})
+            with self.assertRaises(RuntimeError):
+                rc.affinity_cpus(9)
+            os.environ["APXCHOL_BENCH_CPUSET"] = "0-3"
+            with self.assertRaises(RuntimeError):
+                rc.affinity_cpus(4)
+
+
+class PeakRssTest(unittest.TestCase):
+    def test_gnu_and_bsd_time_reports(self):
+        self.assertEqual(rc.parse_peak_rss_mb("x\nAPXRSS 2048\n"), 2.0)
+        bsd = ("        0.10 real         0.05 user         0.01 sys\n"
+               "             3145728  maximum resident set size\n"
+               "                   0  average shared memory size\n")
+        self.assertEqual(rc.parse_peak_rss_mb(bsd), 3.0)
+        self.assertIsNone(rc.parse_peak_rss_mb("no report\n"))
+
+    def test_prefix_matches_the_platform_time(self):
+        with mock.patch.object(rc.sys, "platform", "darwin"):
+            self.assertEqual(rc.peak_rss_prefix(), "/usr/bin/time -l")
+        with mock.patch.object(rc.sys, "platform", "linux"):
+            self.assertEqual(rc.peak_rss_prefix(), "/usr/bin/time -f 'APXRSS %M'")
+
+
+class DeviceInitTest(unittest.TestCase):
+    def test_metal_init_is_reported_in_seconds(self):
+        line = "[bench] metal_init (once, before any timed solver): 250.0 ms\n"
+        self.assertEqual(rc.parse_metal_init(line), 0.25)
+        self.assertIsNone(rc.parse_cuda_init(line))
+
 
 class CsvMetricTest(unittest.TestCase):
     def test_parallel_rchol_effective_thread_count_is_preserved(self):
@@ -141,7 +181,7 @@ class CsvMetricTest(unittest.TestCase):
 
 class CompleteRouteReceiptTest(unittest.TestCase):
     def test_route_and_stop_receipts_parse_together(self):
-        for route in ("cpu", "gpu"):
+        for route in ("cpu", "gpu", "metal"):
             row = rc.parse_csv("v1,m,4,12,1,2,3,7,1e-9,1,2,3,-1,3,2,9e-9,original-v1,2,0.25," + route + "\n")
             self.assertEqual(row["execution_route"], route)
             self.assertEqual(row["stop_contract"], "original-v1")
@@ -276,6 +316,13 @@ class CellReuseTest(unittest.TestCase):
         mismatch = self.cell(metrics={"stop_contract": "original-v1", "total_s": 1.0,
                                       "execution_route": "gpu"})
         self.assertFalse(rc.cell_meets_contract(mismatch))
+
+    def test_metal_cells_need_a_metal_route(self):
+        identity = {"solver": "apxchol_v1", "device": "metal", "matrix_id": "grid"}
+        for route, ok in (("metal", True), ("gpu", False), ("cpu", False)):
+            cell = self.cell(cell=identity, metrics={"stop_contract": "original-v1",
+                                                     "total_s": 1.0, "execution_route": route})
+            self.assertEqual(rc.cell_meets_contract(cell), ok)
 
     def test_missing_route_cannot_hide_behind_missing_total(self):
         cell = self.cell(metrics={"stop_contract": "original-v1", "setup_s": 1})

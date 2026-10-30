@@ -12,6 +12,17 @@ python3 benchmarks/sweep_fair.py --threads N --store results/cells
 
 For CUDA, use a separate build directory and add `-DAPXCHOL_DEVICE=CUDA
 -DBENCH_HYPRE_USE_CUDA=ON -DBUILD_GPU_RCHOL=ON`; sweep with `--device gpu`.
+
+On macOS, build `benchmarks/build-metal` with `-DAPXCHOL_DEVICE=METAL
+-DOpenMP_ROOT=$(brew --prefix libomp)` (Apple Clang; Hypre needs `OpenMP_ROOT` to
+find Homebrew's `libomp`) and sweep with `--device metal`. That axis runs only
+apxchol, since no competitor has a Metal backend. Its cells are stored under
+`device=metal` with `execution_route=metal`, so they never mix with CUDA
+(`gpu`) cells. The same binary also runs the CPU competitors that build there
+(RCHOL with the portable PCG, pRCHOL, Hypre BoomerAMG; AMGCL when Boost headers
+are found). Use it for the CPU axis with `APXCHOL_BENCH_CPU_BIN`. macOS has no
+CPU pinning, so runs are unpinned and record `benchmark_cpuset=unpinned`.
+Peak RSS comes from BSD `time -l`, and no memory cap is applied.
 Optional solvers require their runtimes. Julia dependencies:
 
 ```sh
@@ -91,9 +102,12 @@ comments, Pages or README measurements.
   transfers and returning the solution. Total is setup + solve.
 - Common parsing/assembly and independent grading are excluded. Process-wide CUDA
   initialization is separately reported; solver-specific allocations/module loading
-  remain charged. Hypre initialization is charged once per row.
+  remain charged. Hypre initialization is charged once per row. Metal device
+  creation and kernel compilation are excluded the same way: one small Metal
+  setup and solve runs before the first timed Metal owner, reported once as
+  `metal_init_s`.
 - v1 host `solve_rss_mb` is sampled while the measured owner is still alive; the
-  `/proc` sampling cost is included in Solve. Older v1 rows sampled after owner
+  `/proc` (Linux) or `task_info` (macOS) sampling cost is included in Solve. Older v1 rows sampled after owner
   destruction and are not comparable as solve-held RSS. GNU child peak RSS keeps
   its separate whole-process definition; do not infer a memory win from that
   boundary correction.
@@ -108,7 +122,8 @@ comments, Pages or README measurements.
   no failure silently falls back to another route. The fair/scaling runners force
   their device and require matching `execution_route` CSV/repetition receipts.
   Old mixed-route rows remain historical and cannot resume a current comparison.
-- `--report-fill` reads the actual held factor and its SpTRSV drop statistics.
+- `--report-fill` reads the actual held factor and its SpTRSV drop statistics
+  (on Metal, the statistics of the drop applied before upload).
   It never constructs another factor or uploads a host diagnostic factor. Raw
   factor off-diagonals and stored L11 entries are distinct counts; CSR and CSC each
   hold the latter. The input denominator counts stored off-diagonal entries after

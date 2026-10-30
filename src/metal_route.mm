@@ -562,6 +562,7 @@ void detail::metal_route::impl::setup(const Eigen::SparseMatrix<double>& A, chec
                             A.innerIndexPtr()[p], p, paired);
             }
         }
+        stats.drop = resident->drop;
         exact = resident->operator_exact;
         arguments.spmv_lanes = resident->max_operator_row > 256 ? kTreeLanes : 1;
         arguments.preconditioner_scale = resident->preconditioner_scale;
@@ -572,7 +573,8 @@ void detail::metal_route::impl::setup(const Eigen::SparseMatrix<double>& A, chec
         if (!opts.keep_factor) F.L.release_values();
         scales = detail::gpu_factor_prep::column_scales(backward);
         if (factor_fp16) detail::gpu_factor_prep::normalize_fp16_scales(backward, scales);
-        detail::gpu_factor_prep::apply_factor_drop(backward, scales, opts.factor_opts.drop_tolerance, factor_fp16);
+        stats.drop = detail::gpu_factor_prep::apply_factor_drop(backward, scales,
+            opts.factor_opts.drop_tolerance, factor_fp16);
         if (cp) (*cp)("metal_factor_prep");
 
         Eigen::SparseMatrix<double> compressed;
