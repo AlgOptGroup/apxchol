@@ -13,6 +13,7 @@
 - CUDA setup, factorization and PCG run entirely on the device, with a sync-free dataflow triangular solve and optional fp16 factor storage.
 - New Apple Metal backend: setup, factorization and PCG run on the device, for single and batched solves.
 - `solve_options.backend` (`--backend auto|cpu|gpu`) selects a complete CPU or GPU route and never falls back silently.
+- CUDA solvers can be copied: copies share the device factor and operator, and solve concurrently on their own streams and workspace.
 
 ### API and CLI changes
 - Breaking: runtime environment variables are replaced by explicit solver options.

@@ -219,12 +219,13 @@ struct TestPreconditioner {
     mutable unsigned calls = 0;
     const auto& trsv() const { return *this; }
     template<unsigned Columns>
-    void solve_LLt_dev(const double* input, double* output, const unsigned*, unsigned) const {
+    void solve_LLt_dev(const double* input, double* output, const unsigned*, unsigned,
+                       cudaStream_t stream) const {
         const auto bytes = n * Columns * sizeof(double);
         const bool stopped = breakdown || calls >= breakdown_after;
         ++calls;
-        const auto status = stopped ? cudaMemset(output, 0, bytes)
-            : cudaMemcpy(output, input, bytes, cudaMemcpyDeviceToDevice);
+        const auto status = stopped ? cudaMemsetAsync(output, 0, bytes, stream)
+            : cudaMemcpyAsync(output, input, bytes, cudaMemcpyDeviceToDevice, stream);
         if (status != cudaSuccess) throw std::runtime_error(cudaGetErrorString(status));
     }
 };

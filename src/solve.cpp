@@ -1199,7 +1199,11 @@ struct solver::impl {
     static detail::solver_route copy_route(const detail::solver_route& route) {
         if (const auto* cpu = std::get_if<detail::cpu_route>(&route))
             return detail::solver_route(std::in_place_type<detail::cpu_route>, *cpu);
-        throw std::runtime_error("solver: a GPU solver cannot be copied; construct one per thread");
+#if defined(APXCHOL_USE_CUDA)
+        if (const auto* gpu = std::get_if<detail::gpu_solve_session>(&route))
+            return detail::solver_route(std::in_place_type<detail::gpu_solve_session>, *gpu);
+#endif
+        throw std::runtime_error("solver: a Metal solver cannot be copied; construct one per thread");
     }
 
     static detail::solver_route make_route(const Eigen::SparseMatrix<double>& A,
@@ -1342,20 +1346,21 @@ Eigen::SparseMatrix<double> detail::cpu_route::original_operator() const {
 Eigen::SparseMatrix<double> detail::gpu_solve_session::original_operator() const {
     const auto& pcg = gpcg_;
     const cuda_device_scope device(pcg.device_, cuda_device_scope::checked{});
-    const int n = static_cast<int>(pcg.n_), nnz = pcg.matrix_.nnz;
+    const auto& op = *pcg.op_;
+    const int n = static_cast<int>(pcg.n_), nnz = op.matrix.nnz;
     std::vector<int> outer(static_cast<std::size_t>(n) + 1), inner(nnz), inverse(n);
     std::vector<double> values(nnz);
-    check_cuda(cudaMemcpy(outer.data(), pcg.matrix_.row_ptr, outer.size() * sizeof(int), cudaMemcpyDeviceToHost), "download archive offsets");
-    check_cuda(cudaMemcpy(inner.data(), pcg.matrix_.col_idx, inner.size() * sizeof(int), cudaMemcpyDeviceToHost), "download archive indices");
-    if (pcg.matrix_.fp32) {
+    check_cuda(cudaMemcpy(outer.data(), op.matrix.row_ptr, outer.size() * sizeof(int), cudaMemcpyDeviceToHost), "download archive offsets");
+    check_cuda(cudaMemcpy(inner.data(), op.matrix.col_idx, inner.size() * sizeof(int), cudaMemcpyDeviceToHost), "download archive indices");
+    if (op.matrix.fp32) {
         std::vector<float> narrow(nnz);
-        check_cuda(cudaMemcpy(narrow.data(), pcg.matrix_.values_f32, narrow.size() * sizeof(float), cudaMemcpyDeviceToHost), "download archive values");
+        check_cuda(cudaMemcpy(narrow.data(), op.matrix.values_f32, narrow.size() * sizeof(float), cudaMemcpyDeviceToHost), "download archive values");
         std::copy(narrow.begin(), narrow.end(), values.begin());
     } else {
-        check_cuda(cudaMemcpy(values.data(), pcg.matrix_.values_f64, values.size() * sizeof(double), cudaMemcpyDeviceToHost), "download archive values");
+        check_cuda(cudaMemcpy(values.data(), op.matrix.values_f64, values.size() * sizeof(double), cudaMemcpyDeviceToHost), "download archive values");
     }
     // CUDA stores rows in original order and only columns in factor order.
-    for (int i = 0; i < n; ++i) inverse[pcg.h_perm_[i]] = i;
+    for (int i = 0; i < n; ++i) inverse[op.perm[i]] = i;
     for (auto& column : inner) column = inverse[column];
     return archive_operator_csc(n, outer.data(), inner.data(), values.data());
 }

@@ -256,8 +256,11 @@ and the operator, which are read-only after setup, and allocates only its
 own workspace. Copy a solver once per thread, with `solver copy = original;`
 in C++ or `copy.copy(solver)` in Python, and the copies solve in parallel
 with the same results as serial calls. Copies stay valid after the original
-is destroyed. GPU solvers cannot be copied: construct one per thread, or batch the
-right-hand sides.
+is destroyed. On CUDA, copies share the factor and operator in device memory
+and each copy gets its own device workspace and stream, so copies on one GPU
+solve concurrently without storing the factor again; they share that GPU's
+compute and memory bandwidth. Metal solvers cannot be copied: construct one
+per thread, or batch the right-hand sides.
 
 To solve many right-hand sides from one thread, pass them to `solve(B)` as the
 columns of one matrix; the batched solver shares work between columns.

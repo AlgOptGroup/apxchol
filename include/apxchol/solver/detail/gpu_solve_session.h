@@ -9,6 +9,7 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <memory>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -16,8 +17,8 @@
 
 namespace apxchol::detail {
 // solver validates options and arguments, selects the route and rejects
-// overlapping calls; the session trusts its arguments. It owns per-solve
-// device state and cannot be copied.
+// overlapping calls; the session trusts its arguments. Copies share the
+// factor and operator and own their device workspace and stream.
 class gpu_solve_session {
 public:
     // Panel widths solve_columns and apply_columns accept, widest first.
@@ -34,7 +35,7 @@ public:
                 throw std::invalid_argument("GPU solver: supply a host factor without a device capsule");
             if (!F->sddm && F->L.rows() == 1)
                 throw std::invalid_argument("CUDA cannot adopt a scalar Laplacian factor");
-            F_ = std::move(*F);
+            *F_ = std::move(*F);
             install_factor(cp);
         } else {
             factorize(A, cp);
@@ -42,7 +43,7 @@ public:
         // Lumping changes only the factorization; the GPU operator uses A itself.
         if (cp) { cp->descend("setup"); cp->tick(); }
         const auto operator_setup_begin = gpu_setup_diagnostic_clock::now(opts_.verbose);
-        gpcg_.setup(A, F_.perm, opts_.verbose);
+        gpcg_.setup(A, F_->perm, opts_.verbose);
         if (cp) { (*cp)("gpu_pcg_setup"); cp->ascend(); }
         if (opts_.verbose) {
             const double operator_setup_wall_s = std::chrono::duration<double>(
@@ -66,7 +67,7 @@ public:
             std::array<int, Columns> iterations{};
             std::array<double, Columns> residuals{};
             gpcg_.solve_panel<Columns>(*this, B, X, tol, max_iter, iterations, residuals,
-                                       !F_.sddm, X0);
+                                       !F_->sddm, X0);
             for (unsigned q = 0; q < Columns; ++q) {
                 results[q].iterations = iterations[q];
                 results[q].residual = residuals[q];
@@ -78,7 +79,7 @@ public:
         else run.template operator()<1>();
         if (timings) { (*timings)("gpu_pcg_loop"); timings->ascend(); }
         // Solve-held device VRAM (the operator, vectors and factor are still
-        // resident here; everything is freed when the session destructs).
+        // resident here; shared arrays are freed with the last copy).
         const double vram_mb = gpcg_.device_memory_used_mb();
         for (auto& result : results) {
             result.backend = solve_backend::gpu;
@@ -92,8 +93,8 @@ public:
         const Eigen::Index n = R.rows();
         const Eigen::VectorXd b = R.col(0);
         Eigen::VectorXd z(n);
-        const node_index* P = F_.perm.data();
-        const bool center = !F_.sddm;
+        const node_index* P = F_->perm.data();
+        const bool center = !F_->sddm;
         const int workers = cpu_solve_threads(n);
         const std::size_t need = part_capacity();
         if (part_.size() < need) part_.resize(need);
@@ -103,9 +104,9 @@ public:
         #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
         for (Eigen::Index v = 0; v < n; ++v)
             z[P[v]] = b[v] - (center ? mean : 0.0);
-        trsv_.solve_LLt(z.data(), scratch_.data());
+        trsv_.solve_LLt(z.data(), scratch_.data(), gpcg_.stream());
         double* out = scratch_.data();
-        if (!F_.sddm) out[n - 1] = 0.0;
+        if (!F_->sddm) out[n - 1] = 0.0;
         const double shift = center
             ? det_sum_columns<1>(out, n, part_.data())[0] / static_cast<double>(n) : 0.0;
         #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
@@ -114,12 +115,19 @@ public:
         Z.col(0) = z;
     }
 
-    const factorization& factor() const { return F_; }
+    /// Shares the factor, the device triangular-solve storage and the device
+    /// operator; allocates this copy's device workspace and stream.
+    gpu_solve_session(const gpu_solve_session& other)
+        : opts_(other.opts_), keep_factor_(other.keep_factor_), F_(other.F_),
+          trsv_(other.trsv_), gpcg_(other.gpcg_) {}
+
+    const factorization& factor() const { return *F_; }
     factor_storage_type factor_storage() const {
         return trsv_.fp16() ? factor_storage_type::fp16 : factor_storage_type::fp32;
     }
     /// The device triangular solves; cuda_pcg calls solve_LLt_dev through it.
     const cuda_sptrsv& trsv() const { return trsv_; }
+    const cuda_pcg& pcg() const { return gpcg_; }
     /// The original operator in FP64 CSC, downloaded from the device.
     Eigen::SparseMatrix<double> original_operator() const;
 
@@ -128,10 +136,10 @@ private:
         [[maybe_unused]] const auto factorize_install_begin =
             gpu_setup_diagnostic_clock::now(opts_.verbose);
         cuda_context::prewarm();
-        F_ = factorize_for_solver(A, opts_, cp, setup_route::gpu, keep_factor_);
+        *F_ = factorize_for_solver(A, opts_, cp, setup_route::gpu, keep_factor_);
         // Reject inadmissible factors before installation can initialize
         // CUDA or upload host arrays.
-        const auto& device = factorization_access::device_factor(F_);
+        const auto& device = factorization_access::device_factor(*F_);
         if (!device || device.use_count() != 1 || device->empty())
             throw std::invalid_argument("GPU route requires a unique nonempty device-owned factor");
         install_factor(cp);
@@ -151,11 +159,11 @@ private:
                 "n=%lld rounds=%zu raw_factor_nnz=%zu stored_nnz=%llu adopted=%d "
                 "fp16=%d host_factor_array_bytes=%zu adoption_download_bytes=%zu "
                 "factor_drop_rel=%.17g dropped_threshold=%llu dropped_flush=%llu\n",
-                factorize_install_wall_s, static_cast<long long>(F_.perm.size()),
-                F_.rounds.size(), static_cast<std::size_t>(F_.L.nonZeros()),
+                factorize_install_wall_s, static_cast<long long>(F_->perm.size()),
+                F_->rounds.size(), static_cast<std::size_t>(F_->L.nonZeros()),
                 static_cast<unsigned long long>(trsv_.stored_nnz()),
                 trsv_.adopted_device_factor() ? 1 : 0, trsv_.fp16() ? 1 : 0,
-                F_.L.inner_.size() * sizeof(node_index) + F_.L.vals_.size() * sizeof(factor_value_t),
+                F_->L.inner_.size() * sizeof(node_index) + F_->L.vals_.size() * sizeof(factor_value_t),
                 trsv_.adoption_host_download_bytes(), drop.rel,
                 static_cast<unsigned long long>(drop.dropped_threshold),
                 static_cast<unsigned long long>(drop.dropped_flush));
@@ -177,23 +185,24 @@ private:
         if (opts_.verbose)
             std::fprintf(stderr, "[sptrsv-setup gpu] %-22s %8.2f ms  (context creation %.2f ms)\n",
                          "cuda_init", cuda_init_s * 1e3, cuda_context::context_seconds() * 1e3);
-        auto& device = factorization_access::device_factor(F_);
+        auto& device = factorization_access::device_factor(*F_);
         if (device) {
             trsv_.setup_adopting_device_factor(std::move(*device), opts_);
             device.reset();
         } else {
-            const auto n = static_cast<node_index>(F_.L.rows());
-            trsv_.setup(F_.L, F_.sddm ? n : n - 1, opts_);
+            const auto n = static_cast<node_index>(F_->L.rows());
+            trsv_.setup(F_->L, F_->sddm ? n : n - 1, opts_);
         }
         if (cp) { (*cp)("sptrsv_setup"); cp->ascend(); }
         // The device holds its own copy; keep_factor=true keeps the host
         // row/value arrays for callers that export or adopt L.
-        if (!keep_factor_) F_.L.release_values();
+        if (!keep_factor_) F_->L.release_values();
     }
 
     factor_options opts_;
     bool keep_factor_ = false;
-    factorization F_;
+    // Shared by copies; written only during construction.
+    std::shared_ptr<factorization> F_ = std::make_shared<factorization>();
     cuda_sptrsv trsv_;
     cuda_pcg gpcg_;
     // Host workspace of apply_columns.
