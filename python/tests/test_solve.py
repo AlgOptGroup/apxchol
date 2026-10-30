@@ -251,13 +251,12 @@ def test_adjacency_input_raises_with_a_diagnosis():
     msg = str(exc.value)
     # (a) which condition failed, with counts
     assert "Condition FAILED: positive diagonal" in msg
-    assert f"Not one of the {A.shape[0]} non-empty rows" in msg
-    assert f"{A.nnz} off-diagonal entries are positive" in msg
+    assert f"{A.shape[0]} of {A.shape[0]} non-empty rows" in msg
     # (b) the class apxchol is defined on
     assert "apxchol solves symmetric SDDM / Laplacian operators" in msg
     # (c) the one-line fix, naming the helper
     assert "ADJACENCY matrix" in msg
-    assert "apxchol.laplacian(A)" in msg
+    assert "apxchol.as_operator(M)" in msg
 
 
 def test_every_public_entry_rejects_an_adjacency_matrix():
@@ -328,21 +327,33 @@ def test_mixed_sign_operator_with_positive_diagonal_still_solves():
     assert np.linalg.norm(A @ res.x - b) / np.linalg.norm(b) < 1e-6
 
 
-# ── apxchol.laplacian: the explicit adjacency -> operator conversion ─────────
+# ── apxchol.as_operator: the rule shared with the CLI's --convert-input ─────
 
 
-def test_laplacian_matches_the_textbook_assembly():
+def grid2d_sddm_matrix(m):
+    return (grid2d_laplacian(m) + 0.1 * sp.eye(m * m)).tocsc()
+
+
+def degree_minus(A):
+    """D - A with D the row sums of A, self-loops included: the textbook form."""
+    return sp.diags(np.asarray(A.sum(axis=1)).ravel()) - A
+
+
+@pytest.mark.parametrize("make", [grid2d_laplacian, grid2d_sddm_matrix])
+def test_as_operator_returns_a_valid_operator_unchanged(make):
+    L = make(8)
+    assert apxchol.as_operator(L) is L
+
+
+def test_as_operator_converts_an_adjacency_matrix():
     A = grid2d_adjacency(12)
-    L = apxchol.laplacian(A)
-    expected = sp.diags(np.asarray(A.sum(axis=1)).ravel()) - A
-    assert sp.issparse(L) and L.format == "csc"
-    assert L.dtype == np.float64
-    assert abs(L - expected).max() == 0.0
+    L = apxchol.as_operator(A)
+    assert sp.issparse(L) and L.format == "csc" and L.dtype == np.float64
+    assert abs(L - degree_minus(A)).max() == 0.0
 
 
-def test_laplacian_round_trips_an_adjacency_matrix_into_a_solve():
-    A = grid2d_adjacency(30)
-    L = apxchol.laplacian(A)
+def test_as_operator_round_trips_an_adjacency_matrix_into_a_solve():
+    L = apxchol.as_operator(grid2d_adjacency(30))
     rng = np.random.default_rng(23)
     b = rng.standard_normal(L.shape[0]); b -= b.mean()
     res = apxchol.solve(L, b, rtol=1e-8, maxiter=500)
@@ -350,25 +361,43 @@ def test_laplacian_round_trips_an_adjacency_matrix_into_a_solve():
     assert np.linalg.norm(L @ res.x - b) / np.linalg.norm(b) <= 1e-6
 
 
-def test_laplacian_drops_self_loops():
+def test_as_operator_cancels_self_loops():
     A = grid2d_adjacency(6).tolil()
-    A[0, 0] = 5.0                          # self-loop: contributes nothing to L
+    A[0, 0] = 5.0
     A[4, 4] = 2.0
-    L = apxchol.laplacian(A.tocsc())
+    A = A.tocsc()
+    L = apxchol.as_operator(A)
+    assert abs(L - degree_minus(A)).max() == 0.0
     assert L[0, 0] == pytest.approx(2.0)   # degree of a grid corner, not 2 + 5
     assert abs(L.sum(axis=1)).max() == pytest.approx(0.0)
 
 
-def test_laplacian_keeps_isolated_vertices_as_zero_rows():
+def test_as_operator_converts_a_boolean_pattern():
+    A = grid2d_adjacency(6).tolil()
+    A[0, 0] = 1.0                          # pattern files may carry self-loops
+    A = A.tocsc()
+    assert abs(apxchol.as_operator(A.astype(bool)) - degree_minus(A)).max() == 0.0
+
+
+def test_as_operator_raises_for_mixed_signs():
+    M = sp.csc_matrix(np.array([[0.0, 1.0, 0.0], [1.0, 0.0, -1.0], [0.0, -1.0, 0.0]]))
+    with pytest.raises(ValueError, match="not a graph adjacency matrix either"):
+        apxchol.as_operator(M)
+    negative = sp.csc_matrix(np.array([[0.0, -2.0], [-2.0, 0.0]]))
+    with pytest.raises(ValueError, match="Condition FAILED: positive diagonal"):
+        apxchol.as_operator(negative)
+
+
+def test_as_operator_keeps_isolated_vertices_as_zero_rows():
     A = sp.csc_matrix((5, 5))              # no edges at all
     A = A.tolil(); A[1, 2] = 1.0; A[2, 1] = 1.0; A = A.tocsc()
-    L = apxchol.laplacian(A)
+    L = apxchol.as_operator(A)
     assert L.shape == (5, 5)
     assert np.array_equal(L.diagonal(), np.array([0.0, 1.0, 1.0, 0.0, 0.0]))
-    assert L[0].nnz <= 1                   # an explicit zero at most
+    assert L[0].nnz == 0
 
 
-def test_laplacian_handles_explicit_zeros_and_duplicates():
+def test_as_operator_handles_explicit_zeros_and_duplicates():
     # explicit stored zero on an edge slot, plus an unmerged duplicate pair
     data = np.array([0.0, 1.5, 1.5, 0.0])
     rows = np.array([1, 2, 1, 2])
@@ -377,7 +406,7 @@ def test_laplacian_handles_explicit_zeros_and_duplicates():
     A = A + sp.coo_matrix((np.array([0.5, 0.5]), (np.array([1, 2]),
                                                   np.array([2, 1]))),
                           shape=(3, 3)).tocsc()
-    L = apxchol.laplacian(A)
+    L = apxchol.as_operator(A)
     # vertex 0 is isolated (its only entry was an explicit zero)
     assert L.diagonal()[0] == 0.0
     assert L.diagonal()[1] == pytest.approx(2.0)
@@ -385,43 +414,36 @@ def test_laplacian_handles_explicit_zeros_and_duplicates():
     assert abs(L.sum(axis=1)).max() == pytest.approx(0.0)
 
 
-def test_laplacian_accepts_a_weighted_symmetric_adjacency_in_any_format():
+def test_as_operator_accepts_a_weighted_symmetric_adjacency_in_any_format():
     rng = np.random.default_rng(5)
     M = sp.random(60, 60, density=0.08, random_state=rng, format="csr")
     A = (M + M.T).tocsr()
     A.setdiag(0.0); A.eliminate_zeros()
-    ref = apxchol.laplacian(A)
+    ref = apxchol.as_operator(A)
     for fmt in ("csc", "coo", "lil", "dok", "csr"):
-        L = apxchol.laplacian(A.asformat(fmt))
+        L = apxchol.as_operator(A.asformat(fmt))
         assert abs(L - ref).max() == 0.0
     assert abs(ref.sum(axis=1)).max() == pytest.approx(0.0)
 
 
-def test_laplacian_does_not_mutate_its_input():
+def test_as_operator_does_not_mutate_its_input():
     A = sp.csc_matrix(grid2d_adjacency(8))
     nnz, data, indices, indptr = (A.nnz, A.data.copy(), A.indices.copy(),
                                   A.indptr.copy())
-    apxchol.laplacian(A)
+    apxchol.as_operator(A)
     assert A.nnz == nnz
     assert np.array_equal(A.data, data)
     assert np.array_equal(A.indices, indices)
     assert np.array_equal(A.indptr, indptr)
 
 
-def test_laplacian_takes_absolute_edge_weights():
-    """|A_ij|, matching --input-kind adjacency and load_mtx_as_adjacency."""
-    A = sp.csc_matrix(np.array([[0.0, -2.0], [-2.0, 0.0]]))
-    L = apxchol.laplacian(A)
-    assert np.array_equal(L.toarray(), np.array([[2.0, -2.0], [-2.0, 2.0]]))
-
-
-def test_laplacian_rejects_bad_input():
+def test_as_operator_rejects_bad_input():
     with pytest.raises(ValueError):
-        apxchol.laplacian(np.ones((3, 3)))             # dense
+        apxchol.as_operator(np.ones((3, 3)))             # dense
     with pytest.raises(ValueError):
-        apxchol.laplacian(sp.csc_matrix(np.ones((3, 4))))   # non-square
+        apxchol.as_operator(sp.csc_matrix(np.ones((3, 4))))   # non-square
     with pytest.raises(ValueError):
-        apxchol.laplacian(sp.csc_matrix(np.eye(3) * 1j))    # complex
+        apxchol.as_operator(sp.csc_matrix(np.eye(3) * 1j))    # complex
 
 
 def csc_with_duplicates(A):

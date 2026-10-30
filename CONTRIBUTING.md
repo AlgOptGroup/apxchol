@@ -72,6 +72,12 @@ archives remain unchanged. Older HTML without the marker remains reachable from
 the current site's selector. Publishing a snapshot triggers a main documentation
 build to refresh the site.
 
+## Changelog
+
+A pull request with a user-visible change adds a line to the `Unreleased`
+section of `CHANGELOG.md`. Mark breaking changes. Benchmark-internal and
+CI-only changes usually need no entry.
+
 ## Code conventions
 
 Use C++23, `snake_case`, namespace `apxchol`, and trailing underscores for

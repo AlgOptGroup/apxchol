@@ -14,6 +14,7 @@
 #include "apxchol.h"
 #include "apxchol/solver/archive.h"
 #include "apxchol/detail/csc_import.h"
+#include "apxchol/operator_class.h"
 #include "apxchol/version.h"
 
 namespace py = pybind11;
@@ -342,6 +343,22 @@ PYBIND11_MODULE(_apxchol, m) {
     m.attr("__version__") = APXCHOL_VERSION;
     m.attr("DEFAULT_TOL") = apxchol::default_tol;
     m.attr("DEFAULT_MAXITER") = apxchol::default_max_iter;
+    // Returns None when the input is already a valid operator, else the CSC
+    // arrays of its graph Laplacian; throws for anything else.
+    m.def("as_operator",
+          [](py::array indptr, py::array indices, py::array data) -> py::object {
+              const auto M = csc_to_eigen(std::move(indptr), std::move(indices), std::move(data));
+              if (!apxchol::detail::is_graph_adjacency(M))
+                  return py::none();
+              Eigen::SparseMatrix<double> L = apxchol::detail::adjacency_laplacian(M);
+              L.makeCompressed();
+              using Index = Eigen::SparseMatrix<double>::StorageIndex;
+              return py::make_tuple(
+                  py::array_t<Index>(L.outerSize() + 1, L.outerIndexPtr()),
+                  py::array_t<Index>(L.nonZeros(), L.innerIndexPtr()),
+                  py::array_t<double>(L.nonZeros(), L.valuePtr()));
+          },
+          py::arg("indptr"), py::arg("indices"), py::arg("data"));
     py::class_<Solver>(m, "Solver")
         .def(py::init<py::array, py::array, py::array, const py::dict&>(),
              py::arg("indptr"), py::arg("indices"), py::arg("data"),

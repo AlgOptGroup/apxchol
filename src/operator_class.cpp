@@ -247,6 +247,17 @@ operator_scan scan_operator(const Eigen::SparseMatrix<double>& A) {
     return s;
 }
 
+// A symmetric matrix with no negative off-diagonal is read as a graph by the
+// conversion helpers; name them when the operator reading fails.
+static std::string adjacency_hint(const operator_scan& s) {
+    if (s.offdiag_pos != s.offdiag_nnz) return {};
+    return " The matrix has no negative off-diagonal entry, so it may be a graph "
+           "ADJACENCY matrix rather than an assembled operator. To use its "
+           "Laplacian L = D - A, pass --convert-input on the CLI, or call "
+           "apxchol.as_operator(M) in Python or apxchol_as_operator(M) in "
+           "MATLAB/Octave.";
+}
+
 operator_scan require_operator(const Eigen::SparseMatrix<double>& A, double lump_max_mass) {
     detail::validate_lump_max_mass(lump_max_mass);
     const std::string kContract =
@@ -291,18 +302,7 @@ operator_scan require_operator(const Eigen::SparseMatrix<double>& A, double lump
                    ", a_ii = " + num(s.first_bad_diag_value) + ")";
         msg += "; a positive semidefinite operator cannot have one, since "
                "e_i^T A e_i = a_ii.";
-        // The adjacency signature is exactly this condition failing EVERYWHERE
-        // while positive off-diagonals exist. Name the explicit conversion.
-        if (s.diag_pos == 0 && s.offdiag_pos > 0)
-            msg += " Not one of the " + std::to_string(s.nonempty) +
-                   " non-empty rows carries a positive diagonal, while " +
-                   std::to_string(s.offdiag_pos) +
-                   " off-diagonal entries are positive: this is a graph "
-                   "ADJACENCY matrix, not an assembled operator. Assemble the "
-                   "Laplacian first — apxchol.laplacian(A) in Python, "
-                   "apxchol_laplacian(A) in Octave/MATLAB, `--input-kind "
-                   "adjacency` on the CLI.";
-        throw std::invalid_argument(msg);
+        throw std::invalid_argument(msg + adjacency_hint(s));
     }
 
     // Off-diagonal sign: NOT a failure on its own — `operator_view` repairs it
@@ -316,7 +316,7 @@ operator_scan require_operator(const Eigen::SparseMatrix<double>& A, double lump
                 count_of(s.offdiag_pos, s.offdiag_nnz, "off-diagonal entries") +
                 " are positive, carrying " + num(100.0 * rho) +
                 "% of the off-diagonal mass; lump_max_mass permits at most " +
-                num(100.0 * lump_max_mass) + "%.");
+                num(100.0 * lump_max_mass) + "%." + adjacency_hint(s));
     }
 
     return s;
@@ -400,5 +400,45 @@ std::string describe_operator(const operator_scan& s, Eigen::Index lumped) {
                "), so the operator need not be SDDM — reported, not enforced";
     return out;
 }
+
+namespace detail {
+
+bool is_graph_adjacency(const Eigen::SparseMatrix<double>& M) {
+    try {
+        require_operator(M);
+        return false;
+    } catch (const std::invalid_argument& e) {
+        const operator_scan s = scan_operator(M);
+        const Eigen::Index negative = s.offdiag_nnz - s.offdiag_pos;
+        if (negative == 0 && s.square()) return true;
+        throw std::invalid_argument(
+            std::string(e.what()) + " It is not a graph adjacency matrix either: " +
+            count_of(negative, s.offdiag_nnz, "off-diagonal entries") + " are negative.");
+    }
+}
+
+Eigen::SparseMatrix<double> adjacency_laplacian(const Eigen::SparseMatrix<double>& M) {
+    if (M.rows() != M.cols())
+        throw std::invalid_argument("adjacency matrix must be square");
+    const Eigen::Index n = M.rows();
+    std::vector<Eigen::Triplet<double>> entries;
+    entries.reserve(static_cast<std::size_t>(M.nonZeros() + n));
+    Eigen::VectorXd degree = Eigen::VectorXd::Zero(n);
+    // L = D - M: a self-loop m_ii adds to D_ii and is subtracted again.
+    for (Eigen::Index k = 0; k < M.outerSize(); ++k)
+        for (Eigen::SparseMatrix<double>::InnerIterator it(M, k); it; ++it) {
+            const double w = it.value();
+            if (it.row() == it.col() || w == 0.0) continue;
+            entries.emplace_back(it.row(), it.col(), -w);
+            degree[it.row()] += w;
+        }
+    for (Eigen::Index i = 0; i < n; ++i)
+        if (degree[i] != 0.0) entries.emplace_back(i, i, degree[i]);
+    Eigen::SparseMatrix<double> L(n, n);
+    L.setFromTriplets(entries.begin(), entries.end());
+    return L;
+}
+
+} // namespace detail
 
 } // namespace apxchol

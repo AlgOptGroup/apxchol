@@ -49,8 +49,9 @@ for comparison with MATLAB/Octave.
 ## Matrix inputs
 
 Pass the matrix `A` in `A @ x = b`. For a graph's adjacency matrix, first use
-`A = apxchol.laplacian(Adj)` to form its Laplacian. See [supported matrices
-and RHS requirements](https://algoptgroup.github.io/apxchol/docs/usage.html).
+`A = apxchol.as_operator(Adj)`: it returns a valid operator unchanged and
+otherwise forms the graph Laplacian. See [supported matrices, input
+conversion and RHS requirements](https://algoptgroup.github.io/apxchol/docs/usage.html).
 
 Any SciPy sparse format is converted to sorted, duplicate-free CSC without
 changing the input. Supply the full symmetric matrix, including both

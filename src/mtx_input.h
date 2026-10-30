@@ -9,31 +9,17 @@
 ///     off-diagonals) — the operator is L = D - A, which must be assembled
 ///     first.
 ///
-/// The solver validates assembled operators. The CLI detects adjacency input
-/// and assembles L = D - A before passing it to the operator contract.
-///
-/// This module is the CLI's HUMAN-FACING interpretation layer, and nothing
-/// else compiles it. It may guess, because it prints the guess and takes
-/// `--input-kind` to override it. The in-memory bindings (python/, octave/)
-/// deliberately do NOT share it: a library caller does not reliably see what
-/// we print, so the library asserts the operator class instead of guessing at
-/// it -- see include/apxchol/operator_class.h, which every surface (this one
-/// included, one layer down) goes through.
-///
-/// Everything here depends on Eigen only, so the unit tests can link it.
+/// The CLI reads the file as the operator. `--convert-input` applies the rule
+/// it shares with the bindings' `as_operator` (`detail::is_graph_adjacency` in
+/// include/apxchol/operator_class.h): a valid operator is used unchanged, a
+/// matrix with no negative off-diagonal becomes its graph Laplacian, and
+/// anything else is an error.
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <string>
 
 namespace apxchol {
-
-/// How the CLI should interpret the matrix it just read.
-enum class input_kind {
-    automatic,  ///< decide from the matrix itself (the default)
-    laplacian,  ///< already an assembled Laplacian / SDDM operator
-    adjacency,  ///< a graph adjacency / pattern matrix; assemble L = D - A
-};
 
 /// Structural facts about an input matrix, gathered in a single pass.
 /// Column sums stand in for row sums: the operator contract requires a
@@ -58,30 +44,8 @@ struct input_scan {
     Eigen::Index excess_rows = 0;
 };
 
-/// One pass over `M`, gathering everything `resolve_input_kind` needs.
+/// One pass over `M`, gathering what the CLI reports about it.
 input_scan scan_input(const Eigen::SparseMatrix<double>& M);
-
-/// Resolve `requested` (possibly `automatic`) against the scan.
-///
-/// `pattern_field` says whether the MatrixMarket header declared the
-/// `pattern` field; it only sharpens the explanation, the decision itself
-/// stands without it.
-///
-/// On success returns `laplacian` or `adjacency` and writes a human-readable
-/// justification into `reason`. Throws `std::runtime_error` — naming what was
-/// detected — when the matrix is structurally unusable, or when `automatic`
-/// genuinely cannot tell the two kinds apart.
-input_kind resolve_input_kind(input_kind requested, const input_scan& s,
-                              bool pattern_field, std::string& reason);
-
-/// Reinterpret `M` as a weighted adjacency matrix and replace it with the
-/// graph Laplacian L = D - A, where A_ij = |M_ij| for i != j and D is the
-/// weighted-degree diagonal. Diagonal entries of `M` (graph self-loops, which
-/// contribute nothing to a Laplacian) are dropped.
-///
-/// Taking |value| matches the benchmark suite's `load_mtx_as_adjacency`, so
-/// `--input-kind adjacency` reproduces the benchmark's reading of any file.
-void adjacency_to_laplacian(Eigen::SparseMatrix<double>& M);
 
 /// Project `b` onto the range of a graph Laplacian by subtracting its mean
 /// independently on every connected component of `L`. Returns the component
@@ -94,11 +58,11 @@ Eigen::Index project_laplacian_rhs_components(
     const Eigen::SparseMatrix<double>& L, Eigen::VectorXd& b);
 
 /// The single line the CLI logs to say how it read the file.
-std::string describe_input(input_kind kind, const input_scan& s,
-                           const std::string& reason);
+/// `graph` says whether the file was read as an adjacency matrix.
+std::string describe_input(bool graph, const input_scan& s, const std::string& reason);
 
 /// Extra diagnosis appended to the CLI's failure message. Empty when the scan
 /// found nothing that would explain a breakdown.
-std::string diagnose_failure(input_kind kind, const input_scan& s);
+std::string diagnose_failure(bool graph, const input_scan& s);
 
 } // namespace apxchol

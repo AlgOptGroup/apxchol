@@ -127,20 +127,28 @@ if (APXCHOL_BUILD_CLI)
         set_tests_properties(${name} PROPERTIES TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=4")
     endfunction()
 
-    apxchol_cli_test(cli_pattern_adjacency_converges path5_pattern 0 "ADJACENCY graph")
-    apxchol_cli_test(cli_disconnected_adjacency_converges disconnected_paths_pattern 0
-        "projected random RHS independently over 2 connected components")
+    # The input is the operator; --convert-input applies the as_operator rule.
+    apxchol_cli_test(cli_adjacency_default_is_rejected_with_hint path5_pattern 2
+        "Condition FAILED: positive diagonal.*ADJACENCY matrix.*--convert-input")
+    apxchol_cli_test(cli_self_loop_adjacency_default_is_rejected_with_hint
+        path5_adjacency_loops 2 "non-positive off-diagonals.*--convert-input")
     apxchol_cli_test(cli_laplacian_converges path5_laplacian 0 "LAPLACIAN/SDDM operator")
     apxchol_cli_test(cli_sddm_converges path5_sddm 0 "LAPLACIAN/SDDM operator")
     apxchol_cli_test(cli_nearly_sddm_converges path5_nearly_sddm 0 "LAPLACIAN/SDDM operator")
-    apxchol_cli_test(cli_explicit_adjacency_on_laplacian path5_laplacian 0 "ADJACENCY graph"
-        --input-kind adjacency)
-    apxchol_cli_test(cli_ambiguous_input_is_rejected ambiguous 2 "cannot tell whether this matrix is")
-    apxchol_cli_test(cli_forced_wrong_kind_is_refused path5_pattern 2 "Condition FAILED: positive diagonal"
-        --input-kind laplacian)
-    # Enum transformations must not widen the CLI to accept raw numeric values.
-    apxchol_cli_test(cli_numeric_input_kind_is_rejected path5_pattern 105 "not in"
-        --input-kind 0)
+    apxchol_cli_test(cli_convert_keeps_laplacian path5_laplacian 0
+        "LAPLACIAN/SDDM operator.*already a valid operator" --convert-input)
+    apxchol_cli_test(cli_convert_keeps_sddm path5_sddm 0
+        "LAPLACIAN/SDDM operator.*already a valid operator" --convert-input)
+    apxchol_cli_test(cli_convert_adjacency path5_adjacency 0 "ADJACENCY graph" --convert-input)
+    apxchol_cli_test(cli_convert_adjacency_with_self_loops path5_adjacency_loops 0
+        "ADJACENCY graph" --convert-input)
+    apxchol_cli_test(cli_convert_pattern path5_pattern 0 "ADJACENCY graph" --convert-input)
+    apxchol_cli_test(cli_disconnected_adjacency_converges disconnected_paths_pattern 0
+        "projected random RHS independently over 2 connected components" --convert-input)
+    apxchol_cli_test(cli_convert_mixed_signs_is_rejected ambiguous 2
+        "not a graph adjacency matrix either" --convert-input)
+    apxchol_cli_test(cli_input_kind_is_removed path5_laplacian 109 "--input-kind"
+        --input-kind operator)
 
     # Complete solve-route CLI contract: the CPU choice is usable in every build,
     # and CLI enum transformations must not admit numeric or unknown selectors.
@@ -166,6 +174,26 @@ if (APXCHOL_BUILD_CLI)
         "cannot write solution to" --backend cpu -o "${CMAKE_CURRENT_BINARY_DIR}")
     apxchol_cli_test(cli_output_success path5_sddm 0
         "solution written to" --backend cpu -o "${CMAKE_CURRENT_BINARY_DIR}/cli-solution.mtx")
+
+    # An n x k RHS file is solved as one batch and written back as n x k; an
+    # n x 1 file keeps the scalar path and its log.
+    function(apxchol_cli_rhs_test name rhs status output solution)
+        set(path "${CMAKE_CURRENT_BINARY_DIR}/${name}.mtx")
+        add_test(NAME ${name} COMMAND "${CMAKE_COMMAND}"
+            "-DCLI=$<TARGET_FILE:apxchol>"
+            "-DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/path5_sddm.mtx"
+            "-DRHS=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${rhs}.mtx"
+            "-DEXPECT_STATUS=${status}" "-DEXPECT_OUTPUT=${output}"
+            "-DSOLUTION=${path}" "-DEXPECT_SOLUTION=${solution}"
+            "-DCLI_ARGS=-o;${path};${ARGN}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/check_cli.cmake")
+        set_tests_properties(${name} PROPERTIES TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=4")
+    endfunction()
+    apxchol_cli_rhs_test(cli_batch_rhs_round_trip path5_rhs3 0
+        "columns: +3.*column 0: iterations [0-9]+, residual.*column 2: iterations"
+        "array real general\n5 3\n")
+    apxchol_cli_rhs_test(cli_single_column_rhs_file path5_rhs1 0
+        "iterations: [0-9]+" "array real general\n5 1\n")
     if (APXCHOL_DEVICE STREQUAL "CPU")
         set(cli_backend_label omp)
     else()

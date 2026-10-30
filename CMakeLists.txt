@@ -76,12 +76,12 @@ endif()
 add_compile_options(-Wall -Wextra "$<$<COMPILE_LANGUAGE:C,CXX,OBJCXX>:-Wpedantic>")
 
 # ── CLI input interpretation ─────────────────────────
-# Laplacian-vs-adjacency detection for the CLI's .mtx input. Its own target so
-# the unit tests can link it without pulling in CLI11/spdlog; Eigen-only, no
-# file I/O (the CLI reads the file and hands over the matrix).
+# Input diagnostics for the CLI's .mtx input. Its own target so the unit tests
+# can link it without pulling in CLI11/spdlog; no file I/O (the CLI reads the
+# file and hands over the matrix).
 if (APXCHOL_BUILD_CLI OR APXCHOL_BUILD_TESTS)
     add_library(apxchol_mtx_input STATIC src/mtx_input.cpp)
-    target_link_libraries(apxchol_mtx_input PUBLIC Eigen3::Eigen)
+    target_link_libraries(apxchol_mtx_input PUBLIC apxchol_core)
     target_include_directories(apxchol_mtx_input PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
     target_compile_features(apxchol_mtx_input PUBLIC cxx_std_23)

@@ -15,6 +15,7 @@
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -29,6 +30,7 @@
 #include "apxchol.h"
 #include "apxchol/solver/archive.h"
 #include "apxchol/detail/csc_import.h"
+#include "apxchol/operator_class.h"
 
 namespace {
 
@@ -195,6 +197,15 @@ void solve_metadata(int nlhs, mxArray* plhs[], std::span<const apxchol::solve_re
     }
 }
 
+mxArray* sparse_to_mx(Eigen::SparseMatrix<double> A) {
+    A.makeCompressed();
+    mxArray* m = mxCreateSparse(A.rows(), A.cols(), std::max<Eigen::Index>(A.nonZeros(), 1), mxREAL);
+    std::copy_n(A.outerIndexPtr(), A.cols() + 1, mxGetJc(m));
+    std::copy_n(A.innerIndexPtr(), A.nonZeros(), mxGetIr(m));
+    std::copy_n(A.valuePtr(), A.nonZeros(), mxGetPr(m));
+    return m;
+}
+
 mxArray* vec_to_mx(const Eigen::VectorXd& v) {
     mxArray* m = mxCreateDoubleMatrix(v.size(), 1, mxREAL);
     Eigen::Map<Eigen::VectorXd>(mxGetPr(m), v.size()) = v;
@@ -220,6 +231,13 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             auto solver = std::make_unique<apxchol::solver>(
                 mx_to_eigen(prhs[1]), setup_options(nrhs == 3 ? prhs[2] : nullptr));
             plhs[0] = store_solver(std::move(solver));
+        } else if (op == "as_operator") {
+            if (nrhs != 2)
+                fail("apxchol:usage", "usage: A = apxchol_mex('as_operator', M)");
+            const auto M = mx_to_eigen(prhs[1]);
+            plhs[0] = apxchol::detail::is_graph_adjacency(M)
+                ? sparse_to_mx(apxchol::detail::adjacency_laplacian(M))
+                : mxDuplicateArray(prhs[1]);
         } else if (op == "load") {
             if (nrhs != 2 && nrhs != 3)
                 fail("apxchol:usage", "usage: h = apxchol_mex('load', path, options)");

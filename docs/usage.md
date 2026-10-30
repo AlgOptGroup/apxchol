@@ -9,18 +9,37 @@ diagonally dominant matrices with nonpositive off-diagonal entries.
 For a graph with nonnegative edge weights, the adjacency matrix stores those
 weights. Its Laplacian is
 `L = D - Adj`, where `D` contains the sums of incident weights.
-Use `apxchol.laplacian(Adj)` in Python or `apxchol_laplacian(Adj)` in
-MATLAB/Octave to form it. A Laplacian RHS must sum to zero on each connected
-component; the solution is defined up to a constant on each component.
+A Laplacian RHS must sum to zero on each connected component; the solution is
+defined up to a constant on each component.
+
+### Converting input to an operator
+
+The solver always treats its input as `A` and rejects anything that is not a
+valid operator. To start from a graph instead, convert the input first:
+
+| CLI | Python | MATLAB/Octave |
+|---|---|---|
+| `--convert-input` | `A = apxchol.as_operator(M)` | `A = apxchol_as_operator(M)` |
+
+All three apply the same rule, like NumPy's `asarray`:
+
+- If `M` passes the operator check (a symmetric Laplacian or SDDM matrix,
+  possibly nearly SDDM), it is used unchanged. A diagonal-only matrix with a
+  positive diagonal passes.
+- Otherwise, if `M` has no negative off-diagonal entry, it is a graph
+  adjacency matrix, and its Laplacian `L = D - M` is used, where `D` holds the
+  row sums of `M`. A diagonal entry (self-loop) adds to `D` and is subtracted
+  again, so it cancels. Pattern input (a Matrix Market `pattern` file, a
+  MATLAB logical matrix, a boolean SciPy matrix) has unit weights.
+- Otherwise the conversion fails, explaining why `M` is neither.
+
+Without conversion, when a matrix fails as an operator but has no negative
+off-diagonal entry, the error suggests the conversion for each interface.
 
 Python accepts SciPy sparse matrices and arrays. It converts them to CSC
 (compressed sparse column) format, sorts row indices and combines duplicate
 entries. Supply the full symmetric matrix, not just one triangle. Format conversion
 does not invent missing symmetric entries.
-
-The CLI can detect adjacency input and construct its Laplacian. Use
-`--input-kind` to choose explicitly. Library bindings treat the input as `A`
-and do not guess whether it is an adjacency matrix.
 
 ## Choosing CPU or GPU
 
