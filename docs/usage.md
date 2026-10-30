@@ -184,4 +184,5 @@ workspace, and each returns the same result as when called alone. To solve
 in parallel, give each thread its own solver; independent solvers do not
 share state. In C++ this covers `solver`, `cpu_solver` and `apx_cholesky`;
 a `metal_solver` used directly must not be called concurrently. Python
-releases the GIL during setup, `solve` and `apply`.
+releases the GIL during factorization, `solve` and `apply`, but holds it while
+reading the input matrix.

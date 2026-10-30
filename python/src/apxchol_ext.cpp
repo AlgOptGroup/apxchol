@@ -131,8 +131,9 @@ apxchol::solve_options parse_options(const py::dict& d) {
     return so;
 }
 
-// Python marshalling around the common solver. Native setup, solves and
-// applications release the GIL; the solver serializes calls on one instance.
+// Python marshalling around the common solver. Factorization, solves and
+// applications release the GIL once inputs are converted; the solver
+// serializes calls on one instance.
 class Solver {
 public:
     Solver(py::array indptr, py::array indices, py::array data,
