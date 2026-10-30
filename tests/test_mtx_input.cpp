@@ -168,7 +168,7 @@ TEST(AsOperatorRule, AnyNegativeOffDiagonalLeavesTheMatrixToTheSolver) {
     Sparse mixed(3, 3);
     mixed.setFromTriplets(t.begin(), t.end());
     Sparse heavy = grid_laplacian(4, 4);
-    heavy.coeffRef(0, 5) = heavy.coeffRef(5, 0) = 2.0;
+    heavy.coeffRef(0, 5) = heavy.coeffRef(5, 0) = 20.0;   // 45% positive mass
     for (int i = 0; i < heavy.rows(); ++i) heavy.coeffRef(i, i) += 5.0;
     EXPECT_FALSE(is_graph_adjacency(mixed));
     EXPECT_FALSE(is_graph_adjacency(heavy));

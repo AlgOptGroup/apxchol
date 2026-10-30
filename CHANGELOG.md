@@ -20,7 +20,7 @@
 - Breaking: forward-star and indexed pooled graph storage and the standalone analysis/setup tools are retired.
 - Breaking: `APXCHOL_INDEX_WIDTH=32|64_EDGES|64` replaces the `APXCHOL_64BIT_*_INDICES` build options.
 - Breaking: the CLI and bindings no longer accept an adjacency matrix as if it were the operator. Previously both solved adjacency input as the operator and failed without a clear error; now validation rejects it and the error suggests the conversion.
-- New `apxchol.as_operator(M)`, `apxchol_as_operator(M)` and CLI `--convert-input`: a finite symmetric matrix whose off-diagonal entries are all positive becomes its graph Laplacian `L = D - M` (self-loops cancel), any other finite symmetric matrix is used as given and checked by the solver, and asymmetric or non-finite input is an error.
+- New `apxchol.as_operator(M)`, `apxchol_as_operator(M)` and CLI `--convert-input`: a finite symmetric matrix with at least one off-diagonal entry, all of them positive, becomes its graph Laplacian `L = D - M` (self-loops cancel), any other finite symmetric matrix is used as given and checked by the solver, and asymmetric or non-finite input is an error.
 - The CLI solves an `n` by `k` `--rhs` file as one batch, writes an `n` by `k` solution with `-o`, and logs iterations and residuals per column.
 - The v1 API compatibility scope is documented.
 - The partitioner and eliminator extension interfaces are experimental in 1.x and may change in minor releases.

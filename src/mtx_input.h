@@ -11,9 +11,9 @@
 ///
 /// The CLI reads the file as the operator. `--convert-input` applies the rule
 /// it shares with the bindings' `as_operator` (`detail::is_graph_adjacency` in
-/// include/apxchol/operator_class.h): a finite symmetric matrix whose
-/// off-diagonal entries are all positive becomes its graph Laplacian, any
-/// other finite symmetric matrix is used as given, and the rest is an error.
+/// include/apxchol/operator_class.h): a finite symmetric matrix with at least
+/// one off-diagonal entry, all of them positive, becomes its graph Laplacian,
+/// any other finite symmetric matrix is used as given, and the rest is an error.
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
