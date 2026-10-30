@@ -31,7 +31,7 @@
 ### Benchmarks
 - The benchmark harness checks every result against the original system's residual and reports setup, solve and memory separately.
 - Published results now come from CSCS Daint; laptop results are archived.
-- GPU memory is now this process's NVML usage above its post-context baseline, measured the same way for apxchol, AMGCL and Hypre, with a new `setup_vram_mb` column; other processes on the GPU are flagged instead of counted.
+- GPU memory is now this process's NVML usage above its post-context baseline, measured the same way for apxchol, AMGCL and Hypre, with a new `setup_vram_mb` column; other compute processes are reported separately and flagged as shared.
 
 ### Fixes
 - Reported residuals are now correct on early solve exits.
