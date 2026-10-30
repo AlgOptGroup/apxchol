@@ -718,6 +718,24 @@ TEST(SpmvLrmBuild, UnsortedCompressedInputUsesGeneralFallback) {
     EXPECT_EQ(result.residual, 0.0);
 }
 
+TEST(SpmvLrmBuild, LowerOnlyRouteInputUsesGeneralFallback) {
+    // cpu_route reads its operator through the lower triangle. A lower-only
+    // input has no reusable CSC-as-CSR layout, so it must take the general
+    // lower-reflection build and still apply the full symmetric operator.
+    const Sparse A = spmv_probe_sddm();
+    auto F = apxchol::factorize(A);
+    Sparse lower = A.triangularView<Eigen::Lower>();
+    lower.makeCompressed();
+    ASSERT_LT(lower.nonZeros(), A.nonZeros());
+
+    const Eigen::VectorXd x0 = spmv_probe_x();
+    // solver(A, F) rejects this input, so probe the unvalidated CPU route.
+    const apxchol::detail::cpu_route slv(lower, std::move(F));
+    const auto result = slv.solve(spmv_probe_b(), 1e-15, 0, &x0);
+    EXPECT_EQ(result.iterations, 0);
+    EXPECT_EQ(result.residual, 0.0);
+}
+
 TEST(SpmvLrmBuild, OneSidedExplicitZeroKeepsGeneralFallback) {
     // An explicit zero stored in one triangle passes operator validation but
     // leaves no reusable CSC-as-CSR layout, so it must take the general
