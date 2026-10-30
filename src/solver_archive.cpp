@@ -188,7 +188,10 @@ public:
     explicit reader(const std::filesystem::path& path) : file_(open_file(path, "rb")) {
         prefix_type prefix;
         read_exact(file_.get(), prefix.data(), prefix.size());
-        if (std::memcmp(prefix.data(), "APXCHB01", 8) || get<std::uint32_t>(prefix.data() + 8) != 1 ||
+        const auto version = get<std::uint32_t>(prefix.data() + 8);
+        if (!std::memcmp(prefix.data(), "APXCHB01", 8) && version > 1)
+            invalid("format version " + std::to_string(version) + " is newer than this apxchol supports (1)");
+        if (std::memcmp(prefix.data(), "APXCHB01", 8) || version != 1 ||
             get<std::uint32_t>(prefix.data() + 12) != array_count ||
             get<std::uint32_t>(prefix.data() + 16) != descriptor_bytes ||
             !std::all_of(prefix.begin() + 32, prefix.begin() + header_bytes, [](auto v) { return v == 0; }))

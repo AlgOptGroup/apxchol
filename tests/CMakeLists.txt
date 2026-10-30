@@ -61,6 +61,8 @@ if (APXCHOL_DEVICE STREQUAL "CUDA")
 else()
     target_link_libraries(unit_tests PRIVATE apxchol_core)
 endif()
+target_compile_definitions(unit_tests PRIVATE
+        APXCHOL_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 target_link_libraries(unit_tests PRIVATE
         apxchol_mtx_input
         GTest::gtest_main

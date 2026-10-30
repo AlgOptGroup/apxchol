@@ -55,7 +55,7 @@ Only canonical CSC is stored. Loading copies the arrays and rebuilds triangular-
 
 The original stored entry count is kept separately for fill-ratio reporting. It can differ from the saved matrix’s count when normalization reflects or removes unmatched explicit zeros.
 
-The file format version is independent of the package version. Its compatibility contract is under review before release.
+The file format version is independent of the package version. Every 1.x release reads format version 1 archives. Loading an archive with a newer format version fails with an error that names that version. A committed version 1 fixture, `tests/fixtures/path5_sddm_v1.apxchol`, is loaded and solved by the unit tests, so an accidental format change fails CI.
 
 <details>
 <summary>Binary layout</summary>

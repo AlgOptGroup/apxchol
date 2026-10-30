@@ -382,6 +382,39 @@ TEST_F(SolverArchive, RejectsMalformedHeaderAndTruncation) {
     EXPECT_THROW(load_solver(trailing), std::invalid_argument);
 }
 
+TEST_F(SolverArchive, RejectsNewerFormatVersion) {
+    const auto path = change_file("version-2", [](auto& bytes) { put_number(bytes, 8, 4, 2); });
+    try {
+        load_solver(path);
+        FAIL() << "a version 2 archive loaded";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_STREQ(error.what(),
+            "solver archive: format version 2 is newer than this apxchol supports (1)");
+    }
+}
+
+// The committed fixture is tests/fixtures/path5_sddm.mtx saved with default CPU
+// options. Every 1.x release must keep loading it.
+TEST(SolverArchiveFormat, LoadsCommittedVersion1Fixture) {
+    Sparse A(5, 5);
+    std::vector<Eigen::Triplet<double>> entries;
+    for (int i = 0; i < 5; ++i) {
+        entries.emplace_back(i, i, i == 0 || i == 4 ? 1.5 : 2.5);
+        if (i) { entries.emplace_back(i, i - 1, -1.0); entries.emplace_back(i - 1, i, -1.0); }
+    }
+    A.setFromTriplets(entries.begin(), entries.end());
+    solve_options opts;
+    opts.backend = solve_backend::cpu;
+    auto restored = load_solver(std::filesystem::path(APXCHOL_TEST_FIXTURES) / "path5_sddm_v1.apxchol", opts);
+    EXPECT_EQ(restored.rows(), 5);
+    EXPECT_EQ(restored.operator_nnz(), 13);
+    EXPECT_TRUE(restored.factor().sddm);
+    const Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(5, 1.0, 5.0);
+    const auto result = restored.solve(b, 1e-10);
+    EXPECT_TRUE(result.converged);
+    EXPECT_LT((A * result.x - b).norm() / b.norm(), 1e-10);
+}
+
 TEST_F(SolverArchive, ReadsOppositeEndianArrays) {
     auto arrays = read_fixture(directory / "original.apxchol");
     for (auto& a : arrays) {
