@@ -19,8 +19,15 @@ function(apxchol_install_core)
     configure_package_config_file("${root}/cmake/apxcholConfig.cmake.in"
         "${CMAKE_CURRENT_BINARY_DIR}/apxcholConfig.cmake"
         INSTALL_DESTINATION "${package_dir}")
+    # Source compatibility is promised within a major release from 1.0 on;
+    # 0.x minor releases may break it.
+    if (APXCHOL_VERSION VERSION_LESS 1)
+        set(compatibility SameMinorVersion)
+    else()
+        set(compatibility SameMajorVersion)
+    endif()
     write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/apxcholConfigVersion.cmake"
-        VERSION "${APXCHOL_VERSION}" COMPATIBILITY SameMajorVersion)
+        VERSION "${APXCHOL_VERSION}" COMPATIBILITY ${compatibility})
     install(TARGETS apxchol_core EXPORT apxcholTargets
         ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
         LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
