@@ -61,7 +61,7 @@ solver make_solver(const Eigen::SparseMatrix<double>& L, const run_config& cfg,
 int solve_batch(const Eigen::SparseMatrix<double>& L, const Eigen::MatrixXd& B,
                 const run_config& cfg, bool graph, const input_scan& scan) {
     detail::checkpoint timings;
-    const solver owner = make_solver(L, cfg, timings);
+    solver owner = make_solver(L, cfg, timings);
     Eigen::MatrixXd X(B.rows(), B.cols());
     const auto res = owner.solve(B, X);
 
@@ -153,7 +153,7 @@ int main(int argc, char* argv[]) try {
     }
 
     detail::checkpoint timings;
-    const solver owner = make_solver(L, cfg, timings);
+    solver owner = make_solver(L, cfg, timings);
     const auto res = owner.solve(b);
 
     spdlog::info("backend:    {}", res.backend == solve_backend::gpu ? "gpu" : "cpu");

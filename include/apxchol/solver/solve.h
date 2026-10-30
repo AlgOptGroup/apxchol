@@ -73,8 +73,10 @@ struct batch_solve_result {
 
 /// Reusable solver owning one CPU or GPU backend, selected once at setup.
 /// solve_backend::cpu keeps setup and solves on CPU, also in GPU builds.
-/// Owns its input data. A call made while another thread is using the same
-/// instance throws; give each thread its own copy (docs/usage.md#thread-safety).
+/// Owns its input data. solve() and apply() use this object's workspace, so
+/// they are non-const. Concurrent non-const calls on one object are not allowed:
+/// use a copy per thread, or batch the right-hand sides
+/// (docs/usage.md#thread-safety). An overlapping call throws.
 /// Copies of a CPU solver share its factor and operator; GPU solvers cannot be copied.
 /// Every solve verifies the returned residual against the original operator/RHS.
 /// Supplied factors use CPU in automatic mode; an explicit GPU request uploads them.
@@ -95,13 +97,13 @@ public:
     /// an optional initial guess; nullptr starts from zero. Inspect converged
     /// in the result even when the iteration budget is exhausted.
     solve_result solve(const Eigen::VectorXd& b, double tol = -1.0,
-                       int max_iter = -1, const Eigen::VectorXd* x0 = nullptr) const;
+                       int max_iter = -1, const Eigen::VectorXd* x0 = nullptr);
     /// Write into caller storage; the returned result leaves x empty.
     solve_result solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
                        double tol = -1.0, int max_iter = -1,
-                       const Eigen::VectorXd* x0 = nullptr) const;
+                       const Eigen::VectorXd* x0 = nullptr);
     /// Apply the preconditioner to finite scalar or matrix input.
-    Eigen::VectorXd apply(const Eigen::VectorXd& r) const;
+    Eigen::VectorXd apply(const Eigen::VectorXd& r);
     /// Independent RHS columns, with bounded panel workspace. Output must not
     /// overlap the RHS or warm start. tol/max_iter apply to each column.
     template<class Input, class Output>
@@ -110,7 +112,7 @@ public:
             && (Output::Flags & Eigen::DirectAccessBit) != 0)
     batch_solve_result solve(const Eigen::MatrixBase<Input>& B, Eigen::MatrixBase<Output>& X,
                              double tol = -1, int max_iter = -1,
-                             const const_matrix_view* X0 = nullptr) const {
+                             const const_matrix_view* X0 = nullptr) {
         using Stride = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
         const Eigen::Map<const Eigen::MatrixXd, 0, Stride> rhs(B.derived().data(),
             B.rows(), B.cols(), Stride(B.colStride(), B.rowStride()));
@@ -118,7 +120,7 @@ public:
             X.rows(), X.cols(), Stride(X.colStride(), X.rowStride()));
         return solve_batch(const_matrix_view(rhs), matrix_view(out), tol, max_iter, X0);
     }
-    void apply(const_matrix_view R, matrix_view Z) const;
+    void apply(const_matrix_view R, matrix_view Z);
 
     /// Factor metadata; L's row/value arrays require keep_factor=true.
     /// The returned reference is owned by this solver.
@@ -148,7 +150,7 @@ private:
     solver(const Eigen::SparseMatrix<double>& A, factorization* F,
            const solve_options& opts, detail::checkpoint* timings);
     batch_solve_result solve_batch(const_matrix_view B, matrix_view X, double tol,
-                                   int max_iter, const const_matrix_view* X0) const;
+                                   int max_iter, const const_matrix_view* X0);
     struct impl;
     std::unique_ptr<impl> impl_;
 };
