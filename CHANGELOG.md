@@ -12,6 +12,7 @@
 ### GPU backends
 - CUDA setup, factorization and PCG run entirely on the device, with a sync-free dataflow triangular solve and optional fp16 factor storage.
 - New Apple Metal backend: setup, factorization and PCG run on the device, for single and batched solves.
+- Metal backend and macOS support contributed by Samuel Talkington (@samtalki).
 - `solve_options.backend` (`--backend auto|cpu|gpu`) selects a complete CPU or GPU route and never falls back silently.
 
 ### API and CLI changes

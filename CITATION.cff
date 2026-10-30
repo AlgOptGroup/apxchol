@@ -17,8 +17,6 @@ authors:
   - family-names: Kyng
     given-names: Rasmus
     affiliation: "ETH Zürich"
-  - family-names: Talkington
-    given-names: Samuel
 repository-code: "https://github.com/AlgOptGroup/apxchol"
 license: BSD-3-Clause
 keywords:
