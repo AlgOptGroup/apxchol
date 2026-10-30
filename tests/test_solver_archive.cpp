@@ -349,7 +349,7 @@ TEST_F(SolverArchive, ReinstallsInstalledFactorExactly) {
                 auto opts = options();
                 opts.factor_opts.factor_storage = storage;
                 opts.factor_opts.drop_tolerance = drop;
-                const solver saver(input, opts);
+                solver saver(input, opts);
                 const auto F = saver.factor();
                 EXPECT_EQ(F.storage, storage);
                 EXPECT_EQ(F.scale.size(), storage == factor_storage_type::fp16 ? input.rows() : 0);
@@ -362,7 +362,7 @@ TEST_F(SolverArchive, ReinstallsInstalledFactorExactly) {
                 other.factor_opts.factor_storage = storage == factor_storage_type::fp16
                     ? factor_storage_type::fp32 : factor_storage_type::fp16;
                 other.factor_opts.drop_tolerance = drop > 0 ? 0.0 : 0.5;
-                const auto loaded = solver::load(path, other);
+                auto loaded = solver::load(path, other);
                 EXPECT_EQ(loaded.factor_storage(), storage);
                 const auto G = loaded.factor();
                 EXPECT_EQ(G.L.outer_, F.L.outer_);
@@ -370,7 +370,7 @@ TEST_F(SolverArchive, ReinstallsInstalledFactorExactly) {
                 EXPECT_EQ(std::memcmp(G.L.vals_.data(), F.L.vals_.data(), F.L.vals_.size() * sizeof(float)), 0);
                 EXPECT_EQ(G.scale, F.scale);
                 // Adopting the exported factor directly is exact too.
-                const solver adopted(input, F, other);
+                solver adopted(input, F, other);
                 Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(input.rows(), -1.0, 2.0);
                 if (laplacian) b.array() -= b.mean();
                 const auto x = saver.solve(b, 1e-9, 2000), y = loaded.solve(b, 1e-9, 2000),

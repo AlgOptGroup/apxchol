@@ -3259,7 +3259,7 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     auto exported = apxchol::factorize(A, factor_options);
     EXPECT_EQ(exported.L.vals_.size(), exported.L.nonZeros());
     EXPECT_FALSE(apxchol::detail::factorization_access::device_factor(exported));
-    const apxchol::solver owner(A, exported, options);
+    apxchol::solver owner(A, exported, options);
     EXPECT_FALSE(gpu_session(owner).trsv().adopted_device_factor());
     EXPECT_TRUE(gpu_session(owner).factor().L.vals_.empty());
     EXPECT_EQ(exported.L.vals_.size(), exported.L.nonZeros());
