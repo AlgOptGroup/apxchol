@@ -716,7 +716,7 @@ def parse_cuda_init(stderr):
 
 _GPU_MEMORY_RE = re.compile(
     r'^\[bench\]\s+gpu_memory\s+pid=(\d+)\s+bus_id=(\S+)\s+baseline_mib=(?:([0-9.]+)|'
-    r'unavailable reason=(\S+))\s+other_processes=(\d+|unknown)\s+other_mib=([0-9.]+|unknown)\s*$',
+    r'unavailable reason=(.+?))\s+other_processes=(\d+|unknown)\s+other_mib=([0-9.]+|unknown)\s*$',
     re.M)
 
 def _gpu_memory_receipt(stderr):

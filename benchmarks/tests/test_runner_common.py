@@ -186,6 +186,14 @@ class GpuMemoryTest(unittest.TestCase):
             "vram_baseline_mb": None, "vram_unavailable": "mig", "gpu_other_processes": None,
             "gpu_other_mb": None, "gpu_shared": None})
 
+    def test_multiword_nvml_reason_keeps_sharing_metadata(self):
+        metrics = rc.parse_gpu_memory(
+            "[bench] gpu_memory pid=7 bus_id=00000000:01:00.0 baseline_mib=unavailable "
+            "reason=Insufficient Permissions other_processes=2 other_mib=640.0\n")
+        self.assertEqual(metrics, {
+            "vram_baseline_mb": None, "vram_unavailable": "Insufficient Permissions",
+            "gpu_other_processes": 2, "gpu_other_mb": 640.0, "gpu_shared": True})
+
     def test_sampler_reports_peak_above_baseline_for_the_receipt_process(self):
         polls = [
             "00000000:01:00.0, 4242, 300\n00000000:01:00.0, 99, 5000\n",
