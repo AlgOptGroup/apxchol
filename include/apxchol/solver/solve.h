@@ -58,9 +58,6 @@ struct solve_result {
     /// The original operator is unchanged, including for residual verification.
     Eigen::Index lumped_offdiag = 0;
     checkpoint timings;
-    // Device-wide VRAM usage (MB), sampled at solve end via cudaMemGetInfo.
-    // -1 = unmeasured (CPU build / host PCG).
-    double solve_vram_mb = -1.0;
     solve_backend backend = solve_backend::cpu;
 };
 

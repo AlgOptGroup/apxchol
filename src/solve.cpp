@@ -744,7 +744,6 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
     for (int c = 0; c < C; c++) {
         results[c].lumped_offdiag = precond_.factor().lumped_offdiag;
         results[c].backend = solve_backend::cpu;
-        results[c].solve_vram_mb = -1;
         results[c].iterations = 0;
     }
     r_.resize(n * C);
