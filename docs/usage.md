@@ -178,11 +178,23 @@ see [thread placement](../benchmarks/README.md#thread-placement).
 
 ## Thread safety
 
-A solver can be shared between threads. Calls on one solver (`solve`,
-`apply` and batch solves) run one at a time because they reuse its
-workspace, and each returns the same result as when called alone. To solve
-in parallel, give each thread its own solver; independent solvers do not
-share state. In C++ this covers `solver`, `cpu_solver` and `apx_cholesky`;
-a `metal_solver` used directly must not be called concurrently. Python
-releases the GIL during factorization, `solve` and `apply`, but holds it while
-reading the input matrix.
+Use one solver per thread. A solver reuses its workspace across `solve`,
+`apply` and batch solves, so a call made while another thread is using the
+same solver throws (`RuntimeError` in Python) instead of waiting.
+
+Copies are cheap: a copy shares the factor, the triangular-solve structures
+and the operator, which are read-only after setup, and allocates only its
+own workspace. Copy a solver once per thread, with `solver copy = original;`
+in C++ or `copy.copy(solver)` in Python, and the copies solve in parallel
+with the same results as serial calls. Copies stay valid after the original
+is destroyed. This covers `solver`, `cpu_solver` and `apx_cholesky`; a new
+factor installed in one copy of an `apx_cholesky` leaves the others unchanged.
+GPU solvers cannot be copied: construct one per thread, or batch the
+right-hand sides. A `metal_solver` used directly must not be called
+concurrently.
+
+To solve many right-hand sides from one thread, pass them to `solve(B)` as the
+columns of one matrix; the batched solver shares work between columns.
+
+Python releases the GIL during factorization, `solve` and `apply`, but holds it
+while reading the input matrix.

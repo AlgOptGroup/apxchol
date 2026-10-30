@@ -87,6 +87,8 @@ Eigen::VectorXd generate_test_rhs(Eigen::Index n);
 /// Prefer solver with solve_backend::cpu unless direct preconditioner access is
 /// needed. Setup and solves stay on CPU, including in GPU-enabled builds.
 /// The optional checkpoint receives setup timings and is not retained.
+/// A call made while another thread is using the same instance throws; see
+/// docs/usage.md#thread-safety.
 class cpu_solver {
     friend struct detail::solver_archive_access;
 public:
@@ -105,6 +107,11 @@ public:
                factorization F,
                const solve_options& opts = {},
                checkpoint* cp = nullptr);
+
+    /// Copies share the factor, triangular-solve structures and operator, and
+    /// get their own workspace, so each thread can solve with its own copy.
+    cpu_solver(const cpu_solver& other);
+    cpu_solver& operator=(const cpu_solver& other);
 
     /// Solve using the retained factor. Negative tol/max_iter use constructor
     /// defaults. x0 is an optional initial guess; nullptr starts from zero.
@@ -170,26 +177,32 @@ private:
     void check_solution(const_matrix_view B, const double* x, solve_result* results,
                         checkpoint& timings, double tol) const;
 
+    // Owned row-major FULL symmetric operator for the parallel SpMV; exactly
+    // one matrix is populated (fp32 when every value round-trips float
+    // losslessly). It cannot map constructor input: a reusable solver may
+    // outlive it. Read-only after setup; copies share it.
+    struct pcg_operator {
+        Eigen::SparseMatrix<double, Eigen::RowMajor> Lrm;
+        Eigen::SparseMatrix<float, Eigen::RowMajor>  Lrm_f;
+        bool fp32 = false;
+    };
+
     solve_options opts_;
     apx_cholesky precond_;
     // Reused PCG workspace, resized when the panel width changes. Guarded by
-    // the preconditioner's call mutex, which serializes calls on one owner.
+    // the preconditioner's call guard, which rejects overlapping calls.
     mutable Eigen::VectorXd r_, z_, p_, Ap_, panel_x_;
     // Per-thread partial sums of the fused PCG kernels' deterministic
     // reductions (one cache line per thread; sized to the max team on use).
     mutable std::vector<double> part_;
-    // Owned row-major FULL symmetric operator for the parallel SpMV; exactly
-    // one is populated (fp32 when every value round-trips float losslessly).
-    // These cannot map constructor input: a reusable solver may outlive it.
-    Eigen::SparseMatrix<double, Eigen::RowMajor> Lrm_;
-    Eigen::SparseMatrix<float, Eigen::RowMajor>  Lrm_f_;
-    bool op_fp32_ = false;
+    std::shared_ptr<const pcg_operator> op_;
     Eigen::Index n_ = 0;
 };
 
 /// Reusable solver owning one CPU or GPU backend, selected once at setup.
-/// Owns its input data; movable and noncopyable. Concurrent calls on one
-/// instance run one at a time; see docs/usage.md#thread-safety.
+/// Owns its input data. A call made while another thread is using the same
+/// instance throws; give each thread its own copy (docs/usage.md#thread-safety).
+/// Copies of a CPU solver share its factor and operator; GPU solvers cannot be copied.
 /// Every solve verifies the returned residual against the original operator/RHS.
 /// Supplied factors use CPU in automatic mode; an explicit GPU request uploads them.
 class solver {
@@ -204,8 +217,8 @@ public:
     ~solver();
     solver(solver&&) noexcept;
     solver& operator=(solver&&) noexcept;
-    solver(const solver&) = delete;
-    solver& operator=(const solver&) = delete;
+    solver(const solver& other);
+    solver& operator=(const solver& other);
 
     /// Solve Ax=b. Negative tol/max_iter use constructor defaults. x0 supplies
     /// an optional initial guess; nullptr starts from zero. Inspect converged

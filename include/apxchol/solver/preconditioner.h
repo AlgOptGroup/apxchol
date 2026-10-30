@@ -1,6 +1,6 @@
 #pragma once
 #include "apxchol/checkpoint.h"
-#include "apxchol/detail/call_mutex.h"
+#include "apxchol/detail/call_guard.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"
 #include "apxchol/solver/cuda_context.h"
 #include "apxchol/solver/factorization.h"
@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -127,6 +128,8 @@ std::array<double, Columns> det_sum_columns(const double* v, Eigen::Index n, dou
 ///   cg.compute(L);   // triggers apx_cholesky::compute(L) internally
 ///   x = cg.solve(b);
 ///
+/// An application made while another thread is applying the same object
+/// throws; give each thread its own copy (docs/usage.md#thread-safety).
 namespace detail {
 template<class Trsv, setup_route Route>
 class basic_apx_cholesky : public Eigen::SparseSolverBase<basic_apx_cholesky<Trsv, Route>> {
@@ -141,6 +144,13 @@ class basic_apx_cholesky : public Eigen::SparseSolverBase<basic_apx_cholesky<Trs
 protected:
     using Base::m_isInitialized;
 
+private:
+    // Read-only once installed; copies share it.
+    struct installed {
+        struct factorization F;
+        Trsv trsv;
+    };
+
 public:
     using Scalar      = double;
     using RealScalar  = double;
@@ -154,8 +164,25 @@ public:
     };
 
     basic_apx_cholesky() = default;
+    /// Copies share the installed factor and triangular-solve structures, which
+    /// are read-only after setup, and get their own workspace. Installing a
+    /// new factor in either object leaves the other unchanged.
+    basic_apx_cholesky(const basic_apx_cholesky& other)
+        : opts_(other.opts_), keep_factor_(other.keep_factor_) {
+        copy_installed(other);
+    }
+    basic_apx_cholesky& operator=(const basic_apx_cholesky& other) {
+        if (this != &other) {
+            opts_ = other.opts_;
+            keep_factor_ = other.keep_factor_;
+            cp_ = nullptr;
+            apply_count_ = 0;
+            copy_installed(other);
+        }
+        return *this;
+    }
 
-    const factorization& factor() const { return F_; }
+    const factorization& factor() const { return installed_->F; }
     const factor_options& options() const { return opts_; }
     void set_options(const factor_options& opts) { opts_ = opts; }
     void set_checkpoint(checkpoint* cp) const { cp_ = cp; }
@@ -186,15 +213,16 @@ public:
         [[maybe_unused]] const auto factorize_install_begin = detail::gpu_setup_diagnostic_clock::now(opts_.verbose);
 #endif
         if constexpr (on_gpu) cuda_ctx::prewarm();
-        n_ = A.rows();
-        F_ = detail::factorize_for_solver(A, opts_, cp_, Route, keep_factor_);
+        auto next = std::make_shared<installed>();
+        next->F = detail::factorize_for_solver(A, opts_, cp_, Route, keep_factor_);
 #if defined(APXCHOL_USE_CUDA)
         if constexpr (on_gpu) {
-            if (!F_.research_device_factor)
+            if (!next->F.research_device_factor)
                 throw std::invalid_argument("GPU route requires a unique nonempty device-owned factor");
         }
 #endif
-        install_factor();
+        n_ = A.rows();
+        install_factor(std::move(next));
 #if defined(APXCHOL_USE_CUDA)
         if constexpr (on_gpu) {
             // Complete the adopted factor's queued setup work before returning.
@@ -207,18 +235,20 @@ public:
                 // Host API duration; device-adopted setup additionally completed its work.
                 const double factorize_install_wall_s = std::chrono::duration<double>(
                     detail::gpu_setup_diagnostic_clock::now(opts_.verbose) - factorize_install_begin).count();
-                const auto& drop = trsv_.drop_stats();
+                const auto& F = installed_->F;
+                const auto& trsv = installed_->trsv;
+                const auto& drop = trsv.drop_stats();
                 std::fprintf(stderr,
                     "[gpu-setup-receipt] factorize_install_wall_s=%.17g "
                     "n=%lld rounds=%zu raw_factor_nnz=%zu stored_nnz=%llu adopted=%d "
                     "fp16=%d host_factor_array_bytes=%zu adoption_download_bytes=%zu "
                     "factor_drop_rel=%.17g dropped_threshold=%llu dropped_flush=%llu\n",
-                    factorize_install_wall_s, static_cast<long long>(n_), F_.rounds.size(),
-                    static_cast<std::size_t>(F_.L.nonZeros()),
-                    static_cast<unsigned long long>(trsv_.stored_nnz()),
-                    trsv_.adopted_device_factor() ? 1 : 0, trsv_.fp16() ? 1 : 0,
-                    F_.L.inner_.size() * sizeof(node_index) + F_.L.vals_.size() * sizeof(factor_value_t),
-                    trsv_.adoption_host_download_bytes(), drop.rel,
+                    factorize_install_wall_s, static_cast<long long>(n_), F.rounds.size(),
+                    static_cast<std::size_t>(F.L.nonZeros()),
+                    static_cast<unsigned long long>(trsv.stored_nnz()),
+                    trsv.adopted_device_factor() ? 1 : 0, trsv.fp16() ? 1 : 0,
+                    F.L.inner_.size() * sizeof(node_index) + F.L.vals_.size() * sizeof(factor_value_t),
+                    trsv.adoption_host_download_bytes(), drop.rel,
                     static_cast<unsigned long long>(drop.dropped_threshold),
                     static_cast<unsigned long long>(drop.dropped_flush));
             }
@@ -244,24 +274,28 @@ public:
 #endif
         else if (F.L.nonZeros() > 0 && F.L.vals_.empty())
             throw std::invalid_argument("apx_cholesky::set_factor: factorization values were released");
-        n_ = static_cast<Eigen::Index>(F.L.rows());
-        F_ = std::move(F);
+        auto next = std::make_shared<installed>();
+        next->F = std::move(F);
+        n_ = static_cast<Eigen::Index>(next->F.L.rows());
         m_analysisIsOk = true;
         m_isInitialized = true;
-        install_factor();
+        install_factor(std::move(next));
         return *this;
     }
 
 private:
-    /// Shared tail of factorize()/set_factor(): SpTRSV setup from F_.
-    void install_factor() {
+    /// Shared tail of factorize()/set_factor(): SpTRSV setup from next->F,
+    /// then publish next as this object's read-only installed state.
+    void install_factor(std::shared_ptr<installed> next) {
+        auto& F = next->F;
+        auto& trsv = next->trsv;
 #if defined(APXCHOL_USE_CUDA)
         if constexpr (Route == setup_route::gpu) {
             // Reject inadmissible factors before installation can initialize
             // CUDA or upload host arrays.
-            if (F_.research_device_factor &&
-                (F_.research_device_factor.use_count() != 1 ||
-                 F_.research_device_factor->empty()))
+            if (F.research_device_factor &&
+                (F.research_device_factor.use_count() != 1 ||
+                 F.research_device_factor->empty()))
                 throw std::invalid_argument(
                     "GPU route requires a unique nonempty device-owned factor");
         }
@@ -280,32 +314,32 @@ private:
         if (cp_) { cp_->descend("setup"); cp_->tick(); }
         if constexpr (!on_gpu) {
             // Laplacians leave the grounded last row/column unused.
-            const node_index factor_dim = static_cast<node_index>(F_.sddm ? n_ : n_ - 1);
+            const node_index factor_dim = static_cast<node_index>(F.sddm ? n_ : n_ - 1);
             // Round-as-level: hand the SpTRSV the per-round IS-column boundaries so it
             // builds level sets straight off the elimination rounds (same-round IS
             // columns are mutually independent -> one level) instead of two O(nnz)
             // topological depth scans. Each region is one factor column placed in round
             // order; trailing residual-peel columns get sequential levels inside the
             // SpTRSV. Missing or invalid round metadata uses the topological scan.
-            if (!F_.rounds.empty()) {
+            if (!F.rounds.empty()) {
                 std::vector<node_index> bounds;
-                bounds.reserve(F_.rounds.size() + 1);
+                bounds.reserve(F.rounds.size() + 1);
                 bounds.push_back(0);
                 node_index acc = 0;
-                for (const auto& r : F_.rounds) {
+                for (const auto& r : F.rounds) {
                     acc += static_cast<node_index>(r.is_size);
                     if (acc > factor_dim) acc = static_cast<node_index>(factor_dim);
                     bounds.push_back(acc);
                 }
-                trsv_.set_round_bounds(std::move(bounds));
+                trsv.set_round_bounds(std::move(bounds));
             }
             // Hand the factor over unless the caller wants to read it afterwards:
-            // the CPU SpTRSV then releases F_.L's row/value arrays at the first
+            // the CPU SpTRSV then releases F.L's row/value arrays at the first
             // point it no longer reads them (Laplacian path: right after its L11
             // copy), so its setup transient does not sit on a dead copy of the
             // factor. The release below then finds nothing left to free.
-            if (keep_factor_) trsv_.setup(F_.L, factor_dim, opts_);
-            else              trsv_.setup_consuming(F_.L, factor_dim, opts_);
+            if (keep_factor_) trsv.setup(F.L, factor_dim, opts_);
+            else              trsv.setup_consuming(F.L, factor_dim, opts_);
         }
 #if defined(APXCHOL_USE_CUDA)
         else {
@@ -318,29 +352,42 @@ private:
             if (opts_.verbose)
                 std::fprintf(stderr, "[sptrsv-setup gpu] %-22s %8.2f ms  (context creation %.2f ms)\n",
                              "cuda_init", cuda_init_s * 1e3, cuda_ctx::context_seconds() * 1e3);
-            if (F_.research_device_factor) {
-                trsv_.setup_adopting_device_factor_for_research(
-                    std::move(*F_.research_device_factor), opts_);
-                F_.research_device_factor.reset();
+            if (F.research_device_factor) {
+                trsv.setup_adopting_device_factor_for_research(
+                    std::move(*F.research_device_factor), opts_);
+                F.research_device_factor.reset();
             } else {
-                trsv_.setup(F_.L, static_cast<node_index>(F_.sddm ? n_ : n_ - 1), opts_);
+                trsv.setup(F.L, static_cast<node_index>(F.sddm ? n_ : n_ - 1), opts_);
             }
         }
 #endif
         if (cp_) { (*cp_)("sptrsv_setup"); cp_->ascend(); }
 
         // The SpTRSV (and the CUDA path) have copied the factor into their own
-        // CSR/CSC; the PCG loop only uses trsv_, never F_.L. Free the factor's
+        // CSR/CSC; the PCG loop only uses trsv, never F.L. Free the factor's
         // big row/value arrays -> one fewer full copy of the factor held during
         // the solve: nnz * (sizeof(node_index) + sizeof(factor_value_t)) bytes.
         // nonZeros() still uses the retained column pointers. (On the CPU
         // path setup_consuming has normally done this already; idempotent.)
         // set_keep_factor(true) skips the free for callers that export L.
         if (!keep_factor_)
-            F_.L.release_values();
+            F.L.release_values();
 
+        installed_ = std::move(next);
+        if constexpr (!on_gpu) barrier_ = installed_->trsv.make_workspace();
         m_factorizationIsOk = true;
         m_info = Eigen::Success;
+    }
+
+    void copy_installed(const basic_apx_cholesky& other) {
+        static_assert(!on_gpu, "device preconditioners own per-solve device state and cannot be copied");
+        installed_ = other.installed_;
+        if constexpr (!on_gpu) barrier_ = installed_->trsv.make_workspace();
+        n_ = other.n_;
+        m_info = other.m_info;
+        m_analysisIsOk = other.m_analysisIsOk;
+        m_factorizationIsOk = other.m_factorizationIsOk;
+        m_isInitialized = other.m_isInitialized;
     }
 
 public:
@@ -356,8 +403,7 @@ public:
     Eigen::Index cols() const { return n_; }
     Eigen::ComputationInfo info() const { return m_info; }
 
-    Trsv& trsv() { return trsv_; }
-    const Trsv& trsv() const { return trsv_; }
+    const Trsv& trsv() const { return installed_->trsv; }
 
     /// Apply M^{-1} to rhs via approximate Cholesky (Eigen entry point; also
     /// what apply()/Eigen::ConjugateGradient hit).
@@ -372,7 +418,7 @@ public:
     void _solve_impl(const auto& b, auto& x) const {
         eigen_assert(m_factorizationIsOk && "factorize() should be called first");
         const Eigen::Ref<const Eigen::VectorXd> bv(b);
-        const auto lock = calls_.lock();
+        const auto scope = calls_.enter();
         apply_columns<1>(bv.data(), x.data());
     }
 
@@ -388,7 +434,7 @@ private:
             const double* r, const std::array<double, Columns>& r_sum, double* z) const {
         eigen_assert(m_factorizationIsOk && "factorize() should be called first");
         ensure_part_();
-        const bool center = !F_.sddm && take_center_();
+        const bool center = !installed_->F.sddm && take_center_();
         std::array<double, Columns> rz{};
         apply_core<Columns>(r, r_sum, center, z, &rz);
         return rz;
@@ -397,7 +443,7 @@ private:
     template<int Columns>
     void apply_columns(const double* b, double* z) const {
         ensure_part_();
-        const bool center = !F_.sddm;
+        const bool center = !installed_->F.sddm;
         const auto sums = center
             ? detail::det_sum_columns<Columns>(b, n_, part_.data())
             : std::array<double, Columns>{};
@@ -425,7 +471,9 @@ private:
         static_assert(Columns > 0 && Columns <= detail::kPartStride);
         static_assert(!on_gpu || Columns == 1);
         if (cp_) { cp_->descend("solve"); cp_->tick(); }
-        const node_index* P = F_.perm.data();
+        const auto& F = installed_->F;
+        const auto& trsv = installed_->trsv;
+        const node_index* P = F.perm.data();
         const Eigen::Index n = n_;
         const int workers = detail::cpu_solve_threads(n);
         double* part = part_.data();
@@ -447,18 +495,18 @@ private:
         double* out;
 #if defined(APXCHOL_USE_CUDA)
         if constexpr (on_gpu) {
-            trsv_.solve_LLt(z, scratch_.data());
+            trsv.solve_LLt(z, scratch_.data());
             out = scratch_.data();
         } else
 #endif
         {
-            trsv_.template forward_solve<Columns>(z, scratch_.data());
+            trsv.template forward_solve<Columns>(z, scratch_.data(), barrier_);
             if (cp_) (*cp_)("forward");
-            trsv_.template transpose_solve<Columns>(scratch_.data(), scratch2_.data());
+            trsv.template transpose_solve<Columns>(scratch_.data(), scratch2_.data(), barrier_);
             out = scratch2_.data();
         }
         if (cp_) (*cp_)("back");
-        if (!F_.sddm)
+        if (!F.sddm)
             std::fill_n(out + (n - 1) * Columns, Columns, 0.0);
 
         std::array<double, Columns> shift{};
@@ -507,7 +555,7 @@ private:
         if (cp_) { (*cp_)(rz_out ? "unpermute+rz" : "unpermute"); cp_->ascend(); }
     }
 
-    struct factorization F_;
+    std::shared_ptr<const installed> installed_ = std::make_shared<installed>();
     factor_options opts_;
     mutable checkpoint* cp_ = nullptr;
     bool keep_factor_ = false;
@@ -526,10 +574,11 @@ private:
     bool m_analysisIsOk = false;
     bool m_factorizationIsOk = false;
 
-    mutable Trsv trsv_;
-    // Held by every public application and by the owning cpu_solver's calls,
-    // which share the workspace above.
-    call_mutex calls_;
+    // Weak-barrier state of the CPU triangular solves; unused on the GPU.
+    omp_sptrsv::solve_workspace barrier_;
+    // Entered by every public application and by the owning cpu_solver's
+    // calls, which share the workspace above.
+    call_guard calls_;
 };
 
 #if defined(APXCHOL_USE_CUDA)

@@ -37,6 +37,6 @@
 - Fixed SDDM misclassification of exact Laplacians.
 - CPU solves rescale right-hand sides of extreme magnitude; operators whose scale is not representable in FP32 factor storage are still rejected.
 - Parallel factorization handles a shrinking OpenMP team, and parallel vertex selection on the same graph is reproducible at a fixed thread count.
-- Concurrent calls on one solver no longer corrupt each other's results: `solver`, `cpu_solver` and `apx_cholesky` run them one at a time, and Python releases the GIL during factorization, `solve` and `apply`.
+- Concurrent calls on one solver no longer corrupt each other's results: a call made while another thread uses the same `solver`, `cpu_solver` or `apx_cholesky` throws. CPU solvers can be copied cheaply, sharing the factor, for one solver per thread (`copy.copy` in Python), and Python releases the GIL during factorization, `solve` and `apply`.
 
 Full history: https://github.com/AlgOptGroup/apxchol/compare/v0.2.2...main

@@ -113,7 +113,37 @@ def test_factor_reused_across_many_b():
         assert res.residual <= 1e-8
 
 
-def test_threads_sharing_one_solver_match_serial_calls():
+def test_overlapping_calls_on_one_solver_raise():
+    import threading
+    L = grid2d_laplacian(150)
+    solver = apxchol.factorize(L, backend="cpu", num_threads=1)
+    b = np.sin(np.arange(L.shape[0]))
+    b -= b.mean()
+    expected = solver.solve(b).x
+    errors = []
+    done = threading.Event()
+
+    def work():
+        while not done.is_set():
+            try:
+                np.testing.assert_array_equal(solver.solve(b).x, expected)
+            except RuntimeError as error:
+                errors.append(str(error))
+                done.set()
+
+    threads = [threading.Thread(target=work) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    done.wait(timeout=60)
+    done.set()
+    for thread in threads:
+        thread.join()
+    assert errors
+    assert "already in use by another thread" in errors[0]
+
+
+def test_copies_share_the_factor_and_solve_in_parallel():
+    import copy
     from concurrent.futures import ThreadPoolExecutor
     L = grid2d_laplacian(60)
     solver = apxchol.factorize(L, backend="cpu", num_threads=1)
@@ -122,9 +152,13 @@ def test_threads_sharing_one_solver_match_serial_calls():
     batch = np.column_stack(rhs[:2])
     expected = [(solver.solve(b).x, solver.apply(b)) for b in rhs]
     expected_batch = solver.solve(batch).x
+    copies = [copy.copy(solver) for _ in rhs]
+    assert all(type(c) is apxchol.Solver and c is not solver for c in copies)
+    assert all(c.shape == solver.shape and c.backend == "cpu" for c in copies)
 
     def work(k):
-        return solver.solve(rhs[k]).x, solver.apply(rhs[k]), solver.solve(batch).x
+        own = copies[k]
+        return own.solve(rhs[k]).x, own.apply(rhs[k]), own.solve(batch).x
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         for _ in range(3):
@@ -132,6 +166,8 @@ def test_threads_sharing_one_solver_match_serial_calls():
                 np.testing.assert_array_equal(x, expected[k][0])
                 np.testing.assert_array_equal(z, expected[k][1])
                 np.testing.assert_array_equal(xb, expected_batch)
+    del solver
+    np.testing.assert_array_equal(copies[0].solve(rhs[0]).x, expected[0][0])
 
 
 def test_aslinearoperator_helps_scipy_cg():

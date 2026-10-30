@@ -138,6 +138,8 @@ class Solver:
     """Reusable approximate-Cholesky solver: factor built once, solve many b.
 
     Options (all keyword-only) are documented on :func:`factorize`.
+    A call made while another thread uses the same solver raises
+    ``RuntimeError``; give each thread its own ``copy.copy(solver)``.
     """
 
     def __init__(self, A, **opts):
@@ -156,6 +158,16 @@ class Solver:
         self = cls.__new__(cls)
         self._init_csc(data, indices, indptr, **opts)
         return self
+
+    def __copy__(self):
+        """Return a solver that shares this factor and operator.
+
+        The copy has its own workspace, so another thread can solve with it
+        while this solver is in use. GPU-backed solvers cannot be copied.
+        """
+        copy = type(self).__new__(type(self))
+        copy._initialize(self._impl.__copy__(), self._keep_factor)
+        return copy
 
     def save(self, path):
         """Save the operator and retained factor to a portable binary file.

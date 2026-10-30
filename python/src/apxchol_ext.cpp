@@ -132,8 +132,8 @@ apxchol::solve_options parse_options(const py::dict& d) {
 }
 
 // Python marshalling around the common solver. Factorization, solves and
-// applications release the GIL once inputs are converted; the solver
-// serializes calls on one instance.
+// applications release the GIL once inputs are converted; a call made while
+// another thread uses the same solver raises RuntimeError.
 class Solver {
 public:
     Solver(py::array indptr, py::array indices, py::array data,
@@ -386,6 +386,7 @@ PYBIND11_MODULE(_apxchol, m) {
         .def(py::init<py::array, py::array, py::array, const py::dict&>(),
              py::arg("indptr"), py::arg("indices"), py::arg("data"),
              py::arg("options") = py::dict())
+        .def("__copy__", [](const Solver& self) { return Solver(self); })
         .def("save", &Solver::save, py::arg("path"))
         .def_static("load", &Solver::load, py::arg("path"),
                     py::arg("options") = py::dict())
