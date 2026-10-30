@@ -7,7 +7,11 @@ name = "apxchol"
 dynamic = ["version"]
 description = "Approximate-Cholesky preconditioner for graph-Laplacian / SDDM linear systems"
 readme = "README.md"
-license = "BSD-3-Clause"
+# Wheels also contain Eigen (MPL-2.0), pybind11 (BSD-3-Clause), the LLVM
+# OpenMP runtime (Apache-2.0 WITH LLVM-exception) and zlib's notice; Linux
+# wheels add the CUDA runtime (NVIDIA CUDA EULA) and CCCL. Each license text
+# is under the wheel's .dist-info/licenses.
+license = "BSD-3-Clause AND MPL-2.0 AND Apache-2.0 WITH LLVM-exception AND Zlib AND LicenseRef-NVIDIA-CUDA-EULA"
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.21"]
 authors = [
