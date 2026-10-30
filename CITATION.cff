@@ -18,7 +18,7 @@ authors:
     given-names: Rasmus
     affiliation: "ETH Zürich"
 repository-code: "https://github.com/AlgOptGroup/apxchol"
-license: BSD-4-Clause
+license: BSD-3-Clause
 keywords:
   - Laplacian solver
   - SDDM
