@@ -175,6 +175,17 @@ if (APXCHOL_BUILD_CLI)
     apxchol_cli_test(cli_output_success path5_sddm 0
         "solution written to" --backend cpu -o "${CMAKE_CURRENT_BINARY_DIR}/cli-solution.mtx")
 
+    # The timing tree is diagnostic output: only -v collects and prints it.
+    apxchol_cli_test(cli_verbose_prints_timings path5_sddm 0 "timings:" --backend cpu -v)
+    add_test(NAME cli_default_omits_timings COMMAND "${CMAKE_COMMAND}"
+        "-DCLI=$<TARGET_FILE:apxchol>"
+        "-DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/path5_sddm.mtx"
+        "-DEXPECT_STATUS=0" "-DEXPECT_OUTPUT=iterations:" "-DREJECT_OUTPUT=timings:"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/check_cli.cmake")
+    set_tests_properties(cli_default_omits_timings PROPERTIES
+        TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=4")
+    apxchol_cli_test(cli_no_timings_is_removed path5_sddm 109 "--no-timings" --no-timings)
+
     # An n x k RHS file is solved as one batch and written back as n x k; an
     # n x 1 file keeps the scalar path and its log.
     function(apxchol_cli_rhs_test name rhs status output solution)

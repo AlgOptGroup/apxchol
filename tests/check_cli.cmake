@@ -11,6 +11,9 @@ if (NOT status STREQUAL "${EXPECT_STATUS}" OR
     message(FATAL_ERROR
         "Expected exit ${EXPECT_STATUS} and '${EXPECT_OUTPUT}', got ${status}:\n${stdout}${stderr}")
 endif()
+if (DEFINED REJECT_OUTPUT AND "${stdout}${stderr}" MATCHES "${REJECT_OUTPUT}")
+    message(FATAL_ERROR "Unexpected '${REJECT_OUTPUT}' in output:\n${stdout}${stderr}")
+endif()
 if (DEFINED SOLUTION)
     file(READ "${SOLUTION}" solution)
     if (NOT solution MATCHES "${EXPECT_SOLUTION}")
