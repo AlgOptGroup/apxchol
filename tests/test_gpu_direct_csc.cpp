@@ -261,7 +261,7 @@ TEST(GpuDirectCsc, InitialArraysMatchHostBuilderIncludingRoundingAndSignedZero) 
                 [](double x) { return x > 0.0; }));
             EXPECT_EQ(got.initial.active, std::vector<std::uint8_t>(A.rows(), 1));
             for (const auto& edge : got.initial.incidences) {
-                const double canonical = static_cast<double>(static_cast<apxchol::detail::pool_value_t>(
+                const double canonical = static_cast<double>(static_cast<float>(
                     -A.coeff(std::max(edge.owner,edge.neighbor),std::min(edge.owner,edge.neighbor))));
                 EXPECT_EQ(std::bit_cast<std::uint64_t>(double(edge.weight)), std::bit_cast<std::uint64_t>(canonical));
             }

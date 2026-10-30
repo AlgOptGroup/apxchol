@@ -9,9 +9,9 @@ namespace apxchol::detail {
 // Input-only cycle eligibility. GKS remains the established law when pool
 // rounding or normalized probabilities cannot retain a positive cycle update.
 inline bool cycle_pool_eligible(double value) {
-    if (!(value >= 0) || !(value <= std::numeric_limits<pool_value_t>::max()))
+    if (!(value >= 0) || !(value <= std::numeric_limits<float>::max()))
         throw std::domain_error("cycle sampler: invalid or overflowing residual-pool edge");
-    return static_cast<pool_value_t>(value) > 0;
+    return static_cast<float>(value) > 0;
 }
 inline void require_pool_edge(double value) {
     if (!cycle_pool_eligible(value))

@@ -57,7 +57,7 @@ inline constexpr std::uint64_t gpu_round_shadow_pivot_seed(
 struct gpu_round_shadow_incidence {
     node_index owner = 0;
     node_index neighbor = 0;
-    pool_value_t weight = 0;
+    float weight = 0;
 };
 
 struct gpu_round_shadow_input {
@@ -393,7 +393,7 @@ gpu_round_shadow_ordered_residual_hash(
 }
 
 inline std::uint64_t gpu_round_shadow_pool_bits(double value) noexcept {
-    return std::bit_cast<std::uint32_t>(static_cast<pool_value_t>(value));
+    return std::bit_cast<std::uint32_t>(static_cast<float>(value));
 }
 
 inline std::uint64_t gpu_round_shadow_factor_bits(
@@ -492,7 +492,7 @@ inline gpu_round_shadow_input make_gpu_round_shadow_input(
         input.incidences.reserve(incidence_count);
         for (node_index owner = 0; owner < residual.n(); ++owner) {
             for (const auto& [neighbor, weight] : residual.neighbors(owner))
-                input.incidences.push_back({owner, neighbor, static_cast<pool_value_t>(weight)});
+                input.incidences.push_back({owner, neighbor, static_cast<float>(weight)});
         }
         if (input.incidences.size() != incidence_count)
             throw std::logic_error(
@@ -920,7 +920,7 @@ inline gpu_round_shadow_report reference_gpu_round_shadow(
     report.excess_updates = excess_updates.size();
 
     // graph is an append-only multigraph.  Every
-    // sampled fill is stored separately and narrowed separately to pool_value_t;
+    // sampled fill is stored separately and narrowed separately to float;
     // colliding endpoint pairs must not be coalesced in fp64 here.
     for (const auto& edge : fills)
         gpu_round_shadow_digest_add(

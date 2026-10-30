@@ -20,12 +20,11 @@
 #if defined(APXCHOL_USE_CUDA)
 namespace {
 using apxchol::node_index;
-using apxchol::detail::pool_value_t;
 using apxchol::detail::gpu_round_shadow_incidence;
 using apxchol::detail::gpu_round_shadow_input;
 using edge = gpu_round_shadow_incidence;
 constexpr std::size_t block_size = 16384;
-pool_value_t pool(double x) { return static_cast<pool_value_t>(x); }
+float pool(double x) { return static_cast<float>(x); }
 
 gpu_round_shadow_input make_input(node_index n, const std::vector<edge>& edges) {
     gpu_round_shadow_input result;
@@ -202,7 +201,7 @@ void check(const gpu_round_shadow_input& input, const Output& actual,
 #if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 TEST(GpuOwnedSparsify, CanonicalBucketsAndCoalescingMatchCpuLaw) {
     REQUIRE_OWNED_SPARSIFY_DEVICE();
-    const auto one_next = std::nextafter(pool_value_t{1}, pool_value_t{2});
+    const auto one_next = std::nextafter(float{1}, float{2});
     auto ties = make_input(3, {{1,2,one_next},{0,2,one_next},{0,1,1}});
     auto mixed = make_input(8, {{2,3,4},{0,2,0.25},{0,1,-0.0},{0,1,-0.0},
         {0,2,1},{0,2,0.5},{1,2,1},{0,3,2},{1,3,1},{4,5,4},{5,6,1},{4,6,0.0}});
@@ -301,8 +300,8 @@ TEST(GpuOwnedSparsify, EmptyAllKeptAndInvalidInputsPreserveOwnedContract) {
     check(empty, first, reference(empty, 42));
     auto invalid = original; invalid.active[1] = 0;
     EXPECT_THROW(apxchol::detail::gpu_sparsify_owned_residual_for_test(invalid,42), std::exception);
-    auto overflow = make_input(2, {{0,1,double(std::numeric_limits<pool_value_t>::max())},
-                                  {0,1,double(std::numeric_limits<pool_value_t>::max())}});
+    auto overflow = make_input(2, {{0,1,double(std::numeric_limits<float>::max())},
+                                  {0,1,double(std::numeric_limits<float>::max())}});
     EXPECT_THROW(apxchol::detail::gpu_sparsify_owned_residual_for_test(overflow,42), std::exception);
     RecordProperty("owned_sparsify_empty_all_kept_invalid", "pass");
 }
