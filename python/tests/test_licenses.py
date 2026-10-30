@@ -17,11 +17,13 @@ def test_wheel_ships_a_license_for_each_bundled_component():
     paths = [path.as_posix() for path in files]
     licenses = {path.split(".dist-info/licenses/", 1)[1]
                 for path in paths if ".dist-info/licenses/" in path}
-    assert {"LICENSE", "eigen/NOTICE", "pybind11/LICENSE", "zlib/LICENSE"} <= licenses
+    # Every term of the shared expression has its license text in every wheel.
+    assert {"LICENSE", "LICENSE.cuda.txt", "eigen/NOTICE", "pybind11/LICENSE",
+            "zlib/LICENSE"} <= licenses
     # Wheel repair vendors the OpenMP runtime next to the extension.
     if any("libomp" in path.rsplit("/", 1)[-1] for path in paths):
         assert "LICENSE.libomp.txt" in licenses
     # The CUDA runtime is linked statically into the extension.
     extension, = [f for f in files if f.name.startswith("_apxchol") and f.parent.name == "apxchol"]
     if b"cudaErrorInsufficientDriver" in extension.locate().read_bytes():
-        assert {"LICENSE.cuda.txt", "LICENSE.cccl.txt"} <= licenses
+        assert "LICENSE.cccl.txt" in licenses
