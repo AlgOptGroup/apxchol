@@ -90,7 +90,7 @@ __global__ void owned_sparsify_coalesce(
     if (!flags[i]) return;
     const double sum = residual_sparsify::coalesce(owned_sparsify_math{},
         owned_sparsify_input{sorted}, unsigned(i), unsigned(count)).value;
-    const pool_value_t stored = static_cast<pool_value_t>(sum);
+    const float stored = static_cast<float>(sum);
     if (!isfinite(sum) || !isfinite(double(stored))) atomicExch(error, 1U);
     folded[i] = {e.owner, e.neighbor, stored};
 }
@@ -179,7 +179,7 @@ __global__ void owned_sparsify_sample(const gpu_round_shadow_incidence* edges,
         importance_probability[i], lambda, backbone[i], unsigned(e.owner), unsigned(e.neighbor), seed);
     importance_probability[i] = sampled.probability;
     kept[i] = sampled.kept;
-    if (!sampled.valid || (sampled.kept && !isfinite(double(static_cast<pool_value_t>(sampled.value)))))
+    if (!sampled.valid || (sampled.kept && !isfinite(double(static_cast<float>(sampled.value)))))
         atomicExch(error, 1U);
 }
 
@@ -240,7 +240,7 @@ __global__ void owned_sparsify_expand(const gpu_round_shadow_incidence* edges,
     const auto i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
     if (i >= count) return;
     const auto j = ids[i]; auto e = edges[j];
-    if (!backbone[j]) e.weight = static_cast<pool_value_t>(
+    if (!backbone[j]) e.weight = static_cast<float>(
         __dmul_rn(e.weight, __ddiv_rn(1.0, probabilities[j])));
     output[2 * i] = e; output[2 * i + 1] = {e.neighbor, e.owner, e.weight};
 }

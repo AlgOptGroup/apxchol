@@ -96,11 +96,11 @@ gpu_round_shadow_input make_input(
         input.seeds.push_back(
             apxchol::detail::gpu_round_shadow_pivot_seed(run_seed, pivot));
 
-    std::vector<std::vector<std::pair<node_index, apxchol::detail::pool_value_t>>> adjacency(n);
+    std::vector<std::vector<std::pair<node_index, float>>> adjacency(n);
     for (const auto& edge : edges) {
         // A real directed-AoS graph narrows each edge once on insertion and
         // promotes it back to double when process_vertex reads the slab.
-        const auto stored = static_cast<apxchol::detail::pool_value_t>(edge.weight);
+        const auto stored = static_cast<float>(edge.weight);
         adjacency[edge.u].push_back({edge.v, stored});
         adjacency[edge.v].push_back({edge.u, stored});
     }
@@ -827,7 +827,7 @@ TEST(GpuRoundShadowReference, PoolStorageRetainsDoubleDegreeAccumulation) {
         const auto input = make_input(4, edges, pivots);
         double expected = 0.0;
         for (const auto& edge : edges)
-            expected += double(static_cast<apxchol::detail::pool_value_t>(edge.weight));
+            expected += double(static_cast<float>(edge.weight));
         const auto report = apxchol::detail::reference_gpu_round_shadow(input);
         ASSERT_EQ(report.pivots.size(), 1u);
         EXPECT_EQ(report.pivots[0].total_degree_bits,
@@ -3324,16 +3324,16 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
             for(node_index pivot=0;pivot<count;++pivot)for(unsigned j=0;j<degree[pivot];++j) {
                 // Profiles 3/4/5 cover representable subnormals, zero inputs,
                 // and zero-rounding output, for normal and oversized rows.
-                const auto boundary=profile==9 ? (pivot%3==0 ? apxchol::detail::pool_value_t{2} :
-                    std::nextafter(apxchol::detail::pool_value_t{2},pivot%3==1 ? apxchol::detail::pool_value_t{0} :
-                        std::numeric_limits<apxchol::detail::pool_value_t>::infinity())) : apxchol::detail::pool_value_t{1};
+                const auto boundary=profile==9 ? (pivot%3==0 ? float{2} :
+                    std::nextafter(float{2},pivot%3==1 ? float{0} :
+                        std::numeric_limits<float>::infinity())) : float{1};
                 const double weight = profile==0 || profile==8 ? 1. : profile==3 ? std::exp2(-70) :
-                    profile==4 ? (j==0 ? 0. : 1.) : profile==5 ? std::exp2(sizeof(apxchol::detail::pool_value_t)==4?-90:-600) :
+                    profile==4 ? (j==0 ? 0. : 1.) : profile==5 ? std::exp2(sizeof(float)==4?-90:-600) :
                     profile==7 ? 1.+double(j%17)/64. :
                     profile==9 ? (j==0 ? 1. : double(boundary)) :
                     profile==11 ? (j==0 ? std::exp2(-10) : 1.) :
                     profile==12 ? std::ldexp(1.+double((j*37)%127)/128.,-int((j*23)%61)) :
-                    profile==10 ? (j==0 ? std::numeric_limits<apxchol::detail::pool_value_t>::denorm_min() : std::exp2(sizeof(apxchol::detail::pool_value_t)==4?-70:-500)) :
+                    profile==10 ? (j==0 ? std::numeric_limits<float>::denorm_min() : std::exp2(sizeof(float)==4?-70:-500)) :
                     std::exp2(int(j%11)-5);
                 stars[pivot].push_back({n,weight});
                 if(profile==2) {edges.push_back({pivot,n,.25*weight});edges.push_back({pivot,n,.75*weight});}
@@ -3347,7 +3347,7 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
                 apxchol::tree_elimination{.sampler=numerical_fallback?apxchol::clique_sampler::gks:sampler}.sample_clique(stars[pivot],D,
                     apxchol::detail::gpu_round_shadow_pivot_seed(run_seed,pivot),apxchol::edge_emitter(fill));
                 for(auto edge:fill)expected.emplace_back(std::min(edge.u,edge.v),std::max(edge.u,edge.v),
-                    static_cast<double>(static_cast<apxchol::detail::pool_value_t>(edge.w)));
+                    static_cast<double>(static_cast<float>(edge.w)));
             }
             std::sort(expected.begin(),expected.end());
             std::vector<std::tuple<node_index,node_index,double>> previous;
@@ -3387,9 +3387,9 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
                     if(v<u)got.emplace_back(v,u,static_cast<double>(w));
                 }
                 std::sort(got.begin(),got.end());ASSERT_EQ(got.size(),expected.size());
-                if (profile==3 && sizeof(apxchol::detail::pool_value_t)==4) {
+                if (profile==3 && sizeof(float)==4) {
                     for (const auto& edge:got)
-                        EXPECT_EQ(std::fpclassify(static_cast<apxchol::detail::pool_value_t>(std::get<2>(edge))),FP_SUBNORMAL);
+                        EXPECT_EQ(std::fpclassify(static_cast<float>(std::get<2>(edge))),FP_SUBNORMAL);
                 }
                 std::vector<node_index> owner(n),rank(n);
                 for(node_index pivot=0;pivot<count;++pivot)
@@ -3410,7 +3410,7 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
                     EXPECT_EQ(std::get<0>(got[i]),std::get<0>(expected[i]));
                     EXPECT_EQ(std::get<1>(got[i]),std::get<1>(expected[i]));
                     EXPECT_NEAR(std::get<2>(got[i]),std::get<2>(expected[i]),
-                        8*std::numeric_limits<apxchol::detail::pool_value_t>::epsilon()*std::get<2>(expected[i]));
+                        8*std::numeric_limits<float>::epsilon()*std::get<2>(expected[i]));
                 }
                 // The device emission is item-parallel and its folds need not reproduce the
                 // scalar cut, so verify the law rather than the realization for every sampled
@@ -3461,10 +3461,10 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
                             ++core_degree[i];++core_degree[j];core.emplace_back(i,j);
                             reference=ai*aj/D*(h-1)*.5L;
                         }
-                        const auto rounded=static_cast<apxchol::detail::pool_value_t>(reference);
-                        const double tolerance=(8*std::numeric_limits<apxchol::detail::pool_value_t>::epsilon()+
+                        const auto rounded=static_cast<float>(reference);
+                        const double tolerance=(8*std::numeric_limits<float>::epsilon()+
                             128*std::numeric_limits<double>::epsilon()*(d+1))*std::abs(double(rounded))+
-                            2*double(std::numeric_limits<apxchol::detail::pool_value_t>::denorm_min());
+                            2*double(std::numeric_limits<float>::denorm_min());
                         EXPECT_NEAR(w,double(rounded),tolerance);
                     }
                     ASSERT_EQ(core.size(),h);

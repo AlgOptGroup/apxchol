@@ -18,7 +18,7 @@ public:
                 if (it.row() == col) diagonal = it.value();
                 else degree -= it.value();
                 if (it.row() <= col) continue;
-                const double weight = static_cast<apxchol::detail::pool_value_t>(-it.value());
+                const double weight = static_cast<float>(-it.value());
                 adjacent_[col].push_back({static_cast<apxchol::node_index>(it.row()), weight});
                 adjacent_[it.row()].push_back({static_cast<apxchol::node_index>(col), weight});
                 ++edges_;
