@@ -21,14 +21,21 @@ Apple M1 Max (Metal) <performance-mac>
 ## Headline results
 
 ```{note}
-The 1.0 results are being measured. The charts below will show one-RHS time
-(setup plus solve) for each competitor relative to apxchol on every matrix.
+Each chart shows one-RHS time (setup plus solve) for each competitor relative
+to apxchol: dots are matrices, bars are medians, and values above 1 mean
+apxchol was faster. Euler and Apple M1 Max results for 1.0 are being measured.
 ```
 
 - **x86_64 CPU (Euler):** chart pending.
 - **CUDA (Euler):** chart pending.
-- **ARM64 CPU (Daint):** chart pending.
 - **Metal (Apple M1 Max):** chart pending.
+
+### ARM64 CPU (Daint)
+
+![Daint CPU: competitor time relative to apxchol](performance/daint-cpu.svg)
+
+Recorded in September 2026 under older benchmark rules; see the [Daint page](performance-daint.md) for every
+cell and the differences.
 
 ## How results are measured
 
