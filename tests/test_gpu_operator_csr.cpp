@@ -825,7 +825,7 @@ TEST(GpuSolveHonesty, ZeroIterationSessionReportsRelativeResidualOnReuse) {
     Eigen::SparseMatrix<double> A(n, n);
     A.setFromTriplets(entries.begin(), entries.end());
     apxchol::solve_result result;
-    const apxchol::solver solver(A, {.backend = apxchol::solve_backend::gpu}, &result.timings);
+    apxchol::solver solver(A, {.backend = apxchol::solve_backend::gpu}, &result.timings);
     ASSERT_TRUE(session(solver).trsv().adopted_device_factor());
     EXPECT_THROW(solver.solve(Eigen::VectorXd::Zero(n - 1), result, 1e-8, 0),
                  std::invalid_argument);

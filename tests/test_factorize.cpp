@@ -1873,7 +1873,7 @@ TEST(FactorAdoption, PreservesCustomEntriesAndRoundMetadata) {
         for (int col = 0; col < 3; ++col)
             A(row, col) = permuted(factor.perm[row], factor.perm[col]);
     const Eigen::SparseMatrix<double> sparse = A.sparseView();
-    const apxchol::solver owner(sparse, factor, {.keep_factor = true,
+    apxchol::solver owner(sparse, factor, {.keep_factor = true,
         .factor_opts = {.drop_tolerance = 0}, .backend = apxchol::solve_backend::cpu});
     EXPECT_EQ(owner.factor().L.inner_, factor.L.inner_);
     EXPECT_EQ(owner.factor().L.vals_, factor.L.vals_);
@@ -1890,8 +1890,8 @@ TEST(FactorAdoption, GroundedColumnMayBeEmptyOrZero) {
         factor.L.n_ = 1;
         factor.L.outer_ = {0, apxchol::edge_index(!empty)};
         if (!empty) { factor.L.inner_ = {0}; factor.L.vals_ = {0}; }
-        const apxchol::solver owner(Eigen::SparseMatrix<double>(1, 1), std::move(factor),
-                                    {.backend = apxchol::solve_backend::cpu});
+        apxchol::solver owner(Eigen::SparseMatrix<double>(1, 1), std::move(factor),
+                              {.backend = apxchol::solve_backend::cpu});
         const Eigen::VectorXd result = owner.apply(Eigen::VectorXd::Zero(1));
         EXPECT_TRUE(result.isZero());
     }

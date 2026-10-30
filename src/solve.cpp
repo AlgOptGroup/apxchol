@@ -1366,7 +1366,7 @@ solver& solver::operator=(const solver& other) {
 }
 
 void solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,
-                   int max_iter, const Eigen::VectorXd* x0) const {
+                   int max_iter, const Eigen::VectorXd* x0) {
     impl_->resolve(tol, max_iter);
     if (b.size() != rows()) throw std::invalid_argument("solver::solve: RHS length mismatch");
     if (&b == &result.x || x0 == &result.x)
@@ -1378,14 +1378,14 @@ void solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,
 }
 
 solve_result solver::solve(const Eigen::VectorXd& b, double tol, int max_iter,
-                           const Eigen::VectorXd* x0) const {
+                           const Eigen::VectorXd* x0) {
     solve_result result;
     solve(b, result, tol, max_iter, x0);
     return result;
 }
 
 solve_result solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
-                           double tol, int max_iter, const Eigen::VectorXd* x0) const {
+                           double tol, int max_iter, const Eigen::VectorXd* x0) {
     impl_->resolve(tol, max_iter);
     solve_result result;
     const const_matrix_view initial(x0 ? *x0 : b);
@@ -1394,7 +1394,7 @@ solve_result solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd>
 }
 
 batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X, double tol, int max_iter,
-                                       const const_matrix_view *X0) const {
+                                       const const_matrix_view *X0) {
     impl_->resolve(tol, max_iter);
     batch_solve_result result;
     result.columns.resize(B.cols());
@@ -1403,14 +1403,14 @@ batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X, doubl
     return result;
 }
 
-Eigen::VectorXd solver::apply(const Eigen::VectorXd& r) const {
+Eigen::VectorXd solver::apply(const Eigen::VectorXd& r) {
     if (r.size() != rows()) throw std::invalid_argument("solver::apply: RHS length mismatch");
     Eigen::VectorXd z(rows());
     impl_->apply(r, z);
     return z;
 }
 
-void solver::apply(const_matrix_view R, matrix_view Z) const {
+void solver::apply(const_matrix_view R, matrix_view Z) {
     impl_->apply(R, Z);
 }
 
@@ -1432,7 +1432,7 @@ solve_result solve(const Eigen::SparseMatrix<double>& L, const Eigen::VectorXd& 
                    const solve_options& opts) {
     ensure_eigen_parallel();
     solve_result result;
-    const solver owner(L, opts,
+    solver owner(L, opts,
         opts.collect_timings ? &result.timings : nullptr);
     owner.solve(b, result);
     return result;
