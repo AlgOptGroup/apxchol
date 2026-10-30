@@ -157,7 +157,7 @@ public:
     using StorageIndex = int;
     enum { ColsAtCompileTime = Eigen::Dynamic, MaxColsAtCompileTime = Eigen::Dynamic };
 
-    void attach(const apxchol::solver& s) { solver_ = &s; m_isInitialized = true; }
+    void attach(apxchol::solver& s) { solver_ = &s; m_isInitialized = true; }
 
     // The attached solver already holds the factor.
     template<class Matrix> apxchol_preconditioner& analyzePattern(const Matrix&) { return *this; }
@@ -172,7 +172,7 @@ public:
     void _solve_impl(const Rhs& b, Dest& x) const { x = solver_->apply(b); }
 
 private:
-    const apxchol::solver* solver_ = nullptr;
+    apxchol::solver* solver_ = nullptr;
 };
 
 apxchol::solver s(A);

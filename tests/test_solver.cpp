@@ -45,7 +45,7 @@ public:
     using StorageIndex = int;
     enum { ColsAtCompileTime = Eigen::Dynamic, MaxColsAtCompileTime = Eigen::Dynamic };
 
-    void attach(const apxchol::solver& s) { solver_ = &s; m_isInitialized = true; }
+    void attach(apxchol::solver& s) { solver_ = &s; m_isInitialized = true; }
 
     // The attached solver already holds the factor.
     template<class Matrix> eigen_preconditioner& analyzePattern(const Matrix&) { return *this; }
@@ -60,7 +60,7 @@ public:
     void _solve_impl(const Rhs& b, Dest& x) const { x = solver_->apply(b); }
 
 private:
-    const apxchol::solver* solver_ = nullptr;
+    apxchol::solver* solver_ = nullptr;
 };
 
 Sparse operator_matrix(int n = 64) {
@@ -141,7 +141,7 @@ TEST(Solver, EigenConjugateGradientUsesPreconditioner) {
         Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
         if (laplacian) rhs.array() -= rhs.mean();
 
-        const apxchol::solver owner(matrix, options);
+        apxchol::solver owner(matrix, options);
         Eigen::ConjugateGradient<Sparse, Eigen::Lower, eigen_preconditioner> cg;
         cg.preconditioner().attach(owner);
         cg.setTolerance(options.tol);
