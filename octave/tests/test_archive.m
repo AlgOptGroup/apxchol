@@ -98,8 +98,9 @@ function test_archive()
                'apxchol:badInput', 'null');
   fprintf('ok non-ASCII archive filename round trip and NUL rejection\n');
   before = read_bytes(path);
-  expect_error(@() retained.save(path), 'apxchol:error', 'exists');
-  assert(isequal(read_bytes(path), before), 'existing archive changed after rejected save');
+  retained.save(path);
+  assert(isequal(read_bytes(path), before), 'saving the same solver again changed the archive');
+  assert(exist([path '.tmp'], 'file') == 0, 'temporary archive file was left behind');
   no_factor = apxchol_solver(speye(2));
   expect_error(@() no_factor.save(fullfile(directory, 'discarded.apxchol')), ...
                'apxchol:badInput', 'released');

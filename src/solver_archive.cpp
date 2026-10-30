@@ -10,7 +10,6 @@
 #include <cstring>
 #include <limits>
 #include <memory>
-#include <random>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -31,34 +30,33 @@ void check_path(const std::filesystem::path& path) {
         invalid("path contains a null character");
 }
 
+// The archive is written to <destination>.tmp and renamed into place, so readers
+// see either the old file or the complete new one. O_EXCL makes a second save
+// to the same path fail instead of interleaving writes, and mode 0666 applies
+// the caller's umask.
 struct temporary_file {
     std::string name;
     int fd = -1;
-    // open() with mode 0666 applies the caller's umask, as for any new file;
-    // mkstemp would always create 0600.
-    explicit temporary_file(const std::filesystem::path& destination) {
-        if (std::filesystem::exists(std::filesystem::symlink_status(destination)))
-            throw std::runtime_error("solver archive: destination already exists");
-        std::random_device random;
-        for (int attempt = 0; attempt < 100 && fd < 0; ++attempt) {
-            char suffix[17];
-            std::snprintf(suffix, sizeof suffix, "%08x%08x", random(), random());
-            name = (destination.parent_path() / (std::string(".apxchol-") + suffix)).string();
-            fd = ::open(name.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
-            if (fd < 0 && errno != EEXIST)
-                throw std::system_error(errno, std::generic_category(), "create archive temporary");
-        }
-        if (fd < 0) throw std::system_error(EEXIST, std::generic_category(), "create archive temporary");
+    bool published = false;
+    explicit temporary_file(const std::filesystem::path& destination)
+        : name(destination.string() + ".tmp") {
+        fd = ::open(name.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+        if (fd >= 0) return;
+        if (errno == EEXIST)
+            throw std::runtime_error("solver archive: " + name + " already exists; another save "
+                                     "to this path is running, or an interrupted save left it "
+                                     "behind and it must be removed");
+        throw std::system_error(errno, std::generic_category(), "create " + name);
     }
     std::FILE* open() {
         auto* file = fdopen(fd, "wb+");
-        if (!file) throw std::system_error(errno, std::generic_category(), "open archive temporary");
+        if (!file) throw std::system_error(errno, std::generic_category(), "open " + name);
         fd = -1;
         return file;
     }
     ~temporary_file() {
         if (fd >= 0) (void)close(fd);
-        (void)unlink(name.c_str());
+        if (!published) (void)unlink(name.c_str());
     }
     temporary_file(const temporary_file&) = delete;
     temporary_file& operator=(const temporary_file&) = delete;
@@ -182,13 +180,13 @@ public:
         set<std::uint32_t>(prefix_.data() + 20, checksum(0, prefix_.data(), prefix_.size()));
         seek(file_.get(), 0);
         write_exact(file_.get(), prefix_.data(), prefix_.size());
+        if (std::fflush(file_.get()) != 0 || ::fsync(fileno(file_.get())) != 0)
+            throw std::system_error(errno, std::generic_category(), "flush solver archive");
         if (std::fclose(file_.release()) != 0)
             throw std::system_error(errno, std::generic_category(), "finish solver archive");
-        std::error_code error;
-        std::filesystem::create_hard_link(temporary_.name, destination_, error);
-        if (error == std::errc::file_exists)
-            throw std::runtime_error("solver archive: destination already exists");
-        if (error) throw std::system_error(error, "publish solver archive");
+        if (std::rename(temporary_.name.c_str(), destination_.c_str()) != 0)
+            throw std::system_error(errno, std::generic_category(), "publish solver archive");
+        temporary_.published = true;
     }
 };
 

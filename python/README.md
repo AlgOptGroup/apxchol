@@ -105,8 +105,12 @@ result = solver.solve(b2, x0=first.x)
 The [native reference](https://algoptgroup.github.io/apxchol/docs/reference/cpp.html#solve-defaults) shows the
 compiled tolerance and iteration defaults.
 
-Overlapping inputs are copied before writing `out`. Use separate solver
-instances for concurrent calls; each solver shares mutable workspace.
+Overlapping inputs are copied before writing `out`. Factorization, `solve`
+and `apply` release the GIL while they run native code; reading the input
+matrix holds it. A call made while another thread uses the same solver raises
+`RuntimeError`. For CPU solvers, give each thread `copy.copy(solver)`, which
+shares the factor and allocates only new workspace. GPU-backed solvers cannot
+be copied; pass all right-hand sides to one `solve(B)`.
 
 ## Save and reload
 
@@ -119,8 +123,8 @@ restored = apxchol.Solver.load("system.apxchol", backend="cpu")
 result = restored.solve(b)
 ```
 
-Saving requires `keep_factor=True`, the reusable solver's default. It creates
-a new file and refuses to replace an existing one. The archive stores the
+Saving requires `keep_factor=True`, the reusable solver's default. It replaces
+an existing file, writing to `<path>.tmp` first and renaming it into place. The archive stores the
 original operator and FP32 factor; RHSs, initial guesses and device workspace
 are not saved. Loading adopts the factor without repeating factorization.
 
