@@ -61,7 +61,7 @@ Unspecified fields use the C++ defaults. Unknown fields are rejected.
 | `factor_storage` | `auto`, `float16` or `float32`; affects triangular-solve storage |
 | `cpu_schedule` | CPU triangular-solve scheduling: `auto` or `levels` |
 | `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
-| `regularization` | Minimum diagonal excess of the preconditioner, as a fraction of each diagonal; rows that already exceed it are unchanged, and `A` is not modified; `0` disables it |
+| `regularization` | Minimum diagonal excess of the preconditioner, as a fraction of each diagonal after lumping; `A` is not modified; `0` disables it |
 | `lump_max_mass` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
 | `keep_factor` | Retain canonical FP32 factor values for saving; off by default |
 | `verbose` | Logical flag for setup diagnostics; off by default |
