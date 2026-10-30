@@ -1,5 +1,8 @@
 # Extending the solver
 
+These extension interfaces are experimental in 1.x: they may change in minor
+releases, and each change is noted in the [changelog](../CHANGELOG.md).
+
 Factorization alternates between selecting an independent set of vertices and
 replacing each selected star by sampled Schur-complement edges. These are the
 public **partitioner** and **eliminator** template seams. The resulting factor

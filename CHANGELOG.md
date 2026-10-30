@@ -21,6 +21,7 @@
 - Breaking: `APXCHOL_INDEX_WIDTH=32|64_EDGES|64` replaces the `APXCHOL_64BIT_*_INDICES` build options.
 - Breaking: bindings no longer accept an adjacency matrix as if it were the operator; form the Laplacian with `apxchol.laplacian(Adj)` or `apxchol_laplacian(Adj)`. The CLI detects adjacency `.mtx` input and builds its Laplacian; `--input-kind` overrides the detection. Previously both solved adjacency input as the operator and failed without a clear error.
 - The v1 API compatibility scope is documented.
+- The partitioner and eliminator extension interfaces are experimental in 1.x and may change in minor releases.
 - Python wheels for CPython 3.11+ on Linux and macOS arm64 (GPU wheels select the backend at runtime), standalone CLI archives, and MATLAB/Octave batched solves with save/load.
 
 ### Benchmarks
