@@ -1,10 +1,9 @@
 // Metal factor preparation, PCG and command submission.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
-#include "apxchol/solver/metal_solver.h"
+#include "apxchol/solver/detail/metal_route.h"
 #include "apxchol/solver/detail/metal_host.h"
 #include "apxchol/solver/detail/factor_validation.h"
-#include "apxchol/solver/detail/thread_budget.h"
 #include "apxchol/solver/detail/device_memory_error.h"
 #include "apxchol/solver/detail/gpu_pcg.h"
 #include "apxchol/solver/detail/pcg_restart.h"
@@ -328,7 +327,7 @@ namespace ls = detail::metal_schedule;
 namespace dm = detail::metal;
 using namespace dm;
 
-void print_banner(const metal_solver::statistics& st, bool factor_fp16) {
+void print_banner(const detail::metal_route::statistics& st, bool factor_fp16) {
     std::fprintf(stderr,
                  "[apxchol] Metal PCG on %s: %s factor, "
                  "double-float Krylov vectors, %s operator\n",
@@ -338,9 +337,7 @@ void print_banner(const metal_solver::statistics& st, bool factor_fp16) {
 
 }  // namespace
 
-bool metal_solver::available() noexcept { return dm::status().ok; }
-
-struct metal_solver::impl {
+struct detail::metal_route::impl {
     solve_options opts;
     factorization F;
     std::size_t n = 0;
@@ -445,15 +442,7 @@ struct metal_solver::impl {
     }
 
     explicit impl(const solve_options& options) : opts(options) {
-        detail::validate_solve_options(opts);
-        if (opts.backend == solve_backend::cpu)
-            throw std::invalid_argument("metal_solver cannot execute an explicit CPU request");
-        if (opts.factor_opts.cpu_schedule != cpu_sptrsv_schedule::automatic)
-            throw std::invalid_argument("Metal cannot use a CPU triangular-solve schedule");
         factor_fp16 = detail::resolve_fp16_storage(opts.factor_opts.factor_storage, false);
-        if (!metal_solver::available())
-            throw std::runtime_error("apxchol::metal_solver: the Metal backend is unavailable: " +
-                                     dm::status().error);
     }
 
     void setup(const Eigen::SparseMatrix<double>& A, checkpoint* cp,
@@ -506,10 +495,10 @@ struct metal_solver::impl {
 
     template<unsigned Columns>
     void solve_columns(const_matrix_view B, matrix_view X, std::span<solve_result> results,
-                       checkpoint& cp, double tol, int max_iter, const const_matrix_view* X0);
+                       checkpoint* cp, double tol, int max_iter, const const_matrix_view* X0);
     template<unsigned Columns>
     std::array<bool, Columns> solve_columns_once(const_matrix_view B, matrix_view X,
-                       std::span<solve_result> results, checkpoint& cp, double tol,
+                       std::span<solve_result> results, checkpoint* cp, double tol,
                        int max_iter, const const_matrix_view* X0);
 
     // x follows the retained operator's ordering; y is factor-permuted.
@@ -542,13 +531,9 @@ struct metal_solver::impl {
     void centre(Vector& x) const { x.array() -= x.mean(); }
 };
 
-void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint* cp,
-                               detail::metal_setup::resident_factor* resident) {
-    if (A.rows() != A.cols()) throw std::invalid_argument("metal_solver: the operator must be square");
+void detail::metal_route::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint* cp,
+                                      detail::metal_setup::resident_factor* resident) {
     n = static_cast<std::size_t>(A.rows());
-    if (n == 0) throw std::invalid_argument("metal_solver: empty operator");
-    if (static_cast<std::size_t>(F.L.rows()) != n || F.perm.size() != n)
-        throw std::invalid_argument("metal_solver: factorization dimension mismatch");
     // Eigen's int StorageIndex keeps n and the operator's stored count within
     // the device's 32-bit indices; the factor and the two-triangle permuted
     // operator are checked here.
@@ -556,7 +541,7 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     laplacian = !F.sddm;
     const auto m = static_cast<std::uint32_t>(laplacian ? n - 1 : n);
     if (F.L.outerIndexPtr()[m] > static_cast<edge_index>(std::numeric_limits<int>::max()))
-        throw std::length_error("metal_solver: the factor exceeds the device's 32-bit offsets");
+        throw std::length_error("Metal: the factor exceeds the device's 32-bit offsets");
 
     if (cp) { cp->descend("setup"); cp->tick(); }
     detail::gpu_factor_prep::csr_int<float> backward;
@@ -598,7 +583,7 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
         const auto& src = A.isCompressed() ? A : compressed;
         // Both triangles are stored: up to twice the stored entries of one triangle.
         if (src.nonZeros() > std::numeric_limits<int>::max() / 2)
-            throw std::length_error("metal_solver: operators with 2^30 or more stored entries exceed the "
+            throw std::length_error("Metal: operators with 2^30 or more stored entries exceed the "
                                     "device's 32-bit offsets");
         op = detail::build_permuted_full_symmetric_csr(src, F.perm);
         int max_row = 0;
@@ -629,7 +614,7 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
             if (!exact) lo[p] = d.lo;
         }
         if (!in_range)
-            throw std::domain_error("metal_solver: an operator value is non-finite or outside [2^-100, 2^100]");
+            throw std::domain_error("Metal: an operator value is non-finite or outside [2^-100, 2^100]");
         // A fixed positive PCG preconditioner scale preserves x while balancing
         // rho and curvature exponents; diagonal extremes include mixed scales.
         arguments.preconditioner_scale = 1;
@@ -654,7 +639,7 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     if (opts.factor_opts.verbose) print_banner(stats, factor_fp16);
 }
 
-void metal_solver::impl::prepare_device(detail::gpu_factor_prep::csr_int<float> backward,
+void detail::metal_route::impl::prepare_device(detail::gpu_factor_prep::csr_int<float> backward,
                                        const std::vector<float>& scales,
                                        const std::vector<float>& hi, const std::vector<float>& lo,
                                        unsigned m, detail::metal_setup::resident_factor* resident) {
@@ -714,7 +699,7 @@ void metal_solver::impl::prepare_device(detail::gpu_factor_prep::csr_int<float> 
     pipes = &ctx.pipes[0];
 }
 
-void metal_solver::impl::allocate_workspace(unsigned count) {
+void detail::metal_route::impl::allocate_workspace(unsigned count) {
     const auto tag_rows = std::max({n, std::size_t(fwd.tag_count), std::size_t(bwd.tag_count),
                                    std::size_t(lane_fwd.tag_count), std::size_t(lane_bwd.tag_count)});
     if (tag_rows > std::numeric_limits<unsigned>::max() / count)
@@ -739,61 +724,43 @@ void metal_solver::impl::allocate_workspace(unsigned count) {
     });
 }
 
-metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
-                           checkpoint* cp)
-    : metal_solver(A, opts, cp, false) {}
-
-metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
-                           checkpoint* cp, bool input_prechecked) {
-    const detail::thread_budget threads(opts.num_threads);
+detail::metal_route::metal_route(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
+                                 checkpoint* cp, factorization* F) {
     impl_.reset(new impl(opts));
-    if (!opts.collect_timings) cp = nullptr;
-    auto resident = detail::metal_setup::factorize(shared().device, A, opts, cp, input_prechecked);
+    if (F) {
+        impl_->F = std::move(*F);
+        impl_->setup(A, cp);
+        return;
+    }
+    // Automatic routing has already checked this same input.
+    auto resident = detail::metal_setup::factorize(shared().device, A, opts, cp,
+                                                   opts.backend == solve_backend::automatic);
     impl_->F = std::move(resident.factor);
     impl_->setup(A, cp, &resident);
 }
 
-metal_solver::metal_solver(const Eigen::SparseMatrix<double>& A, factorization F,
-                           const solve_options& opts, checkpoint* cp) {
-    detail::validate_adopted_factor(F);
-    const detail::thread_budget threads(opts.num_threads);
-    impl_.reset(new impl(opts));
-    if (!opts.collect_timings) cp = nullptr;
-    impl_->F = std::move(F);
-    impl_->setup(A, cp);
-}
-
-void metal_solver::impl_deleter::operator()(impl* owner) const {
+void detail::metal_route::impl_deleter::operator()(impl* owner) const {
     @autoreleasepool { delete owner; }
 }
 
-metal_solver::~metal_solver() = default;
-metal_solver::metal_solver(metal_solver&&) noexcept = default;
-metal_solver& metal_solver::operator=(metal_solver&&) noexcept = default;
+detail::metal_route::~metal_route() = default;
+detail::metal_route::metal_route(metal_route&&) noexcept = default;
+detail::metal_route& detail::metal_route::operator=(metal_route&&) noexcept = default;
 
-Eigen::SparseMatrix<double> detail::solver_archive_access::original_operator(const metal_solver& owner) {
-    const auto& data = *owner.impl_;
+Eigen::SparseMatrix<double> detail::metal_route::original_operator() const {
+    const auto& data = *impl_;
     if (data.original_operator.rows()) return data.original_operator;
     return archive_operator_csc(static_cast<int>(data.n), data.op.ptr.data(),
         data.op.idx.get(), data.op.vals.get(), data.F.perm);
 }
 
-const factorization& metal_solver::factor() const { return impl_->F; }
-metal_solver::statistics metal_solver::stats() const { return impl_->stats; }
-Eigen::Index metal_solver::rows() const { return static_cast<Eigen::Index>(impl_->n); }
-
-solve_result metal_solver::solve(const Eigen::VectorXd& b, double tol, int max_iter,
-                                 const Eigen::VectorXd* x0) const {
-    solve_result result;
-    solve(b, result, tol, max_iter, x0);
-    return result;
-}
+const factorization& detail::metal_route::factor() const { return impl_->F; }
+detail::metal_route::statistics detail::metal_route::stats() const { return impl_->stats; }
 
 template<unsigned Columns>
-void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
-                                       std::span<solve_result> results, checkpoint& cp,
+void detail::metal_route::impl::solve_columns(const_matrix_view B, matrix_view X,
+                                       std::span<solve_result> results, checkpoint* cp,
                                        double tol, int max_iter, const const_matrix_view* X0) {
-    detail::resolve_solve_parameters(tol, max_iter, opts.tol, opts.max_iter);
     auto stopped = solve_columns_once<Columns>(B, X, results, cp, tol, max_iter, X0);
     for (unsigned q = 0; q < Columns; ++q) {
         auto& result = results[q];
@@ -820,11 +787,11 @@ void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
 }
 
 template<unsigned Columns>
-std::array<bool, Columns> metal_solver::impl::solve_columns_once(
+std::array<bool, Columns> detail::metal_route::impl::solve_columns_once(
                                        const_matrix_view B, matrix_view X,
-                                       std::span<solve_result> results, checkpoint& cp,
+                                       std::span<solve_result> results, checkpoint* cp,
                                        double tol, int max_iter, const const_matrix_view* X0) {
-    if (opts.collect_timings) { cp.descend("pcg"); cp.tick(); }
+    if (cp) { cp->descend("pcg"); cp->tick(); }
     select_columns(Columns);
     auto* states = static_cast<solve_state*>([state_buffer contents]);
     std::fill_n(states, Columns, solve_state{});
@@ -880,9 +847,9 @@ std::array<bool, Columns> metal_solver::impl::solve_columns_once(
         ran[q] = active = true;
     }
     if (active) {
-        if (opts.collect_timings) cp("pack");
+        if (cp) (*cp)("pack");
         detail::gpu_pcg::solve(*this, static_cast<std::uint32_t>(max_iter), 4);
-        if (opts.collect_timings) cp("gpu_pcg_loop");
+        if (cp) (*cp)("gpu_pcg_loop");
     }
     bool checked = false;
     for (unsigned q = 0; q < Columns; ++q) {
@@ -913,65 +880,43 @@ std::array<bool, Columns> metal_solver::impl::solve_columns_once(
         }
     }
     for (auto& result : results) result.converged = result.residual < tol;
-    if (opts.collect_timings) {
-        if (checked) cp("exit_check");
-        cp.ascend();
+    if (cp) {
+        if (checked) (*cp)("exit_check");
+        cp->ascend();
     }
     std::array<bool, Columns> stopped{};
     for (unsigned q = 0; q < Columns; ++q) stopped[q] = states[q].tolerance_stop != 0;
     return stopped;
 }
 
-void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,
-                         int max_iter, const Eigen::VectorXd* x0) const {
-    const detail::thread_budget threads(impl_->opts.num_threads);
-    if (b.size() != rows()) throw std::invalid_argument("metal_solver::solve: RHS length mismatch");
-    if (x0 != nullptr && x0->size() != rows())
-        throw std::invalid_argument("metal_solver::solve: x0 length mismatch");
-    if (&b == &result.x || x0 == &result.x)
-        throw std::invalid_argument("solver: output must not overlap RHS or warm start");
-    if (!b.allFinite() || (x0 != nullptr && !x0->allFinite()))
-        throw std::invalid_argument("metal_solver::solve: non-finite RHS or initial guess");
-    detail::resolve_solve_parameters(tol, max_iter, impl_->opts.tol, impl_->opts.max_iter);
-    result.x.resize(rows());
-    const const_matrix_view initial(x0 ? *x0 : b);
-    impl_->solve_columns<1>(b, result.x, {&result, 1}, result.timings,
-                           tol, max_iter, x0 ? &initial : nullptr);
-}
-
-batch_solve_result metal_solver::solve_panel(const_matrix_view B, matrix_view X, double tol,
-                                            int max_iter, const const_matrix_view* X0) const {
-    const detail::thread_budget threads(impl_->opts.num_threads);
-    detail::check_matrix_views(B, X, rows(), X0);
-    if (B.cols() != 2 && B.cols() != 4)
-        throw std::invalid_argument("metal_solver::solve_panel requires two or four RHS columns");
-    if (!B.allFinite() || (X0 && !X0->allFinite()))
-        throw std::invalid_argument("metal_solver::solve_panel: non-finite RHS or initial guess");
-    batch_solve_result result;
-    result.columns.resize(B.cols());
+void detail::metal_route::solve_columns(const_matrix_view B, matrix_view X,
+                                        const const_matrix_view* X0,
+                                        std::span<solve_result> results, checkpoint* timings,
+                                        double tol, int max_iter) const {
     if (B.cols() == 4)
-        impl_->solve_columns<4>(B, X, result.columns, result.timings, tol, max_iter, X0);
+        impl_->solve_columns<4>(B, X, results, timings, tol, max_iter, X0);
+    else if (B.cols() == 2)
+        impl_->solve_columns<2>(B, X, results, timings, tol, max_iter, X0);
     else
-        impl_->solve_columns<2>(B, X, result.columns, result.timings, tol, max_iter, X0);
-    return result;
+        impl_->solve_columns<1>(B, X, results, timings, tol, max_iter, X0);
 }
 
-factor_storage_type metal_solver::factor_storage() const {
+factor_storage_type detail::metal_route::factor_storage() const {
     return impl_->factor_fp16 ? factor_storage_type::fp16 : factor_storage_type::fp32;
 }
 
-Eigen::VectorXd metal_solver::apply(const Eigen::VectorXd& r) const {
-    const detail::thread_budget threads(impl_->opts.num_threads);
+void detail::metal_route::apply_columns(const_matrix_view R, matrix_view Z) const {
     impl& s = *impl_;
-    if (r.size() != static_cast<Eigen::Index>(s.n))
-        throw std::invalid_argument("metal_solver::apply: r length mismatch");
-    if (!r.allFinite()) throw std::invalid_argument("metal_solver::apply: r contains a non-finite value");
+    const Eigen::VectorXd r = R.col(0);
     s.select_columns(1);
     const auto& perm = s.F.perm;
     const double mean = s.laplacian ? r.mean() : 0;
     const double max_abs = (r.array() - mean).abs().maxCoeff();
     Eigen::VectorXd z = Eigen::VectorXd::Zero(r.size());
-    if (max_abs == 0.0) return z;
+    if (max_abs == 0.0) {
+        Z.col(0) = z;
+        return;
+    }
     const double scale = mh::pow2_scale(max_abs);
     auto* packed = static_cast<df32*>([s.r contents]);
     #pragma omp parallel for schedule(static)
@@ -987,7 +932,7 @@ Eigen::VectorXd metal_solver::apply(const Eigen::VectorXd& r) const {
     #pragma omp parallel for schedule(static)
     for (Eigen::Index i = 0; i < r.size(); ++i)
         z[i] = (double(applied[perm[i]]) - mean_z) / scale;
-    return z;
+    Z.col(0) = z;
 }
 
 }  // namespace apxchol

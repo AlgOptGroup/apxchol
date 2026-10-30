@@ -67,7 +67,6 @@
 
 #ifdef APXCHOL_USE_CUDA
 #include <cuda_runtime.h>   // cudaMemGetInfo for read_vram_mb().
-#include "apxchol/solver/detail/gpu_solve_session.h"
 #endif
 
 #include <Eigen/Core>
@@ -87,7 +86,7 @@
 
 #ifdef HAVE_APXCHOL_V1
 #include "apxchol/solver/solve.h"
-#include "apxchol/solver/detail/cpu_route.h"
+#include "apxchol/solver/detail/solver_route.h"
 #include "apxchol/solver/detail/solve_backend.h"
 #include "apxchol/solver/factor_options.h"
 #include "apxchol/solver/factorization.h"
@@ -732,55 +731,43 @@ static BenchResult run_apxchol_v1(
     long long factor_nnz = 0, factor_rows = 0;
     std::uint64_t stored_nnz = 0, l11_nnz = 0, dropped = 0;
     double drop_rel = 0;
-    auto capture_fill = [&](const auto& precond) {
+    auto capture_fill = [&](const apxchol::solver& owner) {
         // Column pointers retain raw nnz even after factor values are released.
         // Read this owner; never run a second, potentially different factorization.
-        factor_nnz = static_cast<long long>(precond.factor().L.nonZeros());
-        factor_rows = static_cast<long long>(precond.factor().L.rows());
+        factor_nnz = static_cast<long long>(owner.factor().L.nonZeros());
+        factor_rows = static_cast<long long>(owner.factor().L.rows());
         if (report_fill) {
-            const auto& stats = precond.trsv().drop_stats();
-            stored_nnz = stats.nnz_stored;
-            l11_nnz = stats.nnz_factor;
-            dropped = stats.dropped;
-            drop_rel = stats.rel;
+            std::visit([&](const auto& route) {
+                if constexpr (requires { route.trsv().drop_stats(); }) {
+                    const auto& stats = route.trsv().drop_stats();
+                    stored_nnz = stats.nnz_stored;
+                    l11_nnz = stats.nnz_factor;
+                    dropped = stats.dropped;
+                    drop_rel = stats.rel;
+                }
+            }, apxchol::detail::solver_access::route(owner));
         }
     };
 
     const auto t_wall_start = std::chrono::high_resolution_clock::now();
     apxchol::solve_result res;
-    auto* cp = &res.timings;
-    cp->descend("setup"); cp->tick();
-    const auto route = apxchol::detail::select_solve_backend(opts, &L);
-    opts.backend = route; // resolve once; retries reuse the same concrete owner
-    (*cp)("backend_selection"); cp->ascend();
-    r.execution_route = route == apxchol::solve_backend::gpu ? "gpu" : "cpu";
-#if defined(APXCHOL_USE_CUDA)
-    if (route == apxchol::solve_backend::gpu) {
-        Eigen::initParallel();
-        apxchol::detail::gpu_solve_session solver(L, opts, res);
-        Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
-            [&](double request, int remaining, bool, Eigen::VectorXd& current) {
-                solver.solve(b, res, request, remaining);
-                current = std::move(res.x);
-                return static_cast<int>(res.iterations);
-            });
-        res.x = std::move(x);
-        res.iterations = r.iterations;
-        capture_fill(solver.preconditioner());
-        r.solve_rss_mb = read_vmrss_mb();
-    } else
-#endif
+    Eigen::initParallel();
+    // The solver selects its route once, under setup.backend_selection;
+    // retries reuse the same concrete owner.
+    const apxchol::solver solver(L, opts, &res.timings);
+    const bool gpu_route = solver.backend() == apxchol::solve_backend::gpu;
+    r.execution_route = gpu_route ? "gpu" : "cpu";
     {
-        apxchol::detail::cpu_route solver(L, opts, cp);
         Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
             [&](double request, int remaining, bool warm, Eigen::VectorXd& current) {
-                solver.solve(b, res, request, remaining, warm ? &current : nullptr);
+                // GPU retries restart cold, as they always have.
+                solver.solve(b, res, request, remaining, warm && !gpu_route ? &current : nullptr);
                 current = std::move(res.x);
                 return static_cast<int>(res.iterations);
             });
         res.x = std::move(x);
         res.iterations = r.iterations;
-        capture_fill(solver.preconditioner());
+        capture_fill(solver);
         r.solve_rss_mb = read_vmrss_mb();
     }
     const auto t_wall_end = std::chrono::high_resolution_clock::now();

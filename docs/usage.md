@@ -232,8 +232,7 @@ own workspace. Copy a solver once per thread, with `solver copy = original;`
 in C++ or `copy.copy(solver)` in Python, and the copies solve in parallel
 with the same results as serial calls. Copies stay valid after the original
 is destroyed. GPU solvers cannot be copied: construct one per thread, or batch the
-right-hand sides. A `metal_solver` used directly must not be called
-concurrently.
+right-hand sides.
 
 To solve many right-hand sides from one thread, pass them to `solve(B)` as the
 columns of one matrix; the batched solver shares work between columns.

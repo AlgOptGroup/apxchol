@@ -22,6 +22,7 @@
 - Breaking: `apxchol::cpu_solver` is removed; use `apxchol::solver` with `solve_backend::cpu`.
 - Breaking: `save_solver`/`load_solver` are replaced by `solver::save` and `solver::load`.
 - Breaking: `apxchol::apx_cholesky` is removed from the public API; use `apxchol::solver` (`apply` inside an external Krylov solver).
+- Breaking: `apxchol::metal_solver` is removed from the public API; use `apxchol::solver` with `solve_backend::gpu`, and `backend_available(solve_backend::gpu)` instead of `metal_solver::available()`.
 - Breaking: the triangular solves, CUDA PCG, allocator, graph storage pools, elimination workspace, built-in partitioners and their helpers, the partitioner name list and operator validation (`operator_scan`, `require_operator`, `operator_view`, ...) move to `apxchol::detail`.
 - Breaking: the `factorize(graph, ...)` overloads are removed; pass the operator matrix to `factorize`.
 - Breaking: the partitioner interface no longer exposes `selection::reset`/`finalize`, `partition_result` or `partition_context::cp`.

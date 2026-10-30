@@ -1,6 +1,6 @@
 #pragma once
 #include "apxchol/checkpoint.h"
-#include "apxchol/solver/preconditioner.h"
+#include "apxchol/solver/factorization.h"
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <array>
@@ -9,7 +9,7 @@
 #include <memory>
 
 namespace apxchol {
-namespace detail { struct solver_archive_access; }
+namespace detail { struct solver_access; }
 
 inline constexpr double default_tol      = 1e-8;
 inline constexpr int    default_max_iter = 200;
@@ -44,8 +44,6 @@ struct solve_options {
 namespace detail {
 void validate_solve_parameters(double tol, int max_iter);
 void validate_solve_options(const solve_options& opts);
-void resolve_solve_parameters(double& tol, int& max_iter, double default_tolerance,
-                              int default_iterations);
 }
 
 struct solve_result {
@@ -67,11 +65,6 @@ using matrix_view = Eigen::Ref<Eigen::MatrixXd, 0,
 using const_matrix_view = Eigen::Ref<const Eigen::MatrixXd, 0,
     Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>>;
 
-namespace detail {
-void check_matrix_views(const_matrix_view B, matrix_view X, Eigen::Index rows,
-                        const const_matrix_view* X0 = nullptr);
-}
-
 struct batch_solve_result {
     // Solutions are written to caller storage; each column's x remains empty.
     std::vector<solve_result> columns;
@@ -89,7 +82,7 @@ Eigen::VectorXd generate_test_rhs(Eigen::Index n);
 /// Every solve verifies the returned residual against the original operator/RHS.
 /// Supplied factors use CPU in automatic mode; an explicit GPU request uploads them.
 class solver {
-    friend struct detail::solver_archive_access;
+    friend struct detail::solver_access;
 public:
     explicit solver(const Eigen::SparseMatrix<double>& A,
                     const solve_options& opts = {}, checkpoint* cp = nullptr);

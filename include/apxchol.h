@@ -8,6 +8,3 @@
 #include "apxchol/graph/conversions.h"
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"
-#if defined(APXCHOL_USE_METAL)
-#include "apxchol/solver/metal_solver.h"
-#endif

@@ -83,7 +83,8 @@ Repeatability covers the same factor and execution configuration, not different
 host thread counts, devices, OS/compiler versions or independent factorizations.
 
 Runtime compilation uses safe math and disables contraction where supported;
-`metal_solver::available()` checks rounding, intermediate precision and FMA.
+`backend_available(solve_backend::gpu)` checks rounding, intermediate precision
+and FMA on the Metal device.
 Metal rejects inputs outside these ranges:
 
 - Nonzero operator values and unscaled factor diagonals: magnitude in [2^-100, 2^100].

@@ -3,9 +3,7 @@
 #include "scoped_env.h"
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/detail/solve_backend.h"
-#if defined(APXCHOL_USE_METAL)
-#include "apxchol/solver/metal_solver.h"
-#endif
+#include "apxchol/solver/detail/solver_route.h"
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
@@ -58,8 +56,8 @@ std::vector<apxchol::solve_options> host_only_options() {
 }
 } // namespace
 
-TEST(SolveRoutes, CpuPreconditionerTypeIsIndependentOfCudaBuild) {
-    static_assert(std::is_same_v<decltype(std::declval<apxchol::detail::cpu_preconditioner&>().trsv()),
+TEST(SolveRoutes, CpuRouteTypeIsIndependentOfCudaBuild) {
+    static_assert(std::is_same_v<decltype(std::declval<apxchol::detail::cpu_route&>().trsv()),
                                  const apxchol::detail::omp_sptrsv&>);
     SUCCEED();
 }
@@ -155,7 +153,7 @@ TEST(SolveRoutes, AutomaticCpuGuardBoundary) {
 
 #if defined(APXCHOL_USE_METAL)
 TEST(SolveRoutes, MetalGpuSupportsFp32AndFp16Storage) {
-    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
+    if (!apxchol::backend_available(apxchol::solve_backend::gpu)) GTEST_SKIP() << "no usable Metal device";
     const auto matrix = operator_matrix();
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     for (auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
@@ -264,8 +262,6 @@ TEST(SolveRoutes, RequiredGpuPreconditionerValidatesHostFactorsBeforeCuda) {
             case 4: malformed.L.vals_.front() = std::numeric_limits<float>::quiet_NaN(); break;
             case 5: malformed.L.release_values(); break;
         }
-        apxchol::detail::gpu_preconditioner gpu;
-        EXPECT_THROW(gpu.set_factor(malformed), std::invalid_argument) << defect;
         EXPECT_THROW(apxchol::solver(matrix, malformed, options), std::invalid_argument) << defect;
     }
     EXPECT_THROW(apxchol::solver(operator_matrix(32), valid, options), std::invalid_argument);
@@ -274,9 +270,8 @@ TEST(SolveRoutes, RequiredGpuPreconditionerValidatesHostFactorsBeforeCuda) {
     grounded.L.outer_ = {0, 0};
     grounded.perm = {0};
     grounded.sddm = false;
-    apxchol::detail::gpu_preconditioner gpu;
     try {
-        gpu.set_factor(grounded);
+        apxchol::solver rejected(Eigen::SparseMatrix<double>(1, 1), grounded, options);
         FAIL() << "a scalar Laplacian CUDA factor must be rejected";
     } catch (const std::invalid_argument& error) {
         EXPECT_NE(std::string(error.what()).find("scalar Laplacian"), std::string::npos);
@@ -413,9 +408,9 @@ TEST(SolveRoutes, GpuSingletonSddmAndUnsupportedEmptyFactorAreExplicit) {
     Eigen::SparseMatrix<double> matrix(1, 1);
     matrix.insert(0, 0) = 2.0;
     matrix.makeCompressed();
-    apxchol::detail::gpu_preconditioner preconditioner;
-    preconditioner.compute(matrix);
-    ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
+    const apxchol::solver owner(matrix, options);
+    ASSERT_TRUE(std::get<apxchol::detail::gpu_solve_session>(
+        apxchol::detail::solver_access::route(owner)).trsv().adopted_device_factor());
     const Eigen::VectorXd rhs = Eigen::VectorXd::Constant(1, 2.0);
     const auto result = apxchol::solve(matrix, rhs, options);
     EXPECT_EQ(result.backend, apxchol::solve_backend::gpu);

@@ -1,4 +1,4 @@
-// Metal PCG kernels, compiled at run time by metal_solver.mm.
+// Metal PCG kernels, compiled at run time by metal_route.mm.
 // Embedding the source avoids an offline Metal compiler or generation step.
 R"apxchol_msl(
 #include <metal_stdlib>
@@ -115,7 +115,7 @@ kernel void finalize(constant Params& P [[buffer(0)]],
     else finalize_columns<1>(P, partial, state, l);
 }
 
-// ---- self-test of the error-free transforms (metal_solver::available) ----
+// ---- self-test of the error-free transforms (backend_available) ----
 inline float4 pack_probe(df a, df b) { return float4(a.hi, a.lo, b.hi, b.lo); }
 kernel void df_probe(device const float4* in [[buffer(0)]],
                      device float4* out [[buffer(1)]],

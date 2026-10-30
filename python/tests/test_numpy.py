@@ -121,7 +121,7 @@ def gpu_solver(storage):
         unavailable = (
             "GPU route requested but GPU support is not built",
             "GPU factorization requires an available CUDA device",
-            "apxchol::metal_solver: the Metal backend is unavailable: no Metal device",
+            "apxchol: the Metal backend is unavailable: no Metal device",
         )
         if os.environ.get("APXCHOL_TEST_REQUIRE_GPU") == "1" or str(exc) not in unavailable:
             raise

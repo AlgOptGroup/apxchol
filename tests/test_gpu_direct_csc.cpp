@@ -7,6 +7,7 @@
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 #include "apxchol/solver/gpu_block_frontend.h"
 #include "apxchol/solver/solve.h"
+#include "apxchol/solver/detail/solver_route.h"
 
 #include <algorithm>
 #include <bit>
@@ -16,6 +17,7 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -504,14 +506,16 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
         Eigen::VectorXd exact(n);
         for (int v = 0; v < n; ++v) exact[v] = std::sin(v + 0.25);
         const Eigen::VectorXd b = A * exact;
-        apxchol::detail::gpu_preconditioner preconditioner;
-        apxchol::factor_options factor_options;
-        factor_options.verbose = true;
-        preconditioner.set_options(factor_options);
+        apxchol::solve_options setup;
+        setup.backend = apxchol::solve_backend::gpu;
+        setup.factor_opts.verbose = true;
         testing::internal::CaptureStderr();
-        try { preconditioner.compute(A); }
+        std::optional<apxchol::solver> owner;
+        try { owner.emplace(A, setup); }
         catch (...) { const auto trace=testing::internal::GetCapturedStderr(); ADD_FAILURE()<<trace; throw; }
         const auto trace = testing::internal::GetCapturedStderr();
+        const auto& preconditioner = std::get<apxchol::detail::gpu_solve_session>(
+            apxchol::detail::solver_access::route(*owner));
         ASSERT_NE(trace.find("[gpu-owned-csc] n=257 "),std::string::npos) << trace;
         EXPECT_NE(trace.find("host_graph_bytes=0 host_snapshot_bytes=0 selector_edge_upload_bytes=0"),std::string::npos) << trace;
         EXPECT_NE(trace.find("factor_entry_download_bytes=0"),std::string::npos) << trace;

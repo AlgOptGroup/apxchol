@@ -24,13 +24,13 @@
 #include "apxchol/solver/sptrsv/cuda.h"
 
 namespace apxchol::detail {
-struct solver_archive_access;
+class gpu_solve_session;
 
 #define APXCHOL_PCG_CUDA_CHECK(c)      apxchol::detail::check_cuda((c), #c)
 
 /// All-on-device PCG. Construct once per matrix; reusable across solves.
 class cuda_pcg {
-    friend struct detail::solver_archive_access;
+    friend class gpu_solve_session;
 public:
     cuda_pcg() = default;
     cuda_pcg(const cuda_pcg&) = delete;
@@ -81,32 +81,9 @@ public:
         ready_ = true;
     }
 
-    /// Solve A*x = b via PCG using a device-capable preconditioner. The
-    /// preconditioner's `solve_LLt_dev(d_in, d_out)` device entry point is
-    /// invoked per iter. Returns iteration count and final relative residual.
-    template<class Precond>
-    void solve(const Precond& precond,
-               const Eigen::VectorXd& b_host,
-               Eigen::VectorXd& x_host,
-               double tol,
-               int max_iter,
-               int& iters_out,
-               double& residual_out,
-               bool laplacian,
-               const Eigen::VectorXd* x0 = nullptr)
-    {
-        if (!ready_) throw std::runtime_error("cuda_pcg::solve: setup() not called");
-        if (b_host.size() != n_ || (x0 && x0->size() != n_))
-            throw std::invalid_argument("cuda_pcg::solve: vector length mismatch");
-        std::array<int, 1> iterations{};
-        std::array<double, 1> residuals{};
-        x_host.resize(n_);
-        solve_columns<1>(precond, b_host, x_host, tol, max_iter, iterations,
-                         residuals, laplacian, x0);
-        iters_out = iterations[0];
-        residual_out = residuals[0];
-    }
-
+    /// Solve A*X = B for one, two or four columns via PCG using a
+    /// device-capable preconditioner, whose `trsv().solve_LLt_dev` runs per
+    /// iteration. Reports iteration counts and final relative residuals.
     template<unsigned Columns, class Precond, class Input, class Output>
     void solve_panel(const Precond& precond, const Input& b_host, Output& x_host,
                     double tol, int max_iter, std::array<int, Columns>& iterations,
@@ -188,16 +165,9 @@ private:
         for (int64_t v = 0; v < n_; ++v) {
             for (unsigned q = 0; q < Columns; ++q) {
                 const double rhs = b_host(v, q);
-                if (!std::isfinite(rhs))
-                    throw std::invalid_argument("cuda_pcg::solve: RHS must be finite");
                 packed(h_perm_[v], q) = rhs;
                 max_b[q] = std::max(max_b[q], std::abs(rhs));
-                if (x0) {
-                    const double guess = (*x0)(v, q);
-                    if (!std::isfinite(guess))
-                        throw std::invalid_argument("cuda_pcg::solve: x0 must be finite");
-                    max_x0[q] = std::max(max_x0[q], std::abs(guess));
-                }
+                if (x0) max_x0[q] = std::max(max_x0[q], std::abs((*x0)(v, q)));
             }
         }
         for (double maximum : max_b) any_active |= maximum != 0;
