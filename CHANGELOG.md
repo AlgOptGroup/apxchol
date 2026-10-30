@@ -19,6 +19,13 @@
 - Breaking: the CUDA build no longer uses cuSPARSE or cuBLAS, and the level-set GPU triangular solve is removed.
 - Breaking: forward-star and indexed pooled graph storage and the standalone analysis/setup tools are retired.
 - Breaking: `APXCHOL_INDEX_WIDTH=32|64_EDGES|64` replaces the `APXCHOL_64BIT_*_INDICES` build options.
+- Breaking: `APXCHOL_DEVICE=CPU|CUDA|METAL` replaces `APXCHOL_USE_CUDA`, which now stops configuration with a message. The runtime `factor_storage` option replaces `APXCHOL_SPTRSV_FP32`.
+- Breaking: a parent project that adds apxchol with `add_subdirectory` builds only the portable library by default; the CLI, tests, examples and native tuning are opt-in there.
+- Breaking: the Python default `maxiter` is now the native default, 200 (was 500).
+- Breaking: Python `Solver.solve` and `solve` use `rtol` for the tolerance parameter; the `tol` alias is removed.
+- Breaking: removed from Python: `apxchol.solver`, `Solver.aspreconditioner` (use `aslinearoperator`), the `storage` and `stagnation_window` options, and the `luby` and `rootset` partitioners.
+- Breaking: Python 3.10 is no longer supported.
+- Breaking: removed CLI flags `--stagnation-window`, `--graph-storage`, `--fs-compact` and `--fs-filter-append`.
 - Breaking: the CLI and bindings no longer accept an adjacency matrix as if it were the operator. Previously both solved adjacency input as the operator and failed without a clear error; now validation rejects it and the error suggests the conversion.
 - New `apxchol.as_operator(M)`, `apxchol_as_operator(M)` and CLI `--convert-input`: a finite symmetric matrix with at least one off-diagonal entry, all of them positive, becomes its graph Laplacian `L = D - M` (self-loops cancel), any other finite symmetric matrix is used as given and checked by the solver, and asymmetric or non-finite input is an error.
 - The CLI solves an `n` by `k` `--rhs` file as one batch, writes an `n` by `k` solution with `-o`, and logs iterations and residuals per column.
@@ -31,7 +38,6 @@
 
 ### Benchmarks
 - The benchmark harness checks every result against the original system's residual and reports setup, solve and memory separately.
-- Published results now come from CSCS Daint; laptop results are archived.
 
 ### Fixes
 - Reported residuals are now correct on early solve exits.
@@ -42,3 +48,5 @@
 - The CLI rejects an empty matrix and RHS files with no rows or columns with an error (exit 2); it used to crash.
 
 Full history: https://github.com/AlgOptGroup/apxchol/compare/v0.2.2...main
+
+0.1.0–0.2.0 were published before the public history was squashed and have no source tag.
