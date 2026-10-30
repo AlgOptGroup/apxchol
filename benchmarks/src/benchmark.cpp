@@ -756,7 +756,7 @@ static BenchResult run_apxchol_v1(
     Eigen::initParallel();
     // The solver selects its route once, under setup.backend_selection;
     // retries reuse the same concrete owner.
-    const apxchol::solver solver = apxchol::detail::solver_access::with_timings(L, opts, timings);
+    apxchol::solver solver = apxchol::detail::solver_access::with_timings(L, opts, timings);
     const bool gpu_route = solver.backend() == apxchol::solve_backend::gpu;
     r.execution_route = gpu_route ? "gpu" : "cpu";
     {
