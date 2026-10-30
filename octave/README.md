@@ -28,8 +28,9 @@ GPU routes, factor export and wide indices are not exposed. See the shared
 ## Inputs and solve controls
 
 Pass the sparse matrix `A` in `A * x = b`. For graph adjacency input, first
-use `A = apxchol_laplacian(Adj)`. The [input guide](../docs/usage.md) explains
-supported matrices, adjacency conversion and Laplacian RHS requirements.
+use `A = apxchol_laplacian(Adj)`, or `A = apxchol_operator(M)` to form the
+Laplacian only when `M` is not a valid operator. The [input guide](../docs/usage.md)
+explains supported matrices, input kinds and Laplacian RHS requirements.
 
 `solve(b, rtol, maxiter, x0)` takes a positive, finite relative tolerance and a
 nonnegative integer iteration budget. Omitted arguments or `[]` use native

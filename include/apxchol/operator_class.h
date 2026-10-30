@@ -199,4 +199,34 @@ private:
 /// how it was classified, what was lumped, and any dominance violations.
 std::string describe_operator(const operator_scan& s, Eigen::Index lumped);
 
+namespace detail {
+
+/// How a supplied matrix is read: the CLI's `--input-kind`, Python's
+/// `apxchol.operator` and MATLAB/Octave's `apxchol_operator` share this rule.
+enum class input_kind {
+    as_operator,  ///< "operator": the matrix A itself
+    adjacency,    ///< "adjacency": the Laplacian L = D - W of a graph
+    automatic,    ///< "auto": adjacency only when the operator reading fails
+};
+
+/// Parse "operator", "adjacency" or "auto".
+input_kind parse_input_kind(const std::string& name);
+
+/// Square, finite, symmetric (within `kSymmetryRelTol`), with nonnegative
+/// off-diagonals and no nonzero diagonal entry.
+bool is_adjacency_matrix(const Eigen::SparseMatrix<double>& M);
+
+/// Resolve `automatic` to `as_operator` or `adjacency`; other kinds pass
+/// through. `automatic` reads M as a graph only when M fails `require_operator`
+/// with the default lumping ceiling AND it is an adjacency matrix or was
+/// supplied as a pattern (Matrix Market `pattern`, a logical matrix, a boolean
+/// array). A valid operator is therefore never reinterpreted.
+input_kind resolve_input_kind(const Eigen::SparseMatrix<double>& M, input_kind kind,
+                              bool pattern);
+
+/// The graph Laplacian L = D - W, with W_ij = |M_ij| for i != j and D the
+/// weighted degrees. Diagonal entries of M (self-loops) are dropped.
+Eigen::SparseMatrix<double> adjacency_laplacian(const Eigen::SparseMatrix<double>& M);
+
+} // namespace detail
 } // namespace apxchol

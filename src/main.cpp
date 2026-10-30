@@ -11,6 +11,17 @@ using namespace apxchol;
 
 namespace {
 
+std::string input_kind_reason(input_kind requested, input_kind kind) {
+    switch (requested) {
+    case input_kind::as_operator: return "--input-kind operator, the default";
+    case input_kind::adjacency: return "--input-kind adjacency";
+    case input_kind::automatic: break;
+    }
+    return kind == input_kind::adjacency
+        ? "--input-kind auto: not a valid operator, but an adjacency matrix or pattern file"
+        : "--input-kind auto: used as given";
+}
+
 template<class Dense>
 void write_solution(const std::string& path, const Dense& x) {
     std::ofstream f(path, std::ios_base::binary);
@@ -70,17 +81,14 @@ int main(int argc, char* argv[]) try {
         return 2;
     }
 
-    // Interpret the input and assemble adjacency matrices into Laplacians
-    // before operator validation (see src/mtx_input.h).
-    // An unusable or ambiguous matrix throws here; the handler below logs it
-    // and exits 2, as it does for any other input error.
+    // Read the file as --input-kind says (see src/mtx_input.h); validation
+    // errors from the solver are logged by the handler below, exit 2.
     const auto scan = scan_input(L);
-    std::string reason;
-    const input_kind kind = resolve_input_kind(
-        cfg.input, scan, hdr.field == fast_matrix_market::pattern, reason);
-    spdlog::info("{}", describe_input(kind, scan, reason));
+    const input_kind kind = detail::resolve_input_kind(
+        L, cfg.input, hdr.field == fast_matrix_market::pattern);
+    spdlog::info("{}", describe_input(kind, scan, input_kind_reason(cfg.input, kind)));
     if (kind == input_kind::adjacency)
-        adjacency_to_laplacian(L);
+        L = detail::adjacency_laplacian(L);
 
     spdlog::info("n = {},  nnz(L) = {}", L.rows(), L.nonZeros());
 

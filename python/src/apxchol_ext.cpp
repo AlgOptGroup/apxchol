@@ -14,6 +14,7 @@
 #include "apxchol.h"
 #include "apxchol/solver/archive.h"
 #include "apxchol/detail/csc_import.h"
+#include "apxchol/operator_class.h"
 #include "apxchol/version.h"
 
 namespace py = pybind11;
@@ -342,6 +343,23 @@ PYBIND11_MODULE(_apxchol, m) {
     m.attr("__version__") = APXCHOL_VERSION;
     m.attr("DEFAULT_TOL") = apxchol::default_tol;
     m.attr("DEFAULT_MAXITER") = apxchol::default_max_iter;
+    m.def("input_operator",
+          [](py::array indptr, py::array indices, py::array data, const std::string& kind,
+             bool pattern) {
+              const auto M = csc_to_eigen(std::move(indptr), std::move(indices), std::move(data));
+              const auto resolved = apxchol::detail::resolve_input_kind(
+                  M, apxchol::detail::parse_input_kind(kind), pattern);
+              Eigen::SparseMatrix<double> A = resolved == apxchol::detail::input_kind::adjacency
+                  ? apxchol::detail::adjacency_laplacian(M) : M;
+              A.makeCompressed();
+              using Index = Eigen::SparseMatrix<double>::StorageIndex;
+              return py::make_tuple(
+                  py::array_t<Index>(A.outerSize() + 1, A.outerIndexPtr()),
+                  py::array_t<Index>(A.nonZeros(), A.innerIndexPtr()),
+                  py::array_t<double>(A.nonZeros(), A.valuePtr()));
+          },
+          py::arg("indptr"), py::arg("indices"), py::arg("data"), py::arg("kind"),
+          py::arg("pattern"));
     py::class_<Solver>(m, "Solver")
         .def(py::init<py::array, py::array, py::array, const py::dict&>(),
              py::arg("indptr"), py::arg("indices"), py::arg("data"),

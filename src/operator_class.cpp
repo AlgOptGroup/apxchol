@@ -291,17 +291,15 @@ operator_scan require_operator(const Eigen::SparseMatrix<double>& A, double lump
                    ", a_ii = " + num(s.first_bad_diag_value) + ")";
         msg += "; a positive semidefinite operator cannot have one, since "
                "e_i^T A e_i = a_ii.";
-        // The adjacency signature is exactly this condition failing EVERYWHERE
-        // while positive off-diagonals exist. Name the explicit conversion.
-        if (s.diag_pos == 0 && s.offdiag_pos > 0)
-            msg += " Not one of the " + std::to_string(s.nonempty) +
-                   " non-empty rows carries a positive diagonal, while " +
-                   std::to_string(s.offdiag_pos) +
-                   " off-diagonal entries are positive: this is a graph "
-                   "ADJACENCY matrix, not an assembled operator. Assemble the "
-                   "Laplacian first — apxchol.laplacian(A) in Python, "
-                   "apxchol_laplacian(A) in Octave/MATLAB, `--input-kind "
-                   "adjacency` on the CLI.";
+        // An adjacency matrix fails exactly here. Name the reading that fixes it.
+        if (detail::is_adjacency_matrix(A))
+            msg += " The matrix looks like a graph ADJACENCY matrix (symmetric, "
+                   "nonnegative off-diagonals, zero diagonal), not an assembled "
+                   "operator. Read it as a graph: apxchol.operator(M, \"adjacency\") "
+                   "or apxchol.operator(M, \"auto\") in Python, "
+                   "apxchol_operator(M, 'adjacency') or apxchol_operator(M, 'auto') "
+                   "in MATLAB/Octave, `--input-kind adjacency` or `--input-kind auto` "
+                   "on the CLI.";
         throw std::invalid_argument(msg);
     }
 
@@ -400,5 +398,60 @@ std::string describe_operator(const operator_scan& s, Eigen::Index lumped) {
                "), so the operator need not be SDDM — reported, not enforced";
     return out;
 }
+
+namespace detail {
+
+input_kind parse_input_kind(const std::string& name) {
+    if (name == "operator") return input_kind::as_operator;
+    if (name == "adjacency") return input_kind::adjacency;
+    if (name == "auto") return input_kind::automatic;
+    throw std::invalid_argument("input kind must be operator, adjacency or auto, got '" +
+                                name + "'");
+}
+
+bool is_adjacency_matrix(const Eigen::SparseMatrix<double>& M) {
+    if (M.rows() != M.cols()) return false;
+    for (Eigen::Index k = 0; k < M.outerSize(); ++k)
+        for (Eigen::SparseMatrix<double>::InnerIterator it(M, k); it; ++it)
+            if (!std::isfinite(it.value()) || it.value() < 0.0 ||
+                (it.row() == it.col() && it.value() != 0.0))
+                return false;
+    return scan_operator(M).asymmetric == 0;
+}
+
+input_kind resolve_input_kind(const Eigen::SparseMatrix<double>& M, input_kind kind,
+                              bool pattern) {
+    if (kind != input_kind::automatic) return kind;
+    try {
+        require_operator(M);
+        return input_kind::as_operator;
+    } catch (const std::invalid_argument&) {
+        return pattern || is_adjacency_matrix(M) ? input_kind::adjacency
+                                                 : input_kind::as_operator;
+    }
+}
+
+Eigen::SparseMatrix<double> adjacency_laplacian(const Eigen::SparseMatrix<double>& M) {
+    if (M.rows() != M.cols())
+        throw std::invalid_argument("adjacency matrix must be square");
+    const Eigen::Index n = M.rows();
+    std::vector<Eigen::Triplet<double>> entries;
+    entries.reserve(static_cast<std::size_t>(M.nonZeros() + n));
+    Eigen::VectorXd degree = Eigen::VectorXd::Zero(n);
+    for (Eigen::Index k = 0; k < M.outerSize(); ++k)
+        for (Eigen::SparseMatrix<double>::InnerIterator it(M, k); it; ++it) {
+            const double w = std::abs(it.value());
+            if (it.row() == it.col() || w == 0.0) continue;
+            entries.emplace_back(it.row(), it.col(), -w);
+            degree[it.row()] += w;
+        }
+    for (Eigen::Index i = 0; i < n; ++i)
+        if (degree[i] != 0.0) entries.emplace_back(i, i, degree[i]);
+    Eigen::SparseMatrix<double> L(n, n);
+    L.setFromTriplets(entries.begin(), entries.end());
+    return L;
+}
+
+} // namespace detail
 
 } // namespace apxchol

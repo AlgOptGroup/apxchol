@@ -251,13 +251,13 @@ def test_adjacency_input_raises_with_a_diagnosis():
     msg = str(exc.value)
     # (a) which condition failed, with counts
     assert "Condition FAILED: positive diagonal" in msg
-    assert f"Not one of the {A.shape[0]} non-empty rows" in msg
-    assert f"{A.nnz} off-diagonal entries are positive" in msg
+    assert f"{A.shape[0]} of {A.shape[0]} non-empty rows" in msg
     # (b) the class apxchol is defined on
     assert "apxchol solves symmetric SDDM / Laplacian operators" in msg
     # (c) the one-line fix, naming the helper
     assert "ADJACENCY matrix" in msg
-    assert "apxchol.laplacian(A)" in msg
+    assert 'apxchol.operator(M, "adjacency")' in msg
+    assert 'apxchol.operator(M, "auto")' in msg
 
 
 def test_every_public_entry_rejects_an_adjacency_matrix():
@@ -326,6 +326,49 @@ def test_mixed_sign_operator_with_positive_diagonal_still_solves():
     res = apxchol.solve(A, b, rtol=1e-8, maxiter=500)
     assert res.converged
     assert np.linalg.norm(A @ res.x - b) / np.linalg.norm(b) < 1e-6
+
+
+# ── apxchol.operator: the shared input-kind rule ─────────────────────────────
+
+
+def grid2d_sddm_matrix(m):
+    return (grid2d_laplacian(m) + 0.1 * sp.eye(m * m)).tocsc()
+
+
+@pytest.mark.parametrize("make", [grid2d_laplacian, grid2d_sddm_matrix])
+def test_operator_auto_and_operator_keep_a_valid_operator(make):
+    L = make(8)
+    for kind in ("auto", "operator"):
+        A = apxchol.operator(L, kind)
+        assert A.format == "csc" and A.dtype == np.float64
+        assert abs(A - L).max() == 0.0
+
+
+def test_operator_auto_converts_an_adjacency_matrix():
+    W = grid2d_adjacency(8)
+    assert abs(apxchol.operator(W) - apxchol.laplacian(W)).max() == 0.0
+    assert abs(apxchol.operator(W, "adjacency") - apxchol.laplacian(W)).max() == 0.0
+
+
+def test_operator_auto_converts_a_pattern_matrix_with_self_loops():
+    W = grid2d_adjacency(6).tolil()
+    W[0, 0] = 1.0                          # a self-loop: not an adjacency matrix ...
+    pattern = W.tocsc().astype(bool)       # ... but a pattern is still read as a graph
+    expected = apxchol.laplacian(W.tocsc())
+    assert abs(apxchol.operator(pattern) - expected).max() == 0.0
+    assert abs(apxchol.operator(W.tocsc()) - W.tocsc()).max() == 0.0
+
+
+def test_operator_auto_uses_an_invalid_non_adjacency_as_given():
+    M = sp.csc_matrix(np.array([[0.0, 1.0, 0.0], [1.0, 0.0, -1.0], [0.0, -1.0, 0.0]]))
+    assert abs(apxchol.operator(M) - M).max() == 0.0
+    with pytest.raises(ValueError, match="Condition FAILED"):
+        apxchol.factorize(apxchol.operator(M))
+
+
+def test_operator_rejects_an_unknown_kind():
+    with pytest.raises(ValueError, match="operator, adjacency or auto"):
+        apxchol.operator(grid2d_laplacian(4), "laplacian")
 
 
 # ── apxchol.laplacian: the explicit adjacency -> operator conversion ─────────

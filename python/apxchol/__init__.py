@@ -4,6 +4,7 @@ Public API:
     apxchol.factorize(A, **opts)  ->  Solver
     apxchol.solve(A, b, rtol=None, maxiter=None, **opts)
                                      ->  SolveResult
+    apxchol.operator(M, kind="auto") ->  scipy.sparse.csc_matrix  (the A to pass)
     apxchol.laplacian(A)             ->  scipy.sparse.csc_matrix  (L = D - A)
     Solver.solve(b, rtol=None, maxiter=None, *, x0=None, out=None)
                                      ->  SolveResult
@@ -24,7 +25,7 @@ import numpy as np
 from . import _apxchol
 
 __all__ = [
-    "factorize", "solve", "laplacian",
+    "factorize", "solve", "operator", "laplacian",
     "Solver", "SolveResult", "__version__",
 ]
 
@@ -75,13 +76,49 @@ def _scipy_sparse():
     return sp
 
 
+def operator(M, kind="auto"):
+    """Return the matrix to pass as ``A`` for input `M` of the given kind.
+
+    Parameters
+    ----------
+    M : scipy.sparse matrix or array
+        Square, real input matrix in any sparse format. Duplicate entries are
+        summed. `M` is not modified.
+    kind : {"auto", "operator", "adjacency"}
+        ``"operator"`` returns `M` itself. ``"adjacency"`` reads `M` as a
+        weighted graph and returns its Laplacian (see :func:`laplacian`).
+        ``"auto"`` returns the Laplacian only when `M` fails the solver's
+        operator validation and is an adjacency matrix (symmetric, with
+        nonnegative off-diagonals and a zero diagonal) or a boolean pattern
+        matrix; otherwise it returns `M`, so a valid operator is never
+        reinterpreted. The CLI's ``--input-kind`` uses the same rule.
+
+    Returns
+    -------
+    scipy.sparse.csc_matrix
+        The float64 matrix to pass to :func:`factorize` or :func:`solve`.
+
+    Examples
+    --------
+    >>> M = scipy.io.mmread("com-Amazon.mtx")              # adjacency
+    >>> res = apxchol.solve(apxchol.operator(M), b)
+    """
+    sp = _scipy_sparse()
+    pattern = sp.issparse(M) and M.dtype == np.bool_
+    csc = _to_csc(M)
+    indptr, indices, data = _apxchol.input_operator(
+        csc.indptr, csc.indices, csc.data, kind, pattern)
+    return sp.csc_matrix((data, indices, indptr), shape=csc.shape)
+
+
 def laplacian(A):
     """Convert a weighted adjacency matrix to its graph Laplacian.
 
     Forms ``L = D - W`` using absolute edge weights, with self-loops removed.
     ``D`` contains the weighted vertex degrees; isolated vertices have zero
-    rows. Pass this result to :func:`factorize` or :func:`solve`, which expect
-    the matrix in ``L @ x = b`` rather than adjacency input.
+    rows. Equivalent to ``operator(A, "adjacency")``. Pass this result to
+    :func:`factorize` or :func:`solve`, which expect the matrix in
+    ``L @ x = b`` rather than adjacency input.
 
     Parameters
     ----------
@@ -100,20 +137,7 @@ def laplacian(A):
     >>> A = scipy.io.mmread("com-Amazon.mtx").tocsc()   # adjacency
     >>> res = apxchol.solve(apxchol.laplacian(A), b)
     """
-    sp = _scipy_sparse()
-    if not sp.issparse(A):
-        raise ValueError("A must be a scipy.sparse matrix")
-    if A.shape[0] != A.shape[1]:
-        raise ValueError(f"A must be square, got shape {A.shape}")
-    W = sp.csc_matrix(A, copy=True)      # copy: the caller's matrix stays intact
-    if np.iscomplexobj(W.data):
-        raise ValueError("A must be real; apxchol solves real symmetric systems")
-    W.sum_duplicates()                   # merge unmerged (i, j) before summing degrees
-    W.data = np.abs(W.data).astype(np.float64, copy=False)
-    W = W - sp.diags(W.diagonal(), format="csc")   # self-loops cancel in D - A
-    W.eliminate_zeros()                  # ... as do explicit zeros
-    deg = np.asarray(W.sum(axis=1)).ravel()
-    return (sp.diags(deg, format="csc") - W).tocsc()
+    return operator(A, "adjacency")
 
 
 def _to_csc(A):
@@ -380,8 +404,9 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
         Supply both triangles; sparse inputs are converted to sorted,
         duplicate-free CSC without modifying the caller's matrix.
 
-        Use :func:`laplacian` to convert adjacency input first. A Laplacian
-        RHS must sum to zero within each connected component.
+        Use :func:`operator` or :func:`laplacian` to convert adjacency
+        input first. A Laplacian RHS must sum to zero within each connected
+        component.
 
         Positive off-diagonal pairs are lumped onto the diagonal for
         preconditioning, subject to `lump_max_mass` (see :attr:`Solver.lumped`).

@@ -104,14 +104,13 @@ function test_apxchol()
   assert(strcmp(id, 'apxchol:badInput'), 'wrong identifier: %s', id);
   assert(~isempty(strfind(msg, 'Condition FAILED: positive diagonal')), ...
          'message: does not name the failed condition');
-  assert(~isempty(strfind(msg, sprintf('Not one of the %d non-empty rows', n7*n7))), ...
+  assert(~isempty(strfind(msg, sprintf('%d of %d non-empty rows', n7*n7, n7*n7))), ...
          'message: no row count');
-  assert(~isempty(strfind(msg, sprintf('%d off-diagonal entries are positive', nnz(A7)))), ...
-         'message: no off-diagonal count');
   assert(~isempty(strfind(msg, 'apxchol solves symmetric SDDM / Laplacian operators')), ...
          'message: does not say what is wanted');
   assert(~isempty(strfind(msg, 'ADJACENCY matrix')), 'message: no detection');
-  assert(~isempty(strfind(msg, 'apxchol_laplacian(A)')), 'message: no fix');
+  assert(~isempty(strfind(msg, 'apxchol_operator(M, ''adjacency'')')), 'message: no fix');
+  assert(~isempty(strfind(msg, 'apxchol_operator(M, ''auto'')')), 'message: no auto fix');
   ok = ok + 1; fprintf('ok %d  adjacency input rejected with a diagnosis\n', ok);
 
   % ── 8. positive off-diagonals on a positive diagonal are LUMPED, not refused ──
@@ -164,6 +163,24 @@ function test_apxchol()
   try, apxchol_laplacian(sparse(ones(3, 4))); catch, err = true; end
   assert(err, 'laplacian: non-square must error');
   ok = ok + 1; fprintf('ok %d  apxchol_laplacian assembles L = D - A\n', ok);
+
+  % ── 9b. apxchol_operator: one input-kind rule, shared with the CLI ──
+  S9 = L7 + 0.1 * speye(n7*n7);                       % SDDM
+  for kind = {'auto', 'operator'}
+    assert(isequal(apxchol_operator(L7, kind{1}), L7), 'operator: Laplacian changed');
+    assert(isequal(apxchol_operator(S9, kind{1}), S9), 'operator: SDDM changed');
+  end
+  assert(isequal(apxchol_operator(A7), L9), 'operator: auto did not convert adjacency');
+  assert(isequal(apxchol_operator(A7, 'adjacency'), L9), 'operator: adjacency kind');
+  assert(isequal(apxchol_operator(A7, 'operator'), A7), 'operator: operator kind');
+  P9 = A7 ~= 0;  P9(1, 1) = true;                     % pattern with a self-loop
+  assert(isequal(apxchol_operator(P9), L9), 'operator: auto did not convert a pattern');
+  As9 = A7;  As9(1, 1) = 1;                           % numeric: used as given
+  assert(isequal(apxchol_operator(As9), As9), 'operator: auto reinterpreted a non-adjacency');
+  err = false;  id = '';
+  try, apxchol_operator(L7, 'laplacian'); catch e, err = true; id = e.identifier; end
+  assert(err && strcmp(id, 'apxchol:badInput'), 'operator: unknown kind must error');
+  ok = ok + 1; fprintf('ok %d  apxchol_operator applies the shared input-kind rule\n', ok);
 
   % ── 10. malformed options reject before scalar/integer conversion ──
   Aopts = sparse([2 -1; -1 2]); bopts = [1; -1]; zopts = zeros(2, 1);

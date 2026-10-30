@@ -9,19 +9,37 @@ diagonally dominant matrices with nonpositive off-diagonal entries.
 For a graph with nonnegative edge weights, the adjacency matrix stores those
 weights. Its Laplacian is
 `L = D - Adj`, where `D` contains the sums of incident weights.
-Use `apxchol.laplacian(Adj)` in Python or `apxchol_laplacian(Adj)` in
-MATLAB/Octave to form it. A Laplacian RHS must sum to zero on each connected
-component; the solution is defined up to a constant on each component.
+A Laplacian RHS must sum to zero on each connected component; the solution is
+defined up to a constant on each component.
+
+### Reading a matrix as a graph
+
+The solver always treats its input as `A`. To start from other input, one
+helper per interface returns the matrix to pass, with one shared rule:
+
+| Interface | Helper |
+|---|---|
+| Python | `apxchol.operator(M, kind="auto")` |
+| MATLAB/Octave | `apxchol_operator(M, kind)`, `kind` defaulting to `'auto'` |
+| CLI | `--input-kind` with `operator` (the default), `adjacency` or `auto` |
+
+- `operator` uses `M` as given.
+- `adjacency` returns the Laplacian of the graph with weights `|M_ij|`, `i != j`.
+  Diagonal entries (self-loops) are dropped and duplicate entries are summed.
+- `auto` returns the Laplacian only when `M` fails operator validation and is
+  either an adjacency matrix (symmetric, with nonnegative off-diagonals and a
+  zero diagonal) or a pattern: a Matrix Market `pattern` file, a MATLAB logical
+  matrix or a boolean SciPy matrix. Otherwise `M` is used as given, so a valid
+  operator is never reinterpreted and an invalid one reports why it failed.
+
+`apxchol.laplacian(Adj)` and `apxchol_laplacian(Adj)` are the explicit
+`adjacency` form. When an adjacency matrix is passed as an operator, the
+validation error names the `adjacency` and `auto` readings.
 
 Python accepts SciPy sparse matrices and arrays. It converts them to CSC
 (compressed sparse column) format, sorts row indices and combines duplicate
 entries. Supply the full symmetric matrix, not just one triangle. Format conversion
 does not invent missing symmetric entries.
-
-Every interface treats the input as `A` and never guesses. On the CLI,
-`--input-kind adjacency` forms the Laplacian of an adjacency file. Without it,
-an adjacency file fails operator validation with an error that suggests that
-option.
 
 ## Choosing CPU or GPU
 

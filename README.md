@@ -58,7 +58,8 @@ PyPy wheels use Python 3.11 (`pp73`). On PyPy, use the
 or `backend="gpu"` in `factorize` to choose explicitly.
 
 Pass the matrix `A` from `A x = b`. For a graph adjacency matrix, first form
-its Laplacian with `apxchol.laplacian(Adj)`. See the
+its Laplacian with `apxchol.laplacian(Adj)`, or let `apxchol.operator(M)` form
+it only when `M` is not a valid operator. See the
 [solver guide](docs/usage.md) for supported matrices and convergence checks.
 
 ## Interfaces
@@ -85,8 +86,8 @@ ctest --test-dir build --output-on-failure
 ./build/apxchol matrix.mtx --rhs rhs.mtx -o solution.mtx
 ```
 
-The CLI reads the matrix as `A`; `--input-kind adjacency` forms the Laplacian of an
-adjacency matrix. An `--rhs` file with several columns is solved as one batch.
+The CLI reads the matrix as `A`; `--input-kind adjacency` or `auto` forms the Laplacian
+of an adjacency matrix. An `--rhs` file with several columns is solved as one batch.
 `--random-rhs` generates a test RHS;
 [`--help`](docs/building.md#command-line-use) lists the available controls.
 

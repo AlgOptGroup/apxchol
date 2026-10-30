@@ -9,14 +9,13 @@
 ///     off-diagonals) — the operator is L = D - A, which must be assembled
 ///     first.
 ///
-/// The CLI reads the file as the operator unless `--input-kind adjacency`
-/// asks it to assemble L = D - A first, matching the bindings. `--input-kind
-/// auto` is an explicit opt-in to guessing; it prints the guess. The solver
-/// validates the resulting operator -- see include/apxchol/operator_class.h,
-/// whose error names `--input-kind adjacency` when the file looks like an
-/// adjacency matrix.
+/// The CLI reads the file as the operator unless `--input-kind` says
+/// otherwise. The rule for `adjacency` and `auto` is shared with the bindings
+/// (`detail::resolve_input_kind` in include/apxchol/operator_class.h), and so
+/// is the validation error that suggests them for an adjacency matrix.
 ///
-/// Everything here depends on Eigen only, so the unit tests can link it.
+
+#include "apxchol/operator_class.h"
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
@@ -24,12 +23,7 @@
 
 namespace apxchol {
 
-/// How the CLI should interpret the matrix it just read.
-enum class input_kind {
-    automatic,  ///< decide from the matrix itself (explicit opt-in)
-    laplacian,  ///< already an assembled Laplacian / SDDM operator (the default)
-    adjacency,  ///< a graph adjacency / pattern matrix; assemble L = D - A
-};
+using detail::input_kind;
 
 /// Structural facts about an input matrix, gathered in a single pass.
 /// Column sums stand in for row sums: the operator contract requires a
@@ -54,30 +48,8 @@ struct input_scan {
     Eigen::Index excess_rows = 0;
 };
 
-/// One pass over `M`, gathering everything `resolve_input_kind` needs.
+/// One pass over `M`, gathering what the CLI reports about it.
 input_scan scan_input(const Eigen::SparseMatrix<double>& M);
-
-/// Resolve `requested` (possibly `automatic`) against the scan.
-///
-/// `pattern_field` says whether the MatrixMarket header declared the
-/// `pattern` field; it only sharpens the explanation, the decision itself
-/// stands without it.
-///
-/// On success returns `laplacian` or `adjacency` and writes a human-readable
-/// justification into `reason`. Throws `std::runtime_error` — naming what was
-/// detected — when the matrix is structurally unusable, or when `automatic`
-/// genuinely cannot tell the two kinds apart.
-input_kind resolve_input_kind(input_kind requested, const input_scan& s,
-                              bool pattern_field, std::string& reason);
-
-/// Reinterpret `M` as a weighted adjacency matrix and replace it with the
-/// graph Laplacian L = D - A, where A_ij = |M_ij| for i != j and D is the
-/// weighted-degree diagonal. Diagonal entries of `M` (graph self-loops, which
-/// contribute nothing to a Laplacian) are dropped.
-///
-/// Taking |value| matches the benchmark suite's `load_mtx_as_adjacency`, so
-/// `--input-kind adjacency` reproduces the benchmark's reading of any file.
-void adjacency_to_laplacian(Eigen::SparseMatrix<double>& M);
 
 /// Project `b` onto the range of a graph Laplacian by subtracting its mean
 /// independently on every connected component of `L`. Returns the component

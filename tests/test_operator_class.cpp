@@ -5,8 +5,9 @@
 //
 //  1. The PRECONDITION. The library states the class it is defined on and
 //     names which condition a matrix violates, with counts -- it does not
-//     sniff at what the caller probably meant. (The CLI still guesses, out of
-//     src/mtx_input.h, because it prints its guess and takes --input-kind.)
+//     sniff at what the caller probably meant. Reading a matrix as a graph is
+//     an explicit request (detail::resolve_input_kind, shared by the CLI's
+//     --input-kind and the bindings' operator helpers).
 //
 //  2. The TRANSFORM. Lumping is applied ONLY to the matrix the preconditioner
 //     is built from. `OperatorIsBitIdenticalAfterPreconditionerConstruction`
@@ -379,9 +380,11 @@ TEST(OperatorContract, AdjacencyMatrixGetsTheConversionSuggestion) {
         EXPECT_NE(msg.find("Condition FAILED: positive diagonal"),
                   std::string::npos) << msg;
         EXPECT_NE(msg.find("ADJACENCY"), std::string::npos) << msg;
-        EXPECT_NE(msg.find("apxchol.laplacian(A)"), std::string::npos) << msg;
-        EXPECT_NE(msg.find("apxchol_laplacian(A)"), std::string::npos) << msg;
-        EXPECT_NE(msg.find("--input-kind"), std::string::npos) << msg;
+        EXPECT_NE(msg.find("apxchol.operator(M, \"adjacency\")"), std::string::npos) << msg;
+        EXPECT_NE(msg.find("apxchol.operator(M, \"auto\")"), std::string::npos) << msg;
+        EXPECT_NE(msg.find("apxchol_operator(M, 'adjacency')"), std::string::npos) << msg;
+        EXPECT_NE(msg.find("--input-kind adjacency"), std::string::npos) << msg;
+        EXPECT_NE(msg.find("--input-kind auto"), std::string::npos) << msg;
     }
 }
 

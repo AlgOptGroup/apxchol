@@ -140,12 +140,24 @@ if (APXCHOL_BUILD_CLI)
     apxchol_cli_test(cli_nearly_sddm_converges path5_nearly_sddm 0 "LAPLACIAN/SDDM operator")
     apxchol_cli_test(cli_explicit_adjacency_on_laplacian path5_laplacian 0 "ADJACENCY graph"
         --input-kind adjacency)
-    apxchol_cli_test(cli_auto_ambiguous_input_is_rejected ambiguous 2
-        "cannot tell whether this matrix is" --input-kind auto)
-    apxchol_cli_test(cli_auto_detects_adjacency path5_pattern 0 "ADJACENCY graph"
-        --input-kind auto)
-    apxchol_cli_test(cli_forced_wrong_kind_is_refused path5_pattern 2 "Condition FAILED: positive diagonal"
+    # auto reads a graph only when the operator reading fails and the matrix is
+    # an adjacency matrix or a pattern file; anything else is used as given.
+    apxchol_cli_test(cli_auto_keeps_laplacian path5_laplacian 0
+        "LAPLACIAN/SDDM operator.*auto: used as given" --input-kind auto)
+    apxchol_cli_test(cli_auto_keeps_sddm path5_sddm 0
+        "LAPLACIAN/SDDM operator.*auto: used as given" --input-kind auto)
+    apxchol_cli_test(cli_auto_converts_adjacency path5_adjacency 0
+        "ADJACENCY graph.*auto: not a valid operator" --input-kind auto)
+    apxchol_cli_test(cli_auto_converts_pattern path5_pattern 0
+        "ADJACENCY graph.*auto: not a valid operator" --input-kind auto)
+    apxchol_cli_test(cli_auto_uses_ambiguous_input_as_given ambiguous 2
+        "auto: used as given.*Condition FAILED" --input-kind auto)
+    apxchol_cli_test(cli_explicit_operator_on_adjacency path5_adjacency 2
+        "--input-kind adjacency. or .--input-kind auto" --input-kind operator)
+    apxchol_cli_test(cli_laplacian_input_kind_is_rejected path5_laplacian 105 "not in"
         --input-kind laplacian)
+    apxchol_cli_test(cli_forced_wrong_kind_is_refused path5_pattern 2 "Condition FAILED: positive diagonal"
+        --input-kind operator)
     # Enum transformations must not widen the CLI to accept raw numeric values.
     apxchol_cli_test(cli_numeric_input_kind_is_rejected path5_pattern 105 "not in"
         --input-kind 0)

@@ -12,9 +12,9 @@
 namespace apxchol {
 
 static const std::map<std::string, input_kind> input_kind_map = {
-    {"auto",      input_kind::automatic},
-    {"laplacian", input_kind::laplacian},
+    {"operator",  input_kind::as_operator},
     {"adjacency", input_kind::adjacency},
+    {"auto",      input_kind::automatic},
 };
 
 static const std::map<std::string, solve_backend> solve_backend_map = {
@@ -85,12 +85,13 @@ run_config parse_args(int argc, char* argv[]) {
 
     // ── how to read the input matrix ──
     app.add_option("--input-kind", cfg.input,
-                   "How to read the input file: 'laplacian' (default) = the operator A, "
-                   "an assembled Laplacian/SDDM matrix solved as given; 'adjacency' = a "
-                   "graph adjacency/pattern matrix, from which L = D - A is assembled "
-                   "(edge weight |value|, self-loops dropped); 'auto' = guess from the "
-                   "off-diagonal signs and the diagonal, and refuse if ambiguous")
-        ->default_str("laplacian")
+                   "How to read the input file: 'operator' (default) = the matrix A, "
+                   "solved as given; 'adjacency' = a graph adjacency/pattern matrix, "
+                   "from which L = D - A is assembled (edge weight |value|, self-loops "
+                   "dropped); 'auto' = 'adjacency' only if the matrix fails operator "
+                   "validation and is a symmetric matrix with nonnegative off-diagonals "
+                   "and zero diagonal, or a pattern file; otherwise 'operator'")
+        ->default_str("operator")
         ->transform(CLI::IsMember(input_kind_map) & CLI::Transformer(input_kind_map));
 
     // ── output ──
