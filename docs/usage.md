@@ -105,6 +105,30 @@ auto batch = solver.solve(B, X);
 One-shot `apxchol::solve(A, b)` uses the same backend selection. For explicit
 CPU execution, set `solve_options.backend = solve_backend::cpu`.
 
+### Judging whether reuse pays off
+
+Setup builds the factor and prepares the backend once; each solve then pays
+only for its own iterations. Every solver reports both parts as wall-clock
+seconds:
+
+| | C++ | Python | MATLAB/Octave |
+|---|---|---|---|
+| Setup | `solver.setup_seconds()` | `solver.setup_seconds` | `s.setup_seconds` |
+| One solve call | `result.solve_seconds` | `result.solve_seconds` | `res.solve_seconds` |
+
+Over `k` right-hand sides, each costs `setup_seconds / k + solve_seconds` on
+average. Reuse pays off once that is below the time of solving each system
+another way, for example with a one-shot solve or another preconditioner.
+A matrix RHS reports one `solve_seconds` for all its columns. After
+`load`, `setup_seconds` includes reading the file, so it also shows what a
+saved solver saves over factorizing again.
+
+```cpp
+apxchol::solver solver(A);
+auto result = solver.solve(b);
+std::printf("setup %.3f s, solve %.3f s\n", solver.setup_seconds(), result.solve_seconds);
+```
+
 ## Binding capabilities
 
 The bindings reuse the native solver, convergence checks and option defaults.
@@ -125,10 +149,9 @@ RHS. `result.residual` reports that relative residual, and `result.converged`
 tells whether it meets the requested tolerance. Inspect this flag even when
 the call returns without an exception.
 
-This check is always part of the solve, including when timing collection is
-disabled. It usually costs one additional sparse matrix–vector product and
-norm reductions per RHS; trivial exact exits can avoid that work. Its cost is
-included in reported solve time.
+This check is always part of the solve. It usually costs one additional
+sparse matrix–vector product and norm reductions per RHS; trivial exact exits
+can avoid that work. Its cost is included in `solve_seconds`.
 
 A failed final check does not trigger more iterations or a different backend.
 The [precision contract](precision.md) explains where each backend checks the

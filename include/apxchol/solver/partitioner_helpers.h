@@ -6,7 +6,7 @@
 /// estimate degrees (baumann_kyng) skip the O(active + edges) pre-pass on
 /// purpose; that choice is why it is not hoisted into the orchestrator.
 
-#include "apxchol/checkpoint.h"
+#include "apxchol/detail/checkpoint.h"
 #include "apxchol/graph/graph.h"
 #include "apxchol/solver/factor_options.h"
 #include "apxchol/solver/factorize_workspace.h"

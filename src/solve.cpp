@@ -1189,7 +1189,9 @@ struct solver::impl {
     double tol;
     int max_iter;
     int num_threads;
-    bool collect_timings;
+    // Internal timing tree attached through solver_access; copies start without one.
+    detail::checkpoint* timings = nullptr;
+    double setup_seconds = 0.0;
     // Rejects overlapping calls, which would share the route's workspace.
     // A copy starts with its own guard.
     detail::call_guard calls;
@@ -1201,11 +1203,10 @@ struct solver::impl {
     }
 
     static detail::solver_route make_route(const Eigen::SparseMatrix<double>& A,
-                                           const solve_options& opts, checkpoint* cp,
+                                           const solve_options& opts, detail::checkpoint* cp,
                                            factorization* F) {
         detail::validate_solve_options(opts);
         const detail::thread_budget threads(opts.num_threads);
-        if (!opts.collect_timings) cp = nullptr;
         if (A.rows() == 0) throw std::invalid_argument("solver: empty operator");
         if (F) {
             detail::validate_adopted_operator(A, *F, opts.factor_opts.lump_max_mass);
@@ -1238,10 +1239,10 @@ struct solver::impl {
     }
 
     impl(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
-         checkpoint* cp, factorization* F = nullptr)
+         detail::checkpoint* cp, factorization* F)
         : route(make_route(A, opts, cp, F)), operator_entries(A.nonZeros()),
           tol(opts.tol), max_iter(opts.max_iter),
-          num_threads(opts.num_threads), collect_timings(opts.collect_timings) {
+          num_threads(opts.num_threads), timings(cp) {
 #if defined(APXCHOL_USE_CUDA)
         if (const auto* gpu = std::get_if<detail::gpu_solve_session>(&route))
             print_sptrsv_banner<solve_backend::gpu>(gpu->trsv().fp16(), opts.factor_opts.verbose);
@@ -1251,7 +1252,7 @@ struct solver::impl {
     impl(const impl& other)
         : route(copy_route(other.route)), operator_entries(other.operator_entries),
           tol(other.tol), max_iter(other.max_iter), num_threads(other.num_threads),
-          collect_timings(other.collect_timings) {}
+          setup_seconds(other.setup_seconds) {}
 
     Eigen::Index rows() const {
         return std::visit([](const auto& owner) {
@@ -1266,25 +1267,26 @@ struct solver::impl {
     }
 
     // The only argument checks and panel loop of every solve: the routes
-    // trust what reaches them. tol and max_iter are resolved.
-    void solve(const_matrix_view B, matrix_view X, const const_matrix_view* X0,
-               std::span<solve_result> results, checkpoint& timings, double tol,
-               int max_iter) {
+    // trust what reaches them. tol and max_iter are resolved. Returns the
+    // call's wall-clock seconds.
+    double solve(const_matrix_view B, matrix_view X, const const_matrix_view* X0,
+                 std::span<solve_result> results, double tol, int max_iter) {
+        const auto start = std::chrono::steady_clock::now();
         const auto scope = calls.enter();
         const detail::thread_budget threads(num_threads);
         check_matrix_views(B, X, rows(), X0);
         if (!all_finite(B) || (X0 && !all_finite(*X0)))
             throw std::invalid_argument("solver: RHS and initial guess must be finite");
-        checkpoint* cp = collect_timings ? &timings : nullptr;
         std::visit([&](auto& owner) {
             for_panels(B.cols(), owner.solve_widths, [&](Eigen::Index first, int width) {
                 std::optional<const_matrix_view> initial;
                 if (X0) initial.emplace(X0->middleCols(first, width));
                 owner.solve_columns(B.middleCols(first, width), X.middleCols(first, width),
                                     initial ? &*initial : nullptr,
-                                    results.subspan(first, width), cp, tol, max_iter);
+                                    results.subspan(first, width), timings, tol, max_iter);
             });
         }, route);
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     }
 
     void apply(const_matrix_view R, matrix_view Z) {
@@ -1316,8 +1318,16 @@ void detail::solver_access::save(const std::filesystem::path& path, const solver
     save_solver_data(path, A, F, owner.operator_nnz());
 }
 
-void detail::solver_access::restore_input_entries(solver& owner, Eigen::Index entries) {
+solver detail::solver_access::with_timings(const Eigen::SparseMatrix<double>& A,
+                                          const solve_options& opts, checkpoint& timings) {
+    return solver(A, nullptr, opts, &timings);
+}
+
+void detail::solver_access::finish_load(solver& owner, Eigen::Index entries,
+                                        std::chrono::steady_clock::time_point started) {
     owner.impl_->operator_entries = entries;
+    owner.impl_->setup_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 }
 
 Eigen::SparseMatrix<double> detail::cpu_route::original_operator() const {
@@ -1351,11 +1361,17 @@ Eigen::SparseMatrix<double> detail::gpu_solve_session::original_operator() const
 }
 #endif
 
-solver::solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts, checkpoint* cp)
-    : impl_(std::make_unique<impl>(A, opts, cp)) {}
-solver::solver(const Eigen::SparseMatrix<double>& A, factorization F,
-               const solve_options& opts, checkpoint* cp)
-    : impl_(std::make_unique<impl>(A, opts, cp, &F)) {}
+solver::solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts)
+    : solver(A, nullptr, opts, nullptr) {}
+solver::solver(const Eigen::SparseMatrix<double>& A, factorization F, const solve_options& opts)
+    : solver(A, &F, opts, nullptr) {}
+solver::solver(const Eigen::SparseMatrix<double>& A, factorization* F,
+               const solve_options& opts, detail::checkpoint* timings) {
+    const auto start = std::chrono::steady_clock::now();
+    impl_ = std::make_unique<impl>(A, opts, timings, F);
+    impl_->setup_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+}
 solver::~solver() = default;
 solver::solver(solver&&) noexcept = default;
 solver& solver::operator=(solver&&) noexcept = default;
@@ -1365,22 +1381,15 @@ solver& solver::operator=(const solver& other) {
     return *this;
 }
 
-void solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,
-                   int max_iter, const Eigen::VectorXd* x0) const {
-    impl_->resolve(tol, max_iter);
-    if (b.size() != rows()) throw std::invalid_argument("solver::solve: RHS length mismatch");
-    if (&b == &result.x || x0 == &result.x)
-        throw std::invalid_argument("solver: output must not overlap RHS or warm start");
-    result.x.resize(rows());
-    const const_matrix_view initial(x0 ? *x0 : b);
-    impl_->solve(b, result.x, x0 ? &initial : nullptr, {&result, 1}, result.timings,
-                 tol, max_iter);
-}
-
 solve_result solver::solve(const Eigen::VectorXd& b, double tol, int max_iter,
                            const Eigen::VectorXd* x0) const {
+    impl_->resolve(tol, max_iter);
+    if (b.size() != rows()) throw std::invalid_argument("solver::solve: RHS length mismatch");
     solve_result result;
-    solve(b, result, tol, max_iter, x0);
+    result.x.resize(rows());
+    const const_matrix_view initial(x0 ? *x0 : b);
+    result.solve_seconds = impl_->solve(b, result.x, x0 ? &initial : nullptr, {&result, 1},
+                                        tol, max_iter);
     return result;
 }
 
@@ -1389,7 +1398,8 @@ solve_result solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd>
     impl_->resolve(tol, max_iter);
     solve_result result;
     const const_matrix_view initial(x0 ? *x0 : b);
-    impl_->solve(b, x, x0 ? &initial : nullptr, {&result, 1}, result.timings, tol, max_iter);
+    result.solve_seconds = impl_->solve(b, x, x0 ? &initial : nullptr, {&result, 1},
+                                        tol, max_iter);
     return result;
 }
 
@@ -1398,8 +1408,7 @@ batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X, doubl
     impl_->resolve(tol, max_iter);
     batch_solve_result result;
     result.columns.resize(B.cols());
-    result.timings.tick();
-    impl_->solve(B, X, X0, result.columns, result.timings, tol, max_iter);
+    result.solve_seconds = impl_->solve(B, X, X0, result.columns, tol, max_iter);
     return result;
 }
 
@@ -1427,15 +1436,13 @@ solve_backend solver::backend() const {
 factor_storage_type solver::factor_storage() const {
     return std::visit([](const auto& owner) { return owner.factor_storage(); }, impl_->route);
 }
+double solver::setup_seconds() const { return impl_->setup_seconds; }
 
 solve_result solve(const Eigen::SparseMatrix<double>& L, const Eigen::VectorXd& b,
                    const solve_options& opts) {
     ensure_eigen_parallel();
-    solve_result result;
-    const solver owner(L, opts,
-        opts.collect_timings ? &result.timings : nullptr);
-    owner.solve(b, result);
-    return result;
+    const solver owner(L, opts);
+    return owner.solve(b);
 }
 
 } // namespace apxchol

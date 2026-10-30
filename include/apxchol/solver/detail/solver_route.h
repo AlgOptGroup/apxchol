@@ -9,6 +9,7 @@
 #elif defined(APXCHOL_USE_METAL)
 #include "apxchol/solver/detail/metal_route.h"
 #endif
+#include <chrono>
 #include <filesystem>
 #include <variant>
 
@@ -27,8 +28,15 @@ using solver_route = std::variant<cpu_route
 
 struct solver_access {
     static const solver_route& route(const solver& owner);
+    // Attach a timing tree for the CLI's -v report, tests and the benchmark:
+    // setup records under "setup", and every solve on the returned solver
+    // under "pcg". The tree must outlive the solver; copies start without one.
+    static solver with_timings(const Eigen::SparseMatrix<double>& A,
+                               const solve_options& opts, checkpoint& timings);
     static void save(const std::filesystem::path& path, const solver& owner);
-    static void restore_input_entries(solver& owner, Eigen::Index entries);
+    // started is when load() began, so setup_seconds includes reading the file.
+    static void finish_load(solver& owner, Eigen::Index entries,
+                            std::chrono::steady_clock::time_point started);
 };
 
 } // namespace apxchol::detail

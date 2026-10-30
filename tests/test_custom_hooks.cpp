@@ -8,7 +8,6 @@
 #include "grid_laplacian.h"
 #include "test_rhs.h"
 #include <algorithm>
-#include <limits>
 #include <span>
 #include <vector>
 
@@ -242,16 +241,12 @@ TEST(SolveHonesty, ZeroIterationSolveDoesNotClaimConvergence) {
     EXPECT_GE(res.residual, 1.0);
 }
 
-TEST(SolveHonesty, ZeroRhsResetsReusedResult) {
+TEST(SolveHonesty, ZeroRhsReturnsZero) {
     const auto L = grid_laplacian(3, 3);
     apxchol::solver solver(L, on_cpu);
     const Eigen::VectorXd b = Eigen::VectorXd::Zero(L.rows());
-    apxchol::solve_result result;
-    result.x = Eigen::VectorXd::Ones(L.rows());
-    result.iterations = 7;
-    result.residual = std::numeric_limits<double>::quiet_NaN();
 
-    solver.solve(b, result);
+    const auto result = solver.solve(b);
 
     ASSERT_EQ(result.x.size(), L.rows());
     EXPECT_TRUE(result.x.isZero(0.0));
@@ -259,16 +254,13 @@ TEST(SolveHonesty, ZeroRhsResetsReusedResult) {
     EXPECT_EQ(result.residual, 0.0);
 }
 
-TEST(SolveHonesty, ZeroRhsResetsReusedResultWithWarmStart) {
+TEST(SolveHonesty, ZeroRhsReturnsZeroWithWarmStart) {
     const auto L = grid_laplacian(3, 3);
     apxchol::solver solver(L, on_cpu);
     const Eigen::VectorXd b = Eigen::VectorXd::Zero(L.rows());
     const Eigen::VectorXd x0 = Eigen::VectorXd::LinSpaced(L.rows(), -2.0, 2.0);
-    apxchol::solve_result result;
-    result.iterations = 7;
-    result.residual = std::numeric_limits<double>::infinity();
 
-    solver.solve(b, result, 1e-8, 200, &x0);
+    const auto result = solver.solve(b, 1e-8, 200, &x0);
 
     ASSERT_EQ(result.x.size(), L.rows());
     EXPECT_TRUE(result.x.isZero(0.0));

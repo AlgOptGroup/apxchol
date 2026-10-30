@@ -27,6 +27,7 @@
 #include "apxchol/solver/partition/priority_greedy.h"
 #include "apxchol/solver/partitioner_helpers.h"
 #include "apxchol/solver/solve.h"
+#include "apxchol/solver/detail/solver_route.h"
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/gpu_block_frontend.h"
 #include "gpu_preconditioner_fixture.h"
@@ -38,7 +39,7 @@
 static apxchol::factorization factorize_controlled(
         apxchol::graph graph, const apxchol::factor_options& options,
         const apxchol::detail::factorization_controls& controls,
-        apxchol::checkpoint* checkpoint = nullptr) {
+        apxchol::detail::checkpoint* checkpoint = nullptr) {
     apxchol::detail::block_greedy_partitioner partitioner;
     return apxchol::detail::factorize_impl(apxchol::detail::make_tree_elim(options), partitioner,
         std::move(graph), options, checkpoint, nullptr,
@@ -1106,16 +1107,17 @@ TEST_F(SolveTest, DeterministicWithSameSeed) {
 TEST(Solve, TimingsReported) {
     auto L = grid_laplacian(10, 10);
     auto b = apxchol::test::random_rhs(100);
-    auto res = apxchol::solve(L, b);
-    EXPECT_GT(res.timings.total("setup"), 0.0);
+    apxchol::detail::checkpoint timings;
+    auto res = apxchol::detail::solver_access::with_timings(L, {}, timings).solve(b);
+    EXPECT_GT(timings.total("setup"), 0.0);
     // CPU triangular solves are timed under pcg.solve; GPU-resident PCG
     // records one pcg.gpu_pcg_loop leaf.
-    EXPECT_GT(res.timings.total("pcg"), 0.0);
+    EXPECT_GT(timings.total("pcg"), 0.0);
     if (res.backend == apxchol::solve_backend::gpu) {
-        EXPECT_GT(res.timings.total("pcg.gpu_pcg_loop"), 0.0);
+        EXPECT_GT(timings.total("pcg.gpu_pcg_loop"), 0.0);
     } else {
         EXPECT_EQ(res.backend, apxchol::solve_backend::cpu);
-        EXPECT_GT(res.timings.total("pcg.solve"), 0.0);
+        EXPECT_GT(timings.total("pcg.solve"), 0.0);
     }
 }
 
@@ -1546,7 +1548,7 @@ TEST(ResidualSparsifyGate, DuplicateHeavyIndexedGraphConvergesWithEitherSetting)
     options.min_is_fraction = 0.5;
     for (bool sparsify : {false, true}) {
         SCOPED_TRACE(sparsify);
-        apxchol::checkpoint timings;
+        apxchol::detail::checkpoint timings;
         auto factor = factorize_controlled(graph, options, {.residual_sparsify = sparsify}, &timings);
         EXPECT_EQ(timings.total("setup.sparsify_residual") > 0.0, sparsify)
             << "fixture must exercise the residual sparsification gate";
@@ -2138,8 +2140,9 @@ TEST(GpuBoundedSelection, ConsumingSolveChecksOriginalOperatorResidual) {
         Eigen::VectorXd first_solution;
         Eigen::Index first_iterations = 0;
         for (unsigned repeat = 0; repeat < 2; ++repeat) {
-            const auto solved = apxchol::solve(A, b, options);
-            EXPECT_GT(solved.timings.total("setup.gpu_owned_factorization"), 0.0);
+            apxchol::detail::checkpoint timings;
+            const auto solved = apxchol::detail::solver_access::with_timings(A, options, timings).solve(b);
+            EXPECT_GT(timings.total("setup.gpu_owned_factorization"), 0.0);
             const double rr = (A * solved.x - b).norm() / b.norm();
             EXPECT_TRUE(std::isfinite(rr)); EXPECT_LE(rr, 1e-8);
             std::ostringstream receipt;

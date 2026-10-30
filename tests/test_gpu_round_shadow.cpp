@@ -3,7 +3,7 @@
 #include "apxchol/solver/solve.h"
 #include "gpu_preconditioner_fixture.h"
 
-#include "apxchol/checkpoint.h"
+#include "apxchol/detail/checkpoint.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 #include "apxchol/solver/factorization.h"
@@ -3197,9 +3197,9 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
         apxchol::solve_options setup;
         setup.backend = apxchol::solve_backend::gpu;
         setup.factor_opts = factor_options;
-        apxchol::checkpoint owned_cp;
+        apxchol::detail::checkpoint owned_cp;
         testing::internal::CaptureStderr();
-        const apxchol::solver owner(A, setup, &owned_cp);
+        const auto owner = apxchol::detail::solver_access::with_timings(A, setup, owned_cp);
         const std::string trace = testing::internal::GetCapturedStderr();
         const auto& preconditioner = gpu_session(owner);
         ASSERT_NE(trace.find("[gpu-owned-factorization] complete rounds="), std::string::npos) << trace;

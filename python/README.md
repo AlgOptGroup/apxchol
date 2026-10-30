@@ -89,6 +89,11 @@ Vector inputs have shape `(n,)`; batches have shape `(n, nrhs)`. `result.x`
 and `apply` outputs preserve that shape and use float64. Batch convergence
 fields contain one value per column.
 
+`solver.setup_seconds` is the wall-clock time the factor took to build, and
+`result.solve_seconds` that of one `solve` call, for all columns of a batch.
+Over `k` right-hand sides each costs `setup_seconds / k + solve_seconds` on
+average; see [judging whether reuse pays off](https://algoptgroup.github.io/apxchol/docs/usage.html#judging-whether-reuse-pays-off).
+
 A *warm start* supplies an initial solution estimate:
 
 ```python

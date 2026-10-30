@@ -1,5 +1,4 @@
 #pragma once
-#include "apxchol/checkpoint.h"
 #include "apxchol/solver/factorization.h"
 #include <Eigen/Core>
 #include <Eigen/Sparse>
@@ -9,7 +8,7 @@
 #include <memory>
 
 namespace apxchol {
-namespace detail { struct solver_access; }
+namespace detail { struct checkpoint; struct solver_access; }
 
 inline constexpr double default_tol      = 1e-8;
 inline constexpr int    default_max_iter = 200;
@@ -37,8 +36,6 @@ struct solve_options {
     /// override the calling OpenMP task's setting; 0 inherits it.
     /// Small workloads may use fewer threads.
     int num_threads = 0;
-    /// Record timing checkpoints. Final residual verification always runs.
-    bool collect_timings = true;
 };
 
 namespace detail {
@@ -53,7 +50,9 @@ struct solve_result {
     double residual      = 0.0;
     /// Whether the checked residual is below the requested tolerance.
     bool converged = false;
-    checkpoint timings;
+    /// Wall-clock seconds spent in the solve call. Zero in batch columns,
+    /// which share the batch total.
+    double solve_seconds = 0.0;
     // Device-wide VRAM usage (MB), sampled at solve end via cudaMemGetInfo.
     // -1 = unmeasured (CPU build / host PCG).
     double solve_vram_mb = -1.0;
@@ -68,7 +67,8 @@ using const_matrix_view = Eigen::Ref<const Eigen::MatrixXd, 0,
 struct batch_solve_result {
     // Solutions are written to caller storage; each column's x remains empty.
     std::vector<solve_result> columns;
-    checkpoint timings;
+    /// Wall-clock seconds spent solving all columns.
+    double solve_seconds = 0.0;
 };
 
 /// Reusable solver owning one CPU or GPU backend, selected once at setup.
@@ -81,12 +81,10 @@ struct batch_solve_result {
 class solver {
     friend struct detail::solver_access;
 public:
-    explicit solver(const Eigen::SparseMatrix<double>& A,
-                    const solve_options& opts = {}, checkpoint* cp = nullptr);
+    explicit solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts = {});
     /// Adopt F without rebuilding or regularizing it. lump_max_mass still bounds
     /// operator validation; factor storage, dropping and solve options apply.
-    solver(const Eigen::SparseMatrix<double>& A, factorization F,
-           const solve_options& opts = {}, checkpoint* cp = nullptr);
+    solver(const Eigen::SparseMatrix<double>& A, factorization F, const solve_options& opts = {});
     ~solver();
     solver(solver&&) noexcept;
     solver& operator=(solver&&) noexcept;
@@ -98,9 +96,6 @@ public:
     /// in the result even when the iteration budget is exhausted.
     solve_result solve(const Eigen::VectorXd& b, double tol = -1.0,
                        int max_iter = -1, const Eigen::VectorXd* x0 = nullptr) const;
-    /// Write into an existing result, preserving its setup timing records.
-    void solve(const Eigen::VectorXd& b, solve_result& result, double tol = -1.0,
-               int max_iter = -1, const Eigen::VectorXd* x0 = nullptr) const;
     /// Write into caller storage; the returned result leaves x empty.
     solve_result solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
                        double tol = -1.0, int max_iter = -1,
@@ -137,6 +132,9 @@ public:
     solve_backend backend() const;
     /// Installed triangular-solve storage: fp16 or fp32, never automatic.
     factor_storage_type factor_storage() const;
+    /// Wall-clock seconds spent constructing this solver, or in load()
+    /// including reading the file. Copies keep the original's value.
+    double setup_seconds() const;
 
     /// Save the original operator and retained FP32 factor in a portable binary
     /// file. Creates a new file; an existing destination is an error. Requires
@@ -147,6 +145,8 @@ public:
     static solver load(const std::filesystem::path& path, const solve_options& opts = {});
 
 private:
+    solver(const Eigen::SparseMatrix<double>& A, factorization* F,
+           const solve_options& opts, detail::checkpoint* timings);
     batch_solve_result solve_batch(const_matrix_view B, matrix_view X, double tol,
                                    int max_iter, const const_matrix_view* X0) const;
     struct impl;

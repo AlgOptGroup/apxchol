@@ -2,7 +2,7 @@
 // Metal route of solver: PCG with reusable factor, operator and workspace.
 // solver validates options and arguments, selects the route and rejects
 // overlapping calls; the route trusts its arguments. It cannot be copied.
-#include "apxchol/checkpoint.h"
+#include "apxchol/detail/checkpoint.h"
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"
 #include <Eigen/Core>

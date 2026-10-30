@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "apxchol/solver/solve.h"
+#include "apxchol/detail/checkpoint.h"
 #include "apxchol/detail/call_guard.h"
 #include "apxchol/solver/detail/solver_route.h"
 #include "apxchol/solver/detail/thread_budget.h"
@@ -198,10 +199,11 @@ TEST(Solver, CpuOwnerSurvivesInputsAndMovesAndReusesItsFactor) {
     const Sparse matrix = operator_matrix();
     const auto options = cpu_options();
     std::unique_ptr<apxchol::solver> original;
+    apxchol::detail::checkpoint setup;  // outlives the solver it is attached to
     {
         Sparse temporary = matrix;
-        apxchol::checkpoint setup;
-        original = std::make_unique<apxchol::solver>(temporary, options, &setup);
+        original = std::make_unique<apxchol::solver>(
+            apxchol::detail::solver_access::with_timings(temporary, options, setup));
         EXPECT_GT(setup.total("setup"), 0.0);
     }
     apxchol::solver moved(std::move(*original));
@@ -515,43 +517,61 @@ TEST(Solver, CpuCallerOutputAndWarmStartsUseEachOwnersStorage) {
     }
 }
 
-TEST(Solver, CpuSolveTimingsBelongToTheCurrentResult) {
+TEST(Solver, AttachedTimingTreeRecordsSetupAndEverySolve) {
     const scoped_omp_threads threads(1);
     const Sparse matrix = operator_matrix();
-    apxchol::checkpoint setup;
-    apxchol::solver owner(matrix, cpu_options(), &setup);
-    const std::string setup_before = setup.report();
+    apxchol::detail::checkpoint timings;
+    const auto owner = apxchol::detail::solver_access::with_timings(matrix, cpu_options(), timings);
+    const double setup = timings.total("setup");
+    EXPECT_GT(timings.total("setup.backend_selection"), 0.0);
+    EXPECT_EQ(timings.total("pcg"), 0.0);
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
-    auto first = std::make_unique<apxchol::solve_result>();
-    owner.solve(rhs, *first);
-    EXPECT_GT(first->timings.total("pcg"), 0.0);
-    EXPECT_GT(first->timings.total("pcg.solve"), 0.0);
-    EXPECT_EQ(first->timings.total("setup"), 0.0);
-    const std::string first_before = first->timings.report();
-    apxchol::solve_result second;
-    owner.solve(-rhs, second);
-    EXPECT_GT(second.timings.total("pcg"), 0.0);
-    EXPECT_GT(second.timings.total("pcg.solve"), 0.0);
-    EXPECT_EQ(first->timings.report(), first_before);
-    EXPECT_EQ(setup.report(), setup_before);
-    auto moved = std::move(*first);
-    first.reset();
-    auto copied = moved;
-    owner.solve(rhs, moved);
-    owner.solve(-rhs, copied);
-    expect_solution(matrix, rhs, moved.x);
-    expect_solution(matrix, -rhs, copied.x);
-    const double second_before = second.timings.total("pcg");
-    {
-        apxchol::solve_result temporary;
-        owner.solve(rhs, temporary);
-        expect_solution(matrix, rhs, temporary.x);
+    expect_solution(matrix, rhs, owner.solve(rhs).x);
+    EXPECT_GT(timings.total("pcg.solve"), 0.0);
+    const double first = timings.total("pcg");
+    EXPECT_GT(first, 0.0);
+    Eigen::MatrixXd B = rhs.replicate(1, 3), X(matrix.rows(), 3);
+    owner.solve(B, X);
+    EXPECT_GT(timings.total("pcg"), first);
+    EXPECT_EQ(timings.total("setup"), setup);
+
+    // A copy starts without the tree.
+    const apxchol::solver copy = owner;
+    const double before = timings.total("pcg");
+    expect_solution(matrix, rhs, copy.solve(rhs).x);
+    EXPECT_EQ(timings.total("pcg"), before);
+}
+
+TEST(Solver, ReportsSetupAndSolveSeconds) {
+    const scoped_omp_threads threads(1);
+    const Sparse matrix = operator_matrix();
+    const auto positive = [](double seconds) { return std::isfinite(seconds) && seconds > 0.0; };
+    const apxchol::solver owner(matrix, cpu_options());
+    const double setup = owner.setup_seconds();
+    EXPECT_TRUE(positive(setup)) << setup;
+    const Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
+    const auto scalar = owner.solve(b);
+    EXPECT_TRUE(scalar.converged);
+    EXPECT_TRUE(positive(scalar.solve_seconds)) << scalar.solve_seconds;
+    Eigen::VectorXd x(matrix.rows());
+    const auto into = owner.solve(b, x);
+    EXPECT_TRUE(positive(into.solve_seconds)) << into.solve_seconds;
+    Eigen::MatrixXd B = b.replicate(1, 3), X(matrix.rows(), 3);
+    const auto batch = owner.solve(B, X);
+    EXPECT_TRUE(positive(batch.solve_seconds)) << batch.solve_seconds;
+    for (const auto& column : batch.columns) {
+        EXPECT_TRUE(column.converged);
+        EXPECT_EQ(column.solve_seconds, 0.0);
     }
-    EXPECT_TRUE(owner.apply(rhs).allFinite());
-    owner.solve(rhs, second);
-    EXPECT_GT(second.timings.total("pcg"), second_before);
-    EXPECT_EQ(setup.report(), setup_before);
-    expect_solution(matrix, rhs, second.x);
+    EXPECT_TRUE(owner.apply(b).allFinite());
+    EXPECT_EQ(owner.setup_seconds(), setup);
+    const apxchol::solver copy = owner;
+    EXPECT_EQ(copy.setup_seconds(), setup);
+    const apxchol::solver adopted(matrix, apxchol::factorize(matrix), cpu_options());
+    EXPECT_TRUE(positive(adopted.setup_seconds())) << adopted.setup_seconds();
+    const auto one_shot = apxchol::solve(matrix, b, cpu_options());
+    EXPECT_TRUE(one_shot.converged);
+    EXPECT_TRUE(positive(one_shot.solve_seconds)) << one_shot.solve_seconds;
 }
 
 TEST(Solver, CpuScalesExtremeRhsAndWarmStarts) {
@@ -795,33 +815,19 @@ TEST(Solver, CpuScalarViewsRejectWrongSizesAndAliasing) {
     EXPECT_THROW(owner.solve(wrong, x), std::invalid_argument);
     EXPECT_THROW(owner.solve(b, b), std::invalid_argument);
     EXPECT_THROW(owner.solve(b, x, -1, -1, &x), std::invalid_argument);
-    apxchol::solve_result result;
-    result.x = b;
-    EXPECT_THROW(owner.solve(result.x, result), std::invalid_argument);
-    EXPECT_THROW(owner.solve(b, result, -1, -1, &result.x), std::invalid_argument);
 }
 
-TEST(Solver, TimingsCanBeDisabledWithoutDisablingExitChecks) {
+TEST(Solver, ExitChecksRunWithoutATimingTree) {
     const scoped_omp_threads threads(1);
-    auto options = cpu_options();
-    options.collect_timings = false;
     const Sparse matrix = operator_matrix();
-    apxchol::checkpoint setup;
-    const apxchol::solver owner(matrix, options, &setup);
-    EXPECT_EQ(setup.total("setup"), 0.0);
+    const apxchol::solver owner(matrix, cpu_options());
     const Eigen::VectorXd b = Eigen::VectorXd::Ones(matrix.rows());
     const auto scalar = owner.solve(b);
     EXPECT_TRUE(scalar.converged);
-    EXPECT_EQ(scalar.timings.total("pcg"), 0.0);
     EXPECT_NEAR(scalar.residual, (b - matrix * scalar.x).norm() / b.norm(), 1e-15);
     Eigen::MatrixXd B = b.replicate(1, 3), X(matrix.rows(), 3);
     const auto batch = owner.solve(B, X);
-    EXPECT_EQ(batch.timings.total("pcg"), 0.0);
     for (const auto& column : batch.columns) EXPECT_TRUE(column.converged);
-    const auto one_shot = apxchol::solve(matrix, b, options);
-    EXPECT_TRUE(one_shot.converged);
-    EXPECT_EQ(one_shot.timings.total("setup"), 0.0);
-    EXPECT_EQ(one_shot.timings.total("pcg"), 0.0);
 }
 
 TEST(Solver, CpuRejectsUnrepresentableSolutions) {
@@ -872,8 +878,7 @@ TEST(Solver, CudaOwnerReusesOwnedInputAndAppliesFactor) {
     std::unique_ptr<apxchol::solver> owner;
     {
         Sparse temporary = matrix;
-        apxchol::checkpoint setup;
-        owner = std::make_unique<apxchol::solver>(temporary, options, &setup);
+        owner = std::make_unique<apxchol::solver>(temporary, options);
     }
     EXPECT_EQ(owner->rows(), matrix.rows());
     EXPECT_EQ(owner->backend(), apxchol::solve_backend::gpu);
@@ -954,13 +959,11 @@ TEST(Solver, CudaOwnerAdoptsHostFactorsAndRejectsInvalidWarmStarts) {
     EXPECT_THROW(owner.solve(rhs, -1.0, -1, &x0), std::invalid_argument);
     Eigen::VectorXd output(matrix.rows());
     EXPECT_THROW(owner.solve(rhs, output, -1.0, -1, &x0), std::invalid_argument);
-    apxchol::solve_result result;
-    EXPECT_THROW(owner.solve(rhs, result, -1.0, -1, &x0), std::invalid_argument);
     x0 = Eigen::VectorXd::Zero(matrix.rows());
     for (const double value : {std::numeric_limits<double>::infinity(),
                                std::numeric_limits<double>::quiet_NaN()}) {
         x0[0] = value;
-        EXPECT_THROW(owner.solve(rhs, result, -1.0, -1, &x0), std::invalid_argument);
+        EXPECT_THROW(owner.solve(rhs, -1.0, -1, &x0), std::invalid_argument);
     }
     EXPECT_EQ(owner.backend(), apxchol::solve_backend::gpu);
     const auto recovered = owner.solve(rhs);
@@ -1042,9 +1045,7 @@ TEST(Solver, CudaWarmStartsPreserveOriginalResidualAndIterationBudget) {
             if (kind != 0) {
                 EXPECT_NEAR(output.mean(), 0.0, 1e-12);
             }
-            const double before = result.timings.total("pcg");
-            owner.solve(rhs, result, options.tol, options.max_iter, &x0);
-            EXPECT_GT(result.timings.total("pcg"), before);
+            result = owner.solve(rhs, options.tol, options.max_iter, &x0);
             expect_solution(matrix, rhs, result.x);
 
             const auto cold = owner.solve(rhs);
@@ -1164,8 +1165,7 @@ TEST(Solver, GpuOwnerPreservesStorageAndAdoptsItsFactor) {
         std::unique_ptr<apxchol::solver> owner;
         {
             Sparse temporary = matrix;
-            apxchol::checkpoint setup;
-            owner = std::make_unique<apxchol::solver>(temporary, options, &setup);
+            owner = std::make_unique<apxchol::solver>(temporary, options);
         }
         EXPECT_EQ(owner->backend(), apxchol::solve_backend::gpu);
         EXPECT_EQ(owner->rows(), matrix.rows());
@@ -1346,10 +1346,10 @@ TEST(Solver, CpuMatrixRhsUsesIndependentStopsAndOneTimingTree) {
     EXPECT_EQ(batch.columns[0].iterations, 0);
     EXPECT_EQ(batch.columns[1].iterations, 0);
     EXPECT_TRUE(x.col(0).isZero(0.0));
-    EXPECT_GT(batch.timings.total("pcg"), 0.0);
+    EXPECT_GT(batch.solve_seconds, 0.0);
     for (int c = 0; c < rhs.cols(); ++c) {
         EXPECT_EQ(batch.columns[c].x.size(), 0);
-        EXPECT_DOUBLE_EQ(batch.columns[c].timings.total("pcg"), 0.0);
+        EXPECT_EQ(batch.columns[c].solve_seconds, 0.0);
         EXPECT_EQ(batch.columns[c].backend, apxchol::solve_backend::cpu);
         if (c > 0) expect_solution(matrix, rhs.col(c), x.col(c), 1e-9);
         const Eigen::VectorXd b = rhs.col(c), guess = x0.col(c);
@@ -1374,7 +1374,6 @@ TEST(Solver, CpuMatrixRhsRejectsAliasingAndAcceptsEmptyBatches) {
     Eigen::MatrixXd empty(owner.rows(), 0), output(owner.rows(), 0);
     const auto result = owner.solve(empty, output);
     EXPECT_TRUE(result.columns.empty());
-    EXPECT_DOUBLE_EQ(result.timings.total("pcg"), 0.0);
     EXPECT_NO_THROW(owner.apply(empty, output));
 }
 

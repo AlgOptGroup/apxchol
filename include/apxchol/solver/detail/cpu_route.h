@@ -1,5 +1,6 @@
 #pragma once
 #include "apxchol/solver/solve.h"
+#include "apxchol/detail/checkpoint.h"
 #include "apxchol/solver/sptrsv/omp.h"
 #include <array>
 #include <cstdint>

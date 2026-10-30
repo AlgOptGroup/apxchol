@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <algorithm>
 #include "scoped_env.h"
+#include "apxchol/detail/checkpoint.h"
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/detail/solve_backend.h"
 #include "apxchol/solver/detail/solver_route.h"
@@ -296,10 +297,11 @@ TEST(SolveRoutes, AutomaticAndExplicitGpuUseOwnedSetup) {
             options.backend = backend;
             options.factor_opts.sampler = sampler;
             options.tol = 1e-10;
-            const auto result = apxchol::solve(matrix, rhs, options);
+            apxchol::detail::checkpoint timings;
+            const auto result = apxchol::detail::solver_access::with_timings(matrix, options, timings).solve(rhs);
             EXPECT_EQ(result.backend, apxchol::solve_backend::gpu);
-            EXPECT_GT(result.timings.total("setup.gpu_owned_factorization"), 0.0);
-            EXPECT_GT(result.timings.total("pcg.gpu_pcg_loop"), 0.0);
+            EXPECT_GT(timings.total("setup.gpu_owned_factorization"), 0.0);
+            EXPECT_GT(timings.total("pcg.gpu_pcg_loop"), 0.0);
             expect_solution(matrix, rhs, result);
         }
     }
@@ -321,9 +323,10 @@ TEST(SolveRoutes, UnsupportedStoredLayoutSelectsCpuBeforeSetup) {
         const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(matrix.rows());
         apxchol::solve_options options;
         ASSERT_EQ(apxchol::detail::select_solve_backend(options, &matrix), apxchol::solve_backend::cpu);
-        const auto result = apxchol::solve(matrix, rhs, options);
+        apxchol::detail::checkpoint timings;
+        const auto result = apxchol::detail::solver_access::with_timings(matrix, options, timings).solve(rhs);
         EXPECT_EQ(result.backend, apxchol::solve_backend::cpu);
-        EXPECT_GT(result.timings.total("setup.backend_selection"), 0.0);
+        EXPECT_GT(timings.total("setup.backend_selection"), 0.0);
         expect_solution(matrix, rhs, result);
         options.backend = apxchol::solve_backend::gpu;
         EXPECT_THROW(apxchol::solve(matrix, rhs, options), std::invalid_argument);
@@ -339,9 +342,10 @@ TEST(SolveRoutes, OperatorOutsideMetalRangeSelectsCpuBeforeSetup) {
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(matrix.rows());
     apxchol::solve_options options;
     EXPECT_EQ(apxchol::detail::select_solve_backend(options, &matrix), apxchol::solve_backend::cpu);
-    const auto result = apxchol::solve(matrix, rhs, options);
+    apxchol::detail::checkpoint timings;
+    const auto result = apxchol::detail::solver_access::with_timings(matrix, options, timings).solve(rhs);
     EXPECT_EQ(result.backend, apxchol::solve_backend::cpu);
-    EXPECT_GT(result.timings.total("setup.backend_selection"), 0.0);
+    EXPECT_GT(timings.total("setup.backend_selection"), 0.0);
     expect_solution(matrix, rhs, result);
     options.backend = apxchol::solve_backend::gpu;
     EXPECT_THROW(apxchol::solve(matrix, rhs, options), std::exception);

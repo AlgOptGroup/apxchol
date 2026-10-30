@@ -67,6 +67,23 @@ function test_apxchol()
   end
   ok = ok + 1; fprintf('ok %d  factor reused across 4 rhs\n', ok);
 
+  % ── 3b. setup and solve seconds ──
+  setup = s.setup_seconds;
+  assert(isscalar(setup) && isfinite(setup) && setup > 0, 'setup_seconds: %g', setup);
+  bt = randn(size(L, 1), 1);  bt = bt - mean(bt);
+  for rhs = {bt, [bt, -bt]}
+    rt = s.solve(rhs{1});
+    assert(isscalar(rt.solve_seconds) && isfinite(rt.solve_seconds) && rt.solve_seconds > 0, ...
+           'solve_seconds: %g', rt.solve_seconds);
+  end
+  assert(s.setup_seconds == setup, 'setup_seconds changed across solves');
+  r1 = apxchol_solve(L, bt);
+  assert(isfinite(r1.solve_seconds) && r1.solve_seconds > 0, 'one-shot solve_seconds');
+  caught = false;
+  try, s.setup_seconds = 1; catch, caught = true; end
+  assert(caught, 'setup_seconds must be read-only');
+  ok = ok + 1; fprintf('ok %d  setup_seconds and solve_seconds reported\n', ok);
+
   % ── 4. apply() = one preconditioner application ──
   z = s.apply(randn(size(L, 1), 1));
   assert(numel(z) == size(L, 1) && all(isfinite(z)) && norm(z) > 0, 'apply: bad output');

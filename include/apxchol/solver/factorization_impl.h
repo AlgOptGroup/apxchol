@@ -11,7 +11,7 @@
 #include "apxchol/solver/partitioner_list.h"
 #include "apxchol/solver/factorize_workspace.h"
 #include "apxchol/graph/graph.h"
-#include "apxchol/checkpoint.h"
+#include "apxchol/detail/checkpoint.h"
 #include "apxchol/solver/detail/residual_policy.h"
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/gpu_block_frontend.h"
@@ -1514,27 +1514,27 @@ inline tree_elimination make_tree_elim(const factor_options& opts,
 
 template<typename Partitioner, eliminator E>
 factorization factorize(const Eigen::SparseMatrix<double>& L, const E& elim,
-                        const factor_options& opts, checkpoint* cp) {
+                        const factor_options& opts) {
     return detail::factorize_operator(L, opts, [&](graph&& G, const auto& graph_options) {
         Partitioner partitioner;
-        return detail::factorize_impl(elim, partitioner, std::move(G), graph_options, cp);
+        return detail::factorize_impl(elim, partitioner, std::move(G), graph_options, nullptr);
     });
 }
 
 template<partitioner P>
 factorization factorize(const Eigen::SparseMatrix<double>& L, P part,
-                        const factor_options& opts, checkpoint* cp) {
+                        const factor_options& opts) {
     return detail::factorize_operator(L, opts, [&](graph&& G, const auto& graph_options) {
         return detail::factorize_impl(detail::make_tree_elim(graph_options), part,
-                                      std::move(G), graph_options, cp);
+                                      std::move(G), graph_options, nullptr);
     });
 }
 
 template<partitioner P, eliminator E>
 factorization factorize(const Eigen::SparseMatrix<double>& L, P part, const E& elim,
-                        const factor_options& opts, checkpoint* cp) {
+                        const factor_options& opts) {
     return detail::factorize_operator(L, opts, [&](graph&& G, const auto& graph_options) {
-        return detail::factorize_impl(elim, part, std::move(G), graph_options, cp);
+        return detail::factorize_impl(elim, part, std::move(G), graph_options, nullptr);
     });
 }
 
