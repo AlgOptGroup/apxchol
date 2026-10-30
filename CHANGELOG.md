@@ -46,3 +46,5 @@
 - Parallel factorization handles a shrinking OpenMP team, and parallel vertex selection on the same graph is reproducible at a fixed thread count.
 
 Full history: https://github.com/AlgOptGroup/apxchol/compare/v0.2.2...main
+
+0.1.0–0.2.0 were published before the public history was squashed and have no source tag.
