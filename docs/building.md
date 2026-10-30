@@ -117,6 +117,10 @@ cmake --install build-sdk
 ```
 
 Configure the consuming project with `-DCMAKE_PREFIX_PATH=/path/to/prefix`.
+A version request such as `find_package(apxchol 1.0 CONFIG REQUIRED)` accepts
+any installed 1.x release from 1.0 on. A shared library's soname carries the
+major and minor version (`libapxchol_core.so.1.0`), because the binary ABI may
+change between minor releases; rebuild consumers when you upgrade.
 If apxchol fetched Eigen, the install includes its headers. Otherwise, the
 consumer must also provide Eigen. Static SDK consumers also need zlib; CUDA
 SDK consumers need the CUDA Toolkit.

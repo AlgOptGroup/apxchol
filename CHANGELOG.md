@@ -23,6 +23,7 @@
 - New `apxchol.as_operator(M)`, `apxchol_as_operator(M)` and CLI `--convert-input`: a valid operator is used unchanged, a matrix with no negative off-diagonal entry becomes its graph Laplacian `L = D - M` (self-loops cancel), and anything else is an error.
 - The CLI solves an `n` by `k` `--rhs` file as one batch, writes an `n` by `k` solution with `-o`, and logs iterations and residuals per column.
 - The v1 API compatibility scope is documented.
+- Breaking: the installed CMake package accepts any version request with the same major version, and the shared core library's soname now carries `major.minor` (`libapxchol_core.so.1.0`).
 - The partitioner and eliminator extension interfaces are experimental in 1.x and may change in minor releases.
 - Python wheels for CPython 3.11+ on Linux and macOS arm64 (GPU wheels select the backend at runtime), standalone CLI archives, and MATLAB/Octave batched solves with save/load.
 - Wheels declare `License-Expression: BSD-3-Clause` and take the root LICENSE at build time; minimum scikit-build-core is 0.11.
