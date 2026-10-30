@@ -1,6 +1,7 @@
 #include "gpu_memory.h"
 
 #include <cuda_runtime.h>
+#include <dlfcn.h>
 #include <nvml.h>
 #include <unistd.h>
 
@@ -17,6 +18,41 @@ struct process_reading {
     double other_mib = -1;
 };
 
+// NVML ships with the driver, not the toolkit, so it is loaded at run time: a
+// CUDA build must still start, and run CPU cells, on a node without the driver.
+// The nvml.h macros name the versioned symbols (nvmlInit -> nvmlInit_v2).
+#define APXCHOL_NVML_SYMBOL_NAME(fn) #fn
+#define APXCHOL_NVML_SYMBOL(fn) APXCHOL_NVML_SYMBOL_NAME(fn)
+
+struct nvml_api {
+    decltype(&nvmlInit) init = nullptr;
+    decltype(&nvmlErrorString) error_string = nullptr;
+    decltype(&nvmlDeviceGetHandleByPciBusId) handle_by_bus_id = nullptr;
+    decltype(&nvmlDeviceGetPciInfo) pci_info = nullptr;
+    decltype(&nvmlDeviceGetMigMode) mig_mode = nullptr;
+    decltype(&nvmlDeviceGetComputeRunningProcesses) compute_processes = nullptr;
+};
+nvml_api g_nvml;
+
+template <class F>
+bool load_symbol(void* library, F& fn, const char* name) {
+    fn = reinterpret_cast<F>(dlsym(library, name));
+    return fn != nullptr;
+}
+
+bool load_nvml() {
+    void* library = dlopen("libnvidia-ml.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (!library) return false;
+#define APXCHOL_LOAD_NVML(field, fn) load_symbol(library, g_nvml.field, APXCHOL_NVML_SYMBOL(fn))
+    return APXCHOL_LOAD_NVML(init, nvmlInit) &&
+           APXCHOL_LOAD_NVML(error_string, nvmlErrorString) &&
+           APXCHOL_LOAD_NVML(handle_by_bus_id, nvmlDeviceGetHandleByPciBusId) &&
+           APXCHOL_LOAD_NVML(pci_info, nvmlDeviceGetPciInfo) &&
+           APXCHOL_LOAD_NVML(mig_mode, nvmlDeviceGetMigMode) &&
+           APXCHOL_LOAD_NVML(compute_processes, nvmlDeviceGetComputeRunningProcesses);
+#undef APXCHOL_LOAD_NVML
+}
+
 nvmlDevice_t g_device{};
 bool g_have_device = false;
 gpu_memory_baseline g_baseline;
@@ -30,11 +66,11 @@ process_reading read_processes() {
     for (int attempt = 0; attempt < 4 && status == NVML_ERROR_INSUFFICIENT_SIZE; ++attempt) {
         info.resize(count + 8);
         count = static_cast<unsigned>(info.size());
-        status = nvmlDeviceGetComputeRunningProcesses(g_device, &count, info.data());
+        status = g_nvml.compute_processes(g_device, &count, info.data());
     }
     if (status != NVML_SUCCESS) {
         out.unavailable = status == NVML_ERROR_NOT_SUPPORTED ? "not_supported"
-                                                             : nvmlErrorString(status);
+                                                             : g_nvml.error_string(status);
         return out;
     }
     const auto self = static_cast<unsigned>(getpid());
@@ -59,19 +95,20 @@ process_reading read_processes() {
 }
 
 std::string open_device() {
-    if (nvmlInit() != NVML_SUCCESS) return "nvml_init";
+    if (!load_nvml()) return "nvml_library";
+    if (g_nvml.init() != NVML_SUCCESS) return "nvml_init";
     int ordinal = 0;
     char cuda_bus[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE] = {};
     if (cudaGetDevice(&ordinal) != cudaSuccess ||
         cudaDeviceGetPCIBusId(cuda_bus, sizeof cuda_bus, ordinal) != cudaSuccess)
         return "cuda_device";
-    if (nvmlDeviceGetHandleByPciBusId(cuda_bus, &g_device) != NVML_SUCCESS)
+    if (g_nvml.handle_by_bus_id(cuda_bus, &g_device) != NVML_SUCCESS)
         return "nvml_device";
     nvmlPciInfo_t pci{};
-    if (nvmlDeviceGetPciInfo(g_device, &pci) == NVML_SUCCESS) g_baseline.bus_id = pci.busId;
+    if (g_nvml.pci_info(g_device, &pci) == NVML_SUCCESS) g_baseline.bus_id = pci.busId;
     unsigned current = 0, pending = 0;
     // MIG partitions report per-instance memory that the parent device does not attribute.
-    if (nvmlDeviceGetMigMode(g_device, &current, &pending) == NVML_SUCCESS &&
+    if (g_nvml.mig_mode(g_device, &current, &pending) == NVML_SUCCESS &&
         current == NVML_DEVICE_MIG_ENABLE)
         return "mig";
     g_have_device = true;

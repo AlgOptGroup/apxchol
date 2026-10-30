@@ -32,7 +32,8 @@ target_include_directories(bench_input PUBLIC ${BENCH_SRC})
 set(BENCH_GPU_MEMORY "")
 if (APXCHOL_DEVICE STREQUAL "CUDA")
     add_library(bench_gpu_memory STATIC ${BENCH_SRC}/gpu_memory.cpp)
-    target_link_libraries(bench_gpu_memory PUBLIC CUDA::cudart_static CUDA::nvml)
+    # NVML is opened at run time (the driver provides it); only its header is needed.
+    target_link_libraries(bench_gpu_memory PUBLIC CUDA::cudart_static ${CMAKE_DL_LIBS})
     set(BENCH_GPU_MEMORY bench_gpu_memory)
 endif()
 
