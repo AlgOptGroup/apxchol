@@ -38,3 +38,8 @@ endif()
 # private/ keeps the raw handle interface callable only from the wrappers.
 set_target_properties(apxchol_mex PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/private")
+# Earlier builds wrote the MEX next to the wrappers; drop that stale copy.
+file(GLOB legacy_mex "${CMAKE_CURRENT_SOURCE_DIR}/apxchol_mex.mex*")
+if (legacy_mex)
+    file(REMOVE ${legacy_mex})
+endif()
