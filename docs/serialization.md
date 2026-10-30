@@ -6,7 +6,7 @@ Save the matrix and retained factor together, then load them on a CPU or GPU wit
 #include <apxchol/solver/solve.h>
 
 apxchol::solve_options options;
-options.keep_factor_values = true;
+options.keep_factor = true;
 apxchol::solver prepared(A, options);
 prepared.save("system.apxchol");
 

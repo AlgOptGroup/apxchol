@@ -58,7 +58,7 @@ public:
     Eigen::VectorXd apply(const Eigen::VectorXd& r) const;
 
     /// The factorization (values released after setup unless
-    /// solve_options::keep_factor_values).
+    /// solve_options::keep_factor).
     const factorization& factor() const;
     factor_storage_type factor_storage() const;
     statistics stats() const;

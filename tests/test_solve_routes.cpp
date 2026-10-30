@@ -202,7 +202,7 @@ TEST(SolveRoutes, CpuFactorReuseAndExportRemainAvailable) {
     const auto matrix = operator_matrix();
     apxchol::solve_options options;
     options.backend = apxchol::solve_backend::cpu;
-    options.keep_factor_values = true;
+    options.keep_factor = true;
     apxchol::solver solver(matrix, options);
     ASSERT_FALSE(solver.factor().L.vals_.empty());
     auto factor = solver.factor();
@@ -221,7 +221,7 @@ TEST(SolveRoutes, FactorStorageAppliesToNewAndAdoptedFactors) {
     for (bool fp16 : {false, true}) {
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::cpu;
-        options.keep_factor_values = true;
+        options.keep_factor = true;
         options.factor_opts.factor_storage = fp16
             ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32;
 #if defined(APXCHOL_USE_CUDA)
@@ -233,7 +233,7 @@ TEST(SolveRoutes, FactorStorageAppliesToNewAndAdoptedFactors) {
         }
         apxchol::solver original(matrix, options);
         auto factor = original.factor();
-        options.keep_factor_values = false;
+        options.keep_factor = false;
         apxchol::solver adopted(matrix, std::move(factor), options);
         const auto storage = fp16 ? apxchol::factor_storage_type::fp16
                                   : apxchol::factor_storage_type::fp32;

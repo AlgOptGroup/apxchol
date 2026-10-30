@@ -28,7 +28,7 @@ struct solve_options {
     /// Retain FP32 host factor values for export or adoption by another solver.
     /// Costs an additional host copy; false keeps the permutation but releases
     /// row/value arrays. Python factorize() enables retention by default.
-    bool keep_factor_values = false;
+    bool keep_factor = false;
     /// Factor construction and triangular-solve storage controls.
     factor_options factor_opts{};
     /// Select a complete setup/solve route; execution errors never change it.
@@ -55,9 +55,6 @@ struct solve_result {
     double residual      = 0.0;
     /// Whether the checked residual is below the requested tolerance.
     bool converged = false;
-    /// Positive off-diagonal entries moved onto the preconditioner's diagonal.
-    /// The original operator is unchanged, including for residual verification.
-    Eigen::Index lumped_offdiag = 0;
     checkpoint timings;
     // Device-wide VRAM usage (MB), sampled at solve end via cudaMemGetInfo.
     // -1 = unmeasured (CPU build / host PCG).
@@ -138,7 +135,7 @@ public:
     }
     void apply(const_matrix_view R, matrix_view Z) const;
 
-    /// Factor metadata; L's row/value arrays require keep_factor_values=true.
+    /// Factor metadata; L's row/value arrays require keep_factor=true.
     /// The returned reference is owned by this solver.
     const factorization& factor() const;
     /// Operator dimension.
@@ -153,7 +150,7 @@ public:
 
     /// Save the original operator and retained FP32 factor in a portable binary
     /// file. Creates a new file; an existing destination is an error. Requires
-    /// keep_factor_values=true at construction.
+    /// keep_factor=true at construction.
     void save(const std::filesystem::path& path) const;
     /// Restore a saved solver without factorizing again. Backend, storage and
     /// solve options apply as with solver(A, F, opts); automatic adoption uses CPU.

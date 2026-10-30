@@ -584,7 +584,7 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
         // Keep compensated dropping in the shared FP64 host implementation.
         // Both backends consume the CSR factor without a level-permuted value copy.
         backward = detail::gpu_factor_prep::build_L11_csc_int<float>(F.L, m);
-        if (!opts.keep_factor_values) F.L.release_values();
+        if (!opts.keep_factor) F.L.release_values();
         scales = detail::gpu_factor_prep::column_scales(backward);
         if (factor_fp16) detail::gpu_factor_prep::normalize_fp16_scales(backward, scales);
         detail::gpu_factor_prep::apply_factor_drop(backward, scales, opts.factor_opts.drop_tolerance, factor_fp16);
@@ -841,7 +841,6 @@ std::array<bool, Columns> metal_solver::impl::solve_columns_once(
         result.iterations = 0;
         result.residual = 0.0;
         result.backend = solve_backend::gpu;
-        result.lumped_offdiag = F.lumped_offdiag;
         bnorm[q] = mh::norm_reference(B.col(q));
         if (bnorm[q].value == 0.0) continue;
         if (max_iter == 0 && (X0 == nullptr || X0->col(q).isZero(0.0))) {

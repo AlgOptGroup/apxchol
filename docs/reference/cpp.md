@@ -37,7 +37,7 @@ These defaults apply to each solve. A call may override the tolerance and
 iteration budget without rebuilding the factor.
 
 ```{doxygenstruct} apxchol::solve_options
-:members: tol, max_iter, keep_factor_values, factor_opts, backend, num_threads, collect_timings
+:members: tol, max_iter, keep_factor, factor_opts, backend, num_threads, collect_timings
 :undoc-members:
 ```
 
@@ -51,7 +51,7 @@ storage. Matrix solves write into the caller's output matrix and return one
 status record per RHS column.
 
 ```{doxygenstruct} apxchol::solve_result
-:members: x, iterations, residual, converged, lumped_offdiag, timings, backend
+:members: x, iterations, residual, converged, timings, backend
 :undoc-members:
 ```
 
@@ -142,7 +142,7 @@ position. Keep `L`, the permutation, operator kind and round metadata together
 when handing a factor to another solver.
 
 A solver can also retain a factor built on CUDA or Metal: enable
-`keep_factor_values` before construction, then read `solver.factor()`.
+`keep_factor` before construction, then read `solver.factor()`.
 Pass a copy to `solver(A, F, opts)` to reuse it. Automatic adoption uses CPU;
 set `opts.backend = solve_backend::gpu` to upload it to a GPU.
 The original matrix `A` is still needed for PCG and residual checks.

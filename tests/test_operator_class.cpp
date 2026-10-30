@@ -789,8 +789,9 @@ TEST(MMatrixLumping, NearlySddmOperatorConvergesAgainstTheTrueOperator) {
     ASSERT_GT(scan_operator(A).offdiag_pos, 0);
 
     const Eigen::VectorXd b = apxchol::generate_test_rhs(A.rows());
-    const auto res = apxchol::solve(A, b, {.tol = 1e-8, .max_iter = 300});
-    EXPECT_EQ(res.lumped_offdiag, 80);            // 40 pairs
+    apxchol::solver slv(A, {.tol = 1e-8, .max_iter = 300});
+    EXPECT_EQ(slv.factor().lumped_offdiag, 80);   // 40 pairs
+    const auto res = slv.solve(b);
     EXPECT_GT(res.iterations, 0);
     EXPECT_LT(res.residual, 1e-8);
     EXPECT_LT((b - A * res.x).norm() / b.norm(), 1e-7);
@@ -802,8 +803,9 @@ TEST(MMatrixLumping, PureLaplacianAndSddmAreUnchangedByTheFeature) {
     for (const Sparse& A : {grid_laplacian(30, 30), grid_sddm(30, 30)}) {
         const raw_snapshot snap(A);
         const Eigen::VectorXd b = apxchol::generate_test_rhs(A.rows());
-        const auto res = apxchol::solve(A, b, {.tol = 1e-8, .max_iter = 300});
-        EXPECT_EQ(res.lumped_offdiag, 0);
+        apxchol::solver slv(A, {.tol = 1e-8, .max_iter = 300});
+        EXPECT_EQ(slv.factor().lumped_offdiag, 0);
+        const auto res = slv.solve(b);
         EXPECT_GT(res.iterations, 0);
         EXPECT_LT(res.residual, 1e-8);
         EXPECT_TRUE(snap.identical_to(A));

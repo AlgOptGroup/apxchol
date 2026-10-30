@@ -148,7 +148,7 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         F.lumped_offdiag = validated.lumped();
         const auto data = raw.data();
         const unsigned n = data.state->nodes;
-        if (options.keep_factor_values) {
+        if (options.keep_factor) {
             std::vector<factor_entry> entries(data.state->entries);
             for (unsigned p = 0; p < data.state->entries; ++p)
                 entries[p] = {data.factors[p].node, data.factors[p].value};
@@ -171,7 +171,7 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         out.backward = std::move(finalized.backward);
         out.metadata = finalized.metadata;
         out.half = half;
-        if (!options.keep_factor_values) {
+        if (!options.keep_factor) {
             F.perm.assign(static_cast<unsigned *>(finalized.permutation.contents),
                           static_cast<unsigned *>(finalized.permutation.contents) + n);
             F.L.resize(n, n);

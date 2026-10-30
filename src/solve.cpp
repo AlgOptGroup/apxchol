@@ -535,7 +535,7 @@ detail::cpu_route::cpu_route(const Eigen::SparseMatrix<double>& L,
 
     // Build preconditioner.
     precond_.set_options(opts_.factor_opts);
-    precond_.set_keep_factor(opts_.keep_factor_values);
+    precond_.set_keep_factor(opts_.keep_factor);
     if (cp) precond_.set_checkpoint(cp);
     const bool _pcg_trace = opts_.factor_opts.verbose;
     const auto _t_compute_start = std::chrono::high_resolution_clock::now();
@@ -562,7 +562,7 @@ detail::cpu_route::cpu_route(const Eigen::SparseMatrix<double>& L,
 
     if (static_cast<Eigen::Index>(F.L.rows()) != n_)
         throw std::invalid_argument("solver: factorization dimension mismatch");
-    precond_.set_keep_factor(opts_.keep_factor_values);
+    precond_.set_keep_factor(opts_.keep_factor);
     if (cp) precond_.set_checkpoint(cp);
     precond_.set_options(opts_.factor_opts);
     precond_.set_factor(std::move(F));
@@ -762,7 +762,6 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
     static_assert(C > 0 && C <= 8);
     const Eigen::Index n = n_;
     for (int c = 0; c < C; c++) {
-        results[c].lumped_offdiag = precond_.factor().lumped_offdiag;
         results[c].backend = solve_backend::cpu;
         results[c].solve_vram_mb = -1;
         results[c].iterations = 0;

@@ -109,7 +109,7 @@ double true_residual(const Sparse& A, const Eigen::VectorXd& b, const Eigen::Vec
 
 apxchol::solve_options keep_opts() {
     apxchol::solve_options o;
-    o.keep_factor_values = true;
+    o.keep_factor = true;
     return o;
 }
 
@@ -1294,7 +1294,7 @@ TEST_F(MetalDevice, Float16FactorPreservesRetainedFactorAndConsumingResults) {
     options.factor_opts.factor_storage = apxchol::factor_storage_type::fp16;
     apxchol::metal_solver half(A, F, options);
     EXPECT_EQ(half.factor().L.vals_, F.L.vals_);
-    options.keep_factor_values = false;
+    options.keep_factor = false;
     apxchol::metal_solver consuming(A, F, options);
     EXPECT_TRUE(consuming.factor().L.vals_.empty());
     const auto b = rhs(A.rows(), 3, false);
@@ -1424,7 +1424,7 @@ TEST_F(MetalDevice, ResidentOwnerKeepsOnlyRequestedHostFactorValues) {
         const auto b = rhs(A.rows(), 3, laplacian);
         const auto expected = emulate_apply(exported.factor(), b, options.factor_opts);
         EXPECT_LT((exported.apply(b) - expected).norm() / expected.norm(), 2e-5);
-        options.keep_factor_values = false;
+        options.keep_factor = false;
         apxchol::metal_solver resident(A, options);
         EXPECT_TRUE(resident.factor().L.inner_.empty());
         EXPECT_TRUE(resident.factor().L.vals_.empty());

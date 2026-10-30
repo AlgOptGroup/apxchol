@@ -188,7 +188,7 @@ TEST(KeepFactor, ValuesSurviveWhenRequested) {
     apxchol::solver released(L, opts);
     EXPECT_TRUE(released.factor().L.vals_.empty());
 
-    opts.keep_factor_values = true;
+    opts.keep_factor = true;
     apxchol::solver kept(L, opts);
     const auto& FL = kept.factor().L;
     EXPECT_EQ(FL.vals_.size(), size_t(FL.nonZeros()));
