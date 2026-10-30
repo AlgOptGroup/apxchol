@@ -71,8 +71,8 @@ oracle_output reference(const gpu_round_shadow_input& input, std::uint64_t seed,
     std::vector<edge> physical;
     for (const auto& e : input.incidences)
         if (e.owner < e.neighbor) physical.push_back(e);
-    std::sort(physical.begin(), physical.end(), [](const edge& a, const edge& b) {
-        return std::tie(a.owner, a.neighbor, a.weight) < std::tie(b.owner, b.neighbor, b.weight);
+    std::stable_sort(physical.begin(), physical.end(), [](const edge& a, const edge& b) {
+        return std::tie(a.owner, a.neighbor) < std::tie(b.owner, b.neighbor);
     });
     for (std::size_t i = 0; i < physical.size();) {
         const auto u = physical[i].owner, v = physical[i].neighbor;
