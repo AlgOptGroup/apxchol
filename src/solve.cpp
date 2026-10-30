@@ -1335,6 +1335,7 @@ solve_result solve(const Eigen::SparseMatrix<double>& L, const Eigen::VectorXd& 
 }
 
 Eigen::VectorXd generate_test_rhs(Eigen::Index n) {
+    if (n <= 0) return {};
     Eigen::VectorXd b = Eigen::VectorXd::Random(n);
     b.array() -= b.mean();
     return b.normalized();
