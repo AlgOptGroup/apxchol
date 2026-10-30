@@ -650,8 +650,11 @@ void cpu_solver::solve_impl(const Eigen::VectorXd &b, Eigen::Ref<Eigen::VectorXd
                             std::optional<int> requested_max_iter,
                             const Eigen::VectorXd *x0) const {
     const detail::thread_budget threads(opts_.num_threads);
-    const auto [tol, max_iter] = detail::resolve_solve_parameters(
+    // Named variables: clang 18 cannot capture structured bindings in OpenMP.
+    const auto limits = detail::resolve_solve_parameters(
         requested_tol, requested_max_iter, opts_.tol, opts_.max_iter);
+    const double tol = limits.first;
+    const int max_iter = limits.second;
     const const_matrix_view initial(x0 ? *x0 : b);
     detail::check_matrix_views(b, x, n_, x0 ? &initial : nullptr);
     solve_panel<1>(b.data(), x.data(), &res, res.timings, tol, max_iter,
@@ -1008,8 +1011,10 @@ batch_solve_result cpu_solver::solve_batch(const_matrix_view B, matrix_view X,
                                            std::optional<int> requested_max_iter,
                                            const const_matrix_view *X0) const {
     const detail::thread_budget threads(opts_.num_threads);
-    const auto [tol, max_iter] = detail::resolve_solve_parameters(
+    const auto limits = detail::resolve_solve_parameters(
         requested_tol, requested_max_iter, opts_.tol, opts_.max_iter);
+    const double tol = limits.first;
+    const int max_iter = limits.second;
     detail::check_matrix_views(B, X, n_, X0);
     batch_solve_result result;
     result.columns.resize(B.cols());
@@ -1219,8 +1224,10 @@ void solver::solve(const Eigen::VectorXd& b, solve_result& result,
                    std::optional<double> requested_tol, std::optional<int> requested_max_iter,
                    const Eigen::VectorXd* x0) const {
     const detail::thread_budget threads(impl_->num_threads);
-    const auto [tol, max_iter] = detail::resolve_solve_parameters(
+    const auto limits = detail::resolve_solve_parameters(
         requested_tol, requested_max_iter, impl_->tol, impl_->max_iter);
+    const double tol = limits.first;
+    const int max_iter = limits.second;
     if (b.size() != rows()) throw std::invalid_argument("solver::solve: RHS length mismatch");
     if (&b == &result.x || x0 == &result.x)
         throw std::invalid_argument("solver: output must not overlap RHS or warm start");
@@ -1262,8 +1269,10 @@ batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X,
                                        std::optional<int> requested_max_iter,
                                        const const_matrix_view *X0) const {
     const detail::thread_budget threads(impl_->num_threads);
-    const auto [tol, max_iter] = detail::resolve_solve_parameters(
+    const auto limits = detail::resolve_solve_parameters(
         requested_tol, requested_max_iter, impl_->tol, impl_->max_iter);
+    const double tol = limits.first;
+    const int max_iter = limits.second;
     detail::check_matrix_views(B, X, rows(), X0);
     if (const auto *cpu = std::get_if<cpu_solver>(&impl_->owner))
         return cpu->solve(B, X, tol, max_iter, X0);
