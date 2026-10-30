@@ -596,7 +596,7 @@ TEST(SpmvLrmBuild, AcceptedNearSymmetryStillUsesCanonicalLowerValues) {
 
     const Eigen::VectorXd x0 = spmv_probe_x();
     const Eigen::VectorXd b = spmv_probe_b();
-    const apxchol::solver slv(A, on_cpu);
+    apxchol::solver slv(A, on_cpu);
     const auto res = slv.solve(b, 1e-15, 0, &x0);
     EXPECT_EQ(res.iterations, 0);
     EXPECT_EQ(res.residual, 0.0);
@@ -633,7 +633,7 @@ TEST(SpmvLrmBuild, BitIdenticalFastPathAndWorkSplitApplyTheExactOperator) {
     for (int threads : {1, 3, 16}) {
         omp_set_num_threads(threads);
         SCOPED_TRACE(threads);
-        const apxchol::solver slv(A, on_cpu);
+        apxchol::solver slv(A, on_cpu);
         const auto res = slv.solve(b, 1e-15, 0, &x0);
         EXPECT_EQ(res.iterations, 0);
         EXPECT_EQ(res.residual, 0.0);
@@ -651,7 +651,7 @@ TEST(SpmvLrmBuild, OwnedFp32CopySurvivesCallerMutationAndDestruction) {
 
     const Eigen::VectorXd x0 = spmv_probe_x();
     const Eigen::VectorXd b = spmv_probe_b();
-    const apxchol::solver slv(*A, on_cpu);
+    apxchol::solver slv(*A, on_cpu);
 
     for (int k = 0; k < A->outerSize(); ++k)
         for (Sparse::InnerIterator it(*A, k); it; ++it)
@@ -759,8 +759,8 @@ TEST(SpmvLrmBuild, OneSidedExplicitZeroKeepsGeneralFallback) {
     Eigen::VectorXd x0(4);
     x0 << 8.0, -4.0, 2.0, 1.0;
     const Eigen::VectorXd b = A * x0;
-    const apxchol::solver direct(A, std::move(F_for_direct), on_cpu);
-    const apxchol::solver reflected(padded, std::move(F), on_cpu);
+    apxchol::solver direct(A, std::move(F_for_direct), on_cpu);
+    apxchol::solver reflected(padded, std::move(F), on_cpu);
     const auto res = reflected.solve(b, 1e-15, 0, &x0);
     EXPECT_EQ(res.iterations, 0);
     EXPECT_EQ(res.residual, 0.0);
@@ -785,7 +785,7 @@ TEST(MMatrixLumping, OperatorIsBitIdenticalAfterPreconditionerConstruction) {
     Sparse A = nearly_sddm(20, 20, 12);
     const raw_snapshot snap(A);
 
-    const apxchol::solver slv(A, {.tol = 1e-8, .max_iter = 200,
+    apxchol::solver slv(A, {.tol = 1e-8, .max_iter = 200,
                                   .backend = apxchol::solve_backend::cpu});
     ASSERT_GT(slv.factor().lumped_offdiag, 0)
         << "the test matrix did not actually trigger lumping";
