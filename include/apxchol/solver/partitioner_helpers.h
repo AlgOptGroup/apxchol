@@ -1,10 +1,11 @@
 #pragma once
 /// Shared building blocks for partitioners that opt into the standard
 /// prune-and-collect pipeline: degree-threshold computation, the parallel
-/// prune-dead-edges pass, and chosen-mask collection — public, and custom
-/// partitioners are welcome to them.  Sampling-based partitioners that
-/// estimate degrees (baumann_kyng) skip the O(active + edges) pre-pass on
-/// purpose; that choice is why it is not hoisted into the orchestrator.
+/// prune-dead-edges pass, and chosen-mask collection.  They are internal
+/// (apxchol::detail) and not part of the supported API.  Sampling-based
+/// partitioners that estimate degrees (baumann_kyng) skip the
+/// O(active + edges) pre-pass on purpose; that choice is why it is not
+/// hoisted into the orchestrator.
 
 #include "apxchol/checkpoint.h"
 #include "apxchol/graph/graph.h"
