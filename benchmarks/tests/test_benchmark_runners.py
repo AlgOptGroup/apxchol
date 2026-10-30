@@ -107,6 +107,19 @@ class GpuTimingIsolationTest(unittest.TestCase):
         self.assertEqual(metrics["vram_baseline_mb"], 238.0)
         self.assertIs(metrics["gpu_shared"], False)
 
+    def test_cpp_timeout_keeps_gpu_memory_receipt(self):
+        with mock.patch.object(sweep_fair, "DEVICE", "gpu"), \
+             mock.patch.object(rc, "benchmark_openmp_env", return_value={}), \
+             mock.patch.object(rc, "taskset_prefix", return_value="taskset -c 0"), \
+             mock.patch.object(sweep_fair, "sh", side_effect=subprocess.TimeoutExpired(
+                 "benchmark", 5, output="",
+                 stderr="[bench] gpu_memory pid=9 bus_id=00000000:01:00.0 baseline_mib=238.0 "
+                        "other_processes=1 other_mib=512.0\n")):
+            status, metrics = sweep_fair.run_cpp("", "amgcl_cuda", "", False)
+        self.assertEqual(status, "timeout")
+        self.assertEqual(metrics["vram_baseline_mb"], 238.0)
+        self.assertIs(metrics["gpu_shared"], True)
+
     def test_parac_shared_calibration_and_timing_path_has_no_memory_poller(self):
         import parac_runner
         with mock.patch.object(rc, "VramSampler", side_effect=AssertionError("timing polluted")), \
