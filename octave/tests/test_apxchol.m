@@ -155,12 +155,13 @@ function test_apxchol()
   Li = apxchol_as_operator(Ai);
   assert(isequal(full(diag(Li))', [0 1 1 0 0]), 'as_operator: isolated vertices wrong');
   assert(max(abs(sum(Li, 2))) == 0, 'as_operator: rows do not sum to zero');
-  % mixed signs raise, saying why
+  % mixed signs are left to the solver; an asymmetric matrix raises, saying why
   Am = sparse([1 2 2 3], [2 1 3 2], [1 1 -1 -1], 3, 3);
+  assert(isequal(apxchol_as_operator(Am), Am), 'as_operator: mixed signs must pass unchanged');
   err = false;  msg = '';
-  try, apxchol_as_operator(Am); catch e, err = true; msg = e.message; end
-  assert(err, 'as_operator: mixed signs must error');
-  assert(~isempty(strfind(msg, 'not a graph adjacency matrix either')), 'as_operator: no reason');
+  try, apxchol_as_operator(sparse([1 2], [2 3], [1 1], 3, 3)); catch e, err = true; msg = e.message; end
+  assert(err, 'as_operator: an asymmetric matrix must error');
+  assert(~isempty(strfind(msg, 'transpose partner')), 'as_operator: no reason');
   % a weighted symmetric adjacency matrix, and the input is left alone
   Mw = sprand(40, 40, 0.1);  Aw = Mw + Mw';
   Aw = Aw - spdiags(diag(Aw), 0, 40, 40);
