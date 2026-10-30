@@ -786,9 +786,7 @@ struct normal_weight_less {
     __device__ bool operator()(const normal_record& a,
                                const normal_record& b) const {
         if (a.pivot != b.pivot) return a.pivot < b.pivot;
-        const auto ka = a.value == 0.0 ? 0ULL : double_bits(a.value);
-        const auto kb = b.value == 0.0 ? 0ULL : double_bits(b.value);
-        if (ka != kb) return ka < kb;
+        if (a.value != b.value) return a.value < b.value;
         return a.neighbor < b.neighbor;
     }
 };
