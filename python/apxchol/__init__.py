@@ -55,9 +55,8 @@ class SolveResult:
 
 
 def _solver_options(*, backend="auto", num_threads=0, seed=None, partitioner=None,
-                    keep_factor=True, factor_storage_dtype=None, **advanced):
-    options = dict(backend=backend, num_threads=index(num_threads),
-                   keep_factor=bool(keep_factor))
+                    factor_storage_dtype=None, **advanced):
+    options = dict(backend=backend, num_threads=index(num_threads))
     if seed is not None:
         options["seed"] = index(seed)
     if partitioner is not None:
@@ -172,14 +171,15 @@ class Solver:
         """
         copy = type(self).__new__(type(self))
         copy.__dict__.update(self.__dict__)
-        copy._initialize(self._impl.__copy__(), self._keep_factor)
+        copy._initialize(self._impl.__copy__())
         return copy
 
     def save(self, path):
-        """Save the operator and retained factor to a portable binary file.
+        """Save the operator and the installed factor to a portable binary file.
 
-        Requires ``keep_factor=True``. Existing destinations are rejected.
-        The file contains no RHS, solution or device-specific workspace.
+        The file holds the preconditioner actually used, in its storage dtype.
+        Existing destinations are rejected. The file contains no RHS,
+        solution or device-specific workspace.
         """
         self._impl.save(path)
 
@@ -187,14 +187,16 @@ class Solver:
     def load(cls, path, **opts):
         """Restore a solver from an archive, without requiring SciPy.
 
-        Options use the constructor's defaults. The stored factor is adopted,
-        not factorized again; backend, storage and preparation settings apply.
-        ``backend="auto"`` uses CPU for adoption; ``"gpu"`` requests upload.
+        Options use the constructor's defaults. The stored factor is
+        reinstalled exactly, not factorized again: its storage dtype and
+        dropping come from the file, so ``factor_storage_dtype`` and
+        ``drop_tolerance`` have no effect. ``backend`` and ``num_threads``
+        apply; ``backend="auto"`` uses CPU, ``"gpu"`` requests upload.
         Tolerance, iteration budget and warm starts remain solve arguments.
         """
         options = _solver_options(**opts)
         self = cls.__new__(cls)
-        self._initialize(_apxchol.Solver.load(path, options), options["keep_factor"])
+        self._initialize(_apxchol.Solver.load(path, options))
         return self
 
     def _init_csc(self, data, indices, indptr, **opts):
@@ -204,14 +206,12 @@ class Solver:
         if indices.dtype.kind not in "iu" or indptr.dtype.kind not in "iu":
             raise ValueError("indices and indptr must have integer dtype")
         options = _solver_options(**opts)
-        self._initialize(_apxchol.Solver(indptr, indices, data, options),
-                         options["keep_factor"])
+        self._initialize(_apxchol.Solver(indptr, indices, data, options))
 
-    def _initialize(self, impl, keep_factor):
+    def _initialize(self, impl):
         self._impl = impl
         self._n = int(impl.rows())
         self._nnz_A = int(impl.operator_nnz())
-        self._keep_factor = bool(keep_factor)
         self._chol = None            # lazily built scipy factor (permuted space)
         self._P = None
         self._LD = None
@@ -256,12 +256,7 @@ class Solver:
         return self._impl.lumped()
 
     def __repr__(self) -> str:
-        try:
-            fac = f"factor_nnz={self.factor_nnz}, fill_ratio={self.fill_ratio:.2f}"
-            if not self._keep_factor:
-                fac += ", values=released"     # export unavailable
-        except Exception:
-            fac = "factor=released"
+        fac = f"factor_nnz={self.factor_nnz}, fill_ratio={self.fill_ratio:.2f}"
         return f"<apxchol.Solver n={self._n}, sddm={self.sddm}, {fac}>"
 
     # ── solving ──────────────────────────────────────────────────────────────
@@ -319,6 +314,8 @@ class Solver:
             shape=self.shape, matvec=self.apply, matmat=self.apply, dtype=np.float64)
 
     # ── factor export ────────────────────────────────────────────────────────
+    # The exported factor is the preconditioner actually used: after dropping
+    # and storage rounding, M = P^T G G^T P on the permuted space.
     # Convention: P[original_vertex] = position in the elimination order, so
     # p_tilde = np.argsort(P) is the ORIGINAL index of the k-th eliminated
     # vertex, and A_perm = A[p_tilde][:, p_tilde] is A in permuted space.
@@ -327,8 +324,8 @@ class Solver:
     def P(self) -> np.ndarray:
         """Elimination permutation: P[original_vertex] = position in the order.
 
-        Always available (the permutation survives even `keep_factor=False`).
-        The returned array is read-only; `.copy()` it if you need to modify.
+        The permutation of the preconditioner actually used. The returned
+        array is read-only; `.copy()` it if you need to modify.
         """
         if self._P is None:
             self._P = self._impl.perm()
@@ -336,16 +333,18 @@ class Solver:
         return self._P
 
     def chol(self):
-        """Return a copy of the FP32 lower-triangular factor in permuted order.
+        """Return a copy of the lower-triangular factor G of the preconditioner actually used.
 
-        The result is a ``scipy.sparse.csc_matrix`` with
-        ``A[p][:, p] ≈ G @ G.T``, where ``p = np.argsort(self.P)``.
-        Export requires ``keep_factor=True`` (the default), regardless of
-        backend or internal factor storage dtype.
+        The result is a float64 ``scipy.sparse.csc_matrix`` in permuted order
+        with ``A[p][:, p] ≈ G @ G.T``, where ``p = np.argsort(self.P)``. It is
+        the installed factor after dropping and storage rounding; with
+        float16 storage, G = L S holds each binary16 off-diagonal times its
+        column scale. A GPU-backed solver downloads it.
 
-        For a Laplacian with ``k`` connected components, the factor represents
-        the rank-``n-k`` subspace. Each component's last eliminated column
-        carries a placeholder diagonal.
+        For a Laplacian, the last row and column of G are empty. With ``k``
+        connected components, the factor represents the rank-``n-k``
+        subspace, and each other component's last eliminated column carries a
+        placeholder diagonal.
         """
         if self._chol is None:
             sp = _scipy_sparse()
@@ -381,7 +380,7 @@ class Solver:
 
     @property
     def factor_nnz(self) -> int:
-        """nnz of the lower-triangular factor G (diagonal included)."""
+        """nnz of the installed factor G returned by :meth:`chol` (diagonal included)."""
         return int(self._impl.factor_nnz())
 
     @property
@@ -396,7 +395,7 @@ class Solver:
 
 
 def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
-              keep_factor=True, factor_storage_dtype=None, **advanced) -> Solver:
+              factor_storage_dtype=None, **advanced) -> Solver:
     """Build the reusable approximate-Cholesky factor of A.
 
     Parameters
@@ -429,18 +428,14 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
         Independent-set selector: "block_greedy", "priority_greedy", or
         "baumann_kyng". None uses the C++ default. Unknown names raise at
         factorization time.
-    keep_factor : bool
-        Retain an extra host factor copy for ``save()``, ``chol()``, ``L``
-        and ``D`` export; enabled by default. ``False`` saves this memory while still
-        allowing repeated solves, ``P``, ``factor_nnz`` and ``fill_ratio``.
     factor_storage_dtype : numpy dtype, dtype name, or None
         ``np.float16`` or ``np.float32`` selects triangular-solve storage;
         dtype names also work. ``None`` uses the backend default: FP32 on
         CPU/Metal, FP16 on CUDA.
 
-        FP16 stores scaled off-diagonals with FP32 diagonals and scales. It
-        does not change the exported factor's FP32 type or CPU arithmetic's
-        FP64 type. Unsupported FP16 requests fail; FP64 storage is unavailable.
+        FP16 stores scaled off-diagonals with FP32 diagonals and scales;
+        :meth:`Solver.chol` exports that rounded factor. CPU arithmetic
+        stays FP64. Unsupported FP16 requests fail; FP64 storage is unavailable.
     **advanced
         Passed straight through to the core options: `degree_quantile`,
         `degree_multiplier`, `degree_tiebreak`, `exact_clique_max_degree`,
@@ -460,8 +455,7 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
     quantile in ``(0, 1)`` and includes all vertices tied at its degree cutoff.
     """
     return Solver(A, backend=backend, num_threads=num_threads, seed=seed, partitioner=partitioner,
-                  keep_factor=keep_factor, factor_storage_dtype=factor_storage_dtype,
-                  **advanced)
+                  factor_storage_dtype=factor_storage_dtype, **advanced)
 
 
 def solve(A, b, rtol=None, maxiter=None, *, x0=None, out=None,
@@ -469,8 +463,6 @@ def solve(A, b, rtol=None, maxiter=None, *, x0=None, out=None,
     """One-shot convenience: factorize A, then solve A x = b.
 
     ``x0`` and ``out`` have the same meaning as in :meth:`Solver.solve`.
-    The factor is discarded afterwards, so this passes `keep_factor=False`
-    (no factor export) unless overridden.
+    The factor is discarded afterwards.
     """
-    opts.setdefault("keep_factor", False)
     return factorize(A, **opts).solve(b, rtol=rtol, maxiter=maxiter, x0=x0, out=out)

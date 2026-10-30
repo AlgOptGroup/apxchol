@@ -148,17 +148,6 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         F.lumped_offdiag = validated.lumped();
         const auto data = raw.data();
         const unsigned n = data.state->nodes;
-        if (options.keep_factor) {
-            std::vector<factor_entry> entries(data.state->entries);
-            for (unsigned p = 0; p < data.state->entries; ++p)
-                entries[p] = {data.factors[p].node, data.factors[p].value};
-            std::vector<factor_col> columns(n);
-            for (unsigned row = 0; row < n; ++row) {
-                const auto col = data.columns[row];
-                columns[row] = {col.node, col.diagonal, entries.data() + col.begin, col.count};
-            }
-            build_csc(F, columns, n, nullptr);
-        }
         const bool half = resolve_fp16_storage(options.factor_opts.factor_storage, false);
         auto finalized = cached.finalizer.run(raw, laplacian, half, options.factor_opts.drop_tolerance);
         if (cp)
@@ -171,14 +160,12 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         out.backward = std::move(finalized.backward);
         out.metadata = finalized.metadata;
         out.half = half;
-        if (!options.keep_factor) {
-            F.perm.assign(static_cast<unsigned *>(finalized.permutation.contents),
-                          static_cast<unsigned *>(finalized.permutation.contents) + n);
-            F.L.resize(n, n);
-            for (unsigned row = 0; row < n; ++row)
-                F.L.outer_[row] = data.columns[row].begin + row;
-            F.L.outer_[n] = data.state->entries + n;
-        }
+        F.perm.assign(static_cast<unsigned *>(finalized.permutation.contents),
+                      static_cast<unsigned *>(finalized.permutation.contents) + n);
+        F.L.resize(n, n);
+        for (unsigned row = 0; row < n; ++row)
+            F.L.outer_[row] = data.columns[row].begin + row;
+        F.L.outer_[n] = data.state->entries + n;
         F.rounds.reserve(data.state->round);
         for (unsigned r = 0; r < data.state->round; ++r) {
             const unsigned first = data.round_ptr[r], last = data.round_ptr[r + 1];

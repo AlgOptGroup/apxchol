@@ -199,6 +199,7 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
                     append(lt16.ptr.data(), m + 1); append(lt16.idx.get(), lt16.nnz); append(lt16.vals.get(), lt16.nnz);
                     append(h.diag.data(), m);
                     append(h.inv_scale2.data(), m);
+                    append(scale.data(), m);
                 } else {
                     auto l = apxchol::detail::gpu_factor_prep::transpose_csr(lt);
                     append(l.ptr.data(), m + 1); append(l.idx.get(), l.nnz); append(l.vals.get(), l.nnz);
@@ -304,7 +305,6 @@ TEST(GpuFactorFinalize, DeviceSolvesAndSessionsInstallOwnedCapsules) {
     for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
         apxchol::solve_options solve_options;
         solve_options.backend = apxchol::solve_backend::gpu;
-        solve_options.keep_factor = true;
         solve_options.factor_opts.factor_storage = storage;
         solve_options.factor_opts.drop_tolerance = 0;
         for (double shift : {0.0, 1.0}) {
@@ -312,13 +312,18 @@ TEST(GpuFactorFinalize, DeviceSolvesAndSessionsInstallOwnedCapsules) {
             const auto& preconditioner = std::get<apxchol::detail::gpu_solve_session>(
                 apxchol::detail::solver_access::route(owner));
             ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
-            const auto& factor = preconditioner.factor();
+            // The resident factor downloads on demand; nothing stays on the host.
+            EXPECT_TRUE(preconditioner.factor().L.vals_.empty());
+            const auto factor = owner.factor();
             ASSERT_EQ(factor.L.vals_.size(), factor.L.nonZeros());
             ASSERT_EQ(factor.L.inner_.size(), factor.L.nonZeros());
             ASSERT_EQ(factor.L.rows(), 64);
+            EXPECT_EQ(factor.L.nonZeros(), preconditioner.trsv().stored_nnz());
+            EXPECT_EQ(factor.storage, storage);
+            EXPECT_EQ(factor.scale.size(), storage == apxchol::factor_storage_type::fp16 ? 64u : 0u);
             EXPECT_EQ(preconditioner.trsv().fp16(), storage == apxchol::factor_storage_type::fp16);
             if (!factor.sddm) {
-                EXPECT_EQ(factor.L.vals_[factor.L.outer_[63]], 1.0f);
+                EXPECT_EQ(factor.L.outer_[63], factor.L.outer_[64]);
             }
         }
     }

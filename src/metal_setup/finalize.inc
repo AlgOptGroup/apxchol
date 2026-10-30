@@ -9,7 +9,7 @@ enum Stage : unsigned {
     stage_emit_transpose = 5,
 };
 
-struct Metadata { float scale, diagonal; };
+struct Metadata { float scale, diagonal, scaled_diagonal; };
 struct Row { unsigned count; float scale, diagonal; };
 struct Shape { unsigned n, m; float drop_hi, drop_lo; int drop_exponent; };
 
@@ -89,7 +89,7 @@ APXCHOL_GPU_FUNCTION void emit(Memory s, Math math, unsigned row) {
     if (s.fp16) {
         const float scaled = math.to_float(math.add(math.from_float(diagonal / info.scale), residual));
         diagonal = scaled * info.scale;
-        s.metadata[row] = {info.scale, diagonal};
+        s.metadata[row] = {info.scale, diagonal, scaled};
     }
     const float magnitude = math.absolute(diagonal);
     if (!math.finite_float(diagonal) || magnitude < 0x1p-100f || magnitude > 0x1p100f) s.fail(2);

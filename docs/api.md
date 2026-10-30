@@ -4,7 +4,9 @@ Starting with v1.0, apxchol preserves documented source-level use of these
 interfaces throughout the 1.x series:
 
 - C++ solve and factorize operations, their options and their results,
-  including `solver::save` and `solver::load` for [saved solvers](serialization.md).
+  including `solver::save` and `solver::load` for [saved solvers](serialization.md)
+  and the installed `factorization` that `solver::factor()` exports, with its
+  `storage` and `scale` members.
 - [Python](../python/README.md) names exported through `__all__` and their
   documented methods and arguments.
 - Documented [MATLAB/Octave wrappers](../octave/README.md) and CLI options.
@@ -12,6 +14,7 @@ interfaces throughout the 1.x series:
   CLI's `--convert-input`, with the [rule](usage.md#converting-input-to-an-operator)
   they share.
 - `apxchol::core` and the [documented CMake integration](building.md#use-from-cmake).
+- Reading [solver archives](serialization.md) in format version 1.
 
 The [partitioner and eliminator extension contracts](extending.md), and the
 graph/context operations they require, are **experimental**: they may change in

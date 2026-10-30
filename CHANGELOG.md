@@ -8,6 +8,7 @@
 - Inputs are validated by operator class; nearly-SDDM inputs are repaired by M-matrix lumping.
 - Batched solves take any number of right-hand sides on CPU, CUDA and Metal, processed in panels of up to eight columns on CPU and four on GPU.
 - `apxchol::solver` owns a reusable factorization for repeated solves and can be saved to and loaded from portable archives.
+- Every 1.x release reads format version 1 solver archives; archives with a newer format version are rejected with a clear error.
 
 ### GPU backends
 - CUDA setup, factorization and PCG run entirely on the device, with a sync-free dataflow triangular solve and optional fp16 factor storage.
@@ -28,7 +29,10 @@
 - Breaking: the partitioner interface no longer exposes `selection::reset`/`finalize`, `partition_result` or `partition_context::cp`.
 - Breaking: `factorization` drops `peak_graph_bytes` and the diagnostic `round_stats` fields `avg_deg`, `nnz_added` and `nnz_total`; its CUDA device factor is private.
 - Breaking: `solve_result::lumped_offdiag` is removed; read `solver.factor().lumped_offdiag`.
-- Breaking: `solve_options::keep_factor_values` is renamed `keep_factor`, matching Python and MATLAB/Octave.
+- Breaking: `solve_options::keep_factor_values` and the Python and MATLAB/Octave `keep_factor` option are removed; `solver::factor()`, Python `chol()`/`L`/`D`/`P`/`factor_nnz` and `save()` use the installed factor, the preconditioner actually used after dropping and storage rounding.
+- Breaking: `solver::factor()` returns a `factorization` by value, with new `storage` and `scale` members describing FP32 or scaled FP16 storage; adopting such a factor reinstalls it exactly.
+- Breaking: Python `chol()`, `L` and `D` return float64 matrices; for a Laplacian the last row and column are empty.
+- Breaking: solver archive version 1 stores the installed factor and its storage precision; `load()` takes storage and dropping from the file and reproduces the saved solver's solves bit for bit on the same backend and thread count.
 - Breaking: the `APXCHOL_POOL_FP32` build option is removed; graph weights are always stored in FP32, as in default builds.
 - Breaking: `apxchol::generate_test_rhs` is removed; build the right-hand side in the caller.
 - Breaking: the per-stage timing tree leaves the public API: `checkpoint`, `solve_options::collect_timings`, the `timings` members of `solve_result` and `batch_solve_result`, the `checkpoint*` parameters of the `solver` constructors and `factorize`, and the `solver::solve(b, solve_result&, ...)` overload are removed.

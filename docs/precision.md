@@ -6,7 +6,7 @@ the outer iteration each have their own precision.
 | Stage | Representation | Reason |
 |---|---|---|
 | Mutable residual graph | FP32 weights; reads aggregate in FP64 | Storage and bandwidth; elimination appends weights; late residuals may be coalesced once |
-| Assembled factor | FP32 values | Shared factor/export representation |
+| Assembled factor | FP32 values | Construction factor, before dropping and storage rounding |
 | CPU triangular solves | FP32 storage by default; optional scaled FP16 off-diagonals | FP16 requires efficient conversion; CPU arithmetic remains FP64 |
 | CUDA triangular solves | Scaled FP16 off-diagonals by default; FP32 alternative | Reduced value traffic; GPU triangular-solve arithmetic is FP32 |
 | FP16 scales and diagonals | FP32 | Retain scale range and diagonal quality |
@@ -16,7 +16,7 @@ the outer iteration each have their own precision.
 
 `factor_options::factor_storage` selects triangular-solve storage per solver (`automatic`, `fp16`, or `fp32`). Python exposes this as `factor_storage_dtype=None`, `np.float16`, or `np.float32`. The default is CPU/Metal FP32 and CUDA FP16; C++ owns parsing and default selection.
 
-Construction precision is independent of triangular-solve storage; Python factor exports preserve the C++ factor's FP32 dtype, while CPU solve inputs and results use FP64 arithmetic.
+Construction precision is independent of triangular-solve storage. Factor export and saved solvers carry the installed factor in its triangular-solve storage (FP32, or binary16 off-diagonals with FP32 diagonals and scales); Python returns it as float64. CPU solve inputs and results use FP64 arithmetic.
 
 CPU FP16 is available on x86 CPUs with AVX/F16C and on Apple ARM64, including
 portable wheels. Unsupported explicit requests fail at setup. The CPU path
@@ -68,7 +68,7 @@ Double-float represents a value as the sum of two FP32 numbers, giving about
 48 significant bits but not IEEE FP64 precision or range. Metal uses it for
 x, r, A p and fixed-tree reductions. The operator uses FP32 when all values
 are exactly representable there, and double-float otherwise. Directions p,
-preconditioned residuals z, alpha and beta are FP32. Setup accumulates degrees and diagonal excess in double-float; graph weights and exported factor values are FP32.
+preconditioned residuals z, alpha and beta are FP32. Setup accumulates degrees and diagonal excess in double-float; graph weights and constructed factor values are FP32.
 
 Each RHS (or initial residual b - A x0) is scaled by an exact power of two,
 targeting a largest magnitude in [1, 2) within FP64's exponent range. The host
@@ -93,8 +93,8 @@ Metal rejects inputs outside these ranges:
 
 ## Accuracy and configuration choice
 
-FP16 applies to the installed triangular-solve arrays, not the mutable graph
-or assembled/exported factor. Graph weights always use FP32; scaled FP16 graph
+FP16 applies to the installed triangular-solve arrays, which `solver::factor()`
+exports, not to the mutable graph or the assembled construction factor. Graph weights always use FP32; scaled FP16 graph
 storage is not supported.
 
 Low-precision preconditioning can retain final solution accuracy while changing

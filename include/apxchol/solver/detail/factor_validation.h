@@ -54,6 +54,15 @@ inline void validate_adopted_factor(const factorization& factor) {
         covered += round.is_size;
     }
 
+    const bool installed = factor.storage != factor_storage_type::automatic;
+    const bool fp16 = factor.storage == factor_storage_type::fp16;
+    if (fp16 ? factor.scale.size() != n : !factor.scale.empty())
+        throw std::invalid_argument("adopted factor needs one column scale per column for fp16 "
+                                    "storage and none otherwise");
+    for (const float s : factor.scale)
+        if (!(s > 0) || !std::isfinite(s) || !std::isfinite(1.0f / s))
+            throw std::invalid_argument("adopted factor scales must be positive and finite");
+
     const std::size_t m = n - !factor.sddm;
     std::size_t round = 0, round_end = 0;
     for (std::size_t col = 0; col < n; ++col) {
@@ -72,6 +81,11 @@ inline void validate_adopted_factor(const factorization& factor) {
                 throw std::invalid_argument("adopted factor must be finite and lower triangular");
             if (row > col && row < dependency_begin)
                 throw std::invalid_argument("adopted factor has a dependency within one round");
+            if (installed && row >= m)
+                throw std::invalid_argument("an installed Laplacian factor has an empty last row and column");
+            if (fp16 && row != col &&
+                static_cast<float>(static_cast<_Float16>(L.vals_[p])) != L.vals_[p])
+                throw std::invalid_argument("fp16 factor off-diagonals must be binary16 values");
         }
     }
 }

@@ -112,11 +112,10 @@ apxchol::solve_options setup_options(const mxArray* options) {
             else if (name == "drop_tolerance") result.factor_opts.drop_tolerance = scalar_option(value, name.c_str());
             else if (name == "regularization") result.factor_opts.regularization = scalar_option(value, name.c_str());
             else if (name == "lump_max_mass") result.factor_opts.lump_max_mass = scalar_option(value, name.c_str());
-            else if (name == "verbose" || name == "keep_factor") {
+            else if (name == "verbose") {
                 const double flag = scalar_option(value, name.c_str());
                 if (flag != 0 && flag != 1) fail("apxchol:badInput", name + " must be logical or 0/1");
-                if (name == "keep_factor") result.keep_factor = flag != 0;
-                else result.factor_opts.verbose = flag != 0;
+                result.factor_opts.verbose = flag != 0;
             } else fail("apxchol:badInput", "unknown option '" + name + "'");
         }
     }

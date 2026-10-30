@@ -353,7 +353,7 @@ struct detail::metal_route::impl {
     unsigned columns = 1, workspace_columns = 0;
     id<MTLCommandQueue> queue = nil;
     Params arguments{};
-    bool operator_df = false, factor_fp16 = false;
+    bool operator_df = false, factor_fp16 = false, installed = false;
     id<MTLBuffer> factor_metadata = nil;
     id<MTLBuffer> device_op_ptr = nil, device_op_col = nil, op_hi = nil, op_lo = nil;
     id<MTLBuffer> operator_row_map = nil;
@@ -569,10 +569,18 @@ void detail::metal_route::impl::setup(const Eigen::SparseMatrix<double>& A, chec
         // Keep compensated dropping in the shared FP64 host implementation.
         // Both backends consume the CSR factor without a level-permuted value copy.
         backward = detail::gpu_factor_prep::build_L11_csc_int<float>(F.L, m);
-        if (!opts.keep_factor) F.L.release_values();
-        scales = detail::gpu_factor_prep::column_scales(backward);
-        if (factor_fp16) detail::gpu_factor_prep::normalize_fp16_scales(backward, scales);
-        detail::gpu_factor_prep::apply_factor_drop(backward, scales, opts.factor_opts.drop_tolerance, factor_fp16);
+        F.L.release_values();
+        // An installed factor keeps its storage, scales and values as given.
+        installed = F.storage != factor_storage_type::automatic;
+        if (installed) {
+            factor_fp16 = F.storage == factor_storage_type::fp16;
+            if (factor_fp16) scales.assign(F.scale.begin(), F.scale.begin() + m);
+        } else {
+            scales = detail::gpu_factor_prep::column_scales(backward);
+            if (factor_fp16) detail::gpu_factor_prep::normalize_fp16_scales(backward, scales);
+            detail::gpu_factor_prep::apply_factor_drop(backward, scales, opts.factor_opts.drop_tolerance, factor_fp16);
+        }
+        std::vector<float>().swap(F.scale);
         if (cp) (*cp)("metal_factor_prep");
 
         Eigen::SparseMatrix<double> compressed;
@@ -680,7 +688,8 @@ void detail::metal_route::impl::prepare_device(detail::gpu_factor_prep::csr_int<
         bwd = prepare_tri(ctx, bt, false, diag);
     };
     if (factor_fp16) {
-        auto narrow = detail::gpu_factor_prep::narrow_fp16_scaled(backward, scales);
+        auto narrow = installed ? detail::gpu_factor_prep::installed_fp16_arrays(backward, scales)
+                                : detail::gpu_factor_prep::narrow_fp16_scaled(backward, scales);
         std::vector<mh::factor_metadata> metadata(m);
         for (unsigned j = 0; j < m; ++j) {
             metadata[j] = mh::pack_factor_metadata(scales[j], narrow.diag[j]);
@@ -755,6 +764,45 @@ Eigen::SparseMatrix<double> detail::metal_route::original_operator() const {
 }
 
 const factorization& detail::metal_route::factor() const { return impl_->F; }
+
+// The backward triangle is CSC of L in unified memory, diagonal first. fp16
+// metadata keeps s_j and d_j next to the kernels' fp32(d_j s_j).
+factorization detail::metal_route::installed_factor() const {
+    const auto& s = *impl_;
+    factorization F;
+    F.perm = s.F.perm;
+    F.sddm = s.F.sddm;
+    F.lumped_offdiag = s.F.lumped_offdiag;
+    F.rounds = s.F.rounds;
+    F.storage = factor_storage();
+    const auto n = static_cast<node_index>(s.n), m = static_cast<node_index>(s.arguments.m);
+    const auto* ptr = static_cast<const unsigned*>([s.bwd.ptr contents]);
+    const auto* idx = static_cast<const unsigned*>([s.bwd.idx contents]);
+    const edge_index nnz = m ? ptr[m] : 0;
+    F.L.resize(n, n);
+    F.L.resizeNonZeros(nnz);
+    for (node_index j = 0; j < n; ++j) F.L.outer_[j + 1] = j < m ? ptr[j + 1] : nnz;
+    std::copy(idx, idx + nnz, F.L.inner_.begin());
+    if (!s.factor_fp16) {
+        const auto* val = static_cast<const float*>([s.bwd.val contents]);
+        std::copy(val, val + nnz, F.L.vals_.begin());
+        return F;
+    }
+    const auto* val = static_cast<const _Float16*>([s.bwd.val contents]);
+    const auto* metadata = static_cast<const mh::factor_metadata*>([s.factor_metadata contents]);
+    F.scale.assign(n, 1.0f);
+    for (node_index j = 0; j < m; ++j) {
+        F.scale[j] = metadata[j].scale;
+        for (auto p = ptr[j]; p < ptr[j + 1]; ++p)
+            F.L.vals_[p] = p == ptr[j] ? metadata[j].scaled_diagonal : static_cast<float>(val[p]);
+    }
+    return F;
+}
+
+std::uint64_t detail::metal_route::factor_nnz() const {
+    const auto m = impl_->arguments.m;
+    return m ? static_cast<const unsigned*>([impl_->bwd.ptr contents])[m] : 0;
+}
 detail::metal_route::statistics detail::metal_route::stats() const { return impl_->stats; }
 
 template<unsigned Columns>

@@ -140,7 +140,7 @@ Their language-specific helpers differ:
 | Reusable factor, scalar and batched solves/apply | Yes | Yes |
 | Initial guess, per-call tolerance and iteration budget | Yes | Yes |
 | GPU setup and solve | CUDA or Metal when built and available | CPU only |
-| Factor export | FP32 values when retained | Not exposed |
+| Factor export | Installed factor, float64 copies | Not exposed |
 | External iterative solver | SciPy `LinearOperator` | Function handle for `pcg` |
 
 ## Convergence and cost
@@ -215,22 +215,20 @@ A GPU-backed SciPy operator exchanges host vectors with the device on each
 application. Native `solve` keeps iteration vectors on the GPU, so prefer it
 for GPU workloads unless you need another outer solver.
 
-## Keeping and exporting a factor
+## Exporting a factor
 
-Exported factor values are FP32. Internal triangular-solve storage can be
-FP16 or FP32 independently; see [storage choices](precision.md).
-
-C++ defaults to releasing factor values after preparation. Set
-`keep_factor=true` when you need them later through `solver.factor()`.
-Python's reusable solver instead defaults to `keep_factor=True`, enabling
-`chol()`, `L` and `D` exports. Set it to `False` to save memory; the permutation
-`P` remains available.
+`solver.factor()` in C++ and `chol()`, `L`, `D` and `P` in Python return the
+installed factor: the preconditioner the solves actually use, after dropping
+and in the solver's [storage precision](precision.md). The solver keeps no
+separate copy of the factor; export reads its triangular-solve arrays, and a
+GPU solver downloads them. The [factor reference](reference/cpp.md#constructing-and-reusing-a-factor)
+defines the exported form.
 
 CPU-, CUDA- and Metal-built factors can be reused through
 [C++ factor handoff](extending.md#reusing-a-custom-factor). Automatic adoption
 uses CPU; request `solve_backend::gpu` to upload the factor to a GPU.
 
-Portable solver archives [save the original matrix and retained factor
+Portable solver archives [save the original matrix and installed factor
 together](serialization.md), so loading can prepare the solver without
 repeating factorization.
 

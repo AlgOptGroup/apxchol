@@ -118,21 +118,27 @@ double true_residual(const Sparse& A, const Eigen::VectorXd& b, const Eigen::Vec
     return (b - A * x).norm() / b.norm();
 }
 
-apxchol::solve_options keep_opts() {
-    apxchol::solve_options o;
-    o.keep_factor = true;
-    return o;
-}
+apxchol::solve_options keep_opts() { return {}; }
 
 // Independent FP64 sweeps of the stored FP32 factor, with host centering at
 // the public apply boundary. Device scheduling may change the rounding order.
+// An installed factor (solver::factor()) is swept as Metal stores it; a
+// construction factor first goes through the drop and storage options.
 Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::VectorXd& r,
                              const apxchol::factor_options& options = {}) {
-    const bool fp16 = options.factor_storage == apxchol::factor_storage_type::fp16;
+    const bool installed = F.storage != apxchol::factor_storage_type::automatic;
+    const bool fp16 = (installed ? F.storage : options.factor_storage) ==
+                      apxchol::factor_storage_type::fp16;
     const std::size_t n = static_cast<std::size_t>(r.size());
     const bool lap = !F.sddm;
     const std::int64_t m = lap ? static_cast<std::int64_t>(n) - 1 : static_cast<std::int64_t>(n);
     auto backward = apxchol::detail::gpu_factor_prep::build_L11_csc_int<float>(F.L, m);
+    if (installed) {
+        for (int j = 0; fp16 && j < m; ++j)
+            for (int p = backward.ptr[j]; p < backward.ptr[j + 1]; ++p)
+                backward.vals[p] = p == backward.ptr[j]
+                    ? float(double(backward.vals[p]) * F.scale[j]) : backward.vals[p] * F.scale[j];
+    } else {
     auto scales = apxchol::detail::gpu_factor_prep::column_scales(backward);
     if (fp16) apxchol::detail::gpu_factor_prep::normalize_fp16_scales(backward, scales);
     apxchol::detail::gpu_factor_prep::apply_factor_drop(backward, scales, options.drop_tolerance, fp16);
@@ -143,6 +149,7 @@ Eigen::VectorXd emulate_apply(const apxchol::factorization& F, const Eigen::Vect
                 backward.vals[p] = float(narrow.vals[p]) * scales[j];
             backward.vals[backward.ptr[j]] = float(double(narrow.diag[j]) * scales[j]);
         }
+    }
     }
     const auto forward = apxchol::detail::gpu_factor_prep::transpose_csr(backward);
     std::vector<double> rp(n);
@@ -412,8 +419,9 @@ TEST_F(MetalDevice, FourColumnPlansReuseStorageAfterScalarAndWarmSolves) {
         options.factor_opts.factor_storage = storage;
         const apxchol::solver resident(A, options);
         std::vector<unsigned> row_sizes(A.rows());
-        for (auto row : resident.factor().L.inner_) ++row_sizes[row];
-        ASSERT_TRUE(std::ranges::any_of(resident.factor().rounds, [&](const auto& round) {
+        const auto factor = resident.factor();
+        for (auto row : factor.L.inner_) ++row_sizes[row];
+        ASSERT_TRUE(std::ranges::any_of(factor.rounds, [&](const auto& round) {
             const auto first = row_sizes.begin() + A.rows() - round.active;
             return round.is_size > 128 &&
                 std::count_if(first, first + round.is_size, [](unsigned size) { return size > 1; }) > 32;
@@ -433,7 +441,8 @@ TEST_F(MetalDevice, LongRowMatrixSolvesMatchScalarColumns) {
         options.factor_opts.factor_storage = storage;
         const apxchol::solver owner(A, options);
         std::vector<unsigned> row_sizes(A.rows());
-        for (auto row : owner.factor().L.inner_)
+        const auto factor = owner.factor();
+        for (auto row : factor.L.inner_)
             if (row + 1 < row_sizes.size()) ++row_sizes[row];
         ASSERT_GT(*std::max_element(row_sizes.begin(), row_sizes.end()), 64u);
         for (const int width : {4, 5}) {
@@ -1028,9 +1037,9 @@ TEST_F(MetalDevice, StatisticsDescribeTheSetup) {
     EXPECT_FALSE(st.device.empty());
     EXPECT_FALSE(slv.factor().L.vals_.empty());
     EXPECT_EQ(slv.rows(), A.rows());
-    const apxchol::solver released(A, gpu_options());
-    EXPECT_TRUE(released.factor().L.vals_.empty());
-    EXPECT_EQ(released.factor().perm.size(), static_cast<std::size_t>(A.rows()));
+    EXPECT_EQ(slv.factor().perm.size(), static_cast<std::size_t>(A.rows()));
+    // The route keeps no host copy of the factor; factor() reads the device.
+    EXPECT_TRUE(metal(slv).factor().L.vals_.empty());
 }
 
 TEST_F(MetalDevice, ReusesFactorAcrossDifferentRightHandSides) {
@@ -1279,18 +1288,23 @@ TEST_F(MetalDevice, Float16FactorUsesSharedStorageAndConverges) {
     }
 }
 
-TEST_F(MetalDevice, Float16FactorPreservesRetainedFactorAndConsumingResults) {
+TEST_F(MetalDevice, Float16InstalledFactorIsReadoptedExactly) {
     const auto A = grid(32, 33, 0.25);
     auto F = apxchol::factorize(A);
     auto options = keep_opts();
     options.factor_opts.factor_storage = apxchol::factor_storage_type::fp16;
     apxchol::solver half(A, F, gpu_options(options));
-    EXPECT_EQ(half.factor().L.vals_, F.L.vals_);
-    options.keep_factor = false;
-    apxchol::solver consuming(A, F, gpu_options(options));
-    EXPECT_TRUE(consuming.factor().L.vals_.empty());
+    const auto installed = half.factor();
+    EXPECT_EQ(installed.storage, apxchol::factor_storage_type::fp16);
+    EXPECT_EQ(installed.scale.size(), static_cast<std::size_t>(A.rows()));
+    // Conflicting options do not change an installed factor.
+    options.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
+    options.factor_opts.drop_tolerance = 0;
+    apxchol::solver again(A, installed, gpu_options(options));
+    EXPECT_EQ(again.factor().L.vals_, installed.L.vals_);
+    EXPECT_EQ(again.factor().scale, installed.scale);
     const auto b = rhs(A.rows(), 3, false);
-    EXPECT_LT((consuming.apply(b) - half.apply(b)).norm(), 1e-12);
+    EXPECT_EQ(again.apply(b), half.apply(b));
 }
 
 TEST_F(MetalDevice, Float16TinyColumnScaleKeepsFinitePreconditioning) {
@@ -1405,7 +1419,7 @@ TEST_F(MetalDevice, NonemptyFactorGrowthPreservesExportAndSolve) {
     }
 }
 
-TEST_F(MetalDevice, ResidentOwnerKeepsOnlyRequestedHostFactorValues) {
+TEST_F(MetalDevice, ResidentOwnerKeepsNoHostFactorValues) {
     for (const bool laplacian : {false, true}) for (const bool fp16 : {false, true}) {
         SCOPED_TRACE(::testing::Message() << laplacian << ' ' << fp16);
         const auto A = grid(17, 19, laplacian ? 0.0 : 0.25, true);
@@ -1416,11 +1430,10 @@ TEST_F(MetalDevice, ResidentOwnerKeepsOnlyRequestedHostFactorValues) {
         const auto b = rhs(A.rows(), 3, laplacian);
         const auto expected = emulate_apply(exported.factor(), b, options.factor_opts);
         EXPECT_LT((exported.apply(b) - expected).norm() / expected.norm(), 2e-5);
-        options.keep_factor = false;
         apxchol::solver resident(A, gpu_options(options));
-        EXPECT_TRUE(resident.factor().L.inner_.empty());
-        EXPECT_TRUE(resident.factor().L.vals_.empty());
-        EXPECT_GT(resident.factor().L.nonZeros(), 0);
+        EXPECT_TRUE(metal(resident).factor().L.inner_.empty());
+        EXPECT_TRUE(metal(resident).factor().L.vals_.empty());
+        EXPECT_GT(metal(resident).factor().L.nonZeros(), 0);
         for (unsigned salt : {1u, 2u, 3u}) {
             const auto rhs_value = rhs(A.rows(), salt, laplacian);
             const auto result = resident.solve(rhs_value);

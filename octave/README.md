@@ -70,7 +70,6 @@ Unspecified fields use the C++ defaults. Unknown fields are rejected.
 | `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
 | `regularization` | Nonnegative diagonal fraction added during factor construction; `0` disables it |
 | `lump_max_mass` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
-| `keep_factor` | Retain canonical FP32 factor values for saving; off by default |
 | `verbose` | Logical flag for setup diagnostics; off by default |
 
 See [precision](../docs/precision.md) and the [native option reference](../docs/reference/cpp.md)
@@ -78,11 +77,11 @@ for storage behavior and advanced controls.
 
 ## Save and load a solver
 
-Enable factor retention when constructing a solver, then save its original
-matrix and factor together:
+Save a solver's original matrix and its installed factor, the preconditioner
+the solves actually use, together:
 
 ```matlab
-s = apxchol_solver(A, struct('keep_factor', true));
+s = apxchol_solver(A);
 s.save('system.apxchol');
 restored = apxchol_solver.load('system.apxchol');
 res = restored.solve(B);  % scalar/matrix RHS and warm starts work as usual
@@ -90,8 +89,9 @@ res = restored.solve(B);  % scalar/matrix RHS and warm starts work as usual
 
 The path must be a character row vector. Saving creates a new file and rejects
 an existing destination. Loading accepts the same optional options struct as
-the constructor, including `factor_storage` and `keep_factor`; enable retention
-when loading if you want to save again. Setup defaults are unchanged.
+the constructor. The file fixes the factor storage and dropping, so
+`factor_storage` and `drop_tolerance` have no effect; `num_threads` and
+`lump_max_mass` apply. A loaded solver can be saved again.
 
 Archives use the shared [portable file format](../docs/serialization.md).
 Loading prepares the saved factor without factorizing the matrix again.

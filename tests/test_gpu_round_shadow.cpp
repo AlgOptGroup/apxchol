@@ -3261,7 +3261,7 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     EXPECT_FALSE(apxchol::detail::factorization_access::device_factor(exported));
     const apxchol::solver owner(A, exported, options);
     EXPECT_FALSE(gpu_session(owner).trsv().adopted_device_factor());
-    EXPECT_TRUE(owner.factor().L.vals_.empty());
+    EXPECT_TRUE(gpu_session(owner).factor().L.vals_.empty());
     EXPECT_EQ(exported.L.vals_.size(), exported.L.nonZeros());
     auto host_options = options;
     host_options.backend = apxchol::solve_backend::cpu;

@@ -3368,8 +3368,9 @@ gpu_round_shadow_device_state::finalize_device_factor(
         *result = cuda_sptrsv_device_factor::own_fp16_scaled(impl_->cuda_device, m, nnz,
             {{lp.get(), (m + 1) * sizeof(int)}, {li.get(), std::size_t(nnz) * sizeof(int)}, {lh.get(), std::size_t(nnz) * sizeof(__half)}},
             {{column_ptr, (m + 1) * sizeof(int)}, {lti.get(), std::size_t(nnz) * sizeof(int)}, {lth.get(), std::size_t(nnz) * sizeof(__half)}},
-            {diag.get(), m * sizeof(float)}, {inv_scale2.get(), m * sizeof(double)}, stats, counts[2], 0);
-        lh.release(); lth.release(); diag.release(); inv_scale2.release();
+            {diag.get(), m * sizeof(float)}, {inv_scale2.get(), m * sizeof(double)},
+            {col_scale.get(), m * sizeof(float)}, stats, counts[2], 0);
+        lh.release(); lth.release(); diag.release(); inv_scale2.release(); col_scale.release();
     } else {
         *result = cuda_sptrsv_device_factor::own_fp32(impl_->cuda_device, m, nnz,
             {{lp.get(), (m + 1) * sizeof(int)}, {li.get(), std::size_t(nnz) * sizeof(int)}, {lv.get(), std::size_t(nnz) * sizeof(float)}},
@@ -3415,6 +3416,7 @@ std::vector<std::byte> gpu_round_shadow_device_state::encode_finalized_factor_fo
     if (half) {
         append(factor.data_.diag, m * sizeof(float));
         append(factor.data_.inv_scale2, m * sizeof(double));
+        append(factor.data_.scale, m * sizeof(float));
     }
     return encoded;
 }

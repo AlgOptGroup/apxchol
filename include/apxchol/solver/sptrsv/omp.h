@@ -340,7 +340,7 @@ public:
     /// the storage option at setup.
     void setup(const sparse_csc& L, node_index m,
                const factor_options& options = {}) {
-        setup_dispatch(L, m, nullptr, options);
+        setup_dispatch(L, m, nullptr, options, fp16_resolved(options.factor_storage), false, nullptr);
     }
 
     /// Same analysis, but the SpTRSV CONSUMES L: its row/value arrays are
@@ -355,27 +355,67 @@ public:
     /// still works). For callers that keep the factor, use setup().
     void setup_consuming(sparse_csc& L, node_index m,
                          const factor_options& options = {}) {
-        setup_dispatch(L, m, &L, options);
+        setup_dispatch(L, m, &L, options, fp16_resolved(options.factor_storage), false, nullptr);
+    }
+
+    /// Install an exported installed factor (factorization::storage fp32 or
+    /// fp16) exactly as given and consume L like setup_consuming(): no drop,
+    /// no rescaling and no rounding. fp16 off-diagonals must be binary16
+    /// values, L's diagonal holds d_j and scale holds s_j for columns [0, m).
+    /// options.drop_tolerance and factor_storage are ignored.
+    void install_exact(sparse_csc& L, node_index m, bool fp16, const float* scale,
+                       const factor_options& options = {}) {
+        if (fp16 && !fp16_supported())
+            throw std::runtime_error("FP16 factor storage requires AVX/F16C or Apple ARM64");
+        setup_dispatch(L, m, &L, options, fp16, true, scale);
+    }
+
+    /// The installed factor in factorization's form (solve.h): columns
+    /// [0, m) of the n x n L hold the stored CSC with fp16 off-diagonals
+    /// widened exactly and diagonal d_j; columns [m, n) are empty. fp16
+    /// storage also returns s_j in scale (one per column; 1 beyond m).
+    void export_installed(sparse_csc& L, node_index n, std::vector<float>& scale) const {
+        const edge_index nnz = csc_col_ptr_.empty() ? 0 : csc_col_ptr_[m_];
+        L.resize(n, n);
+        L.resizeNonZeros(nnz);
+        std::copy(csc_col_ptr_.begin(), csc_col_ptr_.begin() + m_ + 1, L.outer_.begin());
+        std::fill(L.outer_.begin() + m_ + 1, L.outer_.end(), nnz);
+        std::copy(csc_row_idx_.begin(), csc_row_idx_.begin() + nnz, L.inner_.begin());
+        scale.clear();
+        if (!fp16_) {
+            std::copy(csc_vals32_.begin(), csc_vals32_.begin() + nnz, L.vals_.begin());
+            return;
+        }
+        #pragma omp parallel for schedule(static)
+        for (node_index j = 0; j < m_; ++j)
+            for (edge_index p = csc_col_ptr_[j]; p < csc_col_ptr_[j + 1]; ++p)
+                L.vals_[p] = p == csc_col_ptr_[j] ? diag_[j] : static_cast<float>(csc_vals16_[p]);
+        scale.assign(n, 1.0f);
+        std::copy(scale_.begin(), scale_.begin() + m_, scale.begin());
     }
 
 private:
     void setup_dispatch(const sparse_csc& L, node_index m, sparse_csc* consumed,
-                        const factor_options& options) {
+                        const factor_options& options, bool fp16, bool exact,
+                        const float* exact_scale) {
         detail::validate_factor_options(options);
         verbose_ = options.verbose;
-        fp16_ = fp16_resolved(options.factor_storage);
+        fp16_ = fp16;
         if (fp16_) {
-            setup_impl<_Float16>(L, m, consumed, options);
+            setup_impl<_Float16>(L, m, consumed, options, exact, exact_scale);
             return;
         }
-        setup_impl<float>(L, m, consumed, options);
+        setup_impl<float>(L, m, consumed, options, exact, exact_scale);
     }
 
     // `consumed` != nullptr: `L` may be released as soon as it is dead (see
     // setup_consuming); it then always aliases &L. V is the storage type.
+    // `exact` installs an exported factor (install_exact): exact_scale
+    // supplies s_j for fp16, and the drop, scale fallback and narrowing
+    // residual are skipped.
     template <class V>
     void setup_impl(const sparse_csc& L, node_index m, sparse_csc* consumed,
-                    const factor_options& options) {
+                    const factor_options& options, bool exact, const float* exact_scale) {
         constexpr bool kScaled = std::is_same_v<V, _Float16>;   // narrow_value / stored_diag read s_j
         m_ = m;
 #ifdef __APPLE__
@@ -470,7 +510,7 @@ private:
         mark("L11_alias_or_copy");
 
         // Compensate dropped mass when off-diagonals remain.
-        const double factor_drop_rel = options.drop_tolerance;
+        const double factor_drop_rel = exact ? 0.0 : options.drop_tolerance;
         stats_ = lowprec_statistics{};
         stats_.rel        = factor_drop_rel;
         stats_.nnz_factor = static_cast<std::uint64_t>(nnz);
@@ -486,7 +526,8 @@ private:
         if constexpr (kScaled) {
             scale_.resize(m_);
             col_scale = scale_.data();
-            need_scale = true;
+            need_scale = !exact;
+            if (exact) std::copy(exact_scale, exact_scale + m_, scale_.begin());
         } else {
             if (factor_drop_rel > 0.0) col_scale_local.resize(m_);
             col_scale = col_scale_local.data();
@@ -506,12 +547,15 @@ private:
             // the same contract in cuda.h): a column whose fp32 1/s_j or
             // fp32(L_jj)/s_j would overflow falls back to s_j = 1. BEFORE the
             // drop, so the threshold and the storage agree on the scale.
+            // An exact install keeps the scales it was given.
             std::uint64_t fallback = 0;
-            #pragma omp parallel for schedule(static) reduction(+ : fallback)
-            for (node_index j = 0; j < m_; ++j) {
-                const float s = col_scale[j];
-                const float d = static_cast<float>(L11_vals[L11_outer[j]]);
-                if (!std::isfinite(1.0f / s) || !std::isfinite(d / s)) { col_scale[j] = 1.0f; ++fallback; }
+            if (!exact) {
+                #pragma omp parallel for schedule(static) reduction(+ : fallback)
+                for (node_index j = 0; j < m_; ++j) {
+                    const float s = col_scale[j];
+                    const float d = static_cast<float>(L11_vals[L11_outer[j]]);
+                    if (!std::isfinite(1.0f / s) || !std::isfinite(d / s)) { col_scale[j] = 1.0f; ++fallback; }
+                }
             }
             stats_.scale_fallback = fallback;
             // r_j = fp32(1 / s_j): the back solve's per-column input scale (see
@@ -538,7 +582,9 @@ private:
         std::vector<edge_index>           drop_outer;
         std::unique_ptr<node_index[]>     drop_inner;
         std::unique_ptr<factor_value_t[]> drop_vals;
-        {
+        if (exact) {
+            stats_.nnz_stored = static_cast<std::uint64_t>(nnz);
+        } else {
             factor_drop_stats ds;
             const bool compacted = compact_factor_columns<edge_index, node_index, factor_value_t>(
                 m_, L11_outer, L11_inner, L11_vals, col_scale, factor_drop_rel,
@@ -597,10 +643,10 @@ private:
                 lowprec_statistics counts;
 #if defined(__x86_64__) && !defined(__F16C__)
                 if constexpr (kScaled)
-                    counts = copy_csc_fp16(L11_outer, L11_inner, L11_vals, first, last);
+                    counts = copy_csc_fp16(L11_outer, L11_inner, L11_vals, first, last, exact);
                 else
 #endif
-                    counts = copy_csc_columns<V>(L11_outer, L11_inner, L11_vals, first, last);
+                    counts = copy_csc_columns<V>(L11_outer, L11_inner, L11_vals, first, last, exact);
                 n_off += counts.offdiag;
                 n_flush += counts.flushed;
                 n_sub += counts.subnormal;
@@ -690,7 +736,8 @@ private:
     template <class V>
     [[gnu::always_inline]]
     lowprec_statistics copy_csc_columns(const edge_index* ptr, const node_index* idx,
-                                       const factor_value_t* vals, node_index first, node_index last) {
+                                       const factor_value_t* vals, node_index first, node_index last,
+                                       bool exact) {
         constexpr bool kScaled = std::is_same_v<V, _Float16>;
         auto& csc_vals = vals_csc(std::type_identity<V>{});
         lowprec_statistics counts;
@@ -698,19 +745,23 @@ private:
             csc_col_ptr_[j] = ptr[j];
             if constexpr (kScaled) {
                 assert(idx[ptr[j]] == j && "factor column must start with its diagonal");
-                diag_[j] = static_cast<float>(stored_diag<V>(vals[ptr[j]], scale_[j]));
+                // An exact install reads d_j as given; the kernels never read
+                // the narrow diagonal slot, so it holds zero.
+                diag_[j] = exact ? vals[ptr[j]]
+                                 : static_cast<float>(stored_diag<V>(vals[ptr[j]], scale_[j]));
             }
             double resid = 0.0; // Off-diagonal storage-rounding residual.
             for (edge_index k = ptr[j]; k < ptr[j + 1]; ++k) {
                 const node_index    i  = idx[k];
                 const factor_value_t v = vals[k];
-                const V              w = narrow_value<V>(v, kScaled ? scale_[j] : 1.0f);
+                const V              w = !exact ? narrow_value<V>(v, kScaled ? scale_[j] : 1.0f)
+                                       : kScaled && i == j ? V(0) : static_cast<V>(v);
                 csc_row_idx_[k] = i;
                 csc_vals[k]     = w;
                 const bool subnormal = is_stored_subnormal(v);
                 counts.factor_subnormal += subnormal;
                 if constexpr (kScaled) {
-                    if (i != j) {
+                    if (i != j && !exact) {
                         const double x = static_cast<double>(v) / scale_[j];
                         resid += x - widen(w);
                     }
@@ -740,8 +791,9 @@ private:
     // Enter F16C after OpenMP has outlined its worker, so Clang retains the target.
     [[gnu::target("f16c"), gnu::flatten]]
     lowprec_statistics copy_csc_fp16(const edge_index* ptr, const node_index* idx,
-                                    const factor_value_t* vals, node_index first, node_index last) {
-        return copy_csc_columns<_Float16>(ptr, idx, vals, first, last);
+                                    const factor_value_t* vals, node_index first, node_index last,
+                                    bool exact) {
+        return copy_csc_columns<_Float16>(ptr, idx, vals, first, last, exact);
     }
 #endif
 

@@ -733,10 +733,13 @@ static BenchResult run_apxchol_v1(
     std::uint64_t stored_nnz = 0, l11_nnz = 0, dropped = 0;
     double drop_rel = 0;
     auto capture_fill = [&](const apxchol::solver& owner) {
-        // Column pointers retain raw nnz even after factor values are released.
-        // Read this owner; never run a second, potentially different factorization.
-        factor_nnz = static_cast<long long>(owner.factor().L.nonZeros());
-        factor_rows = static_cast<long long>(owner.factor().L.rows());
+        // The route's metadata keeps the construction factor's column pointers,
+        // so this is the raw nnz before dropping. Read this owner; never run a
+        // second, potentially different factorization.
+        std::visit([&](const auto& route) {
+            factor_nnz = static_cast<long long>(route.factor().L.nonZeros());
+            factor_rows = static_cast<long long>(route.factor().L.rows());
+        }, apxchol::detail::solver_access::route(owner));
         if (report_fill) {
             std::visit([&](const auto& route) {
                 if constexpr (requires { route.trsv().drop_stats(); }) {

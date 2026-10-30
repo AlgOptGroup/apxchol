@@ -345,10 +345,10 @@ TEST(Solver, CopiesShareTheFactorAndSolveInParallel) {
         return std::get<apxchol::detail::cpu_route>(apxchol::detail::solver_access::route(owner));
     };
     for (int t = 0; t < callers; ++t) {
-        EXPECT_EQ(&owners[t].factor(), &original->factor());
+        EXPECT_EQ(&route(owners[t]).factor(), &route(*original).factor());
         EXPECT_EQ(&route(owners[t]).trsv(), &route(*original).trsv());
     }
-    const auto* shared_factor = &original->factor();
+    const auto* shared_factor = &route(*original).factor();
     original.reset();
     for (int round = 0; round < 3; ++round) {
         std::vector<Eigen::VectorXd> x(callers), z(callers);
@@ -368,7 +368,7 @@ TEST(Solver, CopiesShareTheFactorAndSolveInParallel) {
             EXPECT_EQ(batch[t], expected_panel);
         }
     }
-    EXPECT_EQ(&owners[0].factor(), shared_factor);
+    EXPECT_EQ(&route(owners[0]).factor(), shared_factor);
     // Where the CPU triangular solve picks its hybrid schedule (as on x86
     // Linux), the parallel solves above also cover per-copy barrier state.
     RecordProperty("hybrid_schedule", route(owners[0]).trsv().uses_hybrid_schedule());
@@ -377,7 +377,7 @@ TEST(Solver, CopiesShareTheFactorAndSolveInParallel) {
     const Sparse other_matrix = operator_matrix(500);
     apxchol::solver assigned(other_matrix, options);
     assigned = owners[0];
-    EXPECT_EQ(&assigned.factor(), shared_factor);
+    EXPECT_EQ(&route(assigned).factor(), shared_factor);
     EXPECT_EQ(assigned.solve(rhs[1]).x, solved[1]);
 }
 
@@ -385,7 +385,6 @@ TEST(Solver, CpuOwnerAdoptsAnIndependentFactorAndAppliesIt) {
     const scoped_omp_threads threads(1);
     const Sparse matrix = operator_matrix();
     auto options = cpu_options();
-    options.keep_factor = true;
     const auto expected = apxchol::factorize(matrix, options.factor_opts);
     std::unique_ptr<apxchol::solver> owner;
     {
@@ -393,24 +392,25 @@ TEST(Solver, CpuOwnerAdoptsAnIndependentFactorAndAppliesIt) {
         apxchol::factorization supplied = expected;
         owner = std::make_unique<apxchol::solver>(temporary, std::move(supplied), options);
     }
-    const auto& actual = owner->factor();
-    ASSERT_EQ(actual.L.nonZeros(), expected.L.nonZeros());
-    ASSERT_EQ(actual.L.outer_.size(), expected.L.outer_.size());
-    ASSERT_EQ(actual.L.inner_.size(), expected.L.inner_.size());
-    ASSERT_EQ(actual.L.vals_.size(), expected.L.vals_.size());
+    // factor() is the installed form of the adopted construction factor.
+    const auto actual = owner->factor();
+    EXPECT_EQ(expected.storage, apxchol::factor_storage_type::automatic);
+    EXPECT_EQ(actual.storage, apxchol::factor_storage_type::fp32);
     EXPECT_EQ(actual.perm, expected.perm);
-    EXPECT_TRUE(same_bytes(actual.L.outer_.data(), expected.L.outer_.data(), actual.L.outer_.size()));
-    EXPECT_TRUE(same_bytes(actual.L.inner_.data(), expected.L.inner_.data(), actual.L.inner_.size()));
-    EXPECT_TRUE(same_bytes(actual.L.vals_.data(), expected.L.vals_.data(), actual.L.vals_.size()));
+    EXPECT_EQ(actual.L.rows(), expected.L.rows());
+    EXPECT_EQ(static_cast<std::size_t>(actual.L.nonZeros()), actual.L.vals_.size());
+    EXPECT_LE(actual.L.nonZeros(), expected.L.nonZeros());
     const apxchol::solver reference(matrix, expected, options);
+    const apxchol::solver reinstalled(matrix, actual, options);
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), -1.0, 2.0);
     const auto applied = owner->apply(rhs);
     const auto reference_applied = reference.apply(rhs);
     EXPECT_TRUE(same_bytes(applied.data(), reference_applied.data(), applied.size()));
+    const auto reinstalled_applied = reinstalled.apply(rhs);
+    EXPECT_TRUE(same_bytes(applied.data(), reinstalled_applied.data(), applied.size()));
     expect_solution(matrix, rhs, owner->solve(rhs).x);
 
     options.backend = apxchol::solve_backend::automatic;
-    options.keep_factor = false;
     apxchol::solver automatic_owner(matrix, expected, options);
     EXPECT_EQ(automatic_owner.backend(), apxchol::solve_backend::cpu);
     EXPECT_TRUE(same_bytes(automatic_owner.apply(rhs).data(),
@@ -1161,7 +1161,6 @@ TEST(Solver, GpuOwnerPreservesStorageAndAdoptsItsFactor) {
         auto options = cpu_options();
         options.backend = apxchol::solve_backend::gpu;
         options.factor_opts.factor_storage = storage;
-        options.keep_factor = true;
         std::unique_ptr<apxchol::solver> owner;
         {
             Sparse temporary = matrix;
@@ -1170,13 +1169,15 @@ TEST(Solver, GpuOwnerPreservesStorageAndAdoptsItsFactor) {
         EXPECT_EQ(owner->backend(), apxchol::solve_backend::gpu);
         EXPECT_EQ(owner->rows(), matrix.rows());
         EXPECT_EQ(owner->factor_storage(), storage);
-        const auto& exported = owner->factor();
+        const auto exported = owner->factor();
+        EXPECT_EQ(exported.storage, storage);
         options.factor_opts.is_select = "priority_greedy";
         EXPECT_THROW(apxchol::solver(matrix, options), std::invalid_argument);
         apxchol::solver adopted(matrix, exported, options);
         EXPECT_EQ(adopted.backend(), apxchol::solve_backend::gpu);
         EXPECT_EQ(adopted.factor_storage(), storage);
-        const auto& retained = adopted.factor();
+        const auto retained = adopted.factor();
+        EXPECT_EQ(retained.scale, exported.scale);
         EXPECT_EQ(retained.sddm, exported.sddm);
         EXPECT_EQ(retained.L.n_, exported.L.n_);
         EXPECT_EQ(retained.perm, exported.perm);
@@ -1582,7 +1583,6 @@ void check_thread_budget(const Sparse& matrix, int ambient, int budget,
     auto options = cpu_options();
     options.backend = backend;
     options.num_threads = budget;
-    options.keep_factor = true;
     const Owner owner(matrix, options);
     EXPECT_EQ(omp_get_max_threads(), ambient);
     const Owner adopted(matrix, owner.factor(), options);

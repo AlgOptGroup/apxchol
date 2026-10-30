@@ -125,10 +125,10 @@ An explicit GPU request uploads the factor for CUDA or Metal solves, without
 factorizing again. Automatic adoption stays on CPU. The original matrix `A`
 is still needed for PCG and residual checks.
 
-The factor may come from CPU construction or from a GPU solver created with
-`keep_factor=true`: pass its `solver.factor()` to the constructor above.
-The destination rebuilds its own triangular-solve storage. There is no built-in
-save/load format; this handoff is in memory.
+The factor may come from CPU construction or from any solver's
+`solver.factor()`, which returns its installed factor; pass it to the
+constructor above. The destination rebuilds its own triangular-solve layout.
+For a handoff between processes, use [saved solvers](serialization.md).
 
 To precondition another iterative solver with the factor, construct
 `solver(A, std::move(F), opts)` and call its `apply`; see
@@ -136,9 +136,9 @@ To precondition another iterative solver with the factor, construct
 
 A `factorization` holds CSC factor columns
 (diagonal first), permutation with `perm[original] = elimination_position`,
-operator kind, and round metadata. Preserve these conventions. Set
-`keep_factor=true` if the solver must retain exportable factor arrays;
-otherwise it releases them after preparation.
+operator kind, round metadata and its storage form. Preserve these
+conventions. A custom factor uses `storage = automatic`, so the solver applies
+its dropping and storage options.
 
 Graph storage is the directed AoS pool. Custom partitioners and eliminators
 operate on the same graph. The PCG recurrence, factor-column formula, and triangular-solve

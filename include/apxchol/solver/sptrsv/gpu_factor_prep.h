@@ -231,6 +231,28 @@ inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std:
     return out;
 }
 
+/// The fp16 arrays of an installed factor (factorization::storage fp16),
+/// taken as they are: vals = the binary16 off-diagonals (diagonal slots zero,
+/// never read), diag = the FP32 diagonal d_j and inv_scale2 =
+/// fp64(fp32(1 / s_j))^2, exactly as narrow_fp16_scaled() derives it.
+inline fp16_scaled_arrays installed_fp16_arrays(const csr_int<float>& L11,
+                                                std::span<const float> col_scale) {
+    fp16_scaled_arrays out;
+    out.vals = std::make_unique_for_overwrite<_Float16[]>(static_cast<std::size_t>(L11.nnz));
+    out.diag.resize(static_cast<std::size_t>(L11.m));
+    out.inv_scale2.resize(static_cast<std::size_t>(L11.m));
+    #pragma omp parallel for schedule(static)
+    for (int j = 0; j < L11.m; ++j) {
+        const double inv = 1.0f / col_scale[j];
+        out.inv_scale2[j] = inv * inv;
+        out.diag[j] = L11.vals[L11.ptr[j]];
+        out.vals[L11.ptr[j]] = _Float16(0);
+        for (int p = L11.ptr[j] + 1; p < L11.ptr[j + 1]; ++p)
+            out.vals[p] = static_cast<_Float16>(L11.vals[p]);
+    }
+    return out;
+}
+
 /// Transpose a square m x m CSR (values of any trivially copyable V).
 /// The dataflow forward solve needs CSR of L (row access) while setup
 /// builds CSR of L^T (== the factor's CSC); this produces the one from the

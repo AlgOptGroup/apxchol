@@ -13,6 +13,7 @@
 
 #include "apxchol.h"
 #include "apxchol/detail/csc_import.h"
+#include "apxchol/solver/detail/solver_route.h"
 #include "apxchol/operator_class.h"
 #include "apxchol/version.h"
 
@@ -52,7 +53,7 @@ Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
 // ── options dict -> solve_options ────────────────────────────────────────────
 // Every key the binding understands, in the order reported by the error message.
 const char* const kValidKeys[] = {
-    "backend", "num_threads", "seed", "partitioner", "keep_factor", "factor_storage_dtype",
+    "backend", "num_threads", "seed", "partitioner", "factor_storage_dtype",
     "degree_quantile", "degree_multiplier", "degree_tiebreak",
     "exact_clique_max_degree",
     "residual_peel", "cpu_schedule", "drop_tolerance",
@@ -93,7 +94,6 @@ apxchol::solve_options parse_options(const py::dict& d) {
         // solve_options
         if      (key == "backend")           so.backend = parse_backend(v.cast<std::string>());
         else if (key == "num_threads")       so.num_threads = v.cast<int>();
-        else if (key == "keep_factor")       so.keep_factor = v.cast<bool>();
         // factor_options
         else if (key == "seed")               so.factor_opts.seed = v.cast<unsigned>();
         else if (key == "partitioner")        so.factor_opts.is_select = v.cast<std::string>();
@@ -257,33 +257,38 @@ public:
         return out;
     }
 
-    // nnz of the lower-triangular factor G (diagonal included). Survives
-    // release_values() — the column pointers are always retained.
+    // nnz of the installed factor G (diagonal included), without exporting it.
     std::int64_t factor_nnz() const {
-        return static_cast<std::int64_t>(factor().L.nonZeros());
+        return std::visit([](const auto& route) {
+            return static_cast<std::int64_t>(route.factor_nnz());
+        }, apxchol::detail::solver_access::route(slv_));
     }
 
-    // (indptr, indices, data) copy of the factor in PERMUTED space. Each column
-    // holds its diagonal first, then the off-diagonals in ascending row order.
+    // (indptr, indices, data) copy of the installed factor G = L S in PERMUTED
+    // space (factorization.h), exact in float64. Each column holds its
+    // diagonal first, then the off-diagonals in ascending row order.
     py::tuple factor_csc() const {
-        const apxchol::factorization& F = factor();
+        apxchol::factorization F;
+        {
+            py::gil_scoped_release release;
+            F = slv_.factor();
+        }
         const std::int64_t nnz = static_cast<std::int64_t>(F.L.nonZeros());
-        if (nnz > 0 && F.L.vals_.empty())
-            throw std::runtime_error(
-                "factor values not retained; construct with keep_factor=True");
-
         const std::int64_t ncol = static_cast<std::int64_t>(F.L.rows());
         py::array_t<std::int64_t> indptr(ncol + 1);
         py::array_t<std::int32_t> indices(nnz);
-        py::array_t<apxchol::factor_value_t> data(nnz);
+        py::array_t<double> data(nnz);
         auto* ip = indptr.mutable_data();
         auto* ii = indices.mutable_data();
         auto* dd = data.mutable_data();
         for (std::int64_t c = 0; c <= ncol; ++c)
             ip[c] = static_cast<std::int64_t>(F.L.outer_[static_cast<std::size_t>(c)]);
-        for (std::int64_t k = 0; k < nnz; ++k) {
-            ii[k] = static_cast<std::int32_t>(F.L.inner_[static_cast<std::size_t>(k)]);
-            dd[k] = F.L.vals_[static_cast<std::size_t>(k)];
+        for (std::int64_t c = 0; c < ncol; ++c) {
+            const double s = F.scale.empty() ? 1.0 : F.scale[static_cast<std::size_t>(c)];
+            for (std::int64_t k = ip[c]; k < ip[c + 1]; ++k) {
+                ii[k] = static_cast<std::int32_t>(F.L.inner_[static_cast<std::size_t>(k)]);
+                dd[k] = static_cast<double>(F.L.vals_[static_cast<std::size_t>(k)]) * s;
+            }
         }
         return py::make_tuple(indptr, indices, data);
     }
@@ -351,8 +356,11 @@ private:
             Stride(a.strides(1) / py::ssize_t(sizeof(double)), a.strides(0) / py::ssize_t(sizeof(double))));
     }
 
+    // Permutation and flags of the route; does not export the factor.
     const apxchol::factorization& factor() const {
-        return slv_.factor();
+        return std::visit([](const auto& route) -> const apxchol::factorization& {
+            return route.factor();
+        }, apxchol::detail::solver_access::route(slv_));
     }
 
     apxchol::solver slv_;
