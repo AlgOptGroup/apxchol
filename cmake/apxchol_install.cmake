@@ -20,7 +20,7 @@ function(apxchol_install_core)
         "${CMAKE_CURRENT_BINARY_DIR}/apxcholConfig.cmake"
         INSTALL_DESTINATION "${package_dir}")
     write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/apxcholConfigVersion.cmake"
-        VERSION "${APXCHOL_VERSION}" COMPATIBILITY SameMinorVersion)
+        VERSION "${APXCHOL_VERSION}" COMPATIBILITY SameMajorVersion)
     install(TARGETS apxchol_core EXPORT apxcholTargets
         ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
         LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
