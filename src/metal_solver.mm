@@ -935,8 +935,10 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result,
         throw std::invalid_argument("solver: output must not overlap RHS or warm start");
     if (!b.allFinite() || (x0 != nullptr && !x0->allFinite()))
         throw std::invalid_argument("metal_solver::solve: non-finite RHS or initial guess");
-    const auto [tol, max_iter] = detail::resolve_solve_parameters(
+    const auto limits = detail::resolve_solve_parameters(
         requested_tol, requested_max_iter, impl_->opts.tol, impl_->opts.max_iter);
+    const double tol = limits.first;
+    const int max_iter = limits.second;
     result.x.resize(rows());
     const const_matrix_view initial(x0 ? *x0 : b);
     impl_->solve_columns<1>(b, result.x, {&result, 1}, result.timings,
