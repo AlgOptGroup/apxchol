@@ -8,12 +8,13 @@
 
 namespace apxchol::detail {
 
-// Reflect compressed L's lower triangle into sorted CSR, retaining duplicates.
-// map maps input vertices to output rows; allocate returns writable index/value
-// arrays after the counts establish their size. Each scatter slot is written once.
-template<bool CheckFp32 = false, class Map, class Allocate, class Less>
+// Reflect compressed L's lower triangle into sorted CSR, retaining duplicates
+// ordered by value. map maps input vertices to output rows; allocate returns
+// writable index/value arrays after the counts establish their size. Each
+// scatter slot is written once.
+template<bool CheckFp32 = false, class Map, class Allocate>
 bool reflect_lower_to_csr(const Eigen::SparseMatrix<double>& L, std::span<int> row_ptr,
-                          Map map, Allocate allocate, Less less) {
+                          Map map, Allocate allocate) {
     const Eigen::Index n = L.rows();
     const int* outer = L.outerIndexPtr();
     const int* inner = L.innerIndexPtr();
@@ -68,7 +69,7 @@ bool reflect_lower_to_csr(const Eigen::SparseMatrix<double>& L, std::span<int> r
             entries.reserve(end - begin);
             for (int p = begin; p < end; ++p)
                 entries.emplace_back(indices[p], values[p]);
-            std::sort(entries.begin(), entries.end(), less);
+            std::sort(entries.begin(), entries.end());
             for (int p = begin; p < end; ++p) {
                 indices[p] = entries[p - begin].first;
                 values[p] = entries[p - begin].second;

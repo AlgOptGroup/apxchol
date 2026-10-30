@@ -2,7 +2,6 @@
 #include "apxchol/solver/detail/permuted_operator.h"
 #include "scoped_omp_threads.h"
 #include <array>
-#include <bit>
 #include <cstring>
 #include <numeric>
 #include <random>
@@ -29,9 +28,7 @@ Csr serial_reference(const Matrix& L, const std::vector<node_index>& perm) {
         }
     ref.ptr.push_back(0);
     for (auto& row : rows) {
-        std::ranges::sort(row, {}, [](const auto& entry) {
-            return std::pair{entry.first, std::bit_cast<std::uint64_t>(entry.second)};
-        });
+        std::ranges::sort(row);
         for (auto [index, value] : row) { ref.idx.push_back(index); ref.vals.push_back(value); }
         ref.ptr.push_back(static_cast<int>(ref.idx.size()));
     }

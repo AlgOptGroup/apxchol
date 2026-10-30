@@ -622,8 +622,7 @@ void cpu_solver::build_operator(const Eigen::SparseMatrix<double>& L,
                 [&](int nnz) {
                     Lrm_.resizeNonZeros(nnz);
                     return std::pair{Lrm_.innerIndexPtr(), Lrm_.valuePtr()};
-                },
-                [](const auto& a, const auto& b) { return a.first < b.first; });
+                });
             Lrm_.makeCompressed();
             fallback_needs_fp32_cast = op_fp32_;
         }
