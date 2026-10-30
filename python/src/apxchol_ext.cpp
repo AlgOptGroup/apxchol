@@ -12,7 +12,6 @@
 #include <vector>
 
 #include "apxchol.h"
-#include "apxchol/solver/archive.h"
 #include "apxchol/detail/csc_import.h"
 #include "apxchol/operator_class.h"
 #include "apxchol/version.h"
@@ -142,13 +141,13 @@ public:
 
     void save(const std::filesystem::path& path) const {
         py::gil_scoped_release release;
-        apxchol::save_solver(path, slv_);
+        slv_.save(path);
     }
 
     static Solver load(const std::filesystem::path& path, const py::dict& options) {
         const auto parsed = parse_options(options);
         py::gil_scoped_release release;
-        return Solver(apxchol::load_solver(path, parsed));
+        return Solver(apxchol::solver::load(path, parsed));
     }
 
     Eigen::Index rows() const { return slv_.rows(); }

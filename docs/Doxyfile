@@ -1,7 +1,6 @@
 PROJECT_NAME           = apxchol
 OUTPUT_DIRECTORY       = $(APXCHOL_DOCS_BUILD)/doxygen
 INPUT                  = include/apxchol/solver/solve.h \
-                         include/apxchol/solver/archive.h \
                          include/apxchol/solver/factorization.h \
                          include/apxchol/solver/factor_options.h \
                          include/apxchol/solver/elimination/sampler.h \

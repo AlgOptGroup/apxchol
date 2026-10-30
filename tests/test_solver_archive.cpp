@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "apxchol/solver/archive.h"
+#include "apxchol/solver/solve.h"
 #include "apxchol/detail/csc_import.h"
 #include "../src/solver_archive_internal.h"
 #include <zlib.h>
@@ -125,7 +125,7 @@ protected:
         directory = std::filesystem::temp_directory_path() /
             ("apxchol-archive-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         ASSERT_TRUE(std::filesystem::create_directory(directory));
-        save_solver(directory / "original.apxchol", original);
+        original.save(directory / "original.apxchol");
     }
     void TearDown() override { std::filesystem::remove_all(directory); }
 
@@ -193,7 +193,7 @@ protected:
 };
 
 TEST_F(SolverArchive, ExactFactorAndScalarBatchWarmSolves) {
-    auto restored = load_solver(directory / "original.apxchol", options());
+    auto restored = solver::load(directory / "original.apxchol", options());
     EXPECT_EQ(restored.operator_nnz(), A.nonZeros());
     EXPECT_EQ(original.operator_nnz(), A.nonZeros());
     const auto& before = original.factor();
@@ -233,8 +233,8 @@ TEST_F(SolverArchive, LaplacianFactorAndCenteredSolves) {
     solver before(L, options());
     ASSERT_FALSE(before.factor().sddm);
     const auto path = directory / "laplacian.apxchol";
-    save_solver(path, before);
-    auto restored = load_solver(path, options());
+    before.save(path);
+    auto restored = solver::load(path, options());
     EXPECT_FALSE(restored.factor().sddm);
     EXPECT_EQ(restored.factor().L.outer_, before.factor().L.outer_);
     EXPECT_EQ(restored.factor().L.inner_, before.factor().L.inner_);
@@ -273,9 +273,9 @@ TEST_F(SolverArchive, ReconstructsOriginalSystemCoefficients) {
         solver fresh(expected, options());
         solver owner(input, fresh.factor(), options());
         const auto path = directory / ("operator-" + std::to_string(mode) + ".apxchol");
-        save_solver(path, owner);
+        owner.save(path);
         expect_operator(path, expected);
-        auto restored = load_solver(path, options());
+        auto restored = solver::load(path, options());
         EXPECT_EQ(restored.operator_nnz(), input.nonZeros());
         EXPECT_EQ(restored.operator_nnz(), owner.operator_nnz());
         const Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(expected.rows(), 0.1, 1.0);
@@ -306,44 +306,44 @@ TEST_F(SolverArchive, RejectsTooManyEmptyRoundsBeforeWriting) {
     F.rounds.resize(A.rows() + 1);
     solver owner(A, std::move(F), options());
     const auto path = directory / "empty-rounds.apxchol";
-    EXPECT_THROW(save_solver(path, owner), std::invalid_argument);
+    EXPECT_THROW(owner.save(path), std::invalid_argument);
     EXPECT_FALSE(std::filesystem::exists(path));
 }
 
 TEST_F(SolverArchive, AutomaticAdoptionUsesCpu) {
     auto opts = options(); opts.backend = solve_backend::automatic;
-    auto restored = load_solver(directory / "original.apxchol", opts);
+    auto restored = solver::load(directory / "original.apxchol", opts);
     EXPECT_EQ(restored.backend(), solve_backend::cpu);
     EXPECT_EQ(restored.factor_storage(), factor_storage_type::fp32);
 }
 
 TEST_F(SolverArchive, ExistingFilesAndReleasedFactorsAreRejected) {
     const auto before = read_bytes(directory / "original.apxchol");
-    EXPECT_THROW(save_solver(directory / "original.apxchol", original), std::runtime_error);
+    EXPECT_THROW(original.save(directory / "original.apxchol"), std::runtime_error);
     EXPECT_EQ(read_bytes(directory / "original.apxchol"), before);
     auto opts = options(); opts.keep_factor_values = false;
     solver released(A, opts);
-    EXPECT_THROW(save_solver(directory / "released.apxchol", released), std::invalid_argument);
+    EXPECT_THROW(released.save(directory / "released.apxchol"), std::invalid_argument);
     EXPECT_FALSE(std::filesystem::exists(directory / "released.apxchol"));
 }
 
 TEST_F(SolverArchive, RejectsNullCharactersInPaths) {
     const auto existing = (directory / "original.apxchol").string() + std::string("\0suffix", 7);
-    EXPECT_THROW(load_solver(existing), std::invalid_argument);
+    EXPECT_THROW(solver::load(existing), std::invalid_argument);
     const auto prefix = directory / "new.apxchol";
     const auto output = prefix.string() + std::string("\0suffix", 7);
-    EXPECT_THROW(save_solver(output, original), std::invalid_argument);
+    EXPECT_THROW(original.save(output), std::invalid_argument);
     EXPECT_FALSE(std::filesystem::exists(prefix));
 }
 
 TEST_F(SolverArchive, InvalidOptionsFailBeforeOpeningAnArchive) {
     auto opts = options(); opts.num_threads = -1;
-    EXPECT_THROW(load_solver(directory / "missing.apxchol", opts), std::invalid_argument);
-    EXPECT_THROW(load_solver(directory / "missing.apxchol", options()), std::runtime_error);
+    EXPECT_THROW(solver::load(directory / "missing.apxchol", opts), std::invalid_argument);
+    EXPECT_THROW(solver::load(directory / "missing.apxchol", options()), std::runtime_error);
 }
 
 TEST_F(SolverArchive, ReportsDirectoryReadError) {
-    EXPECT_THROW(load_solver(directory, options()), std::system_error);
+    EXPECT_THROW(solver::load(directory, options()), std::system_error);
 }
 
 TEST_F(SolverArchive, RejectsMetadataAndIndexOverflow) {
@@ -351,35 +351,35 @@ TEST_F(SolverArchive, RejectsMetadataAndIndexOverflow) {
         {0, 99}, {1, UINT64_MAX}, {2, 2}, {3, UINT64_MAX}, {4, UINT64_MAX}, {6, UINT64_MAX}}}) {
         const auto path = change(("meta-" + std::to_string(item.first)).c_str(), metadata,
                                  [&](auto& a) { a.value(item.first, item.second); });
-        EXPECT_THROW(load_solver(path), std::invalid_argument);
+        EXPECT_THROW(solver::load(path), std::invalid_argument);
     }
     const auto bad_row = change("bad-row", a_inner, [](auto& a) { a.value(0, UINT32_MAX); });
-    EXPECT_THROW(load_solver(bad_row), std::invalid_argument);
+    EXPECT_THROW(solver::load(bad_row), std::invalid_argument);
     const auto bad_offset = change("bad-offset", l_outer, [](auto& a) { a.value(0, UINT64_MAX); });
-    EXPECT_THROW(load_solver(bad_offset), std::invalid_argument);
+    EXPECT_THROW(solver::load(bad_offset), std::invalid_argument);
     const auto wide_row = change("wide-row", a_inner, [](auto& a) { widen(a); a.kind = 'u'; a.value(0, UINT64_MAX); });
-    EXPECT_THROW(load_solver(wide_row), std::invalid_argument);
+    EXPECT_THROW(solver::load(wide_row), std::invalid_argument);
 }
 
 TEST_F(SolverArchive, RejectsMalformedHeaderAndTruncation) {
     const auto header = change_file("version", [](auto& bytes) { put_number(bytes, 8, 4, 99); });
-    EXPECT_THROW(load_solver(header), std::invalid_argument);
+    EXPECT_THROW(solver::load(header), std::invalid_argument);
     const auto extent = change_file("extent", [](auto& bytes) { put_number(bytes, 64 + 40 * l_values + 8, 8, UINT64_MAX); });
-    EXPECT_THROW(load_solver(extent), std::invalid_argument);
+    EXPECT_THROW(solver::load(extent), std::invalid_argument);
     const auto wrong_type = change("type", a_values, [](auto& a) { a.kind = 'u'; });
-    EXPECT_THROW(load_solver(wrong_type), std::invalid_argument);
+    EXPECT_THROW(solver::load(wrong_type), std::invalid_argument);
     const auto wrong_width = change_file("width", [](auto& bytes) { bytes.at(64 + 40 * a_values + 6) = 3; });
-    EXPECT_THROW(load_solver(wrong_width), std::invalid_argument);
+    EXPECT_THROW(solver::load(wrong_width), std::invalid_argument);
     const auto duplicate = change_file("duplicate", [](auto& bytes) { put_number(bytes, 64 + 40, 4, 0); });
-    EXPECT_THROW(load_solver(duplicate), std::invalid_argument);
+    EXPECT_THROW(solver::load(duplicate), std::invalid_argument);
     const auto overlap = change_file("overlap", [](auto& bytes) { put_number(bytes, 64 + 40 + 16, 8, 448); });
-    EXPECT_THROW(load_solver(overlap), std::invalid_argument);
+    EXPECT_THROW(solver::load(overlap), std::invalid_argument);
     const auto truncated = change_file("truncated", [](auto& bytes) { bytes.resize(100); }, false);
-    EXPECT_THROW(load_solver(truncated), std::invalid_argument);
+    EXPECT_THROW(solver::load(truncated), std::invalid_argument);
     const auto short_payload = change_file("short-payload", [](auto& bytes) { bytes.pop_back(); }, false);
-    EXPECT_THROW(load_solver(short_payload), std::invalid_argument);
+    EXPECT_THROW(solver::load(short_payload), std::invalid_argument);
     const auto trailing = change_file("trailing", [](auto& bytes) { bytes.push_back(0); put_number(bytes, 24, 8, bytes.size()); });
-    EXPECT_THROW(load_solver(trailing), std::invalid_argument);
+    EXPECT_THROW(solver::load(trailing), std::invalid_argument);
 }
 
 TEST_F(SolverArchive, ReadsOppositeEndianArrays) {
@@ -391,7 +391,7 @@ TEST_F(SolverArchive, ReadsOppositeEndianArrays) {
     }
     const auto path = directory / "opposite-endian.apxchol";
     write_bytes(path, encode_fixture(arrays));
-    auto restored = load_solver(path, options());
+    auto restored = solver::load(path, options());
     EXPECT_EQ(restored.factor().L.vals_, original.factor().L.vals_);
     EXPECT_EQ(restored.factor().perm, original.factor().perm);
     const Eigen::VectorXd b = Eigen::VectorXd::Ones(A.rows());
@@ -405,7 +405,7 @@ TEST_F(SolverArchive, ReadsWideIntegerArrays) {
     for (auto& a : arrays) if (a.kind != 'f') widen(a);
     const auto path = directory / "wide.apxchol";
     write_bytes(path, encode_fixture(arrays));
-    auto restored = load_solver(path, options());
+    auto restored = solver::load(path, options());
     EXPECT_EQ(restored.factor().L.outer_, original.factor().L.outer_);
     EXPECT_EQ(restored.factor().L.inner_, original.factor().L.inner_);
     EXPECT_EQ(restored.factor().L.vals_, original.factor().L.vals_);
@@ -417,21 +417,21 @@ TEST_F(SolverArchive, RejectsCorruptArrayPayload) {
         const auto offset = number(bytes, 64 + 40 * a_values + 16, 8);
         bytes.at(offset) ^= 1;
     }, false);
-    EXPECT_THROW(load_solver(path), std::invalid_argument);
+    EXPECT_THROW(solver::load(path), std::invalid_argument);
     const auto descriptor = change_file("metadata-crc", [](auto& bytes) { bytes.at(64 + 32) ^= 1; }, false);
-    EXPECT_THROW(load_solver(descriptor), std::invalid_argument);
+    EXPECT_THROW(solver::load(descriptor), std::invalid_argument);
 }
 
 TEST_F(SolverArchive, RejectsDuplicatePermutation) {
     const auto path = change("permutation", permutation, [](auto& a) { a.value(1, a.value(0)); });
-    EXPECT_THROW(load_solver(path), std::invalid_argument);
+    EXPECT_THROW(solver::load(path), std::invalid_argument);
 }
 
 TEST_F(SolverArchive, AcceptsUnicodeAndExtensionlessPaths) {
     for (const auto& name : {std::filesystem::path(u8"matrice-α.apxchol"), std::filesystem::path("system")}) {
         const auto path = directory / name;
-        save_solver(path, original);
-        auto restored = load_solver(path, options());
+        original.save(path);
+        auto restored = solver::load(path, options());
         EXPECT_EQ(restored.factor().L.vals_, original.factor().L.vals_);
         EXPECT_EQ(restored.factor().perm, original.factor().perm);
     }
@@ -446,8 +446,8 @@ TEST_F(SolverArchive, OperatorEntryCountUsesCanonicalInput) {
     solver adopted(canonical, direct.factor(), options());
     EXPECT_EQ(direct.operator_nnz(), 4);
     EXPECT_EQ(adopted.operator_nnz(), 4);
-    save_solver(directory / "duplicates.apxchol", direct);
-    EXPECT_EQ(load_solver(directory / "duplicates.apxchol").operator_nnz(), 4);
+    direct.save(directory / "duplicates.apxchol");
+    EXPECT_EQ(solver::load(directory / "duplicates.apxchol").operator_nnz(), 4);
 }
 
 TEST_F(SolverArchive, CpuAndGpuFactorsCrossAdopt) {
@@ -466,7 +466,7 @@ TEST_F(SolverArchive, CpuAndGpuFactorsCrossAdopt) {
                 if (origin == solve_backend::gpu) build.factor_opts.factor_storage = storage;
                 solver resident(input, build);
                 const auto path = directory / ("source-" + std::to_string(source_owners++) + ".apxchol");
-                save_solver(path, resident);
+                resident.save(path);
                 expect_operator(path, input);
                 const auto& F = resident.factor();
                 for (std::size_t i = 0; i < F.perm.size(); ++i)
@@ -474,7 +474,7 @@ TEST_F(SolverArchive, CpuAndGpuFactorsCrossAdopt) {
                 for (auto target : {solve_backend::cpu, solve_backend::gpu}) {
                     auto opts = options(); opts.backend = target;
                     if (target == solve_backend::gpu) opts.factor_opts.factor_storage = storage;
-                    auto restored = load_solver(path, opts); ++loaded_owners;
+                    auto restored = solver::load(path, opts); ++loaded_owners;
                     EXPECT_EQ(restored.backend(), target);
                     EXPECT_EQ(restored.operator_nnz(), input.nonZeros());
                     EXPECT_EQ(restored.factor().L.outer_, F.L.outer_);
@@ -489,8 +489,8 @@ TEST_F(SolverArchive, CpuAndGpuFactorsCrossAdopt) {
                     check_solve_modes(input, restored, laplacian, checked_rhs);
                     if (target == solve_backend::gpu) {
                         const auto adopted = directory / ("adopted-" + std::to_string(resaves++) + ".apxchol");
-                        save_solver(adopted, restored); expect_operator(adopted, input);
-                        auto host = load_solver(adopted, options());
+                        restored.save(adopted); expect_operator(adopted, input);
+                        auto host = solver::load(adopted, options());
                         Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(input.rows(), -1.0, 1.0);
                         const auto result = host.solve(b, 1e-8);
                         EXPECT_TRUE(result.converged);
@@ -518,10 +518,10 @@ TEST_F(SolverArchive, PreservesLumpingAndRegularizationWithoutReapplyingThem) {
     solver before(positive, construction);
     ASSERT_EQ(before.factor().lumped_offdiag, 2);
     const auto path = directory / "positive.apxchol";
-    save_solver(path, before);
-    EXPECT_THROW(load_solver(path), std::invalid_argument);
+    before.save(path);
+    EXPECT_THROW(solver::load(path), std::invalid_argument);
     auto admission = options(); admission.factor_opts.lump_max_mass = 1.0;
-    auto restored = load_solver(path, admission);
+    auto restored = solver::load(path, admission);
     EXPECT_EQ(restored.factor().lumped_offdiag, 2);
     EXPECT_EQ(restored.operator_nnz(), 4);
     ASSERT_EQ(restored.factor().L.vals_.size(), before.factor().L.vals_.size());
@@ -537,20 +537,20 @@ TEST_F(SolverArchive, PreservesLumpingAndRegularizationWithoutReapplyingThem) {
 TEST_F(SolverArchive, DoesNotReplaceSymlinksOrConcurrentWriters) {
     const auto link = directory / "dangling.apxchol";
     std::filesystem::create_symlink(directory / "missing", link);
-    EXPECT_THROW(save_solver(link, original), std::runtime_error);
+    EXPECT_THROW(original.save(link), std::runtime_error);
     EXPECT_TRUE(std::filesystem::is_symlink(link));
     EXPECT_FALSE(std::filesystem::exists(directory / "missing"));
     const auto path = directory / "concurrent.apxchol";
     std::barrier start(2);
     auto write = [&] {
         start.arrive_and_wait();
-        try { save_solver(path, original); return 1; }
+        try { original.save(path); return 1; }
         catch (const std::runtime_error&) { return 0; }
     };
     auto first = std::async(std::launch::async, write);
     auto second = std::async(std::launch::async, write);
     EXPECT_EQ(first.get() + second.get(), 1);
-    EXPECT_EQ(load_solver(path).rows(), A.rows());
+    EXPECT_EQ(solver::load(path).rows(), A.rows());
     for (const auto& entry : std::filesystem::directory_iterator(directory))
         EXPECT_FALSE(entry.path().filename().string().starts_with(".apxchol-"));
 }

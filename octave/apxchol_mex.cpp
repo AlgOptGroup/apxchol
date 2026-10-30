@@ -28,7 +28,6 @@
 #include <utility>
 
 #include "apxchol.h"
-#include "apxchol/solver/archive.h"
 #include "apxchol/detail/csc_import.h"
 #include "apxchol/operator_class.h"
 
@@ -244,11 +243,11 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             const auto path = string_option(prhs[1], "path");
             auto options = setup_options(nrhs == 3 ? prhs[2] : nullptr);
             plhs[0] = store_solver(std::make_unique<apxchol::solver>(
-                apxchol::load_solver(path, options)));
+                apxchol::solver::load(path, options)));
         } else if (op == "save") {
             if (nrhs != 3)
                 fail("apxchol:usage", "usage: apxchol_mex('save', h, path)");
-            apxchol::save_solver(string_option(prhs[2], "path"), get_solver(prhs[1]));
+            get_solver(prhs[1]).save(string_option(prhs[2], "path"));
         } else if (op == "solve") {
             if (nrhs != 5 && nrhs != 6)
                 fail("apxchol:usage",
