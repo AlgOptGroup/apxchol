@@ -32,10 +32,13 @@
 - The benchmark harness checks every result against the original system's residual and reports setup, solve and memory separately.
 - Published results now come from CSCS Daint; laptop results are archived.
 
+### Documentation
+- The website separates user and developer guides, adds installation, quick start, examples, changelog and citing pages, and marks development pages with a banner.
+
 ### Fixes
 - Reported residuals are now correct on early solve exits.
 - Fixed SDDM misclassification of exact Laplacians.
 - CPU solves rescale right-hand sides of extreme magnitude; operators whose scale is not representable in FP32 factor storage are still rejected.
 - Parallel factorization handles a shrinking OpenMP team, and parallel vertex selection on the same graph is reproducible at a fixed thread count.
 
-Full history: https://github.com/AlgOptGroup/apxchol/compare/v0.2.2...main
+Full history: <https://github.com/AlgOptGroup/apxchol/compare/v0.2.2...main>

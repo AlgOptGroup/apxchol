@@ -1,4 +1,4 @@
-# Building and installation
+# Building from source
 
 ## Dependencies
 
@@ -26,106 +26,15 @@ ctest --test-dir build --output-on-failure
 
 The default build is CPU-only. Add `-DAPXCHOL_DEVICE=CUDA` or
 `-DAPXCHOL_DEVICE=METAL` at configuration to include that GPU backend as well.
-The same executable still supports CPU solves.
-
-## CLI archives
-
-Download `cli-*` artifacts from a successful [CI run](https://github.com/AlgOptGroup/apxchol/actions/workflows/ci.yml);
-new [releases](https://github.com/AlgOptGroup/apxchol/releases) attach the archives directly.
-Linux archives require x86-64-v2, glibc 2.28+ and system C++/GCC runtimes. macOS
-archives require Apple silicon and macOS 15+, and include CPU and Metal routes.
-Verify the matching `.sha256` file with `sha256sum -c` (Linux) or `shasum -a 256 -c`
-(macOS), extract the archive, then run its `bin/apxchol --help`. Keep `bin/` and
-`lib/` together; OpenMP and redistribution notices are included. macOS binaries
-are ad-hoc signed, not notarized; Gatekeeper may require manual approval.
-
-For a source build, `cmake --install build --component cli --prefix /path/to/prefix`
-installs the executable using your system runtime libraries.
-
-## Native C++ SDK archives
-
-The [SDK guide](sdk.md) covers extracted C++ SDKs, compiler and runtime
-requirements, and building archives with the native CMake install rules.
+The same executable still supports CPU solves. To run it, see the
+[command-line guide](cli.md); to link the library from your own project, see
+[C++ and CMake](cpp.md#use-from-cmake).
 
 ## Python source installation
 
 The [Python guide](../python/README.md#build-from-source) gives the editable
 installation command and tests. Run it from a repository checkout with the
 native build dependencies above.
-
-## Command-line use
-
-```bash
-./build/apxchol matrix.mtx --rhs rhs.mtx -o solution.mtx
-./build/apxchol graph.mtx --convert-input --random-rhs --tol 1e-8
-./build/apxchol --help
-```
-
-Supply `--rhs` for your actual problem or `--random-rhs` for an experiment.
-An `--rhs` file with `k` columns is solved as one batch, and `-o` writes an
-`n` by `k` solution. The input is read as `A`; `--convert-input` solves the
-Laplacian of a graph adjacency matrix instead (see
-[converting input](usage.md#converting-input-to-an-operator)). The website's
-command-line reference is
-generated from `--help`, so it lists every option for that revision.
-
-## Use from CMake
-
-For a source checkout, call the helper in your consuming project's top-level
-`CMakeLists.txt`, after its `project(...)` declaration:
-
-```cmake
-include(path/to/apxchol/cmake/apxchol_core.cmake)
-apxchol_add_core()
-target_link_libraries(my_program PRIVATE apxchol::core)
-```
-
-This builds just the library and enables any GPU language in the consuming
-project's scope. Set `APXCHOL_DEVICE` when configuring the consuming project.
-For distribution, set `APXCHOL_NATIVE_ARCH=OFF`; CUDA consumers must also
-choose `CMAKE_CUDA_ARCHITECTURES` instead of its `native` default.
-
-Alternatively, embed the repository root directly:
-
-```cmake
-add_subdirectory(path/to/apxchol)
-target_link_libraries(my_program PRIVATE apxchol::core)
-```
-
-Root embedding defaults to the portable library only. Set `APXCHOL_BUILD_CLI`,
-`APXCHOL_BUILD_TESTS` or `APXCHOL_BUILD_EXAMPLES` before `add_subdirectory` to opt
-into those targets. CLI dependencies are fetched only when the CLI is enabled;
-tests with the CLI disabled still include the operator-input unit tests.
-
-For CUDA or Metal, enable `CUDA` or `OBJCXX` in the consuming parent before
-`add_subdirectory`, for example with `project(my_project LANGUAGES CXX CUDA)`.
-The top-level helper above enables the selected language for you.
-
-For a separately installed SDK, use:
-
-```cmake
-find_package(apxchol CONFIG REQUIRED)
-target_link_libraries(my_program PRIVATE apxchol::core)
-```
-
-Build and install that SDK with:
-
-```bash
-cmake -S cmake/core -B build-sdk -DCMAKE_INSTALL_PREFIX=/path/to/prefix
-cmake --build build-sdk -j6
-cmake --install build-sdk
-```
-
-Configure the consuming project with `-DCMAKE_PREFIX_PATH=/path/to/prefix`.
-If apxchol fetched Eigen, the install includes its headers. Otherwise, the
-consumer must also provide Eigen. Static SDK consumers also need zlib; CUDA
-SDK consumers need the CUDA Toolkit.
-Use compatible compiler, standard-library and OpenMP runtime settings.
-
-`ExternalProject_Add` builds in a separate project. Use it to build/install
-`cmake/core`, then configure the consuming project against that install with
-`find_package`. It does not create an immediately linkable `apxchol::core`
-target in the parent configuration.
 
 ## Build options
 

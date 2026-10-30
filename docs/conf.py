@@ -17,7 +17,11 @@ if release_tag:
     if release_tag != f"v{release}":
         raise ValueError(f"Documentation tag {release_tag!r} does not match v{release}")
 html_title = "apxchol"
-html_context = {"docs_version": release_tag or "Development"}
+# Development builds show a banner naming the release the changelog's Unreleased section follows.
+latest = re.search(r"^## Unreleased \(since v([0-9.]+)\)", (ROOT / "CHANGELOG.md").read_text(), re.M)
+html_context = {"docs_version": release_tag or "Development",
+                "latest_release": latest.group(1) if latest else ""}
+html_theme_options = {} if release_tag else {"announcement": "development"}
 templates_path = ["_templates"]
 html_static_path = ["_static"]
 html_css_files = ["versions.css"]

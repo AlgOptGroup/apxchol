@@ -18,3 +18,13 @@
 .version-selector a[aria-current="page"] {
   font-weight: bold;
 }
+
+/* Let the development banner wrap on narrow screens. */
+.announcement {
+  height: auto;
+  min-height: var(--header-height);
+}
+
+.announcement-content {
+  white-space: normal;
+}

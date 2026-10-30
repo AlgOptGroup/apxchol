@@ -10,7 +10,10 @@ on:
     paths:
       - 'docs/**'
       - 'README.md'
+      - 'CHANGELOG.md'
+      - 'CITATION.cff'
       - 'CONTRIBUTING.md'
+      - 'examples/**'
       - 'python/**'
       - 'octave/README.md'
       - 'benchmarks/**'
