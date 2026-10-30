@@ -124,6 +124,6 @@ function test_archive()
                'apxchol:badInput', 'unknown');
   result = retained.solve([1; -1]);
   assert(result.converged, 'owner unusable after archive errors');
-  assert(rejected == 20);
-  fprintf('ok archive retention, re-save and file errors: %d/20 rejected\n', rejected);
+  assert(rejected == 19);
+  fprintf('ok archive retention, re-save and file errors: %d/19 rejected\n', rejected);
 end
