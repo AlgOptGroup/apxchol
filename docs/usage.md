@@ -175,3 +175,28 @@ workloads may use fewer threads.
 The setting also covers CPU work in a GPU build; it does not control GPU
 threadgroups. More CPU threads need not be faster. To choose which cores run those CPU workers,
 see [thread placement](../benchmarks/README.md#thread-placement).
+
+## Thread safety
+
+Use one solver per thread. A solver reuses its workspace across `solve`,
+`apply` and batch solves. In C++ these methods are non-const, and concurrent
+non-const calls on one object are not allowed: use a copy, or batch the
+right-hand sides. As a safety net, a call made while another thread is using
+the same solver throws (`RuntimeError` in Python) instead of waiting.
+
+Copies are cheap: a copy shares the factor, the triangular-solve structures
+and the operator, which are read-only after setup, and allocates only its
+own workspace. Copy a solver once per thread, with `solver copy = original;`
+in C++ or `copy.copy(solver)` in Python, and the copies solve in parallel
+with the same results as serial calls. Copies stay valid after the original
+is destroyed. This covers `solver`, `cpu_solver` and `apx_cholesky`; a new
+factor installed in one copy of an `apx_cholesky` leaves the others unchanged.
+GPU solvers cannot be copied: construct one per thread, or batch the
+right-hand sides. A `metal_solver` used directly must not be called
+concurrently.
+
+To solve many right-hand sides from one thread, pass them to `solve(B)` as the
+columns of one matrix; the batched solver shares work between columns.
+
+Python releases the GIL during factorization, `solve` and `apply`, but holds it
+while reading the input matrix.
