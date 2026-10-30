@@ -79,9 +79,8 @@ int main(int argc, char* argv[]) try {
     const bool graph = cfg.convert_input && detail::is_graph_adjacency(L);
     spdlog::info("{}", describe_input(graph, scan,
                                       !cfg.convert_input ? "the default"
-                                      : graph ? "--convert-input: not a valid operator, "
-                                                "no negative off-diagonal"
-                                              : "--convert-input: already a valid operator"));
+                                      : graph ? "--convert-input: no negative off-diagonal"
+                                              : "--convert-input: not a graph adjacency matrix"));
     if (graph)
         L = detail::adjacency_laplacian(L);
 

@@ -379,13 +379,11 @@ def test_as_operator_converts_a_boolean_pattern():
     assert abs(apxchol.as_operator(A.astype(bool)) - degree_minus(A)).max() == 0.0
 
 
-def test_as_operator_raises_for_mixed_signs():
+def test_as_operator_leaves_negative_off_diagonals_to_the_solver():
     M = sp.csc_matrix(np.array([[0.0, 1.0, 0.0], [1.0, 0.0, -1.0], [0.0, -1.0, 0.0]]))
-    with pytest.raises(ValueError, match="not a graph adjacency matrix either"):
-        apxchol.as_operator(M)
-    negative = sp.csc_matrix(np.array([[0.0, -2.0], [-2.0, 0.0]]))
+    assert apxchol.as_operator(M) is M
     with pytest.raises(ValueError, match="Condition FAILED: positive diagonal"):
-        apxchol.as_operator(negative)
+        apxchol.factorize(apxchol.as_operator(M))
 
 
 def test_as_operator_keeps_isolated_vertices_as_zero_rows():
@@ -444,9 +442,9 @@ def test_as_operator_rejects_bad_input():
         apxchol.as_operator(sp.csc_matrix(np.ones((3, 4))))   # non-square
     with pytest.raises(ValueError):
         apxchol.as_operator(sp.csc_matrix(np.eye(3) * 1j))    # complex
-    with pytest.raises(ValueError, match="symmetry"):
+    with pytest.raises(ValueError, match="transpose partner"):
         apxchol.as_operator(sp.csc_matrix(np.triu(np.ones((3, 3)), 1)))
-    with pytest.raises(ValueError, match="finite values"):
+    with pytest.raises(ValueError, match="NaN or infinite"):
         apxchol.as_operator(sp.csc_matrix([[0.0, np.nan], [np.nan, 0.0]]))
 
 

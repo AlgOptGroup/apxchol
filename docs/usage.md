@@ -21,17 +21,16 @@ valid operator. To start from a graph instead, convert the input first:
 |---|---|---|
 | `--convert-input` | `A = apxchol.as_operator(M)` | `A = apxchol_as_operator(M)` |
 
-All three apply the same rule, like NumPy's `asarray`:
+All three apply the same rule, like NumPy's `asarray`. `M` must be square,
+finite and symmetric; otherwise the conversion fails and says why.
 
-- If `M` passes the operator check (a symmetric Laplacian or SDDM matrix,
-  possibly nearly SDDM), it is used unchanged. A diagonal-only matrix with a
-  positive diagonal passes.
-- Otherwise, if `M` is finite and symmetric and has no negative off-diagonal
-  entry, it is a graph adjacency matrix, and its Laplacian `L = D - M` is used, where `D` holds the
+- If `M` has off-diagonal entries and none of them is negative, it is a graph
+  adjacency matrix, and its Laplacian `L = D - M` is used, where `D` holds the
   row sums of `M`. A diagonal entry (self-loop) adds to `D` and is subtracted
   again, so it cancels. Pattern input (a Matrix Market `pattern` file, a
   MATLAB logical matrix, a boolean SciPy matrix) has unit weights.
-- Otherwise the conversion fails, explaining why `M` is neither.
+- Otherwise `M` is used unchanged, and the solver checks it as an operator.
+  This covers Laplacian, SDDM and nearly SDDM matrices and diagonal matrices.
 
 Without conversion, when a matrix fails as an operator but has no negative
 off-diagonal entry, the error suggests the conversion for each interface.

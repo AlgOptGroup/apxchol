@@ -136,9 +136,9 @@ if (APXCHOL_BUILD_CLI)
     apxchol_cli_test(cli_sddm_converges path5_sddm 0 "LAPLACIAN/SDDM operator")
     apxchol_cli_test(cli_nearly_sddm_converges path5_nearly_sddm 0 "LAPLACIAN/SDDM operator")
     apxchol_cli_test(cli_convert_keeps_laplacian path5_laplacian 0
-        "LAPLACIAN/SDDM operator.*already a valid operator" --convert-input)
+        "LAPLACIAN/SDDM operator.*not a graph adjacency matrix" --convert-input)
     apxchol_cli_test(cli_convert_keeps_sddm path5_sddm 0
-        "LAPLACIAN/SDDM operator.*already a valid operator" --convert-input)
+        "LAPLACIAN/SDDM operator.*not a graph adjacency matrix" --convert-input)
     apxchol_cli_test(cli_convert_adjacency path5_adjacency 0 "ADJACENCY graph" --convert-input)
     apxchol_cli_test(cli_convert_adjacency_with_self_loops path5_adjacency_loops 0
         "ADJACENCY graph" --convert-input)
@@ -146,7 +146,7 @@ if (APXCHOL_BUILD_CLI)
     apxchol_cli_test(cli_disconnected_adjacency_converges disconnected_paths_pattern 0
         "projected random RHS independently over 2 connected components" --convert-input)
     apxchol_cli_test(cli_convert_mixed_signs_is_rejected ambiguous 2
-        "not a graph adjacency matrix either" --convert-input)
+        "not a graph adjacency matrix.*Condition FAILED: positive diagonal" --convert-input)
     apxchol_cli_test(cli_input_kind_is_removed path5_laplacian 109 "--input-kind"
         --input-kind operator)
 
