@@ -202,10 +202,10 @@ namespace detail {
 
 /// The rule behind the CLI's `--convert-input`, Python's `apxchol.as_operator`
 /// and MATLAB/Octave's `apxchol_as_operator`. Returns false when M passes
-/// `require_operator` (use M unchanged), true when it fails but has no
-/// negative off-diagonal entry (a graph adjacency matrix: use its Laplacian).
-/// Otherwise throws `std::invalid_argument` with the validation failure and
-/// the negative off-diagonal count.
+/// `require_operator` (use M unchanged), true when it fails but is finite,
+/// symmetric and has no negative off-diagonal entry (a graph adjacency matrix:
+/// use its Laplacian). Otherwise throws `std::invalid_argument` with the
+/// validation failure.
 bool is_graph_adjacency(const Eigen::SparseMatrix<double>& M);
 
 /// The graph Laplacian L = D - M, with D the diagonal of row sums of M. A

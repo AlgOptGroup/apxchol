@@ -6,8 +6,8 @@ function A = apxchol_as_operator(M)
   %
   % A valid input is returned unchanged. If M passes the solver's operator
   % check (a symmetric Laplacian or SDDM matrix, possibly nearly SDDM), A = M.
-  % Otherwise, if M has no negative off-diagonal entry, it is a graph
-  % adjacency matrix and A is its Laplacian L = D - M, where D holds the row
+  % Otherwise, if M is finite and symmetric and has no negative off-diagonal
+  % entry, it is a graph adjacency matrix and A is its Laplacian L = D - M, where D holds the row
   % sums of M; a diagonal entry (self-loop) adds to D and is subtracted
   % again, so it cancels. A logical (pattern) matrix has unit weights.
   % Anything else raises an error explaining why M is neither. The CLI's

@@ -82,8 +82,8 @@ def as_operator(M):
 
     - If `M` passes the solver's operator check (a symmetric Laplacian or
       SDDM matrix, possibly nearly SDDM), `M` itself is returned.
-    - Otherwise, if `M` has no negative off-diagonal entry, it is a graph
-      adjacency matrix and its Laplacian ``L = D - M`` is returned, where
+    - Otherwise, if `M` is finite and symmetric and has no negative
+      off-diagonal entry, it is a graph adjacency matrix and its Laplacian ``L = D - M`` is returned, where
       ``D`` holds the row sums of `M`. A diagonal entry (self-loop) adds to
       ``D`` and is subtracted again, so it cancels. Boolean (pattern) input
       has unit weights.

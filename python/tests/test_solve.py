@@ -444,6 +444,10 @@ def test_as_operator_rejects_bad_input():
         apxchol.as_operator(sp.csc_matrix(np.ones((3, 4))))   # non-square
     with pytest.raises(ValueError):
         apxchol.as_operator(sp.csc_matrix(np.eye(3) * 1j))    # complex
+    with pytest.raises(ValueError, match="symmetry"):
+        apxchol.as_operator(sp.csc_matrix(np.triu(np.ones((3, 3)), 1)))
+    with pytest.raises(ValueError, match="finite values"):
+        apxchol.as_operator(sp.csc_matrix([[0.0, np.nan], [np.nan, 0.0]]))
 
 
 def csc_with_duplicates(A):
