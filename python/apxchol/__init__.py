@@ -78,16 +78,16 @@ def _scipy_sparse():
 def as_operator(M):
     """Return `M` as an operator for :func:`factorize` and :func:`solve`.
 
-    Like :func:`numpy.asarray`, a valid input is returned unchanged:
+    Like :func:`numpy.asarray`, an operator is returned unchanged. `M` must
+    be square, finite and symmetric; otherwise a ``ValueError`` says why.
 
-    - If `M` passes the solver's operator check (a symmetric Laplacian or
-      SDDM matrix, possibly nearly SDDM), `M` itself is returned.
-    - Otherwise, if `M` is finite and symmetric and has no negative
-      off-diagonal entry, it is a graph adjacency matrix and its Laplacian ``L = D - M`` is returned, where
-      ``D`` holds the row sums of `M`. A diagonal entry (self-loop) adds to
-      ``D`` and is subtracted again, so it cancels. Boolean (pattern) input
-      has unit weights.
-    - Otherwise a ``ValueError`` explains why `M` is neither.
+    - If `M` has off-diagonal entries and none of them is negative, it is a
+      graph adjacency matrix and its Laplacian ``L = D - M`` is returned,
+      where ``D`` holds the row sums of `M`. A diagonal entry (self-loop)
+      adds to ``D`` and is subtracted again, so it cancels. Boolean
+      (pattern) input has unit weights.
+    - Otherwise `M` itself is returned; :func:`factorize` and :func:`solve`
+      check it as an operator.
 
     The CLI's ``--convert-input`` applies the same rule.
 

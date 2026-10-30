@@ -201,11 +201,11 @@ std::string describe_operator(const operator_scan& s, Eigen::Index lumped);
 namespace detail {
 
 /// The rule behind the CLI's `--convert-input`, Python's `apxchol.as_operator`
-/// and MATLAB/Octave's `apxchol_as_operator`. Returns false when M passes
-/// `require_operator` (use M unchanged), true when it fails but is finite,
-/// symmetric and has no negative off-diagonal entry (a graph adjacency matrix:
-/// use its Laplacian). Otherwise throws `std::invalid_argument` with the
-/// validation failure.
+/// and MATLAB/Octave's `apxchol_as_operator`.
+/// Returns true when M has off-diagonal entries and none is negative (a graph
+/// adjacency matrix: use its Laplacian), false otherwise (use M unchanged; the
+/// solver validates it). Throws `std::invalid_argument` when M is not square,
+/// finite and symmetric.
 bool is_graph_adjacency(const Eigen::SparseMatrix<double>& M);
 
 /// The graph Laplacian L = D - M, with D the diagonal of row sums of M. A
