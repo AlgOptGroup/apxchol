@@ -1,7 +1,7 @@
 # Examples
 
 These C++ programs are in the repository's
-[`examples/`](https://github.com/AlgOptGroup/apxchol/tree/main/examples)
+[`examples/`](../examples/)
 directory. A source build compiles them, and `ctest` runs them; each exits
 with a nonzero status if its solve misses the residual it checks.
 
@@ -12,7 +12,7 @@ cmake --build build -j6
 ```
 
 All three use a small grid Laplacian from
-[`example_grid.h`](https://github.com/AlgOptGroup/apxchol/blob/main/examples/example_grid.h).
+[`example_grid.h`](../examples/example_grid.h).
 For Python and MATLAB/Octave, see the [Python guide](../python/README.md) and
 the [MATLAB/Octave guide](../octave/README.md).
 

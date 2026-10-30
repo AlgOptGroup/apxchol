@@ -33,8 +33,9 @@ upload the same archives as `cli-*` artifacts. Python is not required.
 Linux archives require x86-64-v2, glibc 2.28+ and system C++/GCC runtimes. macOS
 archives require Apple silicon and macOS 15+.
 
-1. Verify the matching `.sha256` file with `sha256sum -c` (Linux) or
-   `shasum -a 256 -c` (macOS).
+1. Verify the archive with its checksum file:
+   `sha256sum -c apxchol-*.tar.gz.sha256` (Linux) or
+   `shasum -a 256 -c apxchol-*.tar.gz.sha256` (macOS).
 2. Extract the archive and run `bin/apxchol --help`.
 
 Keep `bin/` and `lib/` together; OpenMP and redistribution notices are included.

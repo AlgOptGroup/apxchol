@@ -5,14 +5,19 @@ It factors `A` once and reuses that factor for every right-hand side.
 
 ## Python
 
+Until the next release, `pip` installs 0.2.2, which solves one right-hand
+side per call and has no `as_operator`. To run this example, install the
+development version [from source](../python/README.md#build-from-source).
+
 ```{include} ../_readme.md
 :start-after: <!-- quickstart -->
 :end-before: <!-- /quickstart -->
 ```
 
 Every result reports `converged`, checked against the original `A` and `b`.
-For a graph adjacency matrix, convert it first with `apxchol.as_operator(Adj)`;
-see [converting input](usage.md#converting-input-to-an-operator).
+For a graph adjacency matrix, convert it first with `apxchol.as_operator(Adj)`
+(development version only); see
+[converting input](usage.md#converting-input-to-an-operator).
 
 ## Command line
 

@@ -14,6 +14,10 @@ conjugate gradients (PCG) to compute the solution.
 
 ## Quick start
 
+Until the next release, `pip` installs 0.2.2, which solves one right-hand
+side per call and has no `as_operator`. To run this example, install the
+development version [from source](python/README.md#build-from-source).
+
 <!-- quickstart -->
 ```bash
 python -m pip install "apxchol[scipy]"
