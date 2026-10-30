@@ -19,6 +19,8 @@ endif()
 install(TARGETS _apxchol LIBRARY DESTINATION apxchol)
 
 if (SKBUILD)
+    install(FILES "${APX_ROOT}/LICENSE" DESTINATION "${SKBUILD_METADATA_DIR}/licenses")
+
     # Preserve the notice from the zlib headers actually selected by this build.
     find_package(ZLIB REQUIRED)
     file(READ "${ZLIB_INCLUDE_DIR}/zlib.h" zlib_header)

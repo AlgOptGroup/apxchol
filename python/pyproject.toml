@@ -1,5 +1,5 @@
 [build-system]
-requires = ["scikit-build-core>=0.10", "pybind11>=3.1"]
+requires = ["scikit-build-core>=0.11", "pybind11>=3.1"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -7,7 +7,7 @@ name = "apxchol"
 dynamic = ["version"]
 description = "Approximate-Cholesky preconditioner for graph-Laplacian / SDDM linear systems"
 readme = "README.md"
-license = {file = "LICENSE"}
+license = "BSD-3-Clause"
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.21"]
 authors = [
@@ -40,7 +40,7 @@ scipy = ["scipy>=1.7"]
 test = ["pytest>=7"]
 
 [tool.scikit-build]
-minimum-version = "0.10"
+minimum-version = "0.11"
 cmake.version = ">=3.20"
 wheel.packages = ["apxchol"]
 build-dir = "build/{wheel_tag}"
