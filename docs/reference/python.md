@@ -7,7 +7,7 @@ See the [Python guide](../../python/README.md) for installation, examples and ba
 
 .. autofunction:: apxchol.solve
 
-.. autofunction:: apxchol.laplacian
+.. autofunction:: apxchol.as_operator
 
 .. autoclass:: apxchol.Solver
    :members: from_csc, save, load, solve, apply, aslinearoperator, shape, sddm, backend, factor_storage_dtype, factor_nnz, fill_ratio, lumped, P, chol, L, D

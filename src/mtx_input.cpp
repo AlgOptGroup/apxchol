@@ -96,9 +96,9 @@ Eigen::Index project_laplacian_rhs_components(
     return static_cast<Eigen::Index>(sums.size());
 }
 
-std::string describe_input(input_kind kind, const input_scan& s,
+std::string describe_input(bool graph, const input_scan& s,
                            const std::string& reason) {
-    if (kind == input_kind::adjacency)
+    if (graph)
         return "input: ADJACENCY graph — solving the Laplacian L = D - A (" +
                reason + ")";
 
@@ -121,17 +121,17 @@ std::string describe_input(input_kind kind, const input_scan& s,
            reason + tail + ")";
 }
 
-std::string diagnose_failure(input_kind kind, const input_scan& s) {
+std::string diagnose_failure(bool graph, const input_scan& s) {
     std::vector<std::string> found;
-    if (kind == input_kind::as_operator && s.offdiag_pos > 0)
+    if (!graph && s.offdiag_pos > 0)
         found.push_back(std::to_string(s.offdiag_pos) +
                         " off-diagonal entries are positive, so they become "
                         "negative edge weights and generate no fill");
-    if (kind == input_kind::as_operator && s.diag_pos < s.n)
+    if (!graph && s.diag_pos < s.n)
         found.push_back("only " + std::to_string(s.diag_pos) + " of " +
                         std::to_string(s.n) + " rows carry a positive diagonal "
                         "entry — if this file is a graph adjacency/pattern "
-                        "matrix, re-run with --input-kind adjacency or auto");
+                        "matrix, re-run with --convert-input");
     if (s.deficient_rows > 0)
         found.push_back(std::to_string(s.deficient_rows) + " of " +
                         std::to_string(s.n) + " rows break diagonal dominance "

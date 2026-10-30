@@ -7,8 +7,9 @@ interfaces throughout the 1.x series:
 - [Python](../python/README.md) names exported through `__all__` and their
   documented methods and arguments.
 - Documented [MATLAB/Octave wrappers](../octave/README.md) and CLI options.
-- The input helpers `apxchol.operator`, `apxchol_operator` and the CLI's
-  `--input-kind`, including the [`auto` rule](usage.md#reading-a-matrix-as-a-graph).
+- The input conversion `apxchol.as_operator`, `apxchol_as_operator` and the
+  CLI's `--convert-input`, with the [rule](usage.md#converting-input-to-an-operator)
+  they share.
 - `apxchol::core` and the [documented CMake integration](building.md#use-from-cmake).
 
 The [partitioner and eliminator extension contracts](extending.md), and the

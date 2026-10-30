@@ -11,12 +11,6 @@
 
 namespace apxchol {
 
-static const std::map<std::string, input_kind> input_kind_map = {
-    {"operator",  input_kind::as_operator},
-    {"adjacency", input_kind::adjacency},
-    {"auto",      input_kind::automatic},
-};
-
 static const std::map<std::string, solve_backend> solve_backend_map = {
     {"auto", solve_backend::automatic},
     {"cpu", solve_backend::cpu},
@@ -50,7 +44,7 @@ run_config parse_args(int argc, char* argv[]) {
 
     CLI::App app{"Solve a Laplacian or SDDM system Ax = b via approximate Cholesky + PCG. "
                  "The input .mtx is the operator A; for a graph adjacency/pattern matrix, "
-                 "pass --input-kind adjacency to solve its Laplacian L = D - A. "
+                 "pass --convert-input to solve its Laplacian L = D - A. "
                  "Laplacian vs SDDM is detected within the solver"};
 
     // ── version ──
@@ -84,15 +78,9 @@ run_config parse_args(int argc, char* argv[]) {
     rhs_group->require_option(1);
 
     // ── how to read the input matrix ──
-    app.add_option("--input-kind", cfg.input,
-                   "How to read the input file: 'operator' (default) = the matrix A, "
-                   "solved as given; 'adjacency' = a graph adjacency/pattern matrix, "
-                   "from which L = D - A is assembled (edge weight |value|, self-loops "
-                   "dropped); 'auto' = 'adjacency' only if the matrix fails operator "
-                   "validation and is a symmetric matrix with nonnegative off-diagonals "
-                   "and zero diagonal, or a pattern file; otherwise 'operator'")
-        ->default_str("operator")
-        ->transform(CLI::IsMember(input_kind_map) & CLI::Transformer(input_kind_map));
+    app.add_flag("--convert-input", cfg.convert_input,
+                 "Convert the input matrix to an operator if needed (a graph adjacency "
+                 "matrix becomes its Laplacian L = D - A)");
 
     // ── output ──
     app.add_option("-o,--output", output_str,

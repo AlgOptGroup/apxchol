@@ -99,7 +99,7 @@ import apxchol
 solver = apxchol.Solver.from_csc([4.], [0], [0, 1], backend="cpu")
 assert solver.solve([8.]).x[0] == 2
 assert np.isfinite(solver.apply([1.])).all()
-for operation in (lambda: apxchol.factorize(None), lambda: apxchol.laplacian(None),
+for operation in (lambda: apxchol.factorize(None), lambda: apxchol.as_operator(None),
                   solver.chol, solver.aslinearoperator):
     try:
         operation()

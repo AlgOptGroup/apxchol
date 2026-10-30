@@ -1,4 +1,5 @@
 #include "apxchol.h"
+#include "apxchol/operator_class.h"
 #include "config.h"
 #include "mtx_input.h"
 #include <fast_matrix_market/app/Eigen.hpp>
@@ -10,17 +11,6 @@
 using namespace apxchol;
 
 namespace {
-
-std::string input_kind_reason(input_kind requested, input_kind kind) {
-    switch (requested) {
-    case input_kind::as_operator: return "--input-kind operator, the default";
-    case input_kind::adjacency: return "--input-kind adjacency";
-    case input_kind::automatic: break;
-    }
-    return kind == input_kind::adjacency
-        ? "--input-kind auto: not a valid operator, but an adjacency matrix or pattern file"
-        : "--input-kind auto: used as given";
-}
 
 template<class Dense>
 void write_solution(const std::string& path, const Dense& x) {
@@ -34,7 +24,7 @@ void write_solution(const std::string& path, const Dense& x) {
 
 // An n x k RHS file: one reusable solver, one batched solve over its columns.
 int solve_batch(const Eigen::SparseMatrix<double>& L, const Eigen::MatrixXd& B,
-                const run_config& cfg, input_kind kind, const input_scan& scan) {
+                const run_config& cfg, bool graph, const input_scan& scan) {
     checkpoint setup;
     const solver owner(L, cfg.solve_opts, cfg.solve_opts.collect_timings ? &setup : nullptr);
     Eigen::MatrixXd X(B.rows(), B.cols());
@@ -58,7 +48,7 @@ int solve_batch(const Eigen::SparseMatrix<double>& L, const Eigen::MatrixXd& B,
     if (failed)
         spdlog::error("{} of {} columns did not reach tol {} within {} iterations.{}",
                       failed, B.cols(), cfg.solve_opts.tol, cfg.solve_opts.max_iter,
-                      diagnose_failure(kind, scan));
+                      diagnose_failure(graph, scan));
     return failed ? 1 : 0;
 }
 
@@ -81,13 +71,18 @@ int main(int argc, char* argv[]) try {
         return 2;
     }
 
-    // Read the file as --input-kind says (see src/mtx_input.h); validation
-    // errors from the solver are logged by the handler below, exit 2.
+    // The file is the operator; --convert-input applies the as_operator rule
+    // (see src/mtx_input.h). Validation errors are logged by the handler
+    // below, exit 2. A pattern file stores unit weights, so it has no
+    // negative off-diagonal and converts like any adjacency matrix.
     const auto scan = scan_input(L);
-    const input_kind kind = detail::resolve_input_kind(
-        L, cfg.input, hdr.field == fast_matrix_market::pattern);
-    spdlog::info("{}", describe_input(kind, scan, input_kind_reason(cfg.input, kind)));
-    if (kind == input_kind::adjacency)
+    const bool graph = cfg.convert_input && detail::is_graph_adjacency(L);
+    spdlog::info("{}", describe_input(graph, scan,
+                                      !cfg.convert_input ? "the default"
+                                      : graph ? "--convert-input: not a valid operator, "
+                                                "no negative off-diagonal"
+                                              : "--convert-input: already a valid operator"));
+    if (graph)
         L = detail::adjacency_laplacian(L);
 
     spdlog::info("n = {},  nnz(L) = {}", L.rows(), L.nonZeros());
@@ -105,14 +100,14 @@ int main(int argc, char* argv[]) try {
             return 2;
         }
         if (B.cols() > 1)
-            return solve_batch(L, B, cfg, kind, scan);
+            return solve_batch(L, B, cfg, graph, scan);
         b = B.col(0);
     } else {
         // parse_args requires exactly one of --rhs / --random-rhs.
         spdlog::debug("generating random test RHS");
         std::srand(cfg.solve_opts.factor_opts.seed);  // Eigen::Random uses rand()
         b = generate_test_rhs(L.rows());
-        if (kind == input_kind::adjacency ||
+        if (graph ||
             (scan.excess_rows == 0 && scan.deficient_rows == 0)) {
             const Eigen::Index components =
                 project_laplacian_rhs_components(L, b);
@@ -137,7 +132,7 @@ int main(int argc, char* argv[]) try {
     if (!res.converged)
         spdlog::error("did not reach tol {} in {} iterations (residual {}).{}",
                       cfg.solve_opts.tol, res.iterations, res.residual,
-                      diagnose_failure(kind, scan));
+                      diagnose_failure(graph, scan));
     return res.converged ? 0 : 1;
 } catch (const std::exception& e) {
     spdlog::error("{}", e.what());

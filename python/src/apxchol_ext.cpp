@@ -343,23 +343,22 @@ PYBIND11_MODULE(_apxchol, m) {
     m.attr("__version__") = APXCHOL_VERSION;
     m.attr("DEFAULT_TOL") = apxchol::default_tol;
     m.attr("DEFAULT_MAXITER") = apxchol::default_max_iter;
-    m.def("input_operator",
-          [](py::array indptr, py::array indices, py::array data, const std::string& kind,
-             bool pattern) {
+    // Returns None when the input is already a valid operator, else the CSC
+    // arrays of its graph Laplacian; throws for anything else.
+    m.def("as_operator",
+          [](py::array indptr, py::array indices, py::array data) -> py::object {
               const auto M = csc_to_eigen(std::move(indptr), std::move(indices), std::move(data));
-              const auto resolved = apxchol::detail::resolve_input_kind(
-                  M, apxchol::detail::parse_input_kind(kind), pattern);
-              Eigen::SparseMatrix<double> A = resolved == apxchol::detail::input_kind::adjacency
-                  ? apxchol::detail::adjacency_laplacian(M) : M;
-              A.makeCompressed();
+              if (!apxchol::detail::is_graph_adjacency(M))
+                  return py::none();
+              Eigen::SparseMatrix<double> L = apxchol::detail::adjacency_laplacian(M);
+              L.makeCompressed();
               using Index = Eigen::SparseMatrix<double>::StorageIndex;
               return py::make_tuple(
-                  py::array_t<Index>(A.outerSize() + 1, A.outerIndexPtr()),
-                  py::array_t<Index>(A.nonZeros(), A.innerIndexPtr()),
-                  py::array_t<double>(A.nonZeros(), A.valuePtr()));
+                  py::array_t<Index>(L.outerSize() + 1, L.outerIndexPtr()),
+                  py::array_t<Index>(L.nonZeros(), L.innerIndexPtr()),
+                  py::array_t<double>(L.nonZeros(), L.valuePtr()));
           },
-          py::arg("indptr"), py::arg("indices"), py::arg("data"), py::arg("kind"),
-          py::arg("pattern"));
+          py::arg("indptr"), py::arg("indices"), py::arg("data"));
     py::class_<Solver>(m, "Solver")
         .def(py::init<py::array, py::array, py::array, const py::dict&>(),
              py::arg("indptr"), py::arg("indices"), py::arg("data"),

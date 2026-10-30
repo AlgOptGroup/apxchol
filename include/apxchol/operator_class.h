@@ -13,9 +13,9 @@
 /// apache2 carry rows that break it and converge fine today, so requiring it
 /// would reject matrices that work.
 ///
-/// `require_operator` reports violated conditions with counts. When the diagonal
-/// check finds no positive diagonal but positive off-diagonals, its diagnostic
-/// suggests assembling the operator with `laplacian(A)`.
+/// `require_operator` reports violated conditions with counts. When the matrix
+/// has no negative off-diagonal entry, its diagnostic suggests reading it as a
+/// graph adjacency matrix (`detail::is_graph_adjacency`).
 ///
 /// ── M-matrix lumping ────────────────────────────────────────────────────────
 /// A symmetric operator that is SPD but carries positive off-diagonals is not
@@ -149,9 +149,8 @@ operator_scan scan_operator(const Eigen::SparseMatrix<double>& A);
 
 /// Assert that `A` belongs to the class apxchol is defined on, and return the
 /// census. Throws `std::invalid_argument` naming WHICH condition failed and
-/// with what counts; when the failure is the adjacency signature (no row
-/// carries a positive diagonal while positive off-diagonals exist) the message
-/// also names the explicit conversion on every surface.
+/// with what counts; when the matrix has no negative off-diagonal entry, the
+/// message also names the conversion to a graph Laplacian on every surface.
 ///
 /// Diagonal dominance is reported in the census but never enforced.
 operator_scan require_operator(const Eigen::SparseMatrix<double>& A,
@@ -201,31 +200,17 @@ std::string describe_operator(const operator_scan& s, Eigen::Index lumped);
 
 namespace detail {
 
-/// How a supplied matrix is read: the CLI's `--input-kind`, Python's
-/// `apxchol.operator` and MATLAB/Octave's `apxchol_operator` share this rule.
-enum class input_kind {
-    as_operator,  ///< "operator": the matrix A itself
-    adjacency,    ///< "adjacency": the Laplacian L = D - W of a graph
-    automatic,    ///< "auto": adjacency only when the operator reading fails
-};
+/// The rule behind the CLI's `--convert-input`, Python's `apxchol.as_operator`
+/// and MATLAB/Octave's `apxchol_as_operator`. Returns false when M passes
+/// `require_operator` (use M unchanged), true when it fails but has no
+/// negative off-diagonal entry (a graph adjacency matrix: use its Laplacian).
+/// Otherwise throws `std::invalid_argument` with the validation failure and
+/// the negative off-diagonal count.
+bool is_graph_adjacency(const Eigen::SparseMatrix<double>& M);
 
-/// Parse "operator", "adjacency" or "auto".
-input_kind parse_input_kind(const std::string& name);
-
-/// Square, finite, symmetric (within `kSymmetryRelTol`), with nonnegative
-/// off-diagonals and no nonzero diagonal entry.
-bool is_adjacency_matrix(const Eigen::SparseMatrix<double>& M);
-
-/// Resolve `automatic` to `as_operator` or `adjacency`; other kinds pass
-/// through. `automatic` reads M as a graph only when M fails `require_operator`
-/// with the default lumping ceiling AND it is an adjacency matrix or was
-/// supplied as a pattern (Matrix Market `pattern`, a logical matrix, a boolean
-/// array). A valid operator is therefore never reinterpreted.
-input_kind resolve_input_kind(const Eigen::SparseMatrix<double>& M, input_kind kind,
-                              bool pattern);
-
-/// The graph Laplacian L = D - W, with W_ij = |M_ij| for i != j and D the
-/// weighted degrees. Diagonal entries of M (self-loops) are dropped.
+/// The graph Laplacian L = D - M, with D the diagonal of row sums of M. A
+/// diagonal entry of M (a self-loop) adds to D and is subtracted again, so it
+/// cancels: L_ii is the sum of row i's off-diagonal weights.
 Eigen::SparseMatrix<double> adjacency_laplacian(const Eigen::SparseMatrix<double>& M);
 
 } // namespace detail

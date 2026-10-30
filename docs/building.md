@@ -57,16 +57,16 @@ native build dependencies above.
 
 ```bash
 ./build/apxchol matrix.mtx --rhs rhs.mtx -o solution.mtx
-./build/apxchol graph.mtx --input-kind adjacency --random-rhs --tol 1e-8
+./build/apxchol graph.mtx --convert-input --random-rhs --tol 1e-8
 ./build/apxchol --help
 ```
 
 Supply `--rhs` for your actual problem or `--random-rhs` for an experiment.
 An `--rhs` file with `k` columns is solved as one batch, and `-o` writes an
-`n` by `k` solution. The input is read as `A`; `--input-kind adjacency` solves
-the Laplacian of a graph adjacency matrix, and `--input-kind auto` does so only
-when the matrix is not a valid operator (see [input kinds](usage.md#reading-a-matrix-as-a-graph)).
-The website's command-line reference is
+`n` by `k` solution. The input is read as `A`; `--convert-input` solves the
+Laplacian of a graph adjacency matrix instead (see
+[converting input](usage.md#converting-input-to-an-operator)). The website's
+command-line reference is
 generated from `--help`, so it lists every option for that revision.
 
 ## Use from CMake

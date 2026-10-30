@@ -9,21 +9,17 @@
 ///     off-diagonals) — the operator is L = D - A, which must be assembled
 ///     first.
 ///
-/// The CLI reads the file as the operator unless `--input-kind` says
-/// otherwise. The rule for `adjacency` and `auto` is shared with the bindings
-/// (`detail::resolve_input_kind` in include/apxchol/operator_class.h), and so
-/// is the validation error that suggests them for an adjacency matrix.
-///
-
-#include "apxchol/operator_class.h"
+/// The CLI reads the file as the operator. `--convert-input` applies the rule
+/// it shares with the bindings' `as_operator` (`detail::is_graph_adjacency` in
+/// include/apxchol/operator_class.h): a valid operator is used unchanged, a
+/// matrix with no negative off-diagonal becomes its graph Laplacian, and
+/// anything else is an error.
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <string>
 
 namespace apxchol {
-
-using detail::input_kind;
 
 /// Structural facts about an input matrix, gathered in a single pass.
 /// Column sums stand in for row sums: the operator contract requires a
@@ -62,11 +58,11 @@ Eigen::Index project_laplacian_rhs_components(
     const Eigen::SparseMatrix<double>& L, Eigen::VectorXd& b);
 
 /// The single line the CLI logs to say how it read the file.
-std::string describe_input(input_kind kind, const input_scan& s,
-                           const std::string& reason);
+/// `graph` says whether the file was read as an adjacency matrix.
+std::string describe_input(bool graph, const input_scan& s, const std::string& reason);
 
 /// Extra diagnosis appended to the CLI's failure message. Empty when the scan
 /// found nothing that would explain a breakdown.
-std::string diagnose_failure(input_kind kind, const input_scan& s);
+std::string diagnose_failure(bool graph, const input_scan& s);
 
 } // namespace apxchol

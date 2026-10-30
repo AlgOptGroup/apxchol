@@ -127,40 +127,28 @@ if (APXCHOL_BUILD_CLI)
         set_tests_properties(${name} PROPERTIES TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=4")
     endfunction()
 
-    # The input is the operator unless --input-kind adjacency says otherwise.
+    # The input is the operator; --convert-input applies the as_operator rule.
     apxchol_cli_test(cli_adjacency_default_is_rejected_with_hint path5_pattern 2
-        "graph ADJACENCY matrix.*--input-kind adjacency")
-    apxchol_cli_test(cli_explicit_adjacency_converges path5_pattern 0 "ADJACENCY graph"
-        --input-kind adjacency)
-    apxchol_cli_test(cli_disconnected_adjacency_converges disconnected_paths_pattern 0
-        "projected random RHS independently over 2 connected components"
-        --input-kind adjacency)
+        "Condition FAILED: positive diagonal.*ADJACENCY matrix.*--convert-input")
+    apxchol_cli_test(cli_self_loop_adjacency_default_is_rejected_with_hint
+        path5_adjacency_loops 2 "non-positive off-diagonals.*--convert-input")
     apxchol_cli_test(cli_laplacian_converges path5_laplacian 0 "LAPLACIAN/SDDM operator")
     apxchol_cli_test(cli_sddm_converges path5_sddm 0 "LAPLACIAN/SDDM operator")
     apxchol_cli_test(cli_nearly_sddm_converges path5_nearly_sddm 0 "LAPLACIAN/SDDM operator")
-    apxchol_cli_test(cli_explicit_adjacency_on_laplacian path5_laplacian 0 "ADJACENCY graph"
-        --input-kind adjacency)
-    # auto reads a graph only when the operator reading fails and the matrix is
-    # an adjacency matrix or a pattern file; anything else is used as given.
-    apxchol_cli_test(cli_auto_keeps_laplacian path5_laplacian 0
-        "LAPLACIAN/SDDM operator.*auto: used as given" --input-kind auto)
-    apxchol_cli_test(cli_auto_keeps_sddm path5_sddm 0
-        "LAPLACIAN/SDDM operator.*auto: used as given" --input-kind auto)
-    apxchol_cli_test(cli_auto_converts_adjacency path5_adjacency 0
-        "ADJACENCY graph.*auto: not a valid operator" --input-kind auto)
-    apxchol_cli_test(cli_auto_converts_pattern path5_pattern 0
-        "ADJACENCY graph.*auto: not a valid operator" --input-kind auto)
-    apxchol_cli_test(cli_auto_uses_ambiguous_input_as_given ambiguous 2
-        "auto: used as given.*Condition FAILED" --input-kind auto)
-    apxchol_cli_test(cli_explicit_operator_on_adjacency path5_adjacency 2
-        "--input-kind adjacency. or .--input-kind auto" --input-kind operator)
-    apxchol_cli_test(cli_laplacian_input_kind_is_rejected path5_laplacian 105 "not in"
-        --input-kind laplacian)
-    apxchol_cli_test(cli_forced_wrong_kind_is_refused path5_pattern 2 "Condition FAILED: positive diagonal"
+    apxchol_cli_test(cli_convert_keeps_laplacian path5_laplacian 0
+        "LAPLACIAN/SDDM operator.*already a valid operator" --convert-input)
+    apxchol_cli_test(cli_convert_keeps_sddm path5_sddm 0
+        "LAPLACIAN/SDDM operator.*already a valid operator" --convert-input)
+    apxchol_cli_test(cli_convert_adjacency path5_adjacency 0 "ADJACENCY graph" --convert-input)
+    apxchol_cli_test(cli_convert_adjacency_with_self_loops path5_adjacency_loops 0
+        "ADJACENCY graph" --convert-input)
+    apxchol_cli_test(cli_convert_pattern path5_pattern 0 "ADJACENCY graph" --convert-input)
+    apxchol_cli_test(cli_disconnected_adjacency_converges disconnected_paths_pattern 0
+        "projected random RHS independently over 2 connected components" --convert-input)
+    apxchol_cli_test(cli_convert_mixed_signs_is_rejected ambiguous 2
+        "not a graph adjacency matrix either" --convert-input)
+    apxchol_cli_test(cli_input_kind_is_removed path5_laplacian 109 "--input-kind"
         --input-kind operator)
-    # Enum transformations must not widen the CLI to accept raw numeric values.
-    apxchol_cli_test(cli_numeric_input_kind_is_rejected path5_pattern 105 "not in"
-        --input-kind 0)
 
     # Complete solve-route CLI contract: the CPU choice is usable in every build,
     # and CLI enum transformations must not admit numeric or unknown selectors.

@@ -19,8 +19,8 @@
 - Breaking: the CUDA build no longer uses cuSPARSE or cuBLAS, and the level-set GPU triangular solve is removed.
 - Breaking: forward-star and indexed pooled graph storage and the standalone analysis/setup tools are retired.
 - Breaking: `APXCHOL_INDEX_WIDTH=32|64_EDGES|64` replaces the `APXCHOL_64BIT_*_INDICES` build options.
-- Breaking: bindings no longer accept an adjacency matrix as if it were the operator; form the Laplacian with `apxchol.laplacian(Adj)` or `apxchol_laplacian(Adj)`. The CLI's `--input-kind operator|adjacency|auto` defaults to `operator`. Previously both solved adjacency input as the operator and failed without a clear error; the error now names the `adjacency` and `auto` readings.
-- New `apxchol.operator(M, kind)` and `apxchol_operator(M, kind)` return the matrix to pass as `A`; they share the CLI's `--input-kind` rule, under which `auto` forms a Laplacian only when `M` is not a valid operator but is an adjacency matrix or a pattern.
+- Breaking: the CLI and bindings no longer accept an adjacency matrix as if it were the operator. Previously both solved adjacency input as the operator and failed without a clear error; now validation rejects it and the error suggests the conversion.
+- New `apxchol.as_operator(M)`, `apxchol_as_operator(M)` and CLI `--convert-input`: a valid operator is used unchanged, a matrix with no negative off-diagonal entry becomes its graph Laplacian `L = D - M` (self-loops cancel), and anything else is an error.
 - The CLI solves an `n` by `k` `--rhs` file as one batch, writes an `n` by `k` solution with `-o`, and logs iterations and residuals per column.
 - The v1 API compatibility scope is documented.
 - The partitioner and eliminator extension interfaces are experimental in 1.x and may change in minor releases.

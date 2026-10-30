@@ -231,15 +231,13 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             auto solver = std::make_unique<apxchol::solver>(
                 mx_to_eigen(prhs[1]), setup_options(nrhs == 3 ? prhs[2] : nullptr));
             plhs[0] = store_solver(std::move(solver));
-        } else if (op == "operator") {
-            if (nrhs != 4)
-                fail("apxchol:usage", "usage: A = apxchol_mex('operator', M, kind, pattern)");
+        } else if (op == "as_operator") {
+            if (nrhs != 2)
+                fail("apxchol:usage", "usage: A = apxchol_mex('as_operator', M)");
             const auto M = mx_to_eigen(prhs[1]);
-            const auto kind = apxchol::detail::resolve_input_kind(
-                M, apxchol::detail::parse_input_kind(string_option(prhs[2], "kind")),
-                mxIsLogicalScalarTrue(prhs[3]));
-            plhs[0] = sparse_to_mx(kind == apxchol::detail::input_kind::adjacency
-                                       ? apxchol::detail::adjacency_laplacian(M) : M);
+            plhs[0] = apxchol::detail::is_graph_adjacency(M)
+                ? sparse_to_mx(apxchol::detail::adjacency_laplacian(M))
+                : mxDuplicateArray(prhs[1]);
         } else if (op == "load") {
             if (nrhs != 2 && nrhs != 3)
                 fail("apxchol:usage", "usage: h = apxchol_mex('load', path, options)");

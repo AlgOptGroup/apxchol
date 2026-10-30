@@ -109,8 +109,7 @@ function test_apxchol()
   assert(~isempty(strfind(msg, 'apxchol solves symmetric SDDM / Laplacian operators')), ...
          'message: does not say what is wanted');
   assert(~isempty(strfind(msg, 'ADJACENCY matrix')), 'message: no detection');
-  assert(~isempty(strfind(msg, 'apxchol_operator(M, ''adjacency'')')), 'message: no fix');
-  assert(~isempty(strfind(msg, 'apxchol_operator(M, ''auto'')')), 'message: no auto fix');
+  assert(~isempty(strfind(msg, 'apxchol_as_operator(M)')), 'message: no fix');
   ok = ok + 1; fprintf('ok %d  adjacency input rejected with a diagnosis\n', ok);
 
   % ── 8. positive off-diagonals on a positive diagonal are LUMPED, not refused ──
@@ -133,54 +132,46 @@ function test_apxchol()
   assert(~isempty(strfind(msg, 'first at row 1')), 'message: no witness row');
   ok = ok + 1; fprintf('ok %d  positive off-diagonals lumped, bad diagonal refused\n', ok);
 
-  % ── 9. apxchol_laplacian assembles L = D - A ──
-  L9 = apxchol_laplacian(A7);
-  assert(norm(L9 - L7, 1) == 0, 'laplacian: does not match D - A');
+  % ── 9. apxchol_as_operator: the rule shared with the CLI's --convert-input ──
+  % valid operators come back unchanged
+  S9 = L7 + 0.1 * speye(n7*n7);
+  assert(isequal(apxchol_as_operator(L7), L7), 'as_operator: Laplacian changed');
+  assert(isequal(apxchol_as_operator(S9), S9), 'as_operator: SDDM changed');
+  % an adjacency matrix becomes L = D - A ...
+  L9 = apxchol_as_operator(A7);
+  assert(norm(L9 - L7, 1) == 0, 'as_operator: does not match D - A');
   b9 = randn(n7*n7, 1);  b9 = b9 - mean(b9);
   r9 = apxchol_solve(L9, b9);
-  assert(r9.converged && r9.residual <= 1e-8, 'laplacian: converted solve failed');
-
-  % self-loops contribute nothing; isolated vertices give all-zero rows
+  assert(r9.converged && r9.residual <= 1e-8, 'as_operator: converted solve failed');
+  % ... with self-loops cancelling, also for a logical (pattern) matrix
   As = A7;  As(1, 1) = 5.0;
-  assert(norm(apxchol_laplacian(As) - L7, 1) == 0, 'laplacian: self-loop leaked');
+  Ds = spdiags(full(sum(As, 2)), 0, n7*n7, n7*n7) - As;
+  assert(norm(apxchol_as_operator(As) - Ds, 1) == 0, 'as_operator: not D - A with a self-loop');
+  assert(norm(apxchol_as_operator(As) - L7, 1) == 0, 'as_operator: self-loop leaked');
+  P9 = A7 ~= 0;  P9(1, 1) = true;
+  assert(norm(apxchol_as_operator(P9) - L7, 1) == 0, 'as_operator: pattern not converted');
+  % isolated vertices give all-zero rows
   Ai = sparse(5, 5);  Ai(2, 3) = 1;  Ai(3, 2) = 1;
-  Li = apxchol_laplacian(Ai);
-  assert(isequal(full(diag(Li))', [0 1 1 0 0]), 'laplacian: isolated vertices wrong');
-  assert(max(abs(sum(Li, 2))) == 0, 'laplacian: rows do not sum to zero');
-
-  % |A_ij|, so a negatively-stored edge is read as an undirected edge
-  An = sparse([1 2], [2 1], [-2 -2], 2, 2);
-  assert(isequal(full(apxchol_laplacian(An)), [2 -2; -2 2]), 'laplacian: sign handling');
-
+  Li = apxchol_as_operator(Ai);
+  assert(isequal(full(diag(Li))', [0 1 1 0 0]), 'as_operator: isolated vertices wrong');
+  assert(max(abs(sum(Li, 2))) == 0, 'as_operator: rows do not sum to zero');
+  % mixed signs raise, saying why
+  Am = sparse([1 2 2 3], [2 1 3 2], [1 1 -1 -1], 3, 3);
+  err = false;  msg = '';
+  try, apxchol_as_operator(Am); catch e, err = true; msg = e.message; end
+  assert(err, 'as_operator: mixed signs must error');
+  assert(~isempty(strfind(msg, 'not a graph adjacency matrix either')), 'as_operator: no reason');
   % a weighted symmetric adjacency matrix, and the input is left alone
   Mw = sprand(40, 40, 0.1);  Aw = Mw + Mw';
   Aw = Aw - spdiags(diag(Aw), 0, 40, 40);
   before = Aw;
-  Lw = apxchol_laplacian(Aw);
-  assert(isequal(Aw, before), 'laplacian: mutated its input');
-  assert(max(abs(sum(Lw, 2))) < 1e-12, 'laplacian: weighted rows do not sum to zero');
+  Lw = apxchol_as_operator(Aw);
+  assert(isequal(Aw, before), 'as_operator: mutated its input');
+  assert(max(abs(sum(Lw, 2))) < 1e-12, 'as_operator: weighted rows do not sum to zero');
   err = false;
-  try, apxchol_laplacian(sparse(ones(3, 4))); catch, err = true; end
-  assert(err, 'laplacian: non-square must error');
-  ok = ok + 1; fprintf('ok %d  apxchol_laplacian assembles L = D - A\n', ok);
-
-  % ── 9b. apxchol_operator: one input-kind rule, shared with the CLI ──
-  S9 = L7 + 0.1 * speye(n7*n7);                       % SDDM
-  for kind = {'auto', 'operator'}
-    assert(isequal(apxchol_operator(L7, kind{1}), L7), 'operator: Laplacian changed');
-    assert(isequal(apxchol_operator(S9, kind{1}), S9), 'operator: SDDM changed');
-  end
-  assert(isequal(apxchol_operator(A7), L9), 'operator: auto did not convert adjacency');
-  assert(isequal(apxchol_operator(A7, 'adjacency'), L9), 'operator: adjacency kind');
-  assert(isequal(apxchol_operator(A7, 'operator'), A7), 'operator: operator kind');
-  P9 = A7 ~= 0;  P9(1, 1) = true;                     % pattern with a self-loop
-  assert(isequal(apxchol_operator(P9), L9), 'operator: auto did not convert a pattern');
-  As9 = A7;  As9(1, 1) = 1;                           % numeric: used as given
-  assert(isequal(apxchol_operator(As9), As9), 'operator: auto reinterpreted a non-adjacency');
-  err = false;  id = '';
-  try, apxchol_operator(L7, 'laplacian'); catch e, err = true; id = e.identifier; end
-  assert(err && strcmp(id, 'apxchol:badInput'), 'operator: unknown kind must error');
-  ok = ok + 1; fprintf('ok %d  apxchol_operator applies the shared input-kind rule\n', ok);
+  try, apxchol_as_operator(sparse(ones(3, 4))); catch, err = true; end
+  assert(err, 'as_operator: non-square must error');
+  ok = ok + 1; fprintf('ok %d  apxchol_as_operator keeps operators and converts graphs\n', ok);
 
   % ── 10. malformed options reject before scalar/integer conversion ──
   Aopts = sparse([2 -1; -1 2]); bopts = [1; -1]; zopts = zeros(2, 1);

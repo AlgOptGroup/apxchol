@@ -12,29 +12,29 @@ weights. Its Laplacian is
 A Laplacian RHS must sum to zero on each connected component; the solution is
 defined up to a constant on each component.
 
-### Reading a matrix as a graph
+### Converting input to an operator
 
-The solver always treats its input as `A`. To start from other input, one
-helper per interface returns the matrix to pass, with one shared rule:
+The solver always treats its input as `A` and rejects anything that is not a
+valid operator. To start from a graph instead, convert the input first:
 
-| Interface | Helper |
-|---|---|
-| Python | `apxchol.operator(M, kind="auto")` |
-| MATLAB/Octave | `apxchol_operator(M, kind)`, `kind` defaulting to `'auto'` |
-| CLI | `--input-kind` with `operator` (the default), `adjacency` or `auto` |
+| CLI | Python | MATLAB/Octave |
+|---|---|---|
+| `--convert-input` | `A = apxchol.as_operator(M)` | `A = apxchol_as_operator(M)` |
 
-- `operator` uses `M` as given.
-- `adjacency` returns the Laplacian of the graph with weights `|M_ij|`, `i != j`.
-  Diagonal entries (self-loops) are dropped and duplicate entries are summed.
-- `auto` returns the Laplacian only when `M` fails operator validation and is
-  either an adjacency matrix (symmetric, with nonnegative off-diagonals and a
-  zero diagonal) or a pattern: a Matrix Market `pattern` file, a MATLAB logical
-  matrix or a boolean SciPy matrix. Otherwise `M` is used as given, so a valid
-  operator is never reinterpreted and an invalid one reports why it failed.
+All three apply the same rule, like NumPy's `asarray`:
 
-`apxchol.laplacian(Adj)` and `apxchol_laplacian(Adj)` are the explicit
-`adjacency` form. When an adjacency matrix is passed as an operator, the
-validation error names the `adjacency` and `auto` readings.
+- If `M` passes the operator check (a symmetric Laplacian or SDDM matrix,
+  possibly nearly SDDM), it is used unchanged. A diagonal-only matrix with a
+  positive diagonal passes.
+- Otherwise, if `M` has no negative off-diagonal entry, it is a graph
+  adjacency matrix, and its Laplacian `L = D - M` is used, where `D` holds the
+  row sums of `M`. A diagonal entry (self-loop) adds to `D` and is subtracted
+  again, so it cancels. Pattern input (a Matrix Market `pattern` file, a
+  MATLAB logical matrix, a boolean SciPy matrix) has unit weights.
+- Otherwise the conversion fails, explaining why `M` is neither.
+
+Without conversion, when a matrix fails as an operator but has no negative
+off-diagonal entry, the error suggests the conversion for each interface.
 
 Python accepts SciPy sparse matrices and arrays. It converts them to CSC
 (compressed sparse column) format, sorts row indices and combines duplicate

@@ -247,6 +247,17 @@ operator_scan scan_operator(const Eigen::SparseMatrix<double>& A) {
     return s;
 }
 
+// A symmetric matrix with no negative off-diagonal is read as a graph by the
+// conversion helpers; name them when the operator reading fails.
+static std::string adjacency_hint(const operator_scan& s) {
+    if (s.offdiag_pos != s.offdiag_nnz) return {};
+    return " The matrix has no negative off-diagonal entry, so it may be a graph "
+           "ADJACENCY matrix rather than an assembled operator. To use its "
+           "Laplacian L = D - A, pass --convert-input on the CLI, or call "
+           "apxchol.as_operator(M) in Python or apxchol_as_operator(M) in "
+           "MATLAB/Octave.";
+}
+
 operator_scan require_operator(const Eigen::SparseMatrix<double>& A, double lump_max_mass) {
     detail::validate_lump_max_mass(lump_max_mass);
     const std::string kContract =
@@ -291,16 +302,7 @@ operator_scan require_operator(const Eigen::SparseMatrix<double>& A, double lump
                    ", a_ii = " + num(s.first_bad_diag_value) + ")";
         msg += "; a positive semidefinite operator cannot have one, since "
                "e_i^T A e_i = a_ii.";
-        // An adjacency matrix fails exactly here. Name the reading that fixes it.
-        if (detail::is_adjacency_matrix(A))
-            msg += " The matrix looks like a graph ADJACENCY matrix (symmetric, "
-                   "nonnegative off-diagonals, zero diagonal), not an assembled "
-                   "operator. Read it as a graph: apxchol.operator(M, \"adjacency\") "
-                   "or apxchol.operator(M, \"auto\") in Python, "
-                   "apxchol_operator(M, 'adjacency') or apxchol_operator(M, 'auto') "
-                   "in MATLAB/Octave, `--input-kind adjacency` or `--input-kind auto` "
-                   "on the CLI.";
-        throw std::invalid_argument(msg);
+        throw std::invalid_argument(msg + adjacency_hint(s));
     }
 
     // Off-diagonal sign: NOT a failure on its own — `operator_view` repairs it
@@ -314,7 +316,7 @@ operator_scan require_operator(const Eigen::SparseMatrix<double>& A, double lump
                 count_of(s.offdiag_pos, s.offdiag_nnz, "off-diagonal entries") +
                 " are positive, carrying " + num(100.0 * rho) +
                 "% of the off-diagonal mass; lump_max_mass permits at most " +
-                num(100.0 * lump_max_mass) + "%.");
+                num(100.0 * lump_max_mass) + "%." + adjacency_hint(s));
     }
 
     return s;
@@ -401,33 +403,17 @@ std::string describe_operator(const operator_scan& s, Eigen::Index lumped) {
 
 namespace detail {
 
-input_kind parse_input_kind(const std::string& name) {
-    if (name == "operator") return input_kind::as_operator;
-    if (name == "adjacency") return input_kind::adjacency;
-    if (name == "auto") return input_kind::automatic;
-    throw std::invalid_argument("input kind must be operator, adjacency or auto, got '" +
-                                name + "'");
-}
-
-bool is_adjacency_matrix(const Eigen::SparseMatrix<double>& M) {
-    if (M.rows() != M.cols()) return false;
-    for (Eigen::Index k = 0; k < M.outerSize(); ++k)
-        for (Eigen::SparseMatrix<double>::InnerIterator it(M, k); it; ++it)
-            if (!std::isfinite(it.value()) || it.value() < 0.0 ||
-                (it.row() == it.col() && it.value() != 0.0))
-                return false;
-    return scan_operator(M).asymmetric == 0;
-}
-
-input_kind resolve_input_kind(const Eigen::SparseMatrix<double>& M, input_kind kind,
-                              bool pattern) {
-    if (kind != input_kind::automatic) return kind;
+bool is_graph_adjacency(const Eigen::SparseMatrix<double>& M) {
     try {
         require_operator(M);
-        return input_kind::as_operator;
-    } catch (const std::invalid_argument&) {
-        return pattern || is_adjacency_matrix(M) ? input_kind::adjacency
-                                                 : input_kind::as_operator;
+        return false;
+    } catch (const std::invalid_argument& e) {
+        const operator_scan s = scan_operator(M);
+        const Eigen::Index negative = s.offdiag_nnz - s.offdiag_pos;
+        if (negative == 0 && s.square()) return true;
+        throw std::invalid_argument(
+            std::string(e.what()) + " It is not a graph adjacency matrix either: " +
+            count_of(negative, s.offdiag_nnz, "off-diagonal entries") + " are negative.");
     }
 }
 
@@ -438,9 +424,10 @@ Eigen::SparseMatrix<double> adjacency_laplacian(const Eigen::SparseMatrix<double
     std::vector<Eigen::Triplet<double>> entries;
     entries.reserve(static_cast<std::size_t>(M.nonZeros() + n));
     Eigen::VectorXd degree = Eigen::VectorXd::Zero(n);
+    // L = D - M: a self-loop m_ii adds to D_ii and is subtracted again.
     for (Eigen::Index k = 0; k < M.outerSize(); ++k)
         for (Eigen::SparseMatrix<double>::InnerIterator it(M, k); it; ++it) {
-            const double w = std::abs(it.value());
+            const double w = it.value();
             if (it.row() == it.col() || w == 0.0) continue;
             entries.emplace_back(it.row(), it.col(), -w);
             degree[it.row()] += w;

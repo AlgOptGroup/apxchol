@@ -1,6 +1,6 @@
 // Tests for the CLI's Laplacian-vs-adjacency input interpretation
 // (src/mtx_input.h): the human-facing layer that reads a .mtx file as the
-// operator unless --input-kind says otherwise, and prints how it read it.
+// operator unless --convert-input is given, and prints how it read it.
 //
 // The LIBRARY-side counterpart -- asserting the operator class rather than
 // guessing at it -- lives in test_operator_class.cpp. Note the split: reading
@@ -22,9 +22,7 @@
 
 using apxchol::describe_input;
 using apxchol::detail::adjacency_laplacian;
-using apxchol::detail::input_kind;
-using apxchol::detail::parse_input_kind;
-using apxchol::detail::resolve_input_kind;
+using apxchol::detail::is_graph_adjacency;
 using apxchol::input_scan;
 using apxchol::project_laplacian_rhs_components;
 using apxchol::scan_input;
@@ -118,73 +116,51 @@ TEST(MtxInputScan, CountsDominanceViolations) {
     EXPECT_GE(s.worst_row, 0);
 }
 
-// ── resolve_input_kind: the rule shared by the CLI and the bindings ──
+// ── is_graph_adjacency: the rule shared by --convert-input and as_operator ──
 
-TEST(InputKindResolve, AutoKeepsValidOperators) {
+TEST(AsOperatorRule, ValidOperatorsPassUnchanged) {
     Sparse sddm = grid_laplacian(6, 6);
     for (int i = 0; i < sddm.rows(); ++i) sddm.coeffRef(i, i) += 0.05;
     Sparse nearly = grid_laplacian(6, 6);   // lumpable positive off-diagonals
     nearly.coeffRef(0, 1) = nearly.coeffRef(1, 0) = 0.25;
-    for (const Sparse& M : {grid_laplacian(6, 6), sddm, nearly})
-        EXPECT_EQ(resolve_input_kind(M, input_kind::automatic, false),
-                  input_kind::as_operator);
-    // Even a pattern file is used as given when it is a valid operator.
-    Sparse identity(3, 3);
-    identity.setIdentity();
-    EXPECT_EQ(resolve_input_kind(identity, input_kind::automatic, true),
-              input_kind::as_operator);
+    Sparse diagonal(3, 3);                  // a positive diagonal-only matrix
+    diagonal.setIdentity();
+    for (const Sparse& M : {grid_laplacian(6, 6), sddm, nearly, diagonal})
+        EXPECT_FALSE(is_graph_adjacency(M));
 }
 
-TEST(InputKindResolve, AutoConvertsAnAdjacencyMatrix) {
-    EXPECT_EQ(resolve_input_kind(grid_adjacency(6, 6, 2.5), input_kind::automatic, false),
-              input_kind::adjacency);
+TEST(AsOperatorRule, NonnegativeOffDiagonalsAreAGraph) {
+    EXPECT_TRUE(is_graph_adjacency(grid_adjacency(6, 6, 2.5)));
+    Sparse loops = grid_adjacency(6, 6);    // self-loops, as a pattern file has
+    for (int i = 0; i < loops.rows(); ++i) loops.coeffRef(i, i) = 1.0;
+    EXPECT_TRUE(is_graph_adjacency(loops));
 }
 
-TEST(InputKindResolve, AutoConvertsAPatternFileWithSelfLoops) {
-    Sparse A = grid_adjacency(6, 6);
-    A.coeffRef(0, 0) = 1.0;   // a self-loop: no longer a valid adjacency matrix
-    A.makeCompressed();
-    EXPECT_EQ(resolve_input_kind(A, input_kind::automatic, true), input_kind::adjacency);
-    EXPECT_EQ(resolve_input_kind(A, input_kind::automatic, false), input_kind::as_operator);
-}
-
-TEST(InputKindResolve, AutoUsesOtherInvalidMatricesAsGiven) {
-    // Mixed signs and no diagonal, or one-sided: neither reading is valid, so
-    // the operator validation reports the real problem.
-    std::vector<Trip> mixed{{0, 1, +1.0}, {1, 0, +1.0}, {1, 2, -1.0}, {2, 1, -1.0}};
-    std::vector<Trip> one_sided{{1, 0, 1.0}, {2, 1, 1.0}};
-    for (const auto& t : {mixed, one_sided}) {
-        Sparse M(3, 3);
-        M.setFromTriplets(t.begin(), t.end());
-        EXPECT_EQ(resolve_input_kind(M, input_kind::automatic, false),
-                  input_kind::as_operator);
+TEST(AsOperatorRule, MixedSignsRaise) {
+    std::vector<Trip> t{{0, 1, +1.0}, {1, 0, +1.0}, {1, 2, -1.0}, {2, 1, -1.0}};
+    Sparse M(3, 3);
+    M.setFromTriplets(t.begin(), t.end());
+    try {
+        (void)is_graph_adjacency(M);
+        FAIL() << "expected mixed signs to be refused";
+    } catch (const std::invalid_argument& e) {
+        const std::string msg = e.what();
+        EXPECT_NE(msg.find("Condition FAILED"), std::string::npos) << msg;
+        EXPECT_NE(msg.find("not a graph adjacency matrix either: 2 of 4 off-diagonal"),
+                  std::string::npos) << msg;
     }
-}
-
-TEST(InputKindResolve, ExplicitKindsPassThrough) {
-    EXPECT_EQ(resolve_input_kind(grid_adjacency(4, 4), input_kind::as_operator, false),
-              input_kind::as_operator);
-    EXPECT_EQ(resolve_input_kind(grid_laplacian(4, 4), input_kind::adjacency, false),
-              input_kind::adjacency);
-}
-
-TEST(InputKindResolve, ParsesTheThreeNames) {
-    EXPECT_EQ(parse_input_kind("operator"), input_kind::as_operator);
-    EXPECT_EQ(parse_input_kind("adjacency"), input_kind::adjacency);
-    EXPECT_EQ(parse_input_kind("auto"), input_kind::automatic);
-    EXPECT_THROW(parse_input_kind("laplacian"), std::invalid_argument);
 }
 
 // ── describe_input ───────────────────────────────────
 
 TEST(MtxInputDescribe, NamesTheChosenReading) {
     const std::string adj =
-        describe_input(input_kind::adjacency, scan_input(grid_adjacency(4, 4)), "r");
+        describe_input(true, scan_input(grid_adjacency(4, 4)), "r");
     EXPECT_NE(adj.find("ADJACENCY"), std::string::npos) << adj;
     EXPECT_NE(adj.find("L = D - A"), std::string::npos) << adj;
 
     const std::string lap =
-        describe_input(input_kind::as_operator, scan_input(grid_laplacian(4, 4)), "r");
+        describe_input(false, scan_input(grid_laplacian(4, 4)), "r");
     EXPECT_NE(lap.find("LAPLACIAN/SDDM"), std::string::npos) << lap;
     EXPECT_NE(lap.find("pure Laplacian"), std::string::npos) << lap;
 }
@@ -222,27 +198,15 @@ TEST(AdjacencyToLaplacian, DropsSelfLoops) {
         }
 }
 
-TEST(AdjacencyToLaplacian, UsesAbsoluteValues) {
-    // The benchmark suite's load_mtx_as_adjacency takes |value|; matching it
-    // means --input-kind adjacency reproduces the benchmark's reading.
-    Sparse A = path_adjacency(4);
-    for (int k = 0; k < A.outerSize(); ++k)
-        for (Sparse::InnerIterator it(A, k); it; ++it)
-            it.valueRef() = -it.value();
-    Sparse B = path_adjacency(4);
-    A = adjacency_laplacian(A);
-    B = adjacency_laplacian(B);
-    EXPECT_NEAR((A - B).norm(), 0.0, 1e-12);
-}
-
-TEST(AdjacencyToLaplacian, IsIdempotentOnAPureLaplacian) {
-    // Re-reading an assembled pure Laplacian as an adjacency matrix must give
-    // the same operator back: |−w| = w, and the rebuilt diagonal is the degree,
-    // which for a pure Laplacian is what the diagonal already was.
-    const Sparse L = grid_laplacian(5, 6, 1.5);
-    Sparse again = L;
-    again = adjacency_laplacian(again);
-    EXPECT_NEAR((L - again).norm(), 0.0, 1e-12);
+TEST(AdjacencyToLaplacian, IsDegreeMinusAdjacencyWithSelfLoopsCancelling) {
+    // L = D - M with D the row sums of M, including the self-loop itself.
+    Sparse M = grid_adjacency(3, 4, 1.5);
+    M.coeffRef(0, 0) = 4.0;
+    M.coeffRef(5, 5) = 0.5;
+    M.makeCompressed();
+    const Eigen::VectorXd rowsum = M * Eigen::VectorXd::Ones(M.cols());
+    const Sparse expected = Sparse(Eigen::MatrixXd(rowsum.asDiagonal()).sparseView()) - M;
+    EXPECT_NEAR((adjacency_laplacian(M) - expected).norm(), 0.0, 1e-12);
 }
 
 TEST(ComponentRhsProjection, LeavesConnectedRhsByteIdentical) {
@@ -298,9 +262,9 @@ TEST(AdjacencyInputRegression, RawAdjacencyIsRefusedByTheOperatorContract) {
             const std::string msg = e.what();
             EXPECT_NE(msg.find("positive diagonal"), std::string::npos) << msg;
             EXPECT_NE(msg.find("ADJACENCY"), std::string::npos) << msg;
-            EXPECT_NE(msg.find("apxchol.operator(M, \"adjacency\")"), std::string::npos) << msg;
-            EXPECT_NE(msg.find("--input-kind adjacency"), std::string::npos) << msg;
-            EXPECT_NE(msg.find("apxchol_operator(M, 'auto')"), std::string::npos) << msg;
+            EXPECT_NE(msg.find("apxchol.as_operator(M)"), std::string::npos) << msg;
+            EXPECT_NE(msg.find("--convert-input"), std::string::npos) << msg;
+            EXPECT_NE(msg.find("apxchol_as_operator(M)"), std::string::npos) << msg;
         }
     }
 }
@@ -322,11 +286,11 @@ TEST(AdjacencyInputRegression, ConvertedAdjacencyHasPlausibleFillAndConverges) {
     EXPECT_LT(res.residual, 1e-8);
 }
 
-TEST(AdjacencyInputRegression, AutoDetectionRoutesAnAdjacencyMatrixToConvergence) {
+TEST(AdjacencyInputRegression, ConversionRoutesAnAdjacencyMatrixToConvergence) {
     // The full CLI decision path, minus the file reading: resolve ->
     // convert -> solve.
     Sparse M = grid_adjacency(16, 16);
-    ASSERT_EQ(resolve_input_kind(M, input_kind::automatic, true), input_kind::adjacency);
+    ASSERT_TRUE(is_graph_adjacency(M));
     M = adjacency_laplacian(M);
 
     const Eigen::VectorXd b = apxchol::generate_test_rhs(M.rows());
@@ -343,7 +307,7 @@ TEST(AdjacencyInputRegression, SddmInputIsStillSolvedAsAnOperator) {
     L.makeCompressed();
 
     EXPECT_EQ(scan_input(L).excess_rows, L.rows());
-    ASSERT_EQ(resolve_input_kind(L, input_kind::automatic, false), input_kind::as_operator);
+    ASSERT_FALSE(is_graph_adjacency(L));
 
     const Eigen::VectorXd b = apxchol::generate_test_rhs(L.rows());
     const auto res = apxchol::solve(L, b, {.tol = 1e-8, .max_iter = 200});

@@ -30,7 +30,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 - Portable save/load: `solver/archive.h` and `docs/serialization.md`; the versioned binary format stores the original CSC operator and retained canonical factor. Typed arrays carry explicit widths, byte order and zlib CRC32 checksums; loading validates and prepares the backend without memory mapping.
 - MATLAB/Octave builds use `octave/CMakeLists.txt` and the shared `apxchol::core` target. Archive methods reuse native save/load and require `keep_factor=true` when saving.
 - Public API scope and compatibility: `docs/api.md`. Precision and storage: `docs/precision.md`. Extension seams: `docs/extending.md`.
-- Operator validation and M-matrix lumping: `operator_class`. Every surface reads input as the operator. One rule in `operator_class` (`detail::resolve_input_kind`) backs `--input-kind`, `apxchol.operator` and `apxchol_operator`; the CLI's logging lives in `src/mtx_input.h`.
+- Operator validation and M-matrix lumping: `operator_class`. Every surface reads input as the operator. One rule in `operator_class` (`detail::is_graph_adjacency`) backs `--convert-input`, `apxchol.as_operator` and `apxchol_as_operator`; the CLI's logging lives in `src/mtx_input.h`.
 - Measurement contracts: `benchmarks/README.md`.
 - CLI archives: `.github/workflows/cli.yml` uses the `cli` install component, bundles OpenMP/notices, and runs `tests/check_cli_archive.py` after relocation.
 - Documentation: `python docs/build.py` reuses the guides, public C++ comments, Python docstrings and CLI help. Build instructions are in `CONTRIBUTING.md`; generated HTML goes to `build/docs`.
