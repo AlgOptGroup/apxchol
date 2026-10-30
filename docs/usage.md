@@ -179,8 +179,10 @@ see [thread placement](../benchmarks/README.md#thread-placement).
 ## Thread safety
 
 Use one solver per thread. A solver reuses its workspace across `solve`,
-`apply` and batch solves, so a call made while another thread is using the
-same solver throws (`RuntimeError` in Python) instead of waiting.
+`apply` and batch solves. In C++ these methods are non-const, and concurrent
+non-const calls on one object are not allowed: use a copy, or batch the
+right-hand sides. As a safety net, a call made while another thread is using
+the same solver throws (`RuntimeError` in Python) instead of waiting.
 
 Copies are cheap: a copy shares the factor, the triangular-solve structures
 and the operator, which are read-only after setup, and allocates only its

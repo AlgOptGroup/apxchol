@@ -170,7 +170,7 @@ public:
     using Array = py::array_t<double, py::array::forcecast>;
     using Stride = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
 
-    py::object apply(Array r) const {
+    py::object apply(Array r) {
         r = checked_rhs(r);
         if (r.ndim() == 1) {
             const auto rhs = r.cast<Eigen::VectorXd>();
@@ -191,7 +191,7 @@ public:
     }
 
     py::dict solve(Array b, double tol, int maxiter,
-                   py::object x0, py::object out_arr) const {
+                   py::object x0, py::object out_arr) {
         apxchol::detail::validate_solve_parameters(tol, maxiter);
         b = checked_rhs(b);
         auto output = output_array(b, out_arr);

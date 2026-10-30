@@ -1254,7 +1254,7 @@ solver& solver::operator=(const solver& other) {
 }
 
 void solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,
-                   int max_iter, const Eigen::VectorXd* x0) const {
+                   int max_iter, const Eigen::VectorXd* x0) {
     const auto scope = impl_->enter();
     const detail::thread_budget threads(impl_->num_threads);
     detail::resolve_solve_parameters(tol, max_iter, impl_->tol, impl_->max_iter);
@@ -1267,14 +1267,14 @@ void solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,
 }
 
 solve_result solver::solve(const Eigen::VectorXd& b, double tol, int max_iter,
-                           const Eigen::VectorXd* x0) const {
+                           const Eigen::VectorXd* x0) {
     solve_result result;
     solve(b, result, tol, max_iter, x0);
     return result;
 }
 
 solve_result solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
-                           double tol, int max_iter, const Eigen::VectorXd* x0) const {
+                           double tol, int max_iter, const Eigen::VectorXd* x0) {
     const auto scope = impl_->enter();
     const const_matrix_view initial(x0 ? *x0 : b);
     detail::check_matrix_views(b, x, rows(), x0 ? &initial : nullptr);
@@ -1286,7 +1286,7 @@ solve_result solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd>
     return result;
 }
 
-Eigen::VectorXd solver::apply(const Eigen::VectorXd& r) const {
+Eigen::VectorXd solver::apply(const Eigen::VectorXd& r) {
     const auto scope = impl_->enter();
     const detail::thread_budget threads(impl_->num_threads);
     if (r.size() != rows()) throw std::invalid_argument("solver::apply: RHS length mismatch");
@@ -1296,7 +1296,7 @@ Eigen::VectorXd solver::apply(const Eigen::VectorXd& r) const {
     }, impl_->owner);
 }
 batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X, double tol, int max_iter,
-                                       const const_matrix_view *X0) const {
+                                       const const_matrix_view *X0) {
     const auto scope = impl_->enter();
     const detail::thread_budget threads(impl_->num_threads);
     detail::resolve_solve_parameters(tol, max_iter, impl_->tol, impl_->max_iter);
@@ -1343,7 +1343,7 @@ batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X, doubl
     return result;
 }
 
-void solver::apply(const_matrix_view R, matrix_view Z) const {
+void solver::apply(const_matrix_view R, matrix_view Z) {
     const auto scope = impl_->enter();
     const detail::thread_budget threads(impl_->num_threads);
     detail::check_matrix_views(R, Z, rows());
@@ -1377,7 +1377,7 @@ solve_result solve(const Eigen::SparseMatrix<double>& L, const Eigen::VectorXd& 
                    const solve_options& opts) {
     ensure_eigen_parallel();
     solve_result result;
-    const solver owner(L, opts,
+    solver owner(L, opts,
         opts.collect_timings ? &result.timings : nullptr);
     owner.solve(b, result);
     return result;
