@@ -101,10 +101,11 @@ iteration budget as solve arguments.
 | `partition_options::degree_multiplier` | `--degree-multiplier` | `degree_multiplier` | `degree_multiplier` |
 | `factor_options::verbose` | `--verbose` | `verbose` | `verbose` |
 
-Enumerated options take the same names everywhere, for example
-`block_greedy`, `priority_greedy` or `baumann_kyng` for the partitioner and
-`gks` or `trace_cycle` for the sampler. Python's `factor_storage_dtype` takes a
-NumPy dtype. The research controls in `factor_options::experimental` are
+The partitioner (`block_greedy`, `priority_greedy` or `baumann_kyng`) and the
+sampler (`gks` or `trace_cycle`) take the same names everywhere. Factor storage
+is `auto`, `float16` or `float32` in the CLI and MATLAB/Octave, a NumPy dtype
+in Python's `factor_storage_dtype`, and `factor_storage_type::automatic`,
+`fp16` or `fp32` in C++. The research controls in `factor_options::experimental` are
 available only from C++; see the [API policy](api.md).
 
 ## Reuse, batches and initial guesses
