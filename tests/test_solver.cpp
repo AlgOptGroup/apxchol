@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
 #include "apxchol/solver/solve.h"
+#include "apxchol/detail/call_guard.h"
+#include "apxchol/solver/detail/solver_route.h"
 #include "apxchol/solver/detail/thread_budget.h"
 #include "scoped_omp_threads.h"
 
@@ -25,8 +27,6 @@
 
 #if defined(APXCHOL_USE_CUDA)
 #include <cuda_runtime.h>
-#elif defined(APXCHOL_USE_METAL)
-#include "apxchol/solver/metal_solver.h"
 #endif
 
 using csc_access = apxchol::detail::sparse_csc_access;
@@ -117,10 +117,7 @@ TEST(Solver, BackendAvailabilityKeepsHostQueriesOnHost) {
         visible && (std::string(visible).empty() || std::string(visible) == "-1")) {
         EXPECT_FALSE(apxchol::backend_available(apxchol::solve_backend::gpu));
     }
-#elif defined(APXCHOL_USE_METAL)
-    EXPECT_EQ(apxchol::backend_available(apxchol::solve_backend::gpu),
-              apxchol::metal_solver::available());
-#else
+#elif !defined(APXCHOL_USE_METAL)
     EXPECT_FALSE(apxchol::backend_available(apxchol::solve_backend::gpu));
 #endif
 }
@@ -128,8 +125,6 @@ TEST(Solver, BackendAvailabilityKeepsHostQueriesOnHost) {
 TEST(Solver, CpuInterfacesRejectEmptyOperator) {
     const Sparse empty(0, 0);
     EXPECT_THROW(apxchol::solver(empty, cpu_options()), std::invalid_argument);
-    apxchol::detail::cpu_preconditioner preconditioner;
-    EXPECT_THROW(preconditioner.compute(empty), std::invalid_argument);
 }
 
 TEST(Solver, TestRhsOfAnEmptySystemIsEmpty) {
@@ -333,68 +328,35 @@ TEST(Solver, OverlappingCallsOnOneOwnerThrow) {
     EXPECT_TRUE(rejected);
 }
 
-TEST(Solver, RefactoringOneCopyKeepsTheOthersAndFailuresKeepTheOldFactor) {
-    const scoped_omp_threads threads(1);
-    const Sparse small = operator_matrix(64), large = operator_matrix(200);
-    apxchol::detail::cpu_preconditioner original;
-    original.compute(small);
-    apxchol::detail::cpu_preconditioner copy = original;
-    const Eigen::VectorXd r = Eigen::VectorXd::LinSpaced(small.rows(), 1.0, 2.0);
-    const Eigen::VectorXd expected = original.solve(r);
-    const auto* shared = &original.factor();
-    ASSERT_EQ(&copy.factor(), shared);
-
-    // A new factor replaces only this copy's shared state.
-    copy.compute(large);
-    EXPECT_EQ(copy.rows(), large.rows());
-    EXPECT_NE(&copy.factor(), shared);
-    EXPECT_EQ(original.rows(), small.rows());
-    EXPECT_EQ(&original.factor(), shared);
-    EXPECT_EQ(Eigen::VectorXd(original.solve(r)), expected);
-
-    // A failed refactor keeps the old factor and its dimension.
-    Sparse asymmetric = large;
-    asymmetric.coeffRef(0, 1) = 5.0;
-    EXPECT_THROW(original.compute(asymmetric), std::invalid_argument);
-    EXPECT_EQ(original.rows(), small.rows());
-    EXPECT_EQ(&original.factor(), shared);
-    EXPECT_EQ(Eigen::VectorXd(original.solve(r)), expected);
-}
-
 TEST(Solver, CopiesShareTheFactorAndSolveInParallel) {
-    // Direct preconditioner applications use the caller's OpenMP setting.
     const scoped_omp_threads threads(2);
     const Sparse matrix = operator_matrix(20000);
     auto options = cpu_options();
     options.num_threads = 2;
     std::optional<apxchol::solver> original(std::in_place, matrix, options);
-    apxchol::detail::cpu_preconditioner preconditioner;
-    preconditioner.set_options(options.factor_opts);
-    preconditioner.compute(matrix);
     constexpr int callers = 4;
-    // Two independent parallel factorizations need not match bit for bit, so
-    // each object family is compared with references from its own source.
-    std::vector<Eigen::VectorXd> rhs, solved, applied, preconditioner_applied;
+    std::vector<Eigen::VectorXd> rhs, solved, applied;
     for (int t = 0; t < callers; ++t) {
         rhs.push_back(Eigen::VectorXd::LinSpaced(matrix.rows(), t + 1.0, -2.0 * t));
         solved.push_back(original->solve(rhs.back()).x);
         applied.push_back(original->apply(rhs.back()));
-        preconditioner_applied.push_back(preconditioner.solve(rhs.back()));
     }
     const Eigen::MatrixXd panel = Eigen::MatrixXd::Ones(matrix.rows(), 3);
     Eigen::MatrixXd expected_panel(matrix.rows(), 3);
     original->solve(panel, expected_panel);
 
     std::vector<apxchol::solver> owners(callers, *original);
-    std::vector<apxchol::detail::cpu_preconditioner> preconditioners(callers, preconditioner);
+    const auto route = [](const apxchol::solver& owner) -> const apxchol::detail::cpu_route& {
+        return std::get<apxchol::detail::cpu_route>(apxchol::detail::solver_access::route(owner));
+    };
     for (int t = 0; t < callers; ++t) {
         EXPECT_EQ(&owners[t].factor(), &original->factor());
-        EXPECT_EQ(&preconditioners[t].trsv(), &preconditioner.trsv());
+        EXPECT_EQ(&route(owners[t]).trsv(), &route(*original).trsv());
     }
     const auto* shared_factor = &original->factor();
     original.reset();
     for (int round = 0; round < 3; ++round) {
-        std::vector<Eigen::VectorXd> x(callers), z(callers), v(callers);
+        std::vector<Eigen::VectorXd> x(callers), z(callers);
         std::vector<Eigen::MatrixXd> batch(callers, Eigen::MatrixXd(matrix.rows(), 3));
         std::vector<std::thread> workers;
         for (int t = 0; t < callers; ++t)
@@ -402,31 +364,26 @@ TEST(Solver, CopiesShareTheFactorAndSolveInParallel) {
                 const scoped_omp_threads worker_threads(2);
                 x[t] = owners[t].solve(rhs[t]).x;
                 z[t] = owners[t].apply(rhs[t]);
-                v[t] = preconditioners[t].solve(rhs[t]);
                 owners[t].solve(panel, batch[t]);
             });
         for (auto& worker : workers) worker.join();
         for (int t = 0; t < callers; ++t) {
             EXPECT_EQ(x[t], solved[t]);
             EXPECT_EQ(z[t], applied[t]);
-            EXPECT_EQ(v[t], preconditioner_applied[t]);
             EXPECT_EQ(batch[t], expected_panel);
         }
     }
     EXPECT_EQ(&owners[0].factor(), shared_factor);
     // Where the CPU triangular solve picks its hybrid schedule (as on x86
     // Linux), the parallel solves above also cover per-copy barrier state.
-    RecordProperty("hybrid_schedule", preconditioner.trsv().uses_hybrid_schedule());
+    RecordProperty("hybrid_schedule", route(owners[0]).trsv().uses_hybrid_schedule());
 
-    // Assignment shares the source; a new factor in a copy leaves others intact.
+    // Assignment shares the source.
     const Sparse other_matrix = operator_matrix(500);
     apxchol::solver assigned(other_matrix, options);
     assigned = owners[0];
     EXPECT_EQ(&assigned.factor(), shared_factor);
     EXPECT_EQ(assigned.solve(rhs[1]).x, solved[1]);
-    preconditioners[0].compute(other_matrix);
-    EXPECT_NE(&preconditioners[0].trsv(), &preconditioner.trsv());
-    EXPECT_EQ(preconditioner.solve(rhs[2]), preconditioner_applied[2]);
 }
 
 TEST(Solver, CpuOwnerAdoptsAnIndependentFactorAndAppliesIt) {
@@ -1234,7 +1191,7 @@ TEST(Solver, GpuOwnerPreservesStorageAndAdoptsItsFactor) {
     ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
     if (count == 0) GTEST_SKIP() << "No CUDA devices";
 #else
-    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
+    if (!apxchol::backend_available(apxchol::solve_backend::gpu)) GTEST_SKIP() << "no usable Metal device";
 #endif
     const scoped_omp_threads threads(1);
     const Sparse matrix = operator_matrix();
@@ -1309,7 +1266,7 @@ TEST(Solver, GpuScalarAndBatchedResidualsDescribeReturnedSolutions) {
     ASSERT_EQ(status, cudaSuccess);
     if (!devices) GTEST_SKIP() << "No CUDA devices";
 #else
-    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "No usable Metal device";
+    if (!apxchol::backend_available(apxchol::solve_backend::gpu)) GTEST_SKIP() << "No usable Metal device";
 #endif
     const scoped_omp_threads threads(2);
     for (const bool laplacian : {false, true}) {
@@ -1569,7 +1526,7 @@ TEST(Solver, CpuScalarAndBatchContinueAfterSlowProgress) {
 
 TEST(Solver, MetalScalarAndBatchContinueAfterSlowProgress) {
 #ifdef APXCHOL_USE_METAL
-    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "Metal unavailable";
+    if (!apxchol::backend_available(apxchol::solve_backend::gpu)) GTEST_SKIP() << "Metal unavailable";
     check_slow_progress(apxchol::solve_backend::gpu);
 #else
     GTEST_SKIP() << "Metal build required";
@@ -1744,10 +1701,9 @@ TEST(Solver, ThreadBudgetsAreLocalToIndependentHostThreads) {
 }
 
 #ifdef APXCHOL_USE_METAL
-TEST(Solver, ThreadBudgetCoversDirectMetalOwners) {
-    if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
-    check_thread_budget<apxchol::metal_solver>(operator_matrix(), 3, 2,
-                                              apxchol::solve_backend::gpu);
+TEST(Solver, ThreadBudgetCoversMetalSolvers) {
+    if (!apxchol::backend_available(apxchol::solve_backend::gpu)) GTEST_SKIP() << "no usable Metal device";
+    check_thread_budget<apxchol::solver>(operator_matrix(), 3, 2, apxchol::solve_backend::gpu);
 }
 #endif
 

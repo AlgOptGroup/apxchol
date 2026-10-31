@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 #include "scoped_omp_threads.h"
 #include "apxchol/solver/factorization.h"
-#include "apxchol/solver/preconditioner.h"
 #include "apxchol/solver/solve.h"
+#include "apxchol/solver/detail/solver_route.h"
 
 using csc_access = apxchol::detail::sparse_csc_access;
 
@@ -277,7 +277,7 @@ TEST(GpuFactorFinalize, InvalidPermutationAndExtentFailClosed) {
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 }
 
-TEST(GpuFactorFinalize, PreconditionerInstallsAndReplacesOwnedCapsules) {
+TEST(GpuFactorFinalize, DeviceSolvesAndSessionsInstallOwnedCapsules) {
     REQUIRE_FINALIZER_DEVICE();
     const apxchol::factor_options options{
         .factor_storage = apxchol::factor_storage_type::fp32, .drop_tolerance = 0};
@@ -285,32 +285,34 @@ TEST(GpuFactorFinalize, PreconditionerInstallsAndReplacesOwnedCapsules) {
     const std::vector<node_index> order = {1, 3, 0, 2};
     complete_factor fixture(4, edges, order);
     const auto& reference = fixture.reference;
-    apxchol::detail::gpu_preconditioner preconditioner;
-    preconditioner.set_keep_factor(true);
-    preconditioner.set_options(options);
+    ASSERT_TRUE(reference.sddm);
     apxchol::detail::omp_sptrsv cpu;
     cpu.setup(reference.L, 4, options);
     for (int repetition = 0; repetition < 2; ++repetition) {
-        auto factor = reference;
-        apxchol::detail::factorization_access::device_factor(factor) = fixture.state.finalize_device_factor(reference.perm, 4, options.factor_storage, options.drop_tolerance);
-        preconditioner.set_factor(std::move(factor));
-        ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
-        ASSERT_TRUE(preconditioner.factor().sddm);
-        ASSERT_EQ(csc_access::vals(preconditioner.factor().L), csc_access::vals(reference.L));
-        Eigen::VectorXd b(4), expected(4), tmp(4), work(4);
+        auto capsule = fixture.state.finalize_device_factor(reference.perm, 4, options.factor_storage, options.drop_tolerance);
+        apxchol::detail::cuda_sptrsv trsv;
+        trsv.setup_adopting_device_factor(std::move(*capsule), options);
+        ASSERT_TRUE(trsv.adopted_device_factor());
+        Eigen::VectorXd b(4), expected(4), tmp(4), work(4), solved(4), observed(4);
         for (int i = 0; i < 4; ++i) { b[i] = std::cos(i + 0.5); work[reference.perm[i]] = b[i]; }
+        trsv.solve_LLt(work.data(), solved.data());
         cpu.forward_solve(work.data(), tmp.data()); cpu.transpose_solve(tmp.data(), work.data());
-        for (int i = 0; i < 4; ++i) expected[i] = work[reference.perm[i]];
-        const Eigen::VectorXd observed = preconditioner.solve(b);
+        for (int i = 0; i < 4; ++i) {
+            expected[i] = work[reference.perm[i]];
+            observed[i] = solved[reference.perm[i]];
+        }
         EXPECT_LT((observed - expected).norm() / expected.norm(), 2e-6);
     }
     for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
-        apxchol::factor_options options;
-        options.factor_storage = storage;
-        options.drop_tolerance = 0;
-        preconditioner.set_options(options);
+        apxchol::solve_options solve_options;
+        solve_options.backend = apxchol::solve_backend::gpu;
+        solve_options.keep_factor = true;
+        solve_options.factor_opts.factor_storage = storage;
+        solve_options.factor_opts.drop_tolerance = 0;
         for (double shift : {0.0, 1.0}) {
-            preconditioner.compute(solve_matrix(64, shift));
+            const apxchol::solver owner(solve_matrix(64, shift), solve_options);
+            const auto& preconditioner = std::get<apxchol::detail::gpu_solve_session>(
+                apxchol::detail::solver_access::route(owner));
             ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
             const auto& factor = preconditioner.factor();
             ASSERT_EQ(csc_access::vals(factor.L).size(), factor.L.nonZeros());
@@ -353,30 +355,23 @@ TEST(GpuFactorFinalize, SharedCapsulesAndExplicitHostImportsPreserveOwnership) {
         auto reference = fixture.reference;
         reference.sddm = sddm;
         apxchol::detail::factorization_access::device_factor(reference) = fixture.state.finalize_device_factor(reference.perm, m, options.factor_storage, options.drop_tolerance);
-        {
-            apxchol::detail::gpu_preconditioner shared_owner;
-            shared_owner.set_options(options);
-            EXPECT_THROW(shared_owner.set_factor(reference), std::invalid_argument);
-        }
+        EXPECT_THROW(apxchol::solver(solve_matrix(4, sddm ? 1.0 : 0.0), reference, public_options),
+                     std::invalid_argument);
         ASSERT_FALSE(apxchol::detail::factorization_access::device_factor(reference)->empty());
         ASSERT_EQ(apxchol::detail::factorization_access::device_factor(reference).use_count(), 1);
-        auto unique = reference;
-        apxchol::detail::factorization_access::device_factor(unique) = fixture.state.finalize_device_factor(reference.perm, m, options.factor_storage, options.drop_tolerance);
-        apxchol::detail::gpu_preconditioner moved;
-        moved.set_options(options);
-        moved.set_factor(std::move(unique));
-        ASSERT_TRUE(moved.trsv().adopted_device_factor());
-        EXPECT_TRUE(csc_access::vals(moved.factor().L).empty());
-        EXPECT_TRUE(csc_access::inner(moved.factor().L).empty());
-        EXPECT_EQ(csc_access::outer(moved.factor().L), csc_access::outer(reference.L));
-        EXPECT_EQ(moved.factor().perm, reference.perm);
+        apxchol::detail::cuda_sptrsv moved;
+        moved.setup_adopting_device_factor(
+            std::move(*fixture.state.finalize_device_factor(reference.perm, m, options.factor_storage,
+                                                            options.drop_tolerance)),
+            options);
+        ASSERT_TRUE(moved.adopted_device_factor());
         std::vector<double> b(m), expected(m), observed(m);
         for (node_index i = 0; i < m; ++i) b[i] = std::sin(i + 0.25);
         apxchol::detail::cuda_sptrsv imported;
         imported.setup(reference.L, m, options);
         EXPECT_FALSE(imported.adopted_device_factor());
         imported.solve_LLt(b.data(), expected.data());
-        moved.trsv().solve_LLt(b.data(), observed.data());
+        moved.solve_LLt(b.data(), observed.data());
         EXPECT_EQ(observed, expected);
         auto import_copy = [reference, b, m, options]() {
             apxchol::detail::cuda_sptrsv solver;

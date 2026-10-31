@@ -3,6 +3,7 @@
 /// and the PCG initial guess.
 #include "apxchol.h"
 #include "apxchol/solver/partitioner_helpers.h"
+#include "apxchol/solver/sptrsv/omp.h"
 #include <gtest/gtest.h>
 #include "grid_laplacian.h"
 #include <algorithm>

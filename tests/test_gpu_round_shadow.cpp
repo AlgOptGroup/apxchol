@@ -636,10 +636,14 @@ std::size_t gpu_round_trace_size(const std::string& line,
 }
 
 #if defined(APXCHOL_USE_CUDA)
+const apxchol::detail::gpu_solve_session& gpu_session(const apxchol::solver& owner) {
+    return std::get<apxchol::detail::gpu_solve_session>(apxchol::detail::solver_access::route(owner));
+}
+
 void expect_setup_api_receipt(const std::string& trace,
-                              const apxchol::detail::gpu_preconditioner& solver) {
+                              const apxchol::detail::gpu_solve_session& solver, bool verbose) {
     const auto begin = trace.find("[gpu-setup-receipt] ");
-    if (solver.options().verbose) {
+    if (verbose) {
         ASSERT_NE(begin, std::string::npos) << trace;
         EXPECT_EQ(trace.find("[gpu-setup-receipt] ", begin + 1), std::string::npos);
         const auto line = trace.substr(begin, trace.find('\n', begin) - begin);
@@ -3192,18 +3196,19 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
     for (double shift : {0.0, 1.0}) {
         SCOPED_TRACE(shift);
         auto A = owned_solve_matrix(n, shift);
-        apxchol::detail::gpu_preconditioner preconditioner;
+        apxchol::solve_options setup;
+        setup.backend = apxchol::solve_backend::gpu;
+        setup.factor_opts = factor_options;
         apxchol::checkpoint owned_cp;
-        preconditioner.set_checkpoint(&owned_cp);
-        preconditioner.set_options(factor_options);
         testing::internal::CaptureStderr();
-        preconditioner.compute(A);
+        const apxchol::solver owner(A, setup, &owned_cp);
         const std::string trace = testing::internal::GetCapturedStderr();
+        const auto& preconditioner = gpu_session(owner);
         ASSERT_NE(trace.find("[gpu-owned-factorization] complete rounds="), std::string::npos) << trace;
         EXPECT_GT(gpu_round_trace_size(trace, "rounds="), 2u);
         EXPECT_NE(trace.find("[gpu-owned-csc] n="), std::string::npos);
         EXPECT_NE(trace.find("factor_entry_download_bytes=0"), std::string::npos);
-        expect_setup_api_receipt(trace, preconditioner);
+        expect_setup_api_receipt(trace, preconditioner, factor_options.verbose);
         EXPECT_GT(owned_cp.total("setup.gpu_owned_factorization"), 0.0);
         EXPECT_EQ(owned_cp.total("setup.factor_metadata"), 0.0);
         const auto& factor = preconditioner.factor();
@@ -3244,9 +3249,11 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     tiny.setFromTriplets(entries.begin(), entries.end());
     const apxchol::factor_options factor_options{
         .factor_storage = apxchol::factor_storage_type::fp32, .drop_tolerance = 0};
-    apxchol::detail::gpu_preconditioner small;
-    small.set_options(factor_options);
-    small.compute(tiny);
+    apxchol::solve_options options;
+    options.backend = apxchol::solve_backend::gpu;
+    options.factor_opts = factor_options;
+    const apxchol::solver tiny_owner(tiny, options);
+    const auto& small = gpu_session(tiny_owner);
     EXPECT_EQ(small.factor().perm.size(), 2u);
     EXPECT_TRUE(small.trsv().adopted_device_factor());
     EXPECT_TRUE(csc_access::vals(small.factor().L).empty());
@@ -3254,15 +3261,13 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     auto exported = apxchol::factorize(A, factor_options);
     EXPECT_EQ(csc_access::vals(exported.L).size(), exported.L.nonZeros());
     EXPECT_FALSE(apxchol::detail::factorization_access::device_factor(exported));
-    apxchol::detail::gpu_preconditioner owner;
-    owner.set_options(factor_options);
-    ASSERT_NO_THROW(owner.set_factor(exported));
-    EXPECT_FALSE(owner.trsv().adopted_device_factor());
+    apxchol::solver owner(A, exported, options);
+    EXPECT_FALSE(gpu_session(owner).trsv().adopted_device_factor());
     EXPECT_TRUE(csc_access::vals(owner.factor().L).empty());
     EXPECT_EQ(csc_access::vals(exported.L).size(), exported.L.nonZeros());
-    apxchol::detail::cpu_preconditioner host;
-    host.set_options(factor_options);
-    ASSERT_NO_THROW(host.set_factor(exported));
+    auto host_options = options;
+    host_options.backend = apxchol::solve_backend::cpu;
+    ASSERT_NO_THROW(apxchol::solver(A, exported, host_options));
     ASSERT_TRUE(exported.sddm);
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(A.rows(), 1.0, 2.0);
     Eigen::VectorXd permuted(A.rows()), expected(A.rows());
@@ -3271,7 +3276,7 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     apxchol::detail::cuda_sptrsv uploaded;
     uploaded.setup(exported.L, static_cast<node_index>(A.rows()), factor_options);
     uploaded.solve_LLt(permuted.data(), expected.data());
-    const Eigen::VectorXd actual = owner.solve(rhs);
+    const Eigen::VectorXd actual = owner.apply(rhs);
     for (Eigen::Index v = 0; v < A.rows(); ++v) EXPECT_EQ(actual[v], expected[exported.perm[v]]) << v;
 #endif
 }

@@ -170,6 +170,18 @@ struct raw_snapshot {
     }
 };
 
+// Zero-iteration residual check of x0 on a CPU route built from A and F.
+apxchol::solve_result unvalidated_route_check(const Sparse& A, apxchol::factorization F,
+                                              const Eigen::VectorXd& b,
+                                              const Eigen::VectorXd& x0) {
+    const apxchol::detail::cpu_route route(A, {}, nullptr, &F);
+    apxchol::solve_result result;
+    Eigen::VectorXd x(b.size());
+    const apxchol::const_matrix_view initial(x0);
+    route.solve_columns(b, x, &initial, {&result, 1}, nullptr, 1e-15, 0);
+    return result;
+}
+
 } // namespace
 
 // ── the transform ───────────────────────────────────────────────────────────
@@ -684,8 +696,7 @@ TEST(SpmvLrmBuild, BalancedDuplicateMultiplicitiesUseGeneralFallback) {
     const Eigen::VectorXd b = A.selfadjointView<Eigen::Lower>() * x0;
 
     // solver(A, F) rejects this input, so probe the unvalidated CPU route.
-    const apxchol::detail::cpu_route slv(A, std::move(F));
-    const auto result = slv.solve(b, 1e-15, 0, &x0);
+    const auto result = unvalidated_route_check(A, std::move(F), b, x0);
     EXPECT_EQ(result.iterations, 0);
     EXPECT_EQ(result.residual, 0.0);
 }
@@ -712,8 +723,7 @@ TEST(SpmvLrmBuild, UnsortedCompressedInputUsesGeneralFallback) {
 
     const Eigen::VectorXd x0 = spmv_probe_x();
     // solver(A, F) rejects this input, so probe the unvalidated CPU route.
-    const apxchol::detail::cpu_route slv(unsorted, std::move(F));
-    const auto result = slv.solve(spmv_probe_b(), 1e-15, 0, &x0);
+    const auto result = unvalidated_route_check(unsorted, std::move(F), spmv_probe_b(), x0);
     EXPECT_EQ(result.iterations, 0);
     EXPECT_EQ(result.residual, 0.0);
 }
@@ -730,8 +740,7 @@ TEST(SpmvLrmBuild, LowerOnlyRouteInputUsesGeneralFallback) {
 
     const Eigen::VectorXd x0 = spmv_probe_x();
     // solver(A, F) rejects this input, so probe the unvalidated CPU route.
-    const apxchol::detail::cpu_route slv(lower, std::move(F));
-    const auto result = slv.solve(spmv_probe_b(), 1e-15, 0, &x0);
+    const auto result = unvalidated_route_check(lower, std::move(F), spmv_probe_b(), x0);
     EXPECT_EQ(result.iterations, 0);
     EXPECT_EQ(result.residual, 0.0);
 }

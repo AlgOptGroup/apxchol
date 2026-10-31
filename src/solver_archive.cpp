@@ -1,5 +1,6 @@
 #include "solver_archive_internal.h"
 #include "apxchol/solver/detail/factor_validation.h"
+#include "apxchol/solver/detail/solver_route.h"
 
 #include <zlib.h>
 #include <algorithm>
@@ -371,7 +372,7 @@ void detail::save_solver_data(const std::filesystem::path& path, const Eigen::Sp
 
 void solver::save(const std::filesystem::path& path) const {
     check_path(path);
-    detail::solver_archive_access::save(path, *this);
+    detail::solver_access::save(path, *this);
 }
 
 solver solver::load(const std::filesystem::path& path, const solve_options& options) {
@@ -425,7 +426,7 @@ solver solver::load(const std::filesystem::path& path, const solve_options& opti
         F.rounds.push_back({0, static_cast<std::size_t>(count)});
     }
     solver restored(A, std::move(F), options);
-    detail::solver_archive_access::restore_input_entries(restored, static_cast<Eigen::Index>(input_entries));
+    detail::solver_access::restore_input_entries(restored, static_cast<Eigen::Index>(input_entries));
     return restored;
 }
 

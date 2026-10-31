@@ -127,7 +127,7 @@ factorization factorize(const Eigen::SparseMatrix<double>& L,
 
 namespace detail {
 
-// Internal consuming route used only by the preconditioner. Public factorize()
+// Internal consuming route used only by the solver routes. Public factorize()
 // always retains exportable host arrays; the resident solve may omit them.
 factorization factorize_for_solver(const Eigen::SparseMatrix<double>& L,
                                   const factor_options& opts,

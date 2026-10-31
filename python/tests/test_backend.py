@@ -29,7 +29,7 @@ def gpu_solver(operator_matrix):
         unavailable = (
             "GPU route requested but GPU support is not built",
             "GPU factorization requires an available CUDA device",
-            "apxchol::metal_solver: the Metal backend is unavailable: no Metal device",
+            "apxchol: the Metal backend is unavailable: no Metal device",
             "GPU route requires 32-bit nodes, block_greedy, vec_pool_aos, "
             "natural residual peeling and supported sampler options; request CPU explicitly",
         )

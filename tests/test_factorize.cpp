@@ -20,16 +20,12 @@
 #include <omp.h>
 
 #include "apxchol/solver/factorization.h"
-#include "apxchol/solver/preconditioner.h"
 #include "apxchol/graph/conversions.h"
 #include "apxchol/graph/graph.h"
 #include "apxchol/solver/partition/baumann_kyng.h"
 #include "apxchol/solver/partition/priority_greedy.h"
 #include "apxchol/solver/partitioner_helpers.h"
 #include "apxchol/solver/solve.h"
-#if defined(APXCHOL_USE_METAL)
-#include "apxchol/solver/metal_solver.h"
-#endif
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/gpu_block_frontend.h"
 #include "gpu_preconditioner_fixture.h"
@@ -1918,17 +1914,16 @@ TEST(FactorAdoption, RejectsMalformedArraysPermutationAndRounds) {
         {"oversized round", [](F& f) { f.rounds = {{3, 4}}; }},
         {"dependent round", [](F& f) { f.rounds = {{3, 2}}; }},
     };
+    Eigen::SparseMatrix<double> A(3, 3);
+    A.setIdentity();
     for (const auto& [name, mutate] : mutations) {
         SCOPED_TRACE(name);
         auto factor = custom_factor_for_adoption();
         mutate(factor);
-        apxchol::detail::cpu_preconditioner preconditioner;
-        EXPECT_THROW(preconditioner.set_factor(factor), std::invalid_argument);
-#if defined(APXCHOL_USE_METAL)
-        Eigen::SparseMatrix<double> A(3, 3);
-        A.setIdentity();
-        EXPECT_THROW(apxchol::metal_solver(A, factor), std::invalid_argument);
-#endif
+        for (const auto backend : {apxchol::solve_backend::cpu, apxchol::solve_backend::gpu}) {
+            if (!apxchol::backend_available(backend)) continue;
+            EXPECT_THROW(apxchol::solver(A, factor, {.backend = backend}), std::invalid_argument);
+        }
     }
 }
 
@@ -1944,15 +1939,14 @@ TEST(FactorAdoption, PreservesCustomEntriesAndRoundMetadata) {
     for (int row = 0; row < 3; ++row)
         for (int col = 0; col < 3; ++col)
             A(row, col) = permuted(factor.perm[row], factor.perm[col]);
-    apxchol::detail::cpu_preconditioner preconditioner;
-    preconditioner.set_keep_factor(true);
-    preconditioner.set_options({.drop_tolerance = 0});
-    ASSERT_NO_THROW(preconditioner.set_factor(factor));
-    EXPECT_EQ(csc_access::inner(preconditioner.factor().L), csc_access::inner(factor.L));
-    EXPECT_EQ(csc_access::vals(preconditioner.factor().L), csc_access::vals(factor.L));
-    EXPECT_EQ(preconditioner.factor().rounds.size(), factor.rounds.size());
+    const Eigen::SparseMatrix<double> sparse = A.sparseView();
+    apxchol::solver owner(sparse, factor, {.keep_factor = true,
+        .factor_opts = {.drop_tolerance = 0}, .backend = apxchol::solve_backend::cpu});
+    EXPECT_EQ(csc_access::inner(owner.factor().L), csc_access::inner(factor.L));
+    EXPECT_EQ(csc_access::vals(owner.factor().L), csc_access::vals(factor.L));
+    EXPECT_EQ(owner.factor().rounds.size(), factor.rounds.size());
     const Eigen::Vector3d b(1, 2, -3);
-    const Eigen::Vector3d x = preconditioner.solve(b);
+    const Eigen::Vector3d x = owner.apply(b);
     EXPECT_LT((A * x - b).norm(), 1e-12);
 }
 
@@ -1963,9 +1957,9 @@ TEST(FactorAdoption, GroundedColumnMayBeEmptyOrZero) {
         csc_access::n(factor.L) = 1;
         csc_access::outer(factor.L) = {0, apxchol::edge_index(!empty)};
         if (!empty) { csc_access::inner(factor.L) = {0}; csc_access::vals(factor.L) = {0}; }
-        apxchol::detail::cpu_preconditioner preconditioner;
-        ASSERT_NO_THROW(preconditioner.set_factor(std::move(factor)));
-        const Eigen::VectorXd result = preconditioner.solve(Eigen::VectorXd::Zero(1));
+        apxchol::solver owner(Eigen::SparseMatrix<double>(1, 1), std::move(factor),
+                              {.backend = apxchol::solve_backend::cpu});
+        const Eigen::VectorXd result = owner.apply(Eigen::VectorXd::Zero(1));
         EXPECT_TRUE(result.isZero());
     }
 }

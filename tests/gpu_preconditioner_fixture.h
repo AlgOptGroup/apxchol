@@ -1,5 +1,5 @@
 #pragma once
-#include "apxchol/solver/preconditioner.h"
+#include "apxchol/solver/detail/solver_route.h"
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 
 #if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)

@@ -7,9 +7,9 @@ defines their compatibility guarantees.
 
 ## Reusable solver
 
-Use `solver` for both CPU and GPU operation. Its backend is selected during
-construction and stays fixed. To force CPU use, set `opts.backend` to
-`solve_backend::cpu`.
+Use `solver` for CPU, CUDA and Metal operation; there is no separate class per
+backend. Its backend is selected during construction and stays fixed. To force
+CPU use, set `opts.backend` to `solve_backend::cpu`.
 
 `solve` checks the returned solution against the original matrix and RHS.
 Inspect `converged`; reaching the iteration limit is not an exception.

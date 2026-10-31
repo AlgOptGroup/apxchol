@@ -4,21 +4,7 @@
 #include <span>
 
 namespace apxchol {
-class metal_solver;
 namespace detail {
-class cpu_route;
-class gpu_solve_session;
-
-struct solver_archive_access {
-    static void save(const std::filesystem::path& path, const solver& owner);
-    static void restore_input_entries(solver& owner, Eigen::Index entries);
-    static Eigen::SparseMatrix<double> original_operator(const cpu_route& owner);
-#if defined(APXCHOL_USE_CUDA)
-    static Eigen::SparseMatrix<double> original_operator(const gpu_solve_session& owner);
-#elif defined(APXCHOL_USE_METAL)
-    static Eigen::SparseMatrix<double> original_operator(const metal_solver& owner);
-#endif
-};
 
 // The caller validates retained factor values before reconstructing the operator.
 void save_solver_data(const std::filesystem::path& path,
