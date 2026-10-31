@@ -100,7 +100,9 @@ context, and team size; dynamic arrival order must not choose the result.
 including eliminated vertices, and `G.is_active(v)` tells whether `v` is still
 live. `G.for_each_neighbor(v, f)` calls `f(u)` for each live neighbor `u`,
 once per parallel edge, and returns that count; `G.degree(v)` returns the
-count alone. Both are safe to call concurrently for distinct `v`.
+count alone. Both drop `v`'s stored incidences of eliminated vertices, so
+concurrent calls must use distinct `v`, and `f` must not query `v` itself.
+Querying another vertex inside `f` is fine when no other thread visits it.
 
 Pass a partitioner instance to `factorize`, alone or with an eliminator; it is
 taken by value and replaces `factor_options::partitioner`. Callable adapters

@@ -125,12 +125,15 @@ public:
     /// True while v has not been eliminated.
     bool is_active(node_index v) const { return g_->is_active(v); }
     /// Calls f(u) for each live neighbor u of v, repeating u once per
-    /// parallel edge, and returns that count. Safe concurrently for distinct v.
+    /// parallel edge, and returns that count. The call drops v's stored
+    /// incidences of eliminated vertices, so concurrent calls need distinct v,
+    /// and f must not query v itself.
     template<typename F>
     node_index for_each_neighbor(node_index v, F&& f) const {
         return g_->prune_and_visit(v, std::forward<F>(f));
     }
-    /// Live degree of v: the count for_each_neighbor returns.
+    /// Live degree of v: the count for_each_neighbor returns, with the same
+    /// concurrency rule.
     node_index degree(node_index v) const { return g_->prune_and_degree(v); }
 
 private:
