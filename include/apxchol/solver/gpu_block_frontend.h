@@ -47,7 +47,8 @@ public:
 
     prepare_result prepare(std::span<const node_index> active,
                            const partition_options &options,
-                           std::uint64_t seed = 42, std::uint64_t phase = 0);
+                           std::uint64_t seed = 42, std::uint64_t phase = 0,
+                           bool degree_tiebreak = true);
     /// Debug/test borrowed views. Materializing either view downloads a full
     /// device array; the production factorization path does not call these
     /// methods. See the class-level nonconcurrency/lifetime contract.

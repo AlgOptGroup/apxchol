@@ -12,6 +12,7 @@
 ### GPU backends
 - CUDA setup, factorization and PCG run entirely on the device, with a sync-free dataflow triangular solve and optional fp16 factor storage.
 - New Apple Metal backend: setup, factorization and PCG run on the device, for single and batched solves.
+- Metal backend and macOS support contributed by Samuel Talkington (@samtalki).
 - `solve_options.backend` (`--backend auto|cpu|gpu`) selects a complete CPU or GPU route and never falls back silently.
 
 ### API and CLI changes
@@ -30,7 +31,14 @@
 - New `apxchol.as_operator(M)`, `apxchol_as_operator(M)` and CLI `--convert-input`: a finite symmetric matrix with at least one off-diagonal entry, all of them positive, becomes its graph Laplacian `L = D - M` (self-loops cancel), any other finite symmetric matrix is used as given and checked by the solver, and asymmetric or non-finite input is an error.
 - The CLI solves an `n` by `k` `--rhs` file as one batch, writes an `n` by `k` solution with `-o`, and logs iterations and residuals per column.
 - The v1 API compatibility scope is documented.
+- Breaking: from 1.0, the installed CMake package accepts any version request with the same major version (0.x stays minor-scoped), and the shared core library's soname now carries `major.minor` (`libapxchol_core.so.0.3` for this version).
 - The partitioner and eliminator extension interfaces are experimental in 1.x and may change in minor releases.
+- Breaking: research controls (`omp_threshold`, `min_is_fraction`, `parallel_residual_threshold`, `exact_clique_max_degree`, `exact_core_max_h`, `double_cycle_min_h`, `degree_tiebreak`, `cpu_schedule`) move to `factor_options::experimental`, outside the 1.x compatibility promise, and leave the CLI, Python and MATLAB/Octave.
+- Breaking: the `residual_peel` option and its `min_degree` and `bk_serial` strategies are removed; the serial tail always uses the natural order.
+- Breaking: `factor_options::is_select` (a string) is replaced by `partitioner`, a `partitioner_kind` enum that option validation checks.
+- Breaking: unset `degree_quantile`, `parallel_residual_threshold` and `exact_core_max_h` are `std::nullopt` instead of -1 or `SIZE_MAX`, and the sentinel constants and resolvers such as `exact_core_by_route` and `degree_quantile_or_host_default` are removed.
+- Breaking: CLI `--is`, `--factor-drop` and `--maxiter` are renamed `--partitioner`, `--drop-tolerance` and `--max-iter`; `--sampler`, `--factor-storage` and `--partitioner` accept names only.
+- Python and MATLAB/Octave accept the same stable setup options, adding `sampler` to Python and `partitioner`, `sampler`, `degree_quantile` and `degree_multiplier` to MATLAB/Octave.
 - Python wheels for CPython 3.11+ on Linux and macOS arm64 (GPU wheels select the backend at runtime), standalone CLI archives, and MATLAB/Octave batched solves with save/load.
 - Wheels declare `License-Expression: BSD-3-Clause` and take the root LICENSE at build time; minimum scikit-build-core is 0.11.
 - Relicensed from BSD-4-Clause to BSD-3-Clause.

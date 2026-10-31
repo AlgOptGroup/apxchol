@@ -477,8 +477,8 @@ apxchol::graph failure_test_graph() {
 TEST_F(FactorizeTest, ParallelEliminatorFailureReachesCaller) {
     const scoped_threads team(2);
     apxchol::factor_options options;
-    options.omp_threshold = 0;
-    options.parallel_residual_threshold = 0;
+    options.experimental.omp_threshold = 0;
+    options.experimental.parallel_residual_threshold = 0;
     EXPECT_THROW(apxchol::factorize(failure_test_graph(), throwing_eliminator{}, options),
                  eliminator_failure);
 }
@@ -487,8 +487,8 @@ TEST_F(FactorizeTest, ParallelFactorAllocationFailureReachesCaller) {
     const scoped_threads team(2);
     auto graph = failure_test_graph();
     apxchol::factor_options options;
-    options.omp_threshold = 0;
-    options.parallel_residual_threshold = 0;
+    options.experimental.omp_threshold = 0;
+    options.experimental.parallel_residual_threshold = 0;
     auto* previous = std::pmr::set_default_resource(std::pmr::null_memory_resource());
     EXPECT_THROW(apxchol::factorize(std::move(graph), options), std::bad_alloc);
     std::pmr::set_default_resource(previous);
@@ -563,7 +563,7 @@ TEST(VecPoolAos, ReducedEliminationTeamIgnoresInactiveWorkerScratch) {
     part.data = {0, 1, 2, 3};
     std::vector<apxchol::detail::factor_col> columns;
     apxchol::factor_options options;
-    options.omp_threshold = 1;
+    options.experimental.omp_threshold = 1;
     const int previous_levels = omp_get_max_active_levels();
     omp_set_max_active_levels(0);
     EXPECT_NO_THROW(apxchol::detail::eliminate_partition_singleton(
@@ -724,7 +724,7 @@ TEST(VecPoolAos, ParallelRebuiltFactorsPreserveSolveContract) {
     const auto L = weighted_grid_laplacian(120, 120, 7.25, 0.03125);
     apxchol::factor_options opts;
     opts.seed = 19;
-    opts.omp_threshold = 256;
+    opts.experimental.omp_threshold = 256;
 
     const auto baseline = apxchol::factorize(
         L, opts);
@@ -765,8 +765,8 @@ TEST(VecPoolAos, AutoIncrementalDegreesPreserveTheFactorByteForByte) {
 
     apxchol::factor_options opts;
     opts.seed = 19;
-    opts.omp_threshold = 16;
-    opts.min_is_fraction = 0.0;
+    opts.experimental.omp_threshold = 16;
+    opts.experimental.min_is_fraction = 0.0;
     using degree_cache = apxchol::detail::factorization_controls::degree_cache;
     auto run = [&](degree_cache mode) {
         return factorize_controlled(apxchol::make_graph(L), opts,
@@ -811,8 +811,8 @@ TEST(VecPoolAos, IncrementalDegreeCacheDoesNotLeakIntoBkResidualLoop) {
 
     apxchol::factor_options opts;
     opts.seed = 19;
-    opts.omp_threshold = 16;
-    opts.parallel_residual_threshold = 5;
+    opts.experimental.omp_threshold = 16;
+    opts.experimental.parallel_residual_threshold = 5;
     using degree_cache = apxchol::detail::factorization_controls::degree_cache;
     auto run = [&](degree_cache mode) {
         return factorize_controlled(apxchol::make_graph(L), opts,
@@ -923,7 +923,7 @@ TEST(PruneSkip, HubGridSolvesAtEveryFactorIncludingTheAggressiveOne) {
 
     apxchol::solve_options opts;
     opts.tol = 1e-8; opts.max_iter = 500; opts.factor_opts.seed = 7;
-    opts.factor_opts.omp_threshold = 16;
+    opts.factor_opts.experimental.omp_threshold = 16;
     auto run = [&](double skip_factor) {
         auto factor = factorize_controlled(apxchol::make_graph(A), opts.factor_opts,
                                            {.prune_skip_factor = skip_factor});
@@ -1014,12 +1014,11 @@ TEST(FactorizeDeterminism, ParallelRebuiltFactorsPreserveSolveContract) {
     // block_greedy race needed.
     const scoped_threads team(16);
     const auto L = grid_laplacian(120, 120);
-    for (const char* sel :
-         {"block_greedy", "priority_greedy", "baumann_kyng"}) {
+    for (const auto& [sel, kind] : apxchol::detail::partitioner_names) {
         apxchol::factor_options opts;
         opts.seed = 3;
-        opts.omp_threshold = 256;
-        opts.is_select = sel;
+        opts.experimental.omp_threshold = 256;
+        opts.partitioner = kind;
         const auto ref = apxchol::factorize(L, opts);
         ASSERT_GT(ref.L.nonZeros(), 70000) << sel;   // the parallel path really ran
 #if !defined(APXCHOL_POOL_FP32)
@@ -1397,7 +1396,7 @@ TEST_F(FactorizeTest, SDDMFullRankDiagonal) {
 // ── Comprehensive IS × elimination convergence tests ──
 
 struct StrategyCombo {
-    std::string is;
+    apxchol::partitioner_kind is;
     const char* name;
 };
 
@@ -1411,9 +1410,9 @@ class StrategyConvergenceTest
     : public ::testing::TestWithParam<StrategyCombo> {};
 
 static const StrategyCombo all_combos[] = {
-    {"block_greedy", "bg_tree"},
-    {"priority_greedy", "priority_greedy_tree"},
-    {"baumann_kyng", "bk_tree"},
+    {apxchol::partitioner_kind::block_greedy, "bg_tree"},
+    {apxchol::partitioner_kind::priority_greedy, "priority_greedy_tree"},
+    {apxchol::partitioner_kind::baumann_kyng, "bk_tree"},
 };
 
 TEST_P(StrategyConvergenceTest, GridConverges) {
@@ -1422,7 +1421,7 @@ TEST_P(StrategyConvergenceTest, GridConverges) {
     auto b = apxchol::generate_test_rhs(225);
     auto res = apxchol::solve(L, b,
         {.tol = 1e-6, .max_iter = 1000,
-         .factor_opts = {.seed = 42, .is_select = is}});
+         .factor_opts = {.seed = 42, .partitioner = is}});
     EXPECT_LT(res.residual, 1e-4)
         << "strategy " << name << " failed: iters=" << res.iterations
         << " residual=" << res.residual;
@@ -1434,7 +1433,7 @@ TEST_P(StrategyConvergenceTest, SDDMConverges) {
     Eigen::VectorXd b = Eigen::VectorXd::Random(100);
     auto res = apxchol::solve(M, b,
         {.tol = 1e-6, .max_iter = 1000,
-         .factor_opts = {.seed = 42, .is_select = is}});
+         .factor_opts = {.seed = 42, .partitioner = is}});
     EXPECT_LT(res.residual, 1e-4)
         << "strategy " << name << " failed on SDDM: iters=" << res.iterations
         << " residual=" << res.residual;
@@ -1497,11 +1496,11 @@ TEST(ExactCliqueOption, Grid40_FewerItersThanSampled) {
     auto b = apxchol::generate_test_rhs(L.rows());
     apxchol::factor_options opts;
     opts.seed = 42;
-    opts.is_select = "block_greedy";
+    opts.partitioner = apxchol::partitioner_kind::block_greedy;
     auto sampled = apxchol::solve(L, b,
         {.tol = 1e-8, .max_iter = 200,
          .factor_opts = opts});
-    opts.exact_clique_max_degree = 8;
+    opts.experimental.exact_clique_max_degree = 8;
     auto exact = apxchol::solve(L, b,
         {.tol = 1e-8, .max_iter = 200,
          .factor_opts = opts});
@@ -1608,8 +1607,8 @@ TEST(ResidualSparsifyGate, DuplicateHeavyIndexedGraphConvergesWithEitherSetting)
     const auto L = apxchol::laplacian(graph);
     const auto b = apxchol::generate_test_rhs(n);
     apxchol::factor_options options;
-    options.parallel_residual_threshold = 5;
-    options.min_is_fraction = 0.5;
+    options.experimental.parallel_residual_threshold = 5;
+    options.experimental.min_is_fraction = 0.5;
     for (bool sparsify : {false, true}) {
         SCOPED_TRACE(sparsify);
         apxchol::checkpoint timings;
@@ -1691,7 +1690,7 @@ TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
     for (unsigned seed : {7u, 11u, 42u, 1234u, 20260820u}) {
         apxchol::factor_options with_loop;          // BK rounds down to `thresh`,
         with_loop.seed = seed;                      // then the peel takes the
-        with_loop.parallel_residual_threshold = thresh;   // rest.
+        with_loop.experimental.parallel_residual_threshold = thresh;   // rest.
         const auto c = apxchol::factorize(
             L, with_loop);
         ASSERT_FALSE(c.rounds.empty());
@@ -1859,10 +1858,9 @@ TEST(PriorityGreedy, ParallelPicksExcludeSharedNeighborsAndResetScratch) {
     std::iota(candidates.begin(), candidates.end(), apxchol::node_index{0});
     (void)apxchol::prune_and_degrees(G, candidates, degrees, 2000);
     apxchol::partition_context ctx{
-        .options = {}, .seed = 17, .omp_threshold = 1, .cp = nullptr,
-        .degrees = degrees,
+        .options = {}, .seed = 17, .omp_threshold = 1, .degree_tiebreak = true,
+        .cp = nullptr, .degrees = degrees,
     };
-    ctx.options.degree_tiebreak = true;
     std::vector<apxchol::node_index> expected(candidates.begin(),
                                              candidates.begin() + leaves);
     apxchol::priority_greedy_partitioner p;
@@ -2022,11 +2020,13 @@ static bounded_oracle_result bounded_four_pass_oracle(
         degree_sum += row.size();
     }
     double threshold = options.degree_multiplier * double(degree_sum) / n;
-    if (options.degree_quantile > 0.0 && options.degree_quantile < 1.0) {
+    const double quantile =
+        options.degree_quantile.value_or(apxchol::detail::degree_quantile_host_default);
+    if (quantile > 0.0 && quantile < 1.0) {
         auto sorted = result.degrees;
         std::sort(sorted.begin(), sorted.end());
         const auto rank = static_cast<std::size_t>(
-            options.degree_quantile * static_cast<double>(n - 1));
+            quantile * static_cast<double>(n - 1));
         threshold = sorted[rank];
     }
     // 0 undecided, 1 chosen, 2 excluded/blocked. Each decision reads a snapshot.
@@ -2035,11 +2035,10 @@ static bounded_oracle_result bounded_four_pass_oracle(
         if (result.degrees[v] <= threshold) {
             state[v] = 0; result.candidates.push_back(v);
         }
+    // The selector prefers lower degrees (the default degree_tiebreak).
     auto precedes = [&](bounded_vertex a, bounded_vertex b) {
-        return std::tuple(options.degree_tiebreak ? result.degrees[a] : 0,
-                          bounded_fixture_key(seed, phase, a), a)
-             < std::tuple(options.degree_tiebreak ? result.degrees[b] : 0,
-                          bounded_fixture_key(seed, phase, b), b);
+        return std::tuple(result.degrees[a], bounded_fixture_key(seed, phase, a), a)
+             < std::tuple(result.degrees[b], bounded_fixture_key(seed, phase, b), b);
     };
     for (unsigned pass = 0; pass < 4; ++pass) {
         std::vector<bounded_vertex> winners;
@@ -2126,7 +2125,7 @@ TEST(GpuBoundedSelection, OwnedSnapshotsMatchIndependentFourPassOracle) {
             if (profile && n > 4)
                 for (bounded_vertex v = 0; v + 5 < n; v += 7) edges.push_back({v, v + 5});
             apxchol::partition_options options;
-            options.degree_tiebreak = true; options.degree_quantile = 0.5;
+            options.degree_quantile = 0.5;
             for (std::size_t k = 0; k < keys.size(); ++k) {
                 SCOPED_TRACE("n=" + std::to_string(n) + " profile=" +
                              std::to_string(profile) + " key=" + std::to_string(k));
@@ -2150,7 +2149,7 @@ TEST(GpuBoundedSelection, FourPassCapLeavesAnUncoveredEligibleVertex) {
     std::vector<bounded_edge> edges;
     for (bounded_vertex i = 0; i + 1 < n; ++i) edges.push_back({order[i], order[i + 1]});
     apxchol::partition_options options;
-    options.degree_tiebreak = true; options.degree_quantile = 0.0;
+    options.degree_quantile = 0.0;
     options.degree_multiplier = 100.0;
     check_owned_bounded_selection(n, edges, options, 42, 0, "bounded_selection_cap65", true);
 }

@@ -58,8 +58,6 @@ def _solver_options(*, backend="auto", num_threads=0, seed=None, partitioner=Non
     if partitioner is not None:
         options["partitioner"] = partitioner
     options.update(advanced)
-    if "exact_clique_max_degree" in options:
-        options["exact_clique_max_degree"] = index(options["exact_clique_max_degree"])
     if factor_storage_dtype is not None:
         options["factor_storage_dtype"] = np.dtype(factor_storage_dtype).name
     return options
@@ -413,8 +411,8 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
         deterministic per seed at one thread only). None uses the C++ default.
     partitioner : str or None
         Independent-set selector: "block_greedy", "priority_greedy", or
-        "baumann_kyng". None uses the C++ default. Unknown names raise at
-        factorization time.
+        "baumann_kyng". None uses the C++ default. Unknown names raise
+        ``ValueError``.
     keep_factor : bool
         Retain an extra host factor copy for ``save()``, ``chol()``, ``L``
         and ``D`` export; enabled by default. ``False`` saves this memory while still
@@ -428,12 +426,14 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
         does not change the exported factor's FP32 type or CPU arithmetic's
         FP64 type. Unsupported FP16 requests fail; FP64 storage is unavailable.
     **advanced
-        Passed straight through to the core options: `degree_quantile`,
-        `degree_multiplier`, `degree_tiebreak`, `exact_clique_max_degree`,
-        `residual_peel` ("natural" | "min_degree" | "bk_serial"),
-        `cpu_schedule` ("auto" | "levels"),
+        Passed straight through to the core options:
+        `sampler` ("gks" | "trace_cycle"; default "gks"),
+        `degree_quantile` (in [0, 1); None uses the backend default),
+        `degree_multiplier` (positive),
         `drop_tolerance` (in [0, 1]; 0 disables dropping),
-        `regularization` (nonnegative diagonal fraction; 0 disables),
+        `regularization` (minimum diagonal excess of the preconditioner, as a
+        fraction of each diagonal after lumping; excess below 1e-12 of the
+        diagonal counts as zero first; 0 disables),
         `lump_max_mass` (fraction in [0, 1]; 0 rejects positive off-diagonals),
         and `verbose` (default False).
 

@@ -45,15 +45,13 @@ void expect_solution(const Eigen::SparseMatrix<double>& matrix,
 }
 
 std::vector<apxchol::solve_options> host_only_options() {
-    std::vector<apxchol::solve_options> options(6);
-    options[0].factor_opts.is_select = "priority_greedy";
-    options[1].factor_opts.exact_clique_max_degree = 3;
+    std::vector<apxchol::solve_options> options(4);
+    options[0].factor_opts.partitioner = apxchol::partitioner_kind::priority_greedy;
+    options[1].factor_opts.experimental.exact_clique_max_degree = 3;
     options[2].factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
-    options[2].factor_opts.exact_core_max_h = 3;
+    options[2].factor_opts.experimental.exact_core_max_h = 3;
     options[3].factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
-    options[3].factor_opts.double_cycle_min_h = 4;
-    options[4].factor_opts.residual_peel = apxchol::residual_peel_strategy::min_degree;
-    options[5].factor_opts.residual_peel = apxchol::residual_peel_strategy::bk_serial;
+    options[3].factor_opts.experimental.double_cycle_min_h = 4;
     return options;
 }
 } // namespace
@@ -107,7 +105,7 @@ TEST(SolveRoutes, AutomaticSelectionRespectsConfigurationAndAvailability) {
     const auto matrix = operator_matrix();
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(matrix.rows());
     const auto cases = host_only_options();
-    ASSERT_EQ(cases.size(), 6u);
+    ASSERT_EQ(cases.size(), 4u);
     for (std::size_t i = 0; i < cases.size(); ++i) {
         SCOPED_TRACE(i);
         EXPECT_EQ(apxchol::detail::select_solve_backend(cases[i]),
@@ -179,7 +177,7 @@ TEST(SolveRoutes, ExplicitGpuRejectsUnsupportedConfigurationsBeforeSetup) {
     const auto matrix = operator_matrix();
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(matrix.rows());
     auto cases = host_only_options();
-    ASSERT_EQ(cases.size(), 6u);
+    ASSERT_EQ(cases.size(), 4u);
     for (auto& options : cases) {
         options.backend = apxchol::solve_backend::gpu;
         EXPECT_THROW(apxchol::detail::select_solve_backend(options), std::invalid_argument);
