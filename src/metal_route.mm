@@ -337,7 +337,10 @@ void print_banner(const detail::metal_route::statistics& st, bool factor_fp16) {
 
 }  // namespace
 
-struct detail::metal_route::impl {
+// The factor, plans and operator: read-only after setup and shared by copies.
+// The four-column lane plans are built once, by the first four-column solve
+// of any copy.
+struct detail::metal_route::device_state {
     solve_options opts;
     factorization F;
     std::size_t n = 0;
@@ -349,104 +352,15 @@ struct detail::metal_route::impl {
     statistics stats;
 
     context* ctx = nullptr;
-    const pipelines* pipes = nullptr;
-    unsigned columns = 1, workspace_columns = 0;
-    id<MTLCommandQueue> queue = nil;
     Params arguments{};
     bool operator_df = false, factor_fp16 = false;
     id<MTLBuffer> factor_metadata = nil;
     id<MTLBuffer> device_op_ptr = nil, device_op_col = nil, op_hi = nil, op_lo = nil;
     id<MTLBuffer> operator_row_map = nil;
     prepared_tri fwd, bwd, lane_fwd, lane_bwd;
-    id<MTLBuffer> x = nil, r = nil, ap = nil, p = nil, z = nil, partial = nil, state_buffer = nil;
-    id<MTLBuffer> tags = nil;
+    std::once_flag lane_once;
 
-    static void bind(id<MTLComputeCommandEncoder> enc, unsigned index,
-                     std::initializer_list<id<MTLBuffer>> buffers) {
-        for (auto buffer : buffers) [enc setBuffer:buffer offset:0 atIndex:index++];
-    }
-
-    void dispatch(id<MTLComputePipelineState> pipe, const Params& prm,
-                  unsigned groups, unsigned threads) const {
-        [encoder setComputePipelineState:pipe];
-        [encoder setBytes:&prm length:sizeof prm atIndex:0];
-        [encoder dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
-                threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
-    }
-
-    void finalize(unsigned mode, unsigned it) const {
-        Params prm = arguments;
-        prm.mode = mode;
-        prm.iter = it;
-        dispatch(pipes->finalize, prm, 1, kTreeLanes);
-    }
-
-    void encode_tri(const prepared_tri& t, bool forward) const {
-        if (!arguments.m) return;
-        bind(encoder, 13, {t.ptr, t.idx, t.val, t.words, t.blocks, t.segments});
-        if (factor_fp16) bind(encoder, 19, {factor_metadata});
-        Params prm = arguments;
-        prm.count = t.tag_count;
-        const unsigned threads = std::min(kRowThreads, pipes->row_threads);
-        dispatch(pipes->dataflow_init[factor_fp16][forward], prm, (t.tag_count + threads - 1) / threads, threads);
-        const unsigned dependent_threads = forward && t.resident_round_plan &&
-            [pipes->dataflow_solve[factor_fp16][1] maxTotalThreadsPerThreadgroup] >= 512 ? 512 : 256;
-        for (auto stage : t.stages) {
-            prm.offset = stage.first;
-            const bool independent = forward && t.resident_round_plan && stage.last - stage.first > 1;
-            const unsigned stage_threads = independent
-                ? (stage.one_batch_per_block ? 32 : 256) : dependent_threads;
-            dispatch(pipes->dataflow_solve[factor_fp16][independent ? 2 : unsigned(forward)], prm,
-                     stage.last - stage.first, stage_threads);
-        }
-    }
-
-    void precondition() const {
-        encode_tri(columns == 4 ? lane_fwd : fwd, true);
-        encode_tri(columns == 4 ? lane_bwd : bwd, false);
-    }
-
-    void step(operation op) const {
-        const auto pipe = pipes->pcg[unsigned(op)][op == operation::multiply && operator_df];
-        const bool direction = op == operation::direction;
-        const unsigned threads = direction ? std::min(kRowThreads, pipes->row_threads) : unsigned(kTreeLanes);
-        dispatch(pipe, arguments, direction ? (arguments.n + threads - 1) / threads : arguments.groups, threads);
-    }
-
-    id<MTLComputeCommandEncoder> encoder = nil;
-
-    // PCG iterations per command buffer. A wait costs about 270 us; a skipped
-    // iteration after convergence up to about 220 us, because every dataflow
-    // stage is still dispatched. 8 was fastest or within 1% from 40k to 4M rows.
-    static constexpr unsigned batch_iterations = 8;
-
-    template<class Record>
-    bool submit(bool first, Record&& record) {
-        with_pool([&] {
-            id<MTLCommandBuffer> cb = [queue commandBuffer];
-            if (first) {
-                id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-                if (blit == nil) throw std::runtime_error("Metal command buffer or encoder creation failed");
-                [blit fillBuffer:x range:NSMakeRange(0, static_cast<NSUInteger>(arguments.n) * columns * sizeof(df32)) value:0];
-                [blit endEncoding];
-            }
-            encoder = [cb computeCommandEncoder];
-            if (encoder == nil) throw std::runtime_error("Metal command buffer or encoder creation failed");
-            bind(encoder, 1, {x, r, ap, p, z, partial, state_buffer, device_op_ptr, device_op_col, op_hi,
-                              op_lo != nil ? op_lo : op_hi, tags});
-            bind(encoder, 20, {operator_row_map != nil ? operator_row_map : device_op_ptr});
-            record();
-            [encoder endEncoding];
-            encoder = nil;
-            finish(cb);
-        });
-        const auto* state = static_cast<const solve_state*>([state_buffer contents]);
-        bool active = false;
-        for (unsigned q = 0; q < columns; ++q) active |= state[q].active != 0;
-        return active;
-    }
-
-    explicit impl(const solve_options& options) : opts(options) {
+    explicit device_state(const solve_options& options) : opts(options) {
         factor_fp16 = detail::resolve_fp16_storage(opts.factor_opts.factor_storage, false);
     }
 
@@ -456,55 +370,7 @@ struct detail::metal_route::impl {
                         const std::vector<float>& scales,
                         const std::vector<float>& hi, const std::vector<float>& lo, unsigned m,
                         detail::metal_setup::resident_factor* resident = nullptr);
-
-    void allocate_workspace(unsigned count);
-    void select_columns(unsigned count) {
-        const auto index = std::countr_zero(count);
-        if (count != 1) {
-            std::call_once(ctx->pipeline_once[index], [&] {
-                with_pool([&] { ctx->pipes[index] = make_pipelines(ctx->device, ctx->library, count); });
-            });
-        }
-        if (count == 4 && lane_fwd.ptr == nil) {
-            prepared_tri next_fwd, next_bwd;
-            if (fwd.resident_round_plan) {
-                next_fwd = {.ptr = fwd.ptr, .idx = fwd.idx, .val = fwd.val};
-                next_bwd = {.ptr = bwd.ptr, .idx = bwd.idx, .val = bwd.val};
-                with_pool([&] {
-                    detail::metal_setup::prepare_lane_plans(ctx->device, F, next_fwd, next_bwd);
-                });
-            } else {
-                std::vector<float> diagonal(factor_fp16 ? arguments.m : 0);
-                if (factor_fp16) {
-                    const auto* metadata = static_cast<const mh::factor_metadata*>([factor_metadata contents]);
-                    for (unsigned i = 0; i < arguments.m; ++i) diagonal[i] = metadata[i].diagonal;
-                }
-                auto prepare = [&](const prepared_tri& base, bool forward) {
-                    return factor_fp16 ? prepare_lane_tri<_Float16>(*ctx, base, arguments.m, forward, diagonal)
-                                       : prepare_lane_tri<float>(*ctx, base, arguments.m, forward, diagonal);
-                };
-                next_fwd = prepare(fwd, true);
-                next_bwd = prepare(bwd, false);
-            }
-            lane_fwd = std::move(next_fwd);
-            lane_bwd = std::move(next_bwd);
-        }
-        if (count > workspace_columns) allocate_workspace(count);
-        columns = count;
-        pipes = &ctx->pipes[index];
-        // A previous width used a different packed position for this ground.
-        // apply(false) needs this too: triangular sweeps only write rows < m.
-        auto* applied = static_cast<float*>([z contents]);
-        std::fill(applied + std::size_t(arguments.m) * count, applied + n * count, 0.0f);
-    }
-
-    template<unsigned Columns>
-    void solve_columns(const_matrix_view B, matrix_view X, std::span<solve_result> results,
-                       checkpoint* cp, double tol, int max_iter, const const_matrix_view* X0);
-    template<unsigned Columns>
-    std::array<bool, Columns> solve_columns_once(const_matrix_view B, matrix_view X,
-                       std::span<solve_result> results, checkpoint* cp, double tol,
-                       int max_iter, const const_matrix_view* X0);
+    void prepare_lane_plans();
 
     // x follows the retained operator's ordering; y is factor-permuted.
     template<class Vector>
@@ -531,13 +397,146 @@ struct detail::metal_route::impl {
         spmv(xp, work);
         return bnorm.relative(bp - work);
     }
+};
+
+// One copy's command queue and PCG workspace over the shared device state.
+struct detail::metal_route::impl {
+    std::shared_ptr<device_state> state;
+    const device_state& d;
+    const pipelines* pipes = nullptr;
+    unsigned columns = 1, workspace_columns = 0;
+    id<MTLCommandQueue> queue = nil;
+    id<MTLBuffer> x = nil, r = nil, ap = nil, p = nil, z = nil, partial = nil, state_buffer = nil;
+    id<MTLBuffer> tags = nil;
+
+    explicit impl(std::shared_ptr<device_state> shared_state)
+        : state(std::move(shared_state)), d(*state) {
+        with_pool([&] {
+            queue = [d.ctx->device newCommandQueue];
+            if (queue == nil) throw std::runtime_error("Metal command queue creation failed");
+        });
+        allocate_workspace(1);
+        pipes = &d.ctx->pipes[0];
+    }
+
+    static void bind(id<MTLComputeCommandEncoder> enc, unsigned index,
+                     std::initializer_list<id<MTLBuffer>> buffers) {
+        for (auto buffer : buffers) [enc setBuffer:buffer offset:0 atIndex:index++];
+    }
+
+    void dispatch(id<MTLComputePipelineState> pipe, const Params& prm,
+                  unsigned groups, unsigned threads) const {
+        [encoder setComputePipelineState:pipe];
+        [encoder setBytes:&prm length:sizeof prm atIndex:0];
+        [encoder dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+    }
+
+    void finalize(unsigned mode, unsigned it) const {
+        Params prm = d.arguments;
+        prm.mode = mode;
+        prm.iter = it;
+        dispatch(pipes->finalize, prm, 1, kTreeLanes);
+    }
+
+    void encode_tri(const prepared_tri& t, bool forward) const {
+        if (!d.arguments.m) return;
+        const bool factor_fp16 = d.factor_fp16;
+        bind(encoder, 13, {t.ptr, t.idx, t.val, t.words, t.blocks, t.segments});
+        if (factor_fp16) bind(encoder, 19, {d.factor_metadata});
+        Params prm = d.arguments;
+        prm.count = t.tag_count;
+        const unsigned threads = std::min(kRowThreads, pipes->row_threads);
+        dispatch(pipes->dataflow_init[factor_fp16][forward], prm, (t.tag_count + threads - 1) / threads, threads);
+        const unsigned dependent_threads = forward && t.resident_round_plan &&
+            [pipes->dataflow_solve[factor_fp16][1] maxTotalThreadsPerThreadgroup] >= 512 ? 512 : 256;
+        for (auto stage : t.stages) {
+            prm.offset = stage.first;
+            const bool independent = forward && t.resident_round_plan && stage.last - stage.first > 1;
+            const unsigned stage_threads = independent
+                ? (stage.one_batch_per_block ? 32 : 256) : dependent_threads;
+            dispatch(pipes->dataflow_solve[factor_fp16][independent ? 2 : unsigned(forward)], prm,
+                     stage.last - stage.first, stage_threads);
+        }
+    }
+
+    void precondition() const {
+        encode_tri(columns == 4 ? d.lane_fwd : d.fwd, true);
+        encode_tri(columns == 4 ? d.lane_bwd : d.bwd, false);
+    }
+
+    void step(operation op) const {
+        const auto pipe = pipes->pcg[unsigned(op)][op == operation::multiply && d.operator_df];
+        const bool direction = op == operation::direction;
+        const unsigned threads = direction ? std::min(kRowThreads, pipes->row_threads) : unsigned(kTreeLanes);
+        dispatch(pipe, d.arguments, direction ? (d.arguments.n + threads - 1) / threads : d.arguments.groups, threads);
+    }
+
+    id<MTLComputeCommandEncoder> encoder = nil;
+
+    // PCG iterations per command buffer. A wait costs about 270 us; a skipped
+    // iteration after convergence up to about 220 us, because every dataflow
+    // stage is still dispatched. 8 was fastest or within 1% from 40k to 4M rows.
+    static constexpr unsigned batch_iterations = 8;
+
+    template<class Record>
+    bool submit(bool first, Record&& record) {
+        with_pool([&] {
+            id<MTLCommandBuffer> cb = [queue commandBuffer];
+            if (first) {
+                id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+                if (blit == nil) throw std::runtime_error("Metal command buffer or encoder creation failed");
+                [blit fillBuffer:x range:NSMakeRange(0, static_cast<NSUInteger>(d.arguments.n) * columns * sizeof(df32)) value:0];
+                [blit endEncoding];
+            }
+            encoder = [cb computeCommandEncoder];
+            if (encoder == nil) throw std::runtime_error("Metal command buffer or encoder creation failed");
+            bind(encoder, 1, {x, r, ap, p, z, partial, state_buffer, d.device_op_ptr, d.device_op_col, d.op_hi,
+                              d.op_lo != nil ? d.op_lo : d.op_hi, tags});
+            bind(encoder, 20, {d.operator_row_map != nil ? d.operator_row_map : d.device_op_ptr});
+            record();
+            [encoder endEncoding];
+            encoder = nil;
+            finish(cb);
+        });
+        const auto* state = static_cast<const solve_state*>([state_buffer contents]);
+        bool active = false;
+        for (unsigned q = 0; q < columns; ++q) active |= state[q].active != 0;
+        return active;
+    }
+
+    void allocate_workspace(unsigned count);
+    void select_columns(unsigned count) {
+        const auto index = std::countr_zero(count);
+        if (count != 1) {
+            std::call_once(d.ctx->pipeline_once[index], [&] {
+                with_pool([&] { d.ctx->pipes[index] = make_pipelines(d.ctx->device, d.ctx->library, count); });
+            });
+        }
+        if (count == 4) std::call_once(state->lane_once, [&] { state->prepare_lane_plans(); });
+        if (count > workspace_columns) allocate_workspace(count);
+        columns = count;
+        pipes = &d.ctx->pipes[index];
+        // A previous width used a different packed position for this ground.
+        // apply(false) needs this too: triangular sweeps only write rows < m.
+        auto* applied = static_cast<float*>([z contents]);
+        std::fill(applied + std::size_t(d.arguments.m) * count, applied + d.n * count, 0.0f);
+    }
+
+    template<unsigned Columns>
+    void solve_columns(const_matrix_view B, matrix_view X, std::span<solve_result> results,
+                       checkpoint* cp, double tol, int max_iter, const const_matrix_view* X0);
+    template<unsigned Columns>
+    std::array<bool, Columns> solve_columns_once(const_matrix_view B, matrix_view X,
+                       std::span<solve_result> results, checkpoint* cp, double tol,
+                       int max_iter, const const_matrix_view* X0);
 
     template<class Vector>
     void centre(Vector& x) const { x.array() -= x.mean(); }
 };
 
-void detail::metal_route::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint* cp,
-                                      detail::metal_setup::resident_factor* resident) {
+void detail::metal_route::device_state::setup(const Eigen::SparseMatrix<double>& A, checkpoint* cp,
+                                              detail::metal_setup::resident_factor* resident) {
     n = static_cast<std::size_t>(A.rows());
     // Eigen's int StorageIndex keeps n and the operator's stored count within
     // the device's 32-bit indices; the factor and the two-triangle permuted
@@ -644,7 +643,7 @@ void detail::metal_route::impl::setup(const Eigen::SparseMatrix<double>& A, chec
     if (opts.factor_opts.verbose) print_banner(stats, factor_fp16);
 }
 
-void detail::metal_route::impl::prepare_device(detail::gpu_factor_prep::csr_int<float> backward,
+void detail::metal_route::device_state::prepare_device(detail::gpu_factor_prep::csr_int<float> backward,
                                        const std::vector<float>& scales,
                                        const std::vector<float>& hi, const std::vector<float>& lo,
                                        unsigned m, detail::metal_setup::resident_factor* resident) {
@@ -657,8 +656,6 @@ void detail::metal_route::impl::prepare_device(detail::gpu_factor_prep::csr_int<
     operator_df = resident ? !resident->operator_exact : !lo.empty();
     with_pool([&] {
         id<MTLDevice> dev = ctx.device;
-        queue = [dev newCommandQueue];
-        if (queue == nil) throw std::runtime_error("Metal command queue creation failed");
         if (resident) {
             device_op_ptr = resident->operator_ptr;
             device_op_col = resident->operator_idx;
@@ -700,17 +697,45 @@ void detail::metal_route::impl::prepare_device(detail::gpu_factor_prep::csr_int<
         install(half, narrow.diag);
     } else install(backward);
     }
-    allocate_workspace(1);
-    pipes = &ctx.pipes[0];
+}
+
+void detail::metal_route::device_state::prepare_lane_plans() {
+    prepared_tri next_fwd, next_bwd;
+    if (fwd.resident_round_plan) {
+        next_fwd = {.ptr = fwd.ptr, .idx = fwd.idx, .val = fwd.val};
+        next_bwd = {.ptr = bwd.ptr, .idx = bwd.idx, .val = bwd.val};
+        with_pool([&] {
+            detail::metal_setup::prepare_lane_plans(ctx->device, F, next_fwd, next_bwd);
+        });
+    } else {
+        std::vector<float> diagonal(factor_fp16 ? arguments.m : 0);
+        if (factor_fp16) {
+            const auto* metadata = static_cast<const mh::factor_metadata*>([factor_metadata contents]);
+            for (unsigned i = 0; i < arguments.m; ++i) diagonal[i] = metadata[i].diagonal;
+        }
+        auto prepare = [&](const prepared_tri& base, bool forward) {
+            return factor_fp16 ? prepare_lane_tri<_Float16>(*ctx, base, arguments.m, forward, diagonal)
+                               : prepare_lane_tri<float>(*ctx, base, arguments.m, forward, diagonal);
+        };
+        next_fwd = prepare(fwd, true);
+        next_bwd = prepare(bwd, false);
+    }
+    lane_fwd = std::move(next_fwd);
+    lane_bwd = std::move(next_bwd);
 }
 
 void detail::metal_route::impl::allocate_workspace(unsigned count) {
-    const auto tag_rows = std::max({n, std::size_t(fwd.tag_count), std::size_t(bwd.tag_count),
-                                   std::size_t(lane_fwd.tag_count), std::size_t(lane_bwd.tag_count)});
+    // Only four-column panels use the lane plans, which select_columns has
+    // built by then; another copy may be building them concurrently.
+    const bool lanes = count == 4;
+    const auto n = d.n;
+    const auto tag_rows = std::max({n, std::size_t(d.fwd.tag_count), std::size_t(d.bwd.tag_count),
+                                   std::size_t(lanes ? d.lane_fwd.tag_count : 0),
+                                   std::size_t(lanes ? d.lane_bwd.tag_count : 0)});
     if (tag_rows > std::numeric_limits<unsigned>::max() / count)
         throw std::overflow_error("Metal RHS panel exceeds packed index range");
     with_pool([&] {
-        id<MTLDevice> dev = ctx->device;
+        id<MTLDevice> dev = d.ctx->device;
         // Install only after every allocation succeeds; scalar use survives a
         // failed attempt to grow the reusable workspace.
         auto next_x = upload(dev, nullptr, n * count * sizeof(df32), "solution");
@@ -721,7 +746,7 @@ void detail::metal_route::impl::allocate_workspace(unsigned count) {
                               "operator product and dataflow tags");
         auto next_p = upload(dev, nullptr, n * count * sizeof(float), "search direction");
         auto next_z = upload(dev, nullptr, n * count * sizeof(float), "preconditioner result");
-        auto next_partial = upload(dev, nullptr, std::size_t(arguments.groups) * count * sizeof(df32), "partial sums");
+        auto next_partial = upload(dev, nullptr, std::size_t(d.arguments.groups) * count * sizeof(df32), "partial sums");
         auto next_state = upload(dev, nullptr, count * sizeof(solve_state), "solve state");
         x = next_x; r = next_r; ap = next_ap; p = next_p; z = next_z;
         partial = next_partial; state_buffer = next_state; tags = next_ap;
@@ -731,18 +756,22 @@ void detail::metal_route::impl::allocate_workspace(unsigned count) {
 
 detail::metal_route::metal_route(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
                                  checkpoint* cp, factorization* F) {
-    impl_.reset(new impl(opts));
+    auto state = std::make_shared<device_state>(opts);
     if (F) {
-        impl_->F = std::move(*F);
-        impl_->setup(A, cp);
-        return;
+        state->F = std::move(*F);
+        state->setup(A, cp);
+    } else {
+        // Automatic routing has already checked this same input.
+        auto resident = detail::metal_setup::factorize(shared().device, A, opts, cp,
+                                                       opts.backend == solve_backend::automatic);
+        state->F = std::move(resident.factor);
+        state->setup(A, cp, &resident);
     }
-    // Automatic routing has already checked this same input.
-    auto resident = detail::metal_setup::factorize(shared().device, A, opts, cp,
-                                                   opts.backend == solve_backend::automatic);
-    impl_->F = std::move(resident.factor);
-    impl_->setup(A, cp, &resident);
+    impl_.reset(new impl(std::move(state)));
 }
+
+detail::metal_route::metal_route(const metal_route& other)
+    : impl_(new impl(other.impl_->state)) {}
 
 void detail::metal_route::impl_deleter::operator()(impl* owner) const {
     @autoreleasepool { delete owner; }
@@ -753,14 +782,14 @@ detail::metal_route::metal_route(metal_route&&) noexcept = default;
 detail::metal_route& detail::metal_route::operator=(metal_route&&) noexcept = default;
 
 Eigen::SparseMatrix<double> detail::metal_route::original_operator() const {
-    const auto& data = *impl_;
+    const auto& data = impl_->d;
     if (data.original_operator.rows()) return data.original_operator;
     return archive_operator_csc(static_cast<int>(data.n), data.op.ptr.data(),
         data.op.idx.get(), data.op.vals.get(), data.F.perm);
 }
 
-const factorization& detail::metal_route::factor() const { return impl_->F; }
-detail::metal_route::statistics detail::metal_route::stats() const { return impl_->stats; }
+const factorization& detail::metal_route::factor() const { return impl_->d.F; }
+detail::metal_route::statistics detail::metal_route::stats() const { return impl_->d.stats; }
 
 template<unsigned Columns>
 void detail::metal_route::impl::solve_columns(const_matrix_view B, matrix_view X,
@@ -798,10 +827,13 @@ std::array<bool, Columns> detail::metal_route::impl::solve_columns_once(
                                        double tol, int max_iter, const const_matrix_view* X0) {
     if (cp) { cp->descend("pcg"); cp->tick(); }
     select_columns(Columns);
+    const auto n = d.n;
+    const auto& F = d.F;
+    const bool laplacian = d.laplacian;
     auto* states = static_cast<solve_state*>([state_buffer contents]);
     std::fill_n(states, Columns, solve_state{});
     X.setZero();
-    const bool permuted = original_operator.rows() == 0;
+    const bool permuted = d.original_operator.rows() == 0;
     std::array<Eigen::VectorXd, Columns> bp;
     Eigen::VectorXd work;
     std::array<mh::norm_reference, Columns> bnorm;
@@ -829,7 +861,7 @@ std::array<bool, Columns> detail::metal_route::impl::solve_columns_once(
             if (X0) xp[permuted ? F.perm[i] : i] = (*X0)(i, q);
         }
         if (X0) {
-            spmv(xp, work);
+            d.spmv(xp, work);
             work = bp[q] - work;
         } else work = bp[q];
         const double initial = X0 ? bnorm[q].relative(work) : 1.0;
@@ -868,14 +900,14 @@ std::array<bool, Columns> detail::metal_route::impl::solve_columns_once(
             #pragma omp parallel for schedule(static) reduction(&& : finite)
             for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i) {
                 const auto row = permuted ? i : F.perm[i];
-                xp[i] += mh::join(packed[row * Columns + q]) / arguments.preconditioner_scale / scale[q];
+                xp[i] += mh::join(packed[row * Columns + q]) / d.arguments.preconditioner_scale / scale[q];
                 finite &= std::isfinite(xp[i]);
             }
             if (!finite) throw std::overflow_error("Metal solve: solution exceeds the finite range");
             results[q].iterations = states[q].iters;
         }
         if (laplacian) centre(xp);
-        results[q].residual = relative_residual(bp[q], xp, work, bnorm[q]);
+        results[q].residual = d.relative_residual(bp[q], xp, work, bnorm[q]);
         if (permuted) {
             // Gather through work so arbitrary output strides remain supported.
             #pragma omp parallel for schedule(static)
@@ -907,15 +939,15 @@ void detail::metal_route::solve_columns(const_matrix_view B, matrix_view X,
 }
 
 factor_storage_type detail::metal_route::factor_storage() const {
-    return impl_->factor_fp16 ? factor_storage_type::fp16 : factor_storage_type::fp32;
+    return impl_->d.factor_fp16 ? factor_storage_type::fp16 : factor_storage_type::fp32;
 }
 
 void detail::metal_route::apply_columns(const_matrix_view R, matrix_view Z) const {
     impl& s = *impl_;
     const Eigen::VectorXd r = R.col(0);
     s.select_columns(1);
-    const auto& perm = s.F.perm;
-    const double mean = s.laplacian ? r.mean() : 0;
+    const auto& perm = s.d.F.perm;
+    const double mean = s.d.laplacian ? r.mean() : 0;
     const double max_abs = (r.array() - mean).abs().maxCoeff();
     Eigen::VectorXd z = Eigen::VectorXd::Zero(r.size());
     if (max_abs == 0.0) {
@@ -932,8 +964,8 @@ void detail::metal_route::apply_columns(const_matrix_view R, matrix_view Z) cons
     cs.active = 1;
     s.submit(false, [&] { s.precondition(); });
     const float* applied = static_cast<float*>([s.z contents]);
-    const double mean_z = s.laplacian
-        ? Eigen::Map<const Eigen::VectorXf>(applied, s.n).cast<double>().mean() : 0;
+    const double mean_z = s.d.laplacian
+        ? Eigen::Map<const Eigen::VectorXf>(applied, s.d.n).cast<double>().mean() : 0;
     #pragma omp parallel for schedule(static)
     for (Eigen::Index i = 0; i < r.size(); ++i)
         z[i] = (double(applied[perm[i]]) - mean_z) / scale;

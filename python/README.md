@@ -115,9 +115,8 @@ Overlapping inputs are copied before writing `out`. Factorization, `solve`
 and `apply` release the GIL while they run native code; reading the input
 matrix holds it. A call made while another thread uses the same solver raises
 `RuntimeError`. Give each thread `copy.copy(solver)`, which shares the factor
-and allocates only new workspace; on CUDA the copy shares the device factor
-and solves on its own stream. Metal-backed solvers cannot be copied; pass all
-right-hand sides to one `solve(B)`.
+and allocates only new workspace; on a GPU the copy shares the device factor
+and solves on its own CUDA stream or Metal command queue.
 
 ## Save and reload
 

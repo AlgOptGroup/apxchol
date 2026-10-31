@@ -14,7 +14,7 @@
 - New Apple Metal backend: setup, factorization and PCG run on the device, for single and batched solves.
 - GPU PCG waits for the device once every four iterations on CUDA (instead of every iteration) and every eight on Metal (instead of four), and skips the reductions of iterations after convergence; solutions are unchanged, and small solves are up to 15% faster on CUDA and 7% on Metal.
 - `solve_options.backend` (`--backend auto|cpu|gpu`) selects a complete CPU or GPU route and never falls back silently.
-- CUDA solvers can be copied: copies share the device factor and operator, and solve concurrently on their own streams and workspace.
+- CUDA and Metal solvers can be copied: copies share the device factor and operator, and solve concurrently on their own streams or command queues and workspace.
 
 ### API and CLI changes
 - Breaking: runtime environment variables are replaced by explicit solver options.
