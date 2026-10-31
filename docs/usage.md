@@ -166,9 +166,56 @@ residual and how rounding affects it.
 
 ## Using another iterative solver
 
-apxchol's SciPy operator (`solver.aslinearoperator()`) and Eigen-compatible
-preconditioner (`apx_cholesky`, CPU only) let another solver drive the
-iteration. That solver controls its stopping test.
+To use apxchol as the preconditioner of another Krylov solver (Eigen, SciPy,
+PETSc, MKL's reverse-communication interface), apply it with C++
+`solver.apply(r)` for vectors or `solver.apply(R, Z)` for matrices, using
+`const_matrix_view` and `matrix_view`, or Python `solver.aslinearoperator()`.
+Each application computes `z = M^{-1} r` with the prepared factor; the other
+solver controls the iteration and its stopping test.
+
+For Eigen's iterative solvers, a small adapter is enough. It is an example
+outside apxchol's stable API; copy it into your code:
+
+```cpp
+#include <apxchol.h>
+#include <Eigen/IterativeLinearSolvers>
+
+class apxchol_preconditioner
+    : public Eigen::SparseSolverBase<apxchol_preconditioner> {
+public:
+    using Scalar = double;
+    using StorageIndex = int;
+    enum { ColsAtCompileTime = Eigen::Dynamic, MaxColsAtCompileTime = Eigen::Dynamic };
+
+    void attach(apxchol::solver& s) { solver_ = &s; m_isInitialized = true; }
+
+    // The attached solver already holds the factor.
+    template<class Matrix> apxchol_preconditioner& analyzePattern(const Matrix&) { return *this; }
+    template<class Matrix> apxchol_preconditioner& factorize(const Matrix&) { return *this; }
+    template<class Matrix> apxchol_preconditioner& compute(const Matrix&) { return *this; }
+
+    Eigen::Index rows() const { return solver_->rows(); }
+    Eigen::Index cols() const { return solver_->rows(); }
+    Eigen::ComputationInfo info() const { return Eigen::Success; }
+
+    template<class Rhs, class Dest>
+    void _solve_impl(const Rhs& b, Dest& x) const { x = solver_->apply(b); }
+
+private:
+    apxchol::solver* solver_ = nullptr;
+};
+
+apxchol::solver s(A);
+Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower | Eigen::Upper,
+                         apxchol_preconditioner> cg;
+cg.preconditioner().attach(s);
+cg.setTolerance(1e-10);
+cg.compute(A);
+Eigen::VectorXd x = cg.solve(b);
+```
+
+Eigen default-constructs the preconditioner, so the adapter holds a pointer
+set by `attach`; the solver must outlive `cg`.
 
 A GPU-backed SciPy operator exchanges host vectors with the device on each
 application. Native `solve` keeps iteration vectors on the GPU, so prefer it
@@ -217,9 +264,7 @@ and the operator, which are read-only after setup, and allocates only its
 own workspace. Copy a solver once per thread, with `solver copy = original;`
 in C++ or `copy.copy(solver)` in Python, and the copies solve in parallel
 with the same results as serial calls. Copies stay valid after the original
-is destroyed. This covers `solver` and `apx_cholesky`; a new
-factor installed in one copy of an `apx_cholesky` leaves the others unchanged.
-GPU solvers cannot be copied: construct one per thread, or batch the
+is destroyed. GPU solvers cannot be copied: construct one per thread, or batch the
 right-hand sides. A `metal_solver` used directly must not be called
 concurrently.
 

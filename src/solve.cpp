@@ -883,7 +883,7 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
     }
     precond_.set_checkpoint(use_cp ? &timings : nullptr);
     struct clear_checkpoint {
-        const apx_cholesky &preconditioner;
+        const cpu_preconditioner &preconditioner;
         ~clear_checkpoint() { preconditioner.set_checkpoint(nullptr); }
     } clear{precond_};
     precond_.reset_apply_count();

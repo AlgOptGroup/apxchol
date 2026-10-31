@@ -132,16 +132,16 @@ The factor may come from CPU construction or from a GPU solver created with
 The destination rebuilds its own triangular-solve storage. This handoff is in
 memory; to reuse a factor across processes, [save the solver](serialization.md).
 
-`apxchol::apx_cholesky::set_factor` also accepts a factor for use with an
-Eigen iterative solver. That adapter always applies it on CPU.
+To precondition another iterative solver with the factor, construct
+`solver(A, std::move(F), opts)` and call its `apply`; see
+[using another iterative solver](usage.md#using-another-iterative-solver).
 
 A `factorization` holds CSC factor columns
 (diagonal first), permutation with `perm[original] = elimination_position`,
 operator kind, and round metadata. Preserve these conventions. The factor `L`
 is a read-only view; build factors with `factorize` or load them from an
-archive. Enable `set_keep_factor(true)` before installation if the
-preconditioner must retain exportable factor arrays; consuming solver paths
-may release them.
+archive. Set `keep_factor_values=true` if the solver must retain exportable
+factor arrays; otherwise it releases them after preparation.
 
 Graph storage is the directed AoS pool. Custom partitioners and eliminators
 operate on the same graph. The PCG recurrence, factor-column formula, and triangular-solve

@@ -1918,7 +1918,7 @@ TEST(FactorAdoption, RejectsMalformedArraysPermutationAndRounds) {
         SCOPED_TRACE(name);
         auto factor = custom_factor_for_adoption();
         mutate(factor);
-        apxchol::apx_cholesky preconditioner;
+        apxchol::detail::cpu_preconditioner preconditioner;
         EXPECT_THROW(preconditioner.set_factor(factor), std::invalid_argument);
 #if defined(APXCHOL_USE_METAL)
         Eigen::SparseMatrix<double> A(3, 3);
@@ -1940,7 +1940,7 @@ TEST(FactorAdoption, PreservesCustomEntriesAndRoundMetadata) {
     for (int row = 0; row < 3; ++row)
         for (int col = 0; col < 3; ++col)
             A(row, col) = permuted(factor.perm[row], factor.perm[col]);
-    apxchol::apx_cholesky preconditioner;
+    apxchol::detail::cpu_preconditioner preconditioner;
     preconditioner.set_keep_factor(true);
     preconditioner.set_options({.drop_tolerance = 0});
     ASSERT_NO_THROW(preconditioner.set_factor(factor));
@@ -1959,7 +1959,7 @@ TEST(FactorAdoption, GroundedColumnMayBeEmptyOrZero) {
         csc_access::n(factor.L) = 1;
         csc_access::outer(factor.L) = {0, apxchol::edge_index(!empty)};
         if (!empty) { csc_access::inner(factor.L) = {0}; csc_access::vals(factor.L) = {0}; }
-        apxchol::apx_cholesky preconditioner;
+        apxchol::detail::cpu_preconditioner preconditioner;
         ASSERT_NO_THROW(preconditioner.set_factor(std::move(factor)));
         const Eigen::VectorXd result = preconditioner.solve(Eigen::VectorXd::Zero(1));
         EXPECT_TRUE(result.isZero());

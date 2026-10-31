@@ -3260,7 +3260,7 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     EXPECT_FALSE(owner.trsv().adopted_device_factor());
     EXPECT_TRUE(csc_access::vals(owner.factor().L).empty());
     EXPECT_EQ(csc_access::vals(exported.L).size(), exported.L.nonZeros());
-    apxchol::apx_cholesky host;
+    apxchol::detail::cpu_preconditioner host;
     host.set_options(factor_options);
     ASSERT_NO_THROW(host.set_factor(exported));
     ASSERT_TRUE(exported.sddm);

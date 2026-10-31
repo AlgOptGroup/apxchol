@@ -146,31 +146,6 @@ The original matrix `A` is still needed for PCG and residual checks.
 For cross-process reuse, `solver.save(path)` and `solver::load(path, opts)`
 [store the operator and factor together](../serialization.md).
 
-## Eigen integration
-
-`apxchol::apx_cholesky` is apxchol's CPU preconditioner for Eigen solvers:
-
-```cpp
-using SpMat = Eigen::SparseMatrix<double>;
-Eigen::ConjugateGradient<SpMat, Eigen::Lower, apxchol::apx_cholesky> cg;
-cg.compute(A);
-Eigen::VectorXd x = cg.solve(b);
-```
-
-Eigen controls the outer iteration and its stopping test. Use this integration
-when an Eigen solver is needed; use `apxchol::solver` for apxchol's complete
-CPU/GPU solve and final residual verification.
-
-| Preconditioner operation | Purpose |
-|---|---|
-| `set_options(opts)` | Set factor construction/storage options before setup |
-| `compute(A)` | Construct and prepare a CPU factor |
-| `set_factor(F)` | Prepare an existing host factor without reconstructing it |
-| `solve(b)` | Apply the prepared preconditioner, not a complete PCG solve |
-| `set_keep_factor(true)` | Retain exportable values; call before `compute` or `set_factor` |
-| `factor()` | Read the retained factor and metadata |
-| `rows()`, `cols()`, `info()` | Query dimensions and Eigen setup status |
-
 ## One-shot solve and availability
 
 ```{doxygenfunction} apxchol::solve
