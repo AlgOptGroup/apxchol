@@ -15,6 +15,7 @@ on:
       - 'benchmarks/**/*.py'
       - 'benchmarks/requirements.txt'
       - 'benchmarks/CMakeLists.txt'
+      - 'benchmarks/eigen.cmake'
       - 'benchmarks/src/**'
       - 'benchmarks/tests/**'
       - 'benchmarks/patches/**'
