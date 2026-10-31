@@ -198,7 +198,7 @@ public:
         read_exact(file_.get(), prefix.data(), prefix.size());
         const auto version = get<std::uint32_t>(prefix.data() + 8);
         if (!std::memcmp(prefix.data(), "APXCHB01", 8) && version > 1)
-            invalid("format version " + std::to_string(version) + " is newer than this apxchol supports (1)");
+            invalid("written by a newer apxchol (format " + std::to_string(version) + "); upgrade to read it");
         if (std::memcmp(prefix.data(), "APXCHB01", 8) || version != 1 ||
             get<std::uint32_t>(prefix.data() + 12) != array_count ||
             get<std::uint32_t>(prefix.data() + 16) != descriptor_bytes ||

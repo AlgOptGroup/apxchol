@@ -192,7 +192,9 @@ class Solver:
         dropping come from the file, so ``factor_storage_dtype`` and
         ``drop_tolerance`` have no effect. ``backend`` and ``num_threads``
         apply; ``backend="auto"`` uses CPU, ``"gpu"`` requests upload.
-        Tolerance, iteration budget and warm starts remain solve arguments.
+        ``lump_max_mass`` still bounds the archived operator, so pass it again
+        if the solver was built with a non-default value. Tolerance, iteration
+        budget and warm starts remain solve arguments.
         """
         options = _solver_options(**opts)
         self = cls.__new__(cls)
@@ -336,10 +338,12 @@ class Solver:
         """Return a copy of the lower-triangular factor G of the preconditioner actually used.
 
         The result is a float64 ``scipy.sparse.csc_matrix`` in permuted order
-        with ``A[p][:, p] ≈ G @ G.T``, where ``p = np.argsort(self.P)``. It is
-        the installed factor after dropping and storage rounding; with
-        float16 storage, G = L S holds each binary16 off-diagonal times its
-        column scale. A GPU-backed solver downloads it.
+        with ``M[p][:, p] ≈ G @ G.T``, where ``p = np.argsort(self.P)`` and
+        ``M`` is the operator the solver factorized: ``A`` after any lumping
+        or regularization. It is the installed factor after dropping and
+        storage rounding; with float16 storage, G = L S holds each binary16
+        off-diagonal times its column scale. A GPU-backed solver downloads it
+        on the first export and caches it.
 
         For a Laplacian, the last row and column of G are empty. With ``k``
         connected components, the factor represents the rank-``n-k``

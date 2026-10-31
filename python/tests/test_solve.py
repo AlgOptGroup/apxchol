@@ -788,7 +788,9 @@ def test_chol_is_the_installed_preconditioner(dtype):
     try:
         slv = apxchol.factorize(A, backend="cpu", num_threads=1, factor_storage_dtype=dtype,
                                 drop_tolerance=0.05)
-    except RuntimeError:
+    except RuntimeError as error:
+        if dtype not in ("float16", np.float16) or "FP16 factor storage requires" not in str(error):
+            raise
         pytest.skip("CPU lacks FP16 conversion support")
     G = slv.chol().tocsr()
     assert G.nnz == slv.factor_nnz

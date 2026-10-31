@@ -354,7 +354,7 @@ TEST_F(SolverArchive, ReinstallsInstalledFactorExactly) {
                 EXPECT_EQ(F.storage, storage);
                 EXPECT_EQ(F.scale.size(), storage == factor_storage_type::fp16 ? input.rows() : 0);
                 EXPECT_EQ(F.L.nonZeros(), F.L.vals_.size());
-                if (laplacian) EXPECT_EQ(F.L.outer_[input.rows() - 1], F.L.outer_[input.rows()]);
+                if (laplacian) { EXPECT_EQ(F.L.outer_[input.rows() - 1], F.L.outer_[input.rows()]); }
                 const auto path = directory / ("exact-" + std::to_string(laplacian) +
                     std::to_string(int(storage)) + std::to_string(drop > 0) + ".apxchol");
                 saver.save(path);
@@ -422,8 +422,9 @@ TEST_F(SolverArchive, ReportsDirectoryReadError) {
 }
 
 TEST_F(SolverArchive, RejectsMetadataAndIndexOverflow) {
-    for (const auto& item : std::array<std::pair<std::size_t, std::uint64_t>, 6>{{
-        {0, 99}, {1, UINT64_MAX}, {2, 2}, {3, UINT64_MAX}, {4, UINT64_MAX}, {7, 2}}}) {
+    for (const auto& item : std::array<std::pair<std::size_t, std::uint64_t>, 7>{{
+        {0, 99}, {1, UINT64_MAX}, {2, 2}, {3, UINT64_MAX}, {4, UINT64_MAX}, {6, UINT64_MAX},
+        {7, 2}}}) {
         const auto path = change(("meta-" + std::to_string(item.first)).c_str(), metadata,
                                  [&](auto& a) { a.value(item.first, item.second); });
         EXPECT_THROW(solver::load(path), std::invalid_argument);
@@ -464,7 +465,7 @@ TEST_F(SolverArchive, RejectsNewerFormatVersion) {
         FAIL() << "a version 2 archive loaded";
     } catch (const std::invalid_argument& error) {
         EXPECT_STREQ(error.what(),
-            "solver archive: format version 2 is newer than this apxchol supports (1)");
+            "solver archive: written by a newer apxchol (format 2); upgrade to read it");
     }
 }
 
@@ -598,6 +599,12 @@ TEST_F(SolverArchive, CpuAndGpuFactorsCrossAdopt) {
                     for (std::size_t i = 0; i < F.rounds.size(); ++i)
                         EXPECT_EQ(restored.factor().rounds[i].is_size, F.rounds[i].is_size);
                     check_solve_modes(input, restored, laplacian, checked_rhs);
+                    if (origin == target) {
+                        // A reloaded factor is the same preconditioner, bit for bit.
+                        Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(input.rows(), -1.0, 2.0);
+                        if (laplacian) b.array() -= b.mean();
+                        EXPECT_EQ(resident.solve(b, 1e-9, 500).x, restored.solve(b, 1e-9, 500).x);
+                    }
                     if (target == solve_backend::gpu) {
                         const auto adopted = directory / ("adopted-" + std::to_string(resaves++) + ".apxchol");
                         restored.save(adopted); expect_operator(adopted, input);

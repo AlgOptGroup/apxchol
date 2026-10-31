@@ -34,7 +34,9 @@ def test_numpy_archive_round_trip(tmp_path):
 def test_archive_reinstalls_the_installed_factor_exactly(tmp_path, dtype):
     try:
         original = owner(seed=3, num_threads=1, factor_storage_dtype=dtype)
-    except RuntimeError:
+    except RuntimeError as error:
+        if dtype != "float16" or "FP16 factor storage requires" not in str(error):
+            raise
         pytest.skip("CPU lacks FP16 conversion support")
     path = tmp_path / "exact.apxchol"
     original.save(path)

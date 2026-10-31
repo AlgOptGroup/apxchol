@@ -307,7 +307,8 @@ private:
 /// otherwise: a factor the fp16 storage cannot represent must fail loudly,
 /// never dissolve into NaN.
 /// Device factor bytes per stored entry: 4 (colidx) + 2 (value), times two
-/// CSRs, plus 12 B/row -- vs 4 + 4 with the fp32 storage.
+/// CSRs, plus 16 B/row (diag, inv_scale^2 and scale) -- vs 4 + 4 with the
+/// fp32 storage.
 /// fp16 subnormals are always flushed to zero at storage and the drop's keep
 /// predicate also drops what fp16 flushes, exactly as on the CPU.
 class cuda_sptrsv {
@@ -338,7 +339,7 @@ public:
     /// verbose reports setup stages; the caller establishes the CUDA context.
     void setup(const sparse_csc& L, node_index m,
                const factor_options& options = {}) {
-        setup_host(L, m, options, fp16_resolved(options.factor_storage), nullptr);
+        setup_host(L, m, options, fp16_resolved(options.factor_storage), false, nullptr);
     }
 
     /// Upload an exported installed factor (factorization::storage fp32 or
@@ -348,7 +349,7 @@ public:
     /// factor_storage are ignored.
     void install_exact(const sparse_csc& L, node_index m, bool fp16, const float* scale,
                        const factor_options& options = {}) {
-        setup_host(L, m, options, fp16, scale);
+        setup_host(L, m, options, fp16, true, scale);
     }
 
     /// Download the installed factor in factorization's form (solve.h):
@@ -384,13 +385,12 @@ public:
     }
 
 private:
-    // exact_scale == nullptr builds the storage from a construction factor;
+    // exact == false builds the storage from a construction factor;
     // otherwise L is an installed factor with fp16 column scales exact_scale
     // (ignored for fp32), uploaded without change.
     void setup_host(const sparse_csc& L, node_index m, const factor_options& options,
-                    bool fp16, const float* exact_scale) {
+                    bool fp16, bool exact, const float* exact_scale) {
         validate_options(options);
-        const bool exact = exact_scale != nullptr;
         destroy();
         data_.verbose = options.verbose;
         data_.m = static_cast<int64_t>(m);
@@ -773,8 +773,8 @@ public:
     /// Bytes per stored off-diagonal value on the device (2 under fp16).
     std::size_t value_bytes_effective() const { return data_.fp16 ? 2 : value_bytes; }
     /// Device bytes of the factor arrays cudaMalloc'd by the last setup()
-    /// (structure + values of every CSR copy, fp16's diag / inv_scale^2 and the
-    /// dataflow batch tables; NOT the solve vectors).
+    /// (structure + values of every CSR copy, fp16's diag / inv_scale^2 / scale
+    /// and the dataflow batch tables; NOT the solve vectors).
     std::size_t factor_device_bytes() const { return data_.factor_bytes; }
     /// True for device-factor adoption; false for host preprocessing/upload.
     bool adopted_device_factor() const { return data_.adopted_device_factor; }

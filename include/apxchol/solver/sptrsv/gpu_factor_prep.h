@@ -241,15 +241,20 @@ inline fp16_scaled_arrays installed_fp16_arrays(const csr_int<float>& L11,
     out.vals = std::make_unique_for_overwrite<_Float16[]>(static_cast<std::size_t>(L11.nnz));
     out.diag.resize(static_cast<std::size_t>(L11.m));
     out.inv_scale2.resize(static_cast<std::size_t>(L11.m));
-    #pragma omp parallel for schedule(static)
+    std::uint64_t subnormal = 0;
+    #pragma omp parallel for schedule(static) reduction(+:subnormal)
     for (int j = 0; j < L11.m; ++j) {
         const double inv = 1.0f / col_scale[j];
         out.inv_scale2[j] = inv * inv;
         out.diag[j] = L11.vals[L11.ptr[j]];
         out.vals[L11.ptr[j]] = _Float16(0);
-        for (int p = L11.ptr[j] + 1; p < L11.ptr[j + 1]; ++p)
+        for (int p = L11.ptr[j] + 1; p < L11.ptr[j + 1]; ++p) {
             out.vals[p] = static_cast<_Float16>(L11.vals[p]);
+            subnormal += std::fpclassify(L11.vals[p]) != FP_ZERO
+                && std::abs(L11.vals[p]) < 0x1p-14f;
+        }
     }
+    out.subnormal = subnormal;
     return out;
 }
 
