@@ -768,7 +768,7 @@ static BenchResult run_apxchol_v1(
     if (apxchol::detail::select_solve_backend(opts) == apxchol::solve_backend::gpu)
         warm_up_cuda_once();
 #elif defined(APXCHOL_USE_METAL)
-    if (apxchol::detail::select_solve_backend(opts) == apxchol::solve_backend::gpu)
+    if (apxchol::detail::select_solve_backend(opts, &L) == apxchol::solve_backend::gpu)
         warm_up_metal_once(opts);
 #endif
     long long factor_nnz = 0, factor_rows = 0;

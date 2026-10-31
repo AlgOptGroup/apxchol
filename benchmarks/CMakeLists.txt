@@ -212,7 +212,7 @@ target_compile_options(rchol_lib PRIVATE -w -O3)
 if (APPLE)
     # rchol_lap.cpp pins threads with Linux-only calls; see the shim.
     target_compile_options(rchol_lib PRIVATE
-        "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/src/macos_affinity_shim.h")
+        "SHELL:-include \"${CMAKE_CURRENT_SOURCE_DIR}/src/macos_affinity_shim.h\"")
 endif()
 if (HAVE_METIS)
     target_compile_definitions(rchol_lib PUBLIC HAVE_METIS)

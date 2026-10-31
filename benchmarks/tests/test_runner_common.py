@@ -119,7 +119,9 @@ class AffinitySpecTest(unittest.TestCase):
     def test_platform_without_affinity_runs_unpinned(self):
         with mock.patch.object(rc, "affinity_supported", return_value=False), \
              mock.patch.object(rc.os, "cpu_count", return_value=8), \
-             mock.patch.dict(os.environ, {"GOMP_CPU_AFFINITY": "stale"}, clear=True):
+             mock.patch.dict(os.environ, {"GOMP_CPU_AFFINITY": "stale", "OMP_PLACES": "{0}",
+                                          "OMP_PROC_BIND": "close", "KMP_AFFINITY": "compact"},
+                             clear=True):
             self.assertIsNone(rc.affinity_cpus(4))
             self.assertEqual(rc.taskset_prefix(4), "")
             env = rc.benchmark_openmp_env(4)

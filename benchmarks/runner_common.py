@@ -314,6 +314,9 @@ def benchmark_openmp_env(threads, base=None):
     env.update({"OMP_NUM_THREADS": str(threads), "OMP_DYNAMIC": "FALSE"})
     env.pop("GOMP_CPU_AFFINITY", None)
     if cpus is None:   # unpinned (macOS): no places to bind to
+        # Inherited binding would otherwise pin a run recorded as unpinned.
+        for name in ("OMP_PLACES", "OMP_PROC_BIND", "KMP_AFFINITY"):
+            env.pop(name, None)
         return env
     env.update({
         "OMP_PROC_BIND": "close",

@@ -734,9 +734,10 @@ def main():
     print(f"=== fair sweep: device={DEVICE}, families={sorted(fams)}, "
           f"store={CELLS} "
           f"(stale-aware resume) ===", flush=True)
+    julia_on = bool(JULIA) and DEVICE == "cpu"   # Julia has only a CPU axis
     print(f"    external solvers: parac={'on' if RUN_PARAC else 'off'} "
-          f"ac/ac2={'on' if JULIA else 'off'} cmg={'on' if RUN_CMG else 'off'}", flush=True)
-    if not JULIA:
+          f"ac/ac2={'on' if julia_on else 'off'} cmg={'on' if RUN_CMG else 'off'}", flush=True)
+    if DEVICE == "cpu" and not JULIA:
         print("    NOTE: AC/AC2 are OFF -> their cells stay empty. Fill them with "
               "`python3 benchmarks/sweep_fair.py` without --no-julia/--headline-only "
               "(needs: julia --project=benchmarks/julia -e 'using Pkg; Pkg.instantiate()').",
