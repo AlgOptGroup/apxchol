@@ -583,11 +583,11 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     } else {
         // Keep compensated dropping in the shared FP64 host implementation.
         // Both backends consume the CSR factor without a level-permuted value copy.
-        backward = cuda_host::build_L11_csc_int<float>(F.L, m);
+        backward = detail::gpu_factor_prep::build_L11_csc_int<float>(F.L, m);
         if (!opts.keep_factor) detail::sparse_csc_access::release_values(F.L);
-        scales = cuda_host::column_scales(backward);
-        if (factor_fp16) cuda_host::normalize_fp16_scales(backward, scales);
-        cuda_host::apply_factor_drop(backward, scales, opts.factor_opts.drop_tolerance, factor_fp16);
+        scales = detail::gpu_factor_prep::column_scales(backward);
+        if (factor_fp16) detail::gpu_factor_prep::normalize_fp16_scales(backward, scales);
+        detail::gpu_factor_prep::apply_factor_drop(backward, scales, opts.factor_opts.drop_tolerance, factor_fp16);
         if (cp) (*cp)("metal_factor_prep");
 
         Eigen::SparseMatrix<double> compressed;
