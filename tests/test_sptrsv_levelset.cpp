@@ -160,7 +160,7 @@ std::vector<double> random_x(node_index m, unsigned seed) {
 // One solve pair at the current thread count: y = forward(x), z = back(y),
 // plus the same in place (w = x; forward(w, w); back(w, w)).
 struct pair_out { std::vector<double> y, z, w; };
-pair_out solve_pair(const apxchol::omp_sptrsv& t, const std::vector<double>& x) {
+pair_out solve_pair(apxchol::omp_sptrsv& t, const std::vector<double>& x) {
     const node_index m = static_cast<node_index>(x.size());
     pair_out o; o.y.resize(m); o.z.resize(m); o.w = x;
     t.forward_solve(x.data(), o.y.data());
@@ -174,7 +174,7 @@ pair_out solve_pair(const apxchol::omp_sptrsv& t, const std::vector<double>& x) 
 // lane, exercising the real team-mismatch fallback instead of merely changing
 // omp_get_max_threads() (the inner region names num_threads(processors)).
 pair_out solve_pair_with_forced_team_mismatch(
-        const apxchol::omp_sptrsv& t, const std::vector<double>& x) {
+        apxchol::omp_sptrsv& t, const std::vector<double>& x) {
     const int saved_levels = omp_get_max_active_levels();
     omp_set_max_active_levels(1);
     pair_out out;
