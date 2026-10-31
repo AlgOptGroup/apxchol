@@ -71,6 +71,15 @@ struct pcg_work {
 template<class Value, unsigned Columns>
 struct column_sums { Value values[Columns]; };
 
+// Whether any column is still iterating. Uniform across a launch: only
+// finalize changes the state, in a later kernel.
+template<unsigned Columns, class State>
+APXCHOL_GPU_FUNCTION bool any_active(APXCHOL_GPU_BUFFER(const State) state) {
+    bool active = false;
+    for (unsigned q = 0; q < Columns; ++q) active |= state[q].active != 0;
+    return active;
+}
+
 // RHS entries are adjacent; the factor/operator traversal is shared while
 // each column keeps its own recurrence state and reduction order.
 // row_map maps stored operator rows to vector rows during multiplication.
@@ -82,9 +91,7 @@ APXCHOL_GPU_FUNCTION column_sums<typename Math::wide, Columns> step_columns(
     pcg_work<Index> work, unsigned lane, APXCHOL_GPU_BUFFER(const Offset) row_map = nullptr) {
     using Wide = typename Math::wide;
     column_sums<Wide, Columns> total{};
-    bool active = false;
-    for (unsigned q = 0; q < Columns; ++q) active |= v.state[q].active != 0;
-    if (!active) return total;
+    if (!any_active<Columns>(v.state)) return total;
     for (auto base = work.first; base < work.last; base += work.stride) {
         const auto row = base + work.offset;
         if (op == operation::multiply) {
