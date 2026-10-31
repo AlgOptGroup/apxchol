@@ -25,15 +25,26 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           mkdir -p "$CCACHE_DIR" dist
+          # Timestamps locate a stall: some runs printed nothing for the whole timeout.
+          echo "[$(date -u +%T)] pulling the build image"
+          docker pull -q "$IMAGE"
+          echo "[$(date -u +%T)] starting the build container"
           docker run --rm --cpus=2 --memory=4g --memory-swap=4g -w /project \
             -v "$PWD:/project" -v "$CCACHE_DIR:/ccache" -e CCACHE_DIR=/ccache -e CCACHE_MAXSIZE \
             -e CMAKE_C_COMPILER_LAUNCHER -e CMAKE_CXX_COMPILER_LAUNCHER \
             "$IMAGE" timeout 600 bash -euc '
+              stamp() { echo "[$(date -u +%T)] $*"; }
+              stamp "container started"
               export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=/project
               # A stalled mirror otherwise uses up the whole timeout with no output.
-              dnf_install() { dnf --setopt=timeout=30 --setopt=retries=5 install -y "$@" || dnf --setopt=timeout=30 --setopt=retries=5 install -y "$@"; }
+              dnf_install() {
+                timeout 240 dnf --setopt=timeout=30 --setopt=retries=5 install -y "$@" ||
+                  { stamp "dnf failed or timed out; retrying"; timeout 240 dnf --setopt=timeout=30 --setopt=retries=5 install -y "$@"; }
+              }
               dnf_install clang-21.1.8-1.module_el8.10.0+4172+b6b13d75 libomp-devel-21.1.8-1.module_el8.10.0+4172+b6b13d75 ccache
-              bash .github/scripts/build-cli.sh'
+              stamp "packages installed"
+              bash .github/scripts/build-cli.sh
+              stamp "build finished"'
           docker run --rm --network=none --cpus=2 --memory=4g \
             -v "$PWD/dist:/artifacts:ro" -v "$PWD/tests/check_cli_archive.py:/check.py:ro" \
             -v "$PWD/tests/fixtures/path5_sddm.mtx:/matrix.mtx:ro" "$IMAGE" \
