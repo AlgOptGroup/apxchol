@@ -64,7 +64,7 @@ The uncompressed binary file stores eleven typed arrays:
 
 The header identifies format version 1. Array descriptors record the element type, width, byte order, count, file offset and CRC32 checksum. Header fields use little-endian integers; array values use their recorded byte order. The header and descriptors have a separate checksum, and each array starts at a 64-byte-aligned file offset.
 
-Loading checks file lengths, dimensions, index ranges, conversion to the current build’s index widths and the factor's structure. The original operator uses Eigen’s signed 32-bit sparse indices; wider factor indices do not remove that limit. CRC checks detect accidental corruption but do not authenticate a file.
+Loading checks file lengths, dimensions, index ranges, conversion to the current build’s index widths and the factor's structure. The format stores the original operator with signed 32-bit indices; wider builds do not remove that limit. CRC checks detect accidental corruption but do not authenticate a file.
 
 Only canonical CSC is stored. Loading copies the arrays and rebuilds triangular-solve layouts and backend schedules; it does not memory-map the file. Level sets, transposed copies, GPU buffers, an active iterative solve and construction diagnostics are omitted.
 
