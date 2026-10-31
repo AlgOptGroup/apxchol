@@ -90,6 +90,7 @@
 
 #ifdef HAVE_APXCHOL_V1
 #include "apxchol/solver/solve.h"
+#include "apxchol/solver/detail/cpu_route.h"
 #include "apxchol/solver/detail/solve_backend.h"
 #include "apxchol/solver/factor_options.h"
 #include "apxchol/solver/factorization.h"
@@ -796,7 +797,7 @@ static BenchResult run_apxchol_v1(
     } else
 #endif
     {
-        apxchol::cpu_solver solver(L, opts, cp);
+        apxchol::detail::cpu_route solver(L, opts, cp);
         Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
             [&](double request, int remaining, bool warm, Eigen::VectorXd& current) {
                 solver.solve(b, res, request, remaining, warm ? &current : nullptr);

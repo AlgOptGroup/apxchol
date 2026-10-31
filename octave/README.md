@@ -84,8 +84,8 @@ restored = apxchol_solver.load('system.apxchol');
 res = restored.solve(B);  % scalar/matrix RHS and warm starts work as usual
 ```
 
-The path must be a character row vector. Saving creates a new file and rejects
-an existing destination. Loading accepts the same optional options struct as
+The path must be a character row vector. Saving replaces an existing file,
+writing to `<path>.tmp` first and renaming it into place. Loading accepts the same optional options struct as
 the constructor, including `factor_storage` and `keep_factor`; enable retention
 when loading if you want to save again. Setup defaults are unchanged.
 

@@ -45,11 +45,7 @@ gpu_round_shadow_input make_input(node_index n, const std::vector<edge>& edges) 
     return result;
 }
 
-std::uint64_t bucket(double w) {
-    if constexpr (sizeof(pool_value_t) == 4)
-        return (~std::uint64_t(std::bit_cast<std::uint32_t>(static_cast<float>(w))) & 0xffffffffULL) >> 20;
-    else return (~std::bit_cast<std::uint64_t>(w)) >> 52;
-}
+std::uint32_t bucket(double w) { return ~std::bit_cast<std::uint32_t>(static_cast<float>(w)) >> 20; }
 double draw(node_index u, node_index v, std::uint64_t seed) {
     std::uint64_t x = seed ^ (std::uint64_t(u) * 0x9E3779B97F4A7C15ULL)
                            ^ (std::uint64_t(v) * 0xBF58476D1CE4E5B9ULL);
@@ -75,8 +71,8 @@ oracle_output reference(const gpu_round_shadow_input& input, std::uint64_t seed,
     std::vector<edge> physical;
     for (const auto& e : input.incidences)
         if (e.owner < e.neighbor) physical.push_back(e);
-    std::sort(physical.begin(), physical.end(), [](const edge& a, const edge& b) {
-        return std::tie(a.owner, a.neighbor, a.weight) < std::tie(b.owner, b.neighbor, b.weight);
+    std::stable_sort(physical.begin(), physical.end(), [](const edge& a, const edge& b) {
+        return std::tie(a.owner, a.neighbor) < std::tie(b.owner, b.neighbor);
     });
     for (std::size_t i = 0; i < physical.size();) {
         const auto u = physical[i].owner, v = physical[i].neighbor;
