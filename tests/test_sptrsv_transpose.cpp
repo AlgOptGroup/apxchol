@@ -21,6 +21,8 @@
 #include "apxchol/solver/sptrsv/gpu_factor_prep.h"
 #include "apxchol/solver/sptrsv/omp.h"
 
+using csc_access = apxchol::detail::sparse_csc_access;
+
 using apxchol::edge_index;
 using apxchol::node_index;
 using apxchol::sparse_csc;
@@ -41,9 +43,9 @@ struct ref_csr {
 ref_csr reference_transpose(const sparse_csc& L) {
     const node_index m   = L.rows();
     const edge_index nnz = L.nonZeros();
-    const auto* outer = L.outerIndexPtr();
-    const auto* inner = L.innerIndexPtr();
-    const auto* vals  = L.valuePtr();
+    const auto* outer = L.col_ptrs().data();
+    const auto* inner = L.row_indices().data();
+    const auto* vals  = L.values().data();
 
     ref_csr R;
     R.row_ptr.assign(static_cast<size_t>(m) + 1, 0);
@@ -79,8 +81,8 @@ sparse_csc make_random_lower(node_index m, double avg_offdiag, unsigned seed) {
     std::poisson_distribution<int> pcount(avg_offdiag);
 
     sparse_csc L;
-    L.n_ = m;
-    L.outer_.assign(static_cast<size_t>(m) + 1, 0);
+    csc_access::n(L) = m;
+    csc_access::outer(L).assign(static_cast<size_t>(m) + 1, 0);
 
     std::vector<std::vector<node_index>> col_rows(m);
     for (node_index j = 0; j < m; ++j) {
@@ -96,14 +98,14 @@ sparse_csc make_random_lower(node_index m, double avg_offdiag, unsigned seed) {
         rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
     }
     for (node_index j = 0; j < m; ++j)
-        L.outer_[j + 1] = L.outer_[j] + static_cast<edge_index>(col_rows[j].size());
-    L.inner_.resize(static_cast<size_t>(L.outer_[m]));
-    L.vals_.resize(static_cast<size_t>(L.outer_[m]));
+        csc_access::outer(L)[j + 1] = csc_access::outer(L)[j] + static_cast<edge_index>(col_rows[j].size());
+    csc_access::inner(L).resize(static_cast<size_t>(csc_access::outer(L)[m]));
+    csc_access::vals(L).resize(static_cast<size_t>(csc_access::outer(L)[m]));
     for (node_index j = 0; j < m; ++j) {
-        edge_index out = L.outer_[j];
+        edge_index out = csc_access::outer(L)[j];
         for (node_index r : col_rows[j]) {
-            L.inner_[out] = r;
-            L.vals_[out]  = static_cast<factor_value_t>(uval(rng));
+            csc_access::inner(L)[out] = r;
+            csc_access::vals(L)[out]  = static_cast<factor_value_t>(uval(rng));
             ++out;
         }
     }

@@ -109,3 +109,7 @@ Baumann–Kyng ([2024](https://dl.acm.org/doi/10.1145/3626183.3659987)).
 
 Developed at ETH Zürich. Contact: <apxchol@inf.ethz.ch>.
 [License](LICENSE) · [Citation](CITATION.cff).
+
+## Acknowledgements
+
+Samuel Talkington contributed the Apple Metal backend and macOS support.

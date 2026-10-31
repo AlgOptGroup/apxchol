@@ -7,10 +7,12 @@
 #include "apxchol/detail/checkpoint.h"
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"
+#include "apxchol/solver/sptrsv/factor_drop.h"
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <string>
@@ -31,11 +33,12 @@ public:
         std::size_t steps_backward = 0;
         bool operator_double_float = false;  // some operator value is not fp32-exact
         std::string device;
+        factor_drop_stats drop;  // what the factor drop removed before upload
     };
 
-    /// Factorizes A on the device, or adopts F (values retained) when it is
-    /// not null. Construction options (including regularization/lumping) are
-    /// not reapplied to F. Factorization requires supported GKS options and
+    /// Factorizes A on the device, or adopts F when it is not null (exactly,
+    /// if F is an installed factor). Construction options (including
+    /// regularization/lumping) are not reapplied to F. Factorization requires supported GKS options and
     /// compressed, sorted, paired CSC input satisfying operator_class.h;
     /// numerical limits are in docs/precision.md.
     metal_route(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
@@ -55,9 +58,13 @@ public:
     /// Laplacian).
     void apply_columns(const_matrix_view R, matrix_view Z) const;
 
-    /// The factorization (values released after setup unless
-    /// solve_options::keep_factor).
+    /// Permutation, rounds and flags; L keeps only its column pointers.
     const factorization& factor() const;
+    /// The installed preconditioner (factorization.h), read from the
+    /// unified-memory triangles.
+    factorization installed_factor() const;
+    /// Entries of installed_factor().L.
+    std::uint64_t factor_nnz() const;
     factor_storage_type factor_storage() const;
     statistics stats() const;
     /// The original operator in FP64 CSC.

@@ -50,7 +50,7 @@ private:
         // the full hash and vertex id. The local-min IS prefers low-degree
         // candidates (parallel min-degree) without the overflow/collision risk
         // of packing a truncated hash into one integer. Plain hash otherwise.
-        const bool tiebreak = ctx.options.degree_tiebreak;
+        const bool tiebreak = ctx.degree_tiebreak;
         const auto degrees  = ctx.degrees;
         auto hash = [&](node_index v) -> uint64_t {
             return detail::fibonacci_vertex_hash(v, round_seed);

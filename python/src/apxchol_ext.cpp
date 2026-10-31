@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/eigen.h>
+#include <pybind11/stl.h>
 #include <pybind11/stl/filesystem.h>
 #include <Eigen/Core>
 #include <Eigen/Sparse>
@@ -13,6 +14,7 @@
 
 #include "apxchol.h"
 #include "apxchol/detail/csc_import.h"
+#include "apxchol/solver/detail/solver_route.h"
 #include "apxchol/operator_class.h"
 #include "apxchol/version.h"
 
@@ -52,10 +54,8 @@ Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
 // ── options dict -> solve_options ────────────────────────────────────────────
 // Every key the binding understands, in the order reported by the error message.
 const char* const kValidKeys[] = {
-    "backend", "num_threads", "seed", "partitioner", "keep_factor", "factor_storage_dtype",
-    "degree_quantile", "degree_multiplier", "degree_tiebreak",
-    "exact_clique_max_degree",
-    "residual_peel", "cpu_schedule", "drop_tolerance",
+    "backend", "num_threads", "seed", "partitioner", "sampler",
+    "factor_storage_dtype", "degree_quantile", "degree_multiplier", "drop_tolerance",
     "regularization", "lump_max_mass", "verbose",
 };
 
@@ -75,15 +75,6 @@ apxchol::solve_backend parse_backend(const std::string& name) {
     throw std::invalid_argument("backend must be auto, cpu or gpu");
 }
 
-apxchol::residual_peel_strategy parse_peel(const std::string& name) {
-    if (name == "natural")    return apxchol::residual_peel_strategy::natural;
-    if (name == "min_degree") return apxchol::residual_peel_strategy::min_degree;
-    if (name == "bk_serial")  return apxchol::residual_peel_strategy::bk_serial;
-    throw std::invalid_argument(
-        "unknown residual_peel '" + name +
-        "'; valid: natural, min_degree, bk_serial");
-}
-
 apxchol::solve_options parse_options(const py::dict& d) {
     apxchol::solve_options so;
     for (auto item : d) {
@@ -93,21 +84,20 @@ apxchol::solve_options parse_options(const py::dict& d) {
         // solve_options
         if      (key == "backend")           so.backend = parse_backend(v.cast<std::string>());
         else if (key == "num_threads")       so.num_threads = v.cast<int>();
-        else if (key == "keep_factor")       so.keep_factor = v.cast<bool>();
         // factor_options
         else if (key == "seed")               so.factor_opts.seed = v.cast<unsigned>();
-        else if (key == "partitioner")        so.factor_opts.is_select = v.cast<std::string>();
-        else if (key == "degree_quantile")    so.factor_opts.partition.degree_quantile = v.cast<double>();
+        else if (key == "partitioner")
+            so.factor_opts.partitioner = apxchol::detail::parse_option_name(
+                apxchol::detail::partitioner_names, v.cast<std::string>(), key);
+        else if (key == "sampler")
+            so.factor_opts.sampler = apxchol::detail::parse_option_name(
+                apxchol::detail::clique_sampler_names, v.cast<std::string>(), key);
+        else if (key == "degree_quantile") {
+            if (!v.is_none()) so.factor_opts.partition.degree_quantile = v.cast<double>();
+        }
         else if (key == "degree_multiplier")  so.factor_opts.partition.degree_multiplier = v.cast<double>();
-        else if (key == "degree_tiebreak")    so.factor_opts.partition.degree_tiebreak = v.cast<bool>();
-        else if (key == "exact_clique_max_degree")
-            so.factor_opts.exact_clique_max_degree = v.cast<std::size_t>();
-        else if (key == "residual_peel")
-            so.factor_opts.residual_peel = parse_peel(v.cast<std::string>());
         else if (key == "factor_storage_dtype")
             so.factor_opts.factor_storage = apxchol::detail::parse_factor_storage(v.cast<std::string>());
-        else if (key == "cpu_schedule")
-            so.factor_opts.cpu_schedule = apxchol::detail::parse_cpu_schedule(v.cast<std::string>());
         else if (key == "drop_tolerance")     so.factor_opts.drop_tolerance = v.cast<double>();
         else if (key == "regularization")     so.factor_opts.regularization = v.cast<double>();
         else if (key == "lump_max_mass")       so.factor_opts.lump_max_mass = v.cast<double>();
@@ -151,7 +141,6 @@ public:
     }
 
     Eigen::Index rows() const { return slv_.rows(); }
-    Eigen::Index operator_nnz() const { return slv_.operator_nnz(); }
     double setup_seconds() const { return slv_.setup_seconds(); }
     const char* backend() const {
         return slv_.backend() == apxchol::solve_backend::cpu ? "cpu" : "gpu";
@@ -190,9 +179,8 @@ public:
         return out;
     }
 
-    py::dict solve(Array b, double tol, int maxiter,
+    py::dict solve(Array b, std::optional<double> tol, std::optional<int> maxiter,
                    py::object x0, py::object out_arr) {
-        apxchol::detail::validate_solve_parameters(tol, maxiter);
         b = checked_rhs(b);
         auto output = output_array(b, out_arr);
         auto copy_alias = [&](Array input) {
@@ -257,33 +245,41 @@ public:
         return out;
     }
 
-    // nnz of the lower-triangular factor G (diagonal included). Survives
-    // release_values() — the column pointers are always retained.
+    // nnz of the installed factor G (diagonal included), without exporting it.
     std::int64_t factor_nnz() const {
-        return static_cast<std::int64_t>(factor().L.nonZeros());
+        return std::visit([](const auto& route) {
+            return static_cast<std::int64_t>(route.factor_nnz());
+        }, apxchol::detail::solver_access::route(slv_));
     }
 
-    // (indptr, indices, data) copy of the factor in PERMUTED space. Each column
-    // holds its diagonal first, then the off-diagonals in ascending row order.
+    // (indptr, indices, data) copy of the installed factor G = L S in PERMUTED
+    // space (factorization.h), exact in float64. Each column holds its
+    // diagonal first, then the off-diagonals in ascending row order.
     py::tuple factor_csc() const {
-        const apxchol::factorization& F = factor();
+        apxchol::factorization F;
+        {
+            py::gil_scoped_release release;
+            F = slv_.factor();
+        }
         const std::int64_t nnz = static_cast<std::int64_t>(F.L.nonZeros());
-        if (nnz > 0 && F.L.vals_.empty())
-            throw std::runtime_error(
-                "factor values not retained; construct with keep_factor=True");
-
         const std::int64_t ncol = static_cast<std::int64_t>(F.L.rows());
         py::array_t<std::int64_t> indptr(ncol + 1);
         py::array_t<std::int32_t> indices(nnz);
-        py::array_t<apxchol::factor_value_t> data(nnz);
+        py::array_t<double> data(nnz);
         auto* ip = indptr.mutable_data();
         auto* ii = indices.mutable_data();
         auto* dd = data.mutable_data();
+        const auto outer = F.L.col_ptrs();
+        const auto inner = F.L.row_indices();
+        const auto vals = F.L.values();
         for (std::int64_t c = 0; c <= ncol; ++c)
-            ip[c] = static_cast<std::int64_t>(F.L.outer_[static_cast<std::size_t>(c)]);
-        for (std::int64_t k = 0; k < nnz; ++k) {
-            ii[k] = static_cast<std::int32_t>(F.L.inner_[static_cast<std::size_t>(k)]);
-            dd[k] = F.L.vals_[static_cast<std::size_t>(k)];
+            ip[c] = static_cast<std::int64_t>(outer[static_cast<std::size_t>(c)]);
+        for (std::int64_t c = 0; c < ncol; ++c) {
+            const double s = F.scale.empty() ? 1.0 : F.scale[static_cast<std::size_t>(c)];
+            for (std::int64_t k = ip[c]; k < ip[c + 1]; ++k) {
+                ii[k] = static_cast<std::int32_t>(inner[static_cast<std::size_t>(k)]);
+                dd[k] = static_cast<double>(vals[static_cast<std::size_t>(k)]) * s;
+            }
         }
         return py::make_tuple(indptr, indices, data);
     }
@@ -351,8 +347,11 @@ private:
             Stride(a.strides(1) / py::ssize_t(sizeof(double)), a.strides(0) / py::ssize_t(sizeof(double))));
     }
 
+    // Permutation and flags of the route; does not export the factor.
     const apxchol::factorization& factor() const {
-        return slv_.factor();
+        return std::visit([](const auto& route) -> const apxchol::factorization& {
+            return route.factor();
+        }, apxchol::detail::solver_access::route(slv_));
     }
 
     apxchol::solver slv_;
@@ -398,7 +397,6 @@ PYBIND11_MODULE(_apxchol, m) {
              py::arg("x0") = py::none(), py::arg("out") = py::none())
         .def("apply", &Solver::apply, py::arg("r"))
         .def("rows", &Solver::rows)
-        .def("operator_nnz", &Solver::operator_nnz)
         .def("setup_seconds", &Solver::setup_seconds)
         .def("backend", &Solver::backend)
         .def("sddm", &Solver::sddm)
