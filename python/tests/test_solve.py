@@ -113,6 +113,63 @@ def test_factor_reused_across_many_b():
         assert res.residual <= 1e-8
 
 
+def test_overlapping_calls_on_one_solver_raise():
+    import threading
+    L = grid2d_laplacian(150)
+    solver = apxchol.factorize(L, backend="cpu", num_threads=1)
+    b = np.sin(np.arange(L.shape[0]))
+    b -= b.mean()
+    expected = solver.solve(b).x
+    errors = []
+    done = threading.Event()
+
+    def work():
+        while not done.is_set():
+            try:
+                np.testing.assert_array_equal(solver.solve(b).x, expected)
+            except RuntimeError as error:
+                errors.append(str(error))
+                done.set()
+
+    threads = [threading.Thread(target=work) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    done.wait(timeout=60)
+    done.set()
+    for thread in threads:
+        thread.join()
+    assert errors
+    assert "already in use by another thread" in errors[0]
+
+
+def test_copies_share_the_factor_and_solve_in_parallel():
+    import copy
+    from concurrent.futures import ThreadPoolExecutor
+    L = grid2d_laplacian(60)
+    solver = apxchol.factorize(L, backend="cpu", num_threads=1)
+    rhs = [np.sin(np.arange(L.shape[0]) * (k + 1)) for k in range(4)]
+    rhs = [b - b.mean() for b in rhs]
+    batch = np.column_stack(rhs[:2])
+    expected = [(solver.solve(b).x, solver.apply(b)) for b in rhs]
+    expected_batch = solver.solve(batch).x
+    copies = [copy.copy(solver) for _ in rhs]
+    assert all(type(c) is apxchol.Solver and c is not solver for c in copies)
+    assert all(c.shape == solver.shape and c.backend == "cpu" for c in copies)
+
+    def work(k):
+        own = copies[k]
+        return own.solve(rhs[k]).x, own.apply(rhs[k]), own.solve(batch).x
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for _ in range(3):
+            for k, (x, z, xb) in enumerate(pool.map(work, range(4))):
+                np.testing.assert_array_equal(x, expected[k][0])
+                np.testing.assert_array_equal(z, expected[k][1])
+                np.testing.assert_array_equal(xb, expected_batch)
+    del solver
+    np.testing.assert_array_equal(copies[0].solve(rhs[0]).x, expected[0][0])
+
+
 def test_aslinearoperator_helps_scipy_cg():
     L = grid2d_laplacian(40)
     rng = np.random.default_rng(5)
@@ -379,13 +436,11 @@ def test_as_operator_converts_a_boolean_pattern():
     assert abs(apxchol.as_operator(A.astype(bool)) - degree_minus(A)).max() == 0.0
 
 
-def test_as_operator_raises_for_mixed_signs():
+def test_as_operator_leaves_negative_off_diagonals_to_the_solver():
     M = sp.csc_matrix(np.array([[0.0, 1.0, 0.0], [1.0, 0.0, -1.0], [0.0, -1.0, 0.0]]))
-    with pytest.raises(ValueError, match="not a graph adjacency matrix either"):
-        apxchol.as_operator(M)
-    negative = sp.csc_matrix(np.array([[0.0, -2.0], [-2.0, 0.0]]))
+    assert apxchol.as_operator(M) is M
     with pytest.raises(ValueError, match="Condition FAILED: positive diagonal"):
-        apxchol.as_operator(negative)
+        apxchol.factorize(apxchol.as_operator(M))
 
 
 def test_as_operator_keeps_isolated_vertices_as_zero_rows():
@@ -444,6 +499,10 @@ def test_as_operator_rejects_bad_input():
         apxchol.as_operator(sp.csc_matrix(np.ones((3, 4))))   # non-square
     with pytest.raises(ValueError):
         apxchol.as_operator(sp.csc_matrix(np.eye(3) * 1j))    # complex
+    with pytest.raises(ValueError, match="transpose partner"):
+        apxchol.as_operator(sp.csc_matrix(np.triu(np.ones((3, 3)), 1)))
+    with pytest.raises(ValueError, match="NaN or infinite"):
+        apxchol.as_operator(sp.csc_matrix([[0.0, np.nan], [np.nan, 0.0]]))
 
 
 def csc_with_duplicates(A):
@@ -819,3 +878,18 @@ def test_archive_restores_scipy_helpers(tmp_path):
     result = restored.solve(rhs)
     assert result.converged
     assert np.linalg.norm(A @ result.x - rhs) / np.linalg.norm(rhs) <= 1e-8
+
+
+def test_copy_keeps_subclass_attributes():
+    import copy
+
+    class Tagged(apxchol.Solver):
+        pass
+
+    L = grid2d_laplacian(8)
+    solver = Tagged(L, backend="cpu")
+    solver.tag = "kept"
+    clone = copy.copy(solver)
+    assert type(clone) is Tagged and clone.tag == "kept"
+    b = np.sin(np.arange(L.shape[0])); b -= b.mean()
+    np.testing.assert_array_equal(clone.solve(b).x, solver.solve(b).x)
