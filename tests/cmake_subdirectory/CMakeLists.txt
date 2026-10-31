@@ -36,10 +36,30 @@ if (NOT APXCHOL_BUILD_TESTS AND TARGET apxchol_mtx_input)
     message(FATAL_ERROR "Library-only embedding built the CLI input helper")
 endif()
 
+# apxchol's architecture flag must not reach consumers; only the Eigen
+# alignment it implies does.
+foreach (_target apxchol::core apxchol_mtx_input)
+    if (TARGET ${_target})
+        get_target_property(_options ${_target} INTERFACE_COMPILE_OPTIONS)
+        if (_options MATCHES "-m(arch|cpu)=")
+            message(FATAL_ERROR "${_target} exports an architecture flag: ${_options}")
+        endif()
+    endif()
+endforeach()
+if (CMAKE_CXX_FLAGS MATCHES "-m(arch|cpu)=")
+    get_target_property(_options apxchol_core COMPILE_OPTIONS)
+    if (_options MATCHES "-m(arch|cpu)=")
+        message(FATAL_ERROR "apxchol added an architecture flag to the parent's: ${_options}")
+    endif()
+endif()
+
 # Reuse the existing real consumer's alignment and original-residual checks.
 target_sources(apxchol_core PRIVATE ../cmake_consumer/core_alignment.cpp)
 add_executable(apxchol_subdirectory_consumer ../cmake_consumer/consumer.cpp)
 target_link_libraries(apxchol_subdirectory_consumer PRIVATE apxchol::core)
+# A consumer may target a wider instruction set than the core, e.g. -mavx2.
+set(APXCHOL_TEST_CONSUMER_FLAGS "" CACHE STRING "Extra compile flags for the consumer only")
+target_compile_options(apxchol_subdirectory_consumer PRIVATE ${APXCHOL_TEST_CONSUMER_FLAGS})
 add_test(NAME cmake_subdirectory_consumer COMMAND apxchol_subdirectory_consumer)
 set_tests_properties(cmake_subdirectory_consumer PROPERTIES
     TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=2")

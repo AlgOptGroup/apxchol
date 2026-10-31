@@ -3,7 +3,20 @@ include(GNUInstallDirs)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_version.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_device.cmake)
 
-option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)" ON)
+# Native tuning defaults ON only when apxchol itself is the top-level project:
+# the root, local Python and benchmark builds. Embedding and the SDK stay portable.
+get_filename_component(_apxchol_root "${CMAKE_CURRENT_LIST_DIR}/.." REALPATH)
+get_filename_component(_apxchol_top "${CMAKE_SOURCE_DIR}" REALPATH)
+set(_apxchol_native_default OFF)
+if (_apxchol_top STREQUAL _apxchol_root OR _apxchol_top STREQUAL "${_apxchol_root}/python"
+    OR _apxchol_top STREQUAL "${_apxchol_root}/benchmarks")
+    set(_apxchol_native_default ON)
+endif()
+option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)"
+       ${_apxchol_native_default})
+unset(_apxchol_root)
+unset(_apxchol_top)
+unset(_apxchol_native_default)
 if (DEFINED APXCHOL_64BIT_EDGE_INDICES OR DEFINED APXCHOL_64BIT_NODE_INDICES)
     message(FATAL_ERROR "Use APXCHOL_INDEX_WIDTH=32|64_EDGES|64; remove the old APXCHOL_64BIT_*_INDICES entries from your CMake cache")
 endif()
@@ -13,9 +26,10 @@ if (NOT APXCHOL_INDEX_WIDTH MATCHES "^(32|64_EDGES|64)$")
     message(FATAL_ERROR "APXCHOL_INDEX_WIDTH must be 32, 64_EDGES or 64")
 endif()
 
-include(${CMAKE_CURRENT_LIST_DIR}/apxchol_arch.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_eigen.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/apxchol_arch.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_openmp.cmake)
+
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_archive.cmake)
 
 if (APXCHOL_DEVICE STREQUAL "METAL")
@@ -45,8 +59,10 @@ function(_apxchol_configure_core target)
     target_compile_options(${target} PRIVATE
         -Wall -Wextra "$<$<COMPILE_LANGUAGE:C,CXX,OBJCXX>:-Wpedantic>")
     if (_APXCHOL_ARCH_FLAG)
-        target_compile_options(${target} PUBLIC "${_APXCHOL_ARCH_FLAG}")
+        target_compile_options(${target} PRIVATE "${_APXCHOL_ARCH_FLAG}")
     endif()
+    target_compile_definitions(${target} PUBLIC
+        EIGEN_MAX_ALIGN_BYTES=${_APXCHOL_EIGEN_ALIGN_BYTES} EIGEN_MALLOC_ALREADY_ALIGNED=0)
 
     set(APXCHOL_GIT_SHA "unknown")
     execute_process(COMMAND git -C "${root}" rev-parse --show-toplevel

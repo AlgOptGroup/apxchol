@@ -61,6 +61,11 @@ if (APXCHOL_DEVICE STREQUAL "CUDA")
 else()
     target_link_libraries(unit_tests PRIVATE apxchol_core)
 endif()
+# The tests are built like the core: a wider default instruction set would
+# compile Eigen with AVX and trip GCC 14's false -Warray-bounds reports.
+if (_APXCHOL_ARCH_FLAG)
+    target_compile_options(unit_tests PRIVATE "${_APXCHOL_ARCH_FLAG}")
+endif()
 target_link_libraries(unit_tests PRIVATE
         apxchol_mtx_input
         GTest::gtest_main

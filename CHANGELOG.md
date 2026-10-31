@@ -27,6 +27,7 @@
 - Breaking: removed from Python: `apxchol.solver`, `Solver.aspreconditioner` (use `aslinearoperator`), the `storage` and `stagnation_window` options, and the `luby` and `rootset` partitioners.
 - Breaking: Python 3.10 is no longer supported.
 - Breaking: removed CLI flags `--stagnation-window`, `--graph-storage`, `--fs-compact` and `--fs-filter-append`.
+- `apxchol::core` no longer passes its `-march` flag to consumers, and a `-march`/`-mcpu` already in `CMAKE_CXX_FLAGS` or `CMAKE_CXX_FLAGS_<CONFIG>` replaces apxchol's own. Consumers get `EIGEN_MAX_ALIGN_BYTES` and `EIGEN_MALLOC_ALREADY_ALIGNED=0` instead, so Eigen objects cross the library boundary safely whichever instruction set each side targets. Projects that embed apxchol by including `cmake/apxchol_core.cmake` now default to portable code, like `add_subdirectory` embedding; standalone root, Python and benchmark builds stay native.
 - Breaking: `solve_result::solve_vram_mb` is removed. It reported device-wide memory in use, including other processes, so it did not measure the solve.
 - Breaking: C++ `solve()` takes `std::optional` tolerance and iteration budget; `std::nullopt` selects the solver's defaults, and a negative value now throws `std::invalid_argument` instead of selecting them.
 - Breaking: `apxchol::cpu_solver` is removed; use `apxchol::solver` with `solve_backend::cpu`.
