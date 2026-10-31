@@ -5,12 +5,14 @@
 
 static_assert(__cplusplus > 202002L, "apxchol must propagate C++23");
 int apxchol_consumer_core_alignment();
+Eigen::VectorXd apxchol_consumer_core_vector(Eigen::Index n);
 
 int main() {
     if (apxchol_consumer_core_alignment() != EIGEN_DEFAULT_ALIGN_BYTES) {
         std::cerr << "core and consumer Eigen alignment differ\n";
         return 1;
     }
+    if (apxchol_consumer_core_vector(1000).sum() != 1000) return 1;
     for (int n : {17, 33, 65}) {
         Eigen::SparseMatrix<double> matrix(n, n);
         std::vector<Eigen::Triplet<double>> entries;

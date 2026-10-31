@@ -36,6 +36,19 @@ if (NOT APXCHOL_BUILD_TESTS AND TARGET apxchol_mtx_input)
     message(FATAL_ERROR "Library-only embedding built the CLI input helper")
 endif()
 
+# apxchol's architecture flag must not reach consumers; only the Eigen
+# alignment it implies does.
+get_target_property(_options apxchol::core INTERFACE_COMPILE_OPTIONS)
+if (_options MATCHES "-m(arch|cpu)=")
+    message(FATAL_ERROR "apxchol::core exports an architecture flag: ${_options}")
+endif()
+if (CMAKE_CXX_FLAGS MATCHES "-m(arch|cpu)=")
+    get_target_property(_options apxchol_core COMPILE_OPTIONS)
+    if (_options MATCHES "-m(arch|cpu)=")
+        message(FATAL_ERROR "apxchol added an architecture flag to the parent's: ${_options}")
+    endif()
+endif()
+
 # Reuse the existing real consumer's alignment and original-residual checks.
 target_sources(apxchol_core PRIVATE ../cmake_consumer/core_alignment.cpp)
 add_executable(apxchol_subdirectory_consumer ../cmake_consumer/consumer.cpp)

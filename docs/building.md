@@ -82,8 +82,12 @@ target_link_libraries(my_program PRIVATE apxchol::core)
 
 This builds just the library and enables any GPU language in the consuming
 project's scope. Set `APXCHOL_DEVICE` when configuring the consuming project.
-For distribution, set `APXCHOL_NATIVE_ARCH=OFF`; CUDA consumers must also
-choose `CMAKE_CUDA_ARCHITECTURES` instead of its `native` default.
+This builds portable code by default; CUDA consumers must also choose
+`CMAKE_CUDA_ARCHITECTURES` for distribution instead of its `native` default.
+The core keeps its `-march` flag private. A `-march` or `-mcpu` in
+`CMAKE_CXX_FLAGS` replaces apxchol's own. When the core's flag raises Eigen's
+alignment above 16 bytes, `apxchol::core` exports `EIGEN_MAX_ALIGN_BYTES` so
+consumers allocate and free Eigen objects the same way.
 
 Alternatively, embed the repository root directly:
 
@@ -141,7 +145,7 @@ backend selection and factor storage are runtime settings; see the
 | Option | Default | Meaning |
 |---|---|---|
 | `APXCHOL_DEVICE` | `CPU` | `CPU` only, or CPU plus `CUDA` / `METAL` |
-| `APXCHOL_NATIVE_ARCH` | ON for standalone root/helper/local Python; OFF for root embedding/SDK/wheels | Tune for the build machine; turn OFF for distribution |
+| `APXCHOL_NATIVE_ARCH` | ON for standalone root, local Python and benchmarks; OFF for embedding, the SDK and wheels | Tune for the build machine; turn OFF for distribution. Ignored when `CMAKE_CXX_FLAGS` sets `-march`/`-mcpu` |
 | `APXCHOL_POOL_FP32` | ON | Store mutable graph weights in FP32; OFF uses FP64 |
 | `APXCHOL_INDEX_WIDTH` | `32` | `32`, `64_EDGES` or `64`; see layouts below |
 | `APXCHOL_BUILD_CLI` | ON standalone; OFF when embedded | Build the CLI and its input/logging dependencies |

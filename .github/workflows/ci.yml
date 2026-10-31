@@ -152,6 +152,13 @@ jobs:
                 -DAPXCHOL_BUILD_TESTS=ON -DAPXCHOL_BUILD_CLI=OFF
           cmake --build build-subdirectory-tests --parallel 2
           ctest --test-dir build-subdirectory-tests --no-tests=error --output-on-failure
+          cmake -S tests/cmake_subdirectory -B build-subdirectory-march -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
+                -DCMAKE_CXX_FLAGS=-march=x86-64-v3 | tee subdirectory-march.log
+          grep -q "using the -march/-mcpu flag from CMAKE_CXX_FLAGS" subdirectory-march.log
+          grep -q "exporting EIGEN_MAX_ALIGN_BYTES=32" subdirectory-march.log
+          cmake --build build-subdirectory-march --parallel 2
+          ctest --test-dir build-subdirectory-march --no-tests=error --output-on-failure
       - name: Test relocated SDK with fetched Eigen
         if: matrix.cxx == 'clang++-18'
         run: |
