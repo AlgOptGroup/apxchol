@@ -76,7 +76,7 @@ struct batch_solve_result {
 /// Owns its input data. solve() and apply() use this object's workspace, so
 /// they are non-const. Concurrent non-const calls on one object are not allowed:
 /// use a copy per thread, or batch the right-hand sides
-/// (docs/usage.md#thread-safety). An overlapping call throws.
+/// (see "Thread safety" in docs/usage.md). An overlapping call throws.
 /// Copies share the factor and operator, on CUDA in device memory; Metal
 /// solvers cannot be copied.
 /// Every solve verifies the returned residual against the original operator/RHS.
