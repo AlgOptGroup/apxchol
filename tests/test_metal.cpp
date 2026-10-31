@@ -1191,8 +1191,8 @@ TEST_F(MetalDevice, ResidentDropToleranceMatchesHostReference) {
                 const auto m = static_cast<node_index>(A.rows() - (laplacian ? 1 : 0));
                 std::uint64_t factored = 0;
                 for (node_index j = 0; j < m; ++j)
-                    for (auto p = L.outer_[j]; p < L.outer_[j + 1]; ++p)
-                        factored += L.inner_[p] < m;
+                    for (auto p = L.col_ptrs()[j]; p < L.col_ptrs()[j + 1]; ++p)
+                        factored += L.row_indices()[p] < m;
                 const auto st = metal(solver).stats().drop;
                 EXPECT_EQ(st.rel, drop);
                 EXPECT_EQ(st.nnz_factor, factored);
