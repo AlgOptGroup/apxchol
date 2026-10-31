@@ -15,6 +15,7 @@
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <typeinfo>
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <Eigen/IterativeLinearSolvers>
@@ -36,10 +37,14 @@
 
 using csc_access = apxchol::detail::sparse_csc_access;
 
+static apxchol::partition_graph partition_view(apxchol::detail::graph& graph) {
+    return apxchol::detail::partition_graph_access::view(graph);
+}
+
 // ── Helpers ──────────────────────────────────────────
 
 static apxchol::factorization factorize_controlled(
-        apxchol::graph graph, const apxchol::factor_options& options,
+        apxchol::detail::graph graph, const apxchol::factor_options& options,
         const apxchol::detail::factorization_controls& controls,
         apxchol::detail::checkpoint* checkpoint = nullptr) {
     apxchol::detail::block_greedy_partitioner partitioner;
@@ -69,7 +74,7 @@ TEST(SetupDiagnostics, EndpointRadixSortMatchesComparisonSort) {
 }
 
 TEST(EliminationDedup, PooledLocalHashPreservesOrderSumsAndEpochReuse) {
-    apxchol::graph graph(12);
+    apxchol::detail::graph graph(12);
     graph.add_edge(0, 1, 2.0);
     graph.add_edge(0, 9, 4.0);  // 1 and 9 collide modulo the 8-slot table.
     graph.add_edge(0, 1, 3.0);
@@ -79,7 +84,7 @@ TEST(EliminationDedup, PooledLocalHashPreservesOrderSumsAndEpochReuse) {
     scratch.factor_entries =
         std::make_unique<std::pmr::monotonic_buffer_resource>();
     apxchol::detail::factor_col first;
-    apxchol::detail::process_vertex(apxchol::tree_elimination{}, graph, 0, 42,
+    apxchol::detail::process_vertex(apxchol::detail::tree_elimination{}, graph, 0, 42,
                                      first, scratch);
 
     ASSERT_EQ(first.entry_count, 3u);
@@ -94,7 +99,7 @@ TEST(EliminationDedup, PooledLocalHashPreservesOrderSumsAndEpochReuse) {
                     static_cast<float>(5.0 / std::sqrt(14.0)));
 
     apxchol::detail::factor_col second;
-    apxchol::detail::process_vertex(apxchol::tree_elimination{}, graph, 0, 42,
+    apxchol::detail::process_vertex(apxchol::detail::tree_elimination{}, graph, 0, 42,
                                      second, scratch);
     ASSERT_EQ(second.entry_count, first.entry_count);
     for (std::size_t i = 0; i < first.entry_count; ++i) {
@@ -141,39 +146,39 @@ static double factor_diag(const apxchol::sparse_csc& L, int i) {
 }
 
 static Eigen::SparseMatrix<double> path_laplacian(int n) {
-    apxchol::graph G(n);
+    apxchol::detail::graph G(n);
     for (int i = 0; i + 1 < n; ++i)
         G.add_edge(i, i + 1, 1.0);
-    return apxchol::laplacian(G);
+    return apxchol::detail::laplacian(G);
 }
 
 using apxchol::test::grid_laplacian;
 
 static Eigen::SparseMatrix<double> star_laplacian(int n) {
-    apxchol::graph G(n);
+    apxchol::detail::graph G(n);
     for (int i = 1; i < n; ++i)
         G.add_edge(0, i, 1.0);
-    return apxchol::laplacian(G);
+    return apxchol::detail::laplacian(G);
 }
 
 static Eigen::SparseMatrix<double> cycle_laplacian(int n) {
-    apxchol::graph G(n);
+    apxchol::detail::graph G(n);
     for (int i = 0; i < n; ++i)
         G.add_edge(i, (i + 1) % n, 1.0);
-    return apxchol::laplacian(G);
+    return apxchol::detail::laplacian(G);
 }
 
 static Eigen::SparseMatrix<double> weighted_grid_laplacian(int rows, int cols,
                                                            double w_horiz,
                                                            double w_vert) {
-    apxchol::graph G(rows * cols);
+    apxchol::detail::graph G(rows * cols);
     auto id = [cols](int r, int c) { return r * cols + c; };
     for (int r = 0; r < rows; ++r)
         for (int c = 0; c < cols; ++c) {
             if (r + 1 < rows) G.add_edge(id(r, c), id(r + 1, c), w_vert);
             if (c + 1 < cols) G.add_edge(id(r, c), id(r, c + 1), w_horiz);
         }
-    return apxchol::laplacian(G);
+    return apxchol::detail::laplacian(G);
 }
 
 TEST(PartitionerHelpers, ParallelDegreeQuantileMatchesNthElementExactly) {
@@ -365,11 +370,11 @@ void expect_same_factor(const apxchol::factorization& a,
 
 template<class Partitioner>
 void expect_same_graph_selection(
-        const apxchol::graph& snapshot,
+        const apxchol::detail::graph& snapshot,
         const std::vector<apxchol::node_index>& candidates,
         const apxchol::partition_context& context,
         const Partitioner& initial) {
-    SCOPED_TRACE(Partitioner::name);
+    SCOPED_TRACE(typeid(Partitioner).name());
     std::vector<apxchol::node_index> reference;
     for (int repeat = 0; repeat < 4; ++repeat) {
         // Copy graph AND selector state: pruning and BK's round/degree estimate
@@ -378,7 +383,7 @@ void expect_same_graph_selection(
         auto partitioner = initial;
         apxchol::selection selected;
         apxchol::detail::selection_access::reset(selected, graph.n());
-        partitioner.find_partition(graph, candidates, context, selected);
+        partitioner.find_partition(partition_view(graph), candidates, context, selected);
         const auto result = apxchol::detail::selection_access::finalize(selected).data;
         ASSERT_FALSE(result.empty());
         if (repeat == 0) reference = result;
@@ -411,8 +416,8 @@ struct throwing_eliminator {
     }
 };
 
-apxchol::graph failure_test_graph() {
-    apxchol::graph graph(16);
+apxchol::detail::graph failure_test_graph() {
+    apxchol::detail::graph graph(16);
     for (apxchol::node_index i = 0; i + 1 < graph.n(); ++i)
         graph.add_edge(i, i + 1, 1.0);
     return graph;
@@ -424,7 +429,7 @@ TEST_F(FactorizeTest, ParallelEliminatorFailureReachesCaller) {
     apxchol::factor_options options;
     options.experimental.omp_threshold = 0;
     options.experimental.parallel_residual_threshold = 0;
-    EXPECT_THROW(apxchol::factorize(apxchol::laplacian(failure_test_graph()), throwing_eliminator{},
+    EXPECT_THROW(apxchol::factorize(apxchol::detail::laplacian(failure_test_graph()), throwing_eliminator{},
                                     options),
                  eliminator_failure);
 }
@@ -493,7 +498,7 @@ TEST(VecPoolAos, ReserveAccommodatesALargerTeamThanGraphConstruction) {
 
 TEST(VecPoolAos, ReducedEliminationTeamIgnoresInactiveWorkerScratch) {
     const scoped_threads team(4);
-    apxchol::graph graph(6);
+    apxchol::detail::graph graph(6);
     for (apxchol::node_index v = 0; v < 4; ++v) {
         graph.add_edge(v, 4, 1.0);
         graph.add_edge(v, 5, 1.0);
@@ -513,7 +518,7 @@ TEST(VecPoolAos, ReducedEliminationTeamIgnoresInactiveWorkerScratch) {
     const int previous_levels = omp_get_max_active_levels();
     omp_set_max_active_levels(0);
     EXPECT_NO_THROW(apxchol::detail::eliminate_partition_singleton(
-        apxchol::tree_elimination{}, graph, part, columns, workspace, options));
+        apxchol::detail::tree_elimination{}, graph, part, columns, workspace, options));
     omp_set_max_active_levels(previous_levels);
     EXPECT_EQ(columns.size(), 4u);
     EXPECT_EQ(workspace.touched_concat, (std::vector<apxchol::node_index>{4, 5}));
@@ -711,7 +716,7 @@ TEST(VecPoolAos, AutoIncrementalDegreesPreserveTheFactorByteForByte) {
     using degree_cache = apxchol::detail::factorization_controls::degree_cache;
     std::vector<double> baseline_degrees;
     auto run = [&](degree_cache mode, std::vector<double>* degrees = nullptr) {
-        return factorize_controlled(apxchol::make_graph(L), opts,
+        return factorize_controlled(apxchol::detail::make_graph(L), opts,
                                     {.incremental_degrees = mode,
                                      .round_average_degrees = degrees});
     };
@@ -759,7 +764,7 @@ TEST(VecPoolAos, IncrementalDegreeCacheDoesNotLeakIntoBkResidualLoop) {
     using degree_cache = apxchol::detail::factorization_controls::degree_cache;
     std::vector<double> baseline_degrees;
     auto run = [&](degree_cache mode, std::vector<double>* degrees = nullptr) {
-        return factorize_controlled(apxchol::make_graph(L), opts,
+        return factorize_controlled(apxchol::detail::make_graph(L), opts,
                                     {.incremental_degrees = mode,
                                      .round_average_degrees = degrees});
     };
@@ -780,7 +785,7 @@ TEST(VecPoolAos, IncrementalDegreeCacheDoesNotLeakIntoBkResidualLoop) {
 
 TEST(PruneAndDegrees, SkipAboveReportsTheRawCountAndLeavesTheVertexUnwalked) {
     // Hub 0 with eight neighbours, three of them already eliminated.
-    apxchol::graph graph(10);
+    apxchol::detail::graph graph(10);
     for (apxchol::node_index v = 1; v <= 8; ++v) graph.add_edge(0, v, 1.0);
     graph.add_edge(8, 9, 1.0);
     for (apxchol::node_index v : {1u, 2u, 3u}) graph.deactivate(v);
@@ -814,7 +819,7 @@ TEST(PruneAndDegrees, AuditCountsTheEligibleVerticesASkipWouldHide) {
     // Hub 0 has eight raw entries but only two live neighbours left: a skip
     // at cutoff 4 would keep it away from a selector whose threshold is 3.
     // Hub 9 has six raw entries, all live: above the cutoff, rightly skipped.
-    apxchol::graph graph(16);
+    apxchol::detail::graph graph(16);
     for (apxchol::node_index v = 1; v <= 8; ++v) graph.add_edge(0, v, 1.0);
     for (apxchol::node_index v = 10; v <= 15; ++v) graph.add_edge(9, v, 1.0);
     for (apxchol::node_index v = 1; v <= 6; ++v) graph.deactivate(v);
@@ -870,7 +875,7 @@ TEST(PruneSkip, HubGridSolvesAtEveryFactorIncludingTheAggressiveOne) {
     opts.tol = 1e-8; opts.max_iter = 500; opts.factor_opts.seed = 7;
     opts.factor_opts.experimental.omp_threshold = 16;
     auto run = [&](double skip_factor) {
-        auto factor = factorize_controlled(apxchol::make_graph(A), opts.factor_opts,
+        auto factor = factorize_controlled(apxchol::detail::make_graph(A), opts.factor_opts,
                                            {.prune_skip_factor = skip_factor});
         apxchol::solver solver(A, std::move(factor), opts);
         return solver.solve(b);
@@ -890,7 +895,7 @@ TEST(PruneSkip, HubGridSolvesAtEveryFactorIncludingTheAggressiveOne) {
     // larger than the exact one.
     auto round_degrees = [&](double skip_factor) {
         std::vector<double> avg;
-        factorize_controlled(apxchol::make_graph(A), opts.factor_opts,
+        factorize_controlled(apxchol::detail::make_graph(A), opts.factor_opts,
                              {.prune_skip_factor = skip_factor, .round_average_degrees = &avg});
         return avg;
     };
@@ -912,7 +917,7 @@ TEST(FactorizeDeterminism, SameGraphParallelSelectionIsExact) {
     actual_threads = omp_get_num_threads();
     ASSERT_EQ(actual_threads, 16);
     constexpr apxchol::node_index n = 1024, block = n / 16;
-    apxchol::graph initial(n);
+    apxchol::detail::graph initial(n);
     for (apxchol::node_index v = 0; v < n; ++v) {
         initial.add_edge(v, (v + 1) % n, 1.0);
         // Chains cross every worker's block, exercising snapshot-based
@@ -1537,12 +1542,12 @@ TEST(ResidualSparsifyGate, UsesObservedTrafficAndHandoffYield) {
 TEST(ResidualSparsifyGate, DuplicateHeavyIndexedGraphConvergesWithEitherSetting) {
     const scoped_threads team(4);
     constexpr apxchol::node_index n = 96;
-    apxchol::graph graph(n);
+    apxchol::detail::graph graph(n);
     for (apxchol::node_index u = 0; u < n; ++u)
         for (apxchol::node_index v = u + 1; v < n; ++v)
             for (int duplicate = 0; duplicate < 4; ++duplicate)
                 graph.add_edge(u, v, 0.25 * (1 + (u + v + duplicate) % 7));
-    const auto L = apxchol::laplacian(graph);
+    const auto L = apxchol::detail::laplacian(graph);
     const auto b = apxchol::test::random_rhs(n);
     apxchol::factor_options options;
     options.experimental.parallel_residual_threshold = 5;
@@ -1676,12 +1681,12 @@ TEST(BaumannKyngSeeding, Round0UsesTheSeedInsteadOfTwoMOverActive) {
     std::iota(active.begin(), active.end(), apxchol::node_index{0});
 
     auto is_size = [&](double seed) {
-        auto G = apxchol::make_graph(L);
+        auto G = apxchol::detail::make_graph(L);
         apxchol::detail::baumann_kyng_partitioner bk;
         bk.est_avg_degree = seed;                   // 0 = "work it out yourself"
         apxchol::selection sel;
         apxchol::detail::selection_access::reset(sel, G.n());
-        bk.find_partition(G, std::span<const apxchol::node_index>(active),
+        bk.find_partition(partition_view(G), std::span<const apxchol::node_index>(active),
                           ctx, sel);
         return apxchol::detail::selection_access::finalize(sel).data.size();
     };
@@ -1698,7 +1703,7 @@ TEST(BaumannKyngSeeding, Round0UsesTheSeedInsteadOfTwoMOverActive) {
 
 TEST(BaumannKyngWorkHint, MatchesSelectedLiveDegreeSum) {
     const auto L = grid_laplacian(30, 30);
-    auto G = apxchol::make_graph(L);
+    auto G = apxchol::detail::make_graph(L);
     std::vector<apxchol::node_index> active(900);
     std::iota(active.begin(), active.end(), apxchol::node_index{0});
     apxchol::partition_context ctx{
@@ -1712,7 +1717,7 @@ TEST(BaumannKyngWorkHint, MatchesSelectedLiveDegreeSum) {
     bk.est_avg_degree = 4.0;
     apxchol::selection selected;
     apxchol::detail::selection_access::reset(selected, G.n());
-    bk.find_partition(G, active, ctx, selected);
+    bk.find_partition(partition_view(G), active, ctx, selected);
     const auto& part = apxchol::detail::selection_access::finalize(selected);
 
     size_t expected = 0;
@@ -1721,7 +1726,8 @@ TEST(BaumannKyngWorkHint, MatchesSelectedLiveDegreeSum) {
     EXPECT_EQ(bk.selected_degree_work(), expected);
 
     apxchol::detail::selection_access::reset(selected, G.n());
-    bk.find_partition(G, std::span<const apxchol::node_index>{}, ctx, selected);
+    bk.find_partition(partition_view(G), std::span<const apxchol::node_index>{},
+                      ctx, selected);
     EXPECT_EQ(bk.selected_degree_work(), 0u);
 }
 
@@ -1734,7 +1740,7 @@ TEST(EliminationTeamSizing, DenseSmallRoundsUseFineSchedulingChunks) {
 TEST(PriorityGreedy, SerialFallbackPreservesExactSelectedSetAndMaximality) {
     const scoped_threads team(4);
     constexpr apxchol::node_index n = 80;
-    apxchol::graph G(n);
+    apxchol::detail::graph G(n);
     for (apxchol::node_index v = 0; v < n; ++v) {
         G.add_edge(v, (v + 1) % n, 1.0);
         G.add_edge(v, (v + 7) % n, 1.0);
@@ -1752,7 +1758,7 @@ TEST(PriorityGreedy, SerialFallbackPreservesExactSelectedSetAndMaximality) {
         p.parallel_passes = passes;
         apxchol::selection selected;
         apxchol::detail::selection_access::reset(selected, n);
-        p.find_partition(G, candidates, ctx, selected);
+        p.find_partition(partition_view(G), candidates, ctx, selected);
         return apxchol::detail::selection_access::finalize(selected).data;
     };
 
@@ -1785,7 +1791,7 @@ TEST(PriorityGreedy, ParallelPicksExcludeSharedNeighborsAndResetScratch) {
     ASSERT_GT(actual_threads, 1) << "shared-neighbor coverage requires a parallel team";
     constexpr apxchol::node_index leaves = 128;
     constexpr apxchol::node_index n = leaves + 2;
-    apxchol::graph G(n);
+    apxchol::detail::graph G(n);
     for (apxchol::node_index v = 0; v < leaves; ++v) {
         G.add_edge(v, leaves, 1.0);
         G.add_edge(v, leaves + 1, 1.0);
@@ -1807,13 +1813,13 @@ TEST(PriorityGreedy, ParallelPicksExcludeSharedNeighborsAndResetScratch) {
     for (int repetition = 0; repetition < 8; ++repetition) {
         // Every leaf wins in the same pass; all workers exclude the same hubs.
         apxchol::detail::selection_access::reset(selected, n);
-        p.find_partition(G, candidates, ctx, selected);
+        p.find_partition(partition_view(G), candidates, ctx, selected);
         EXPECT_EQ(apxchol::detail::selection_access::finalize(selected).data, expected);
 
         // Reuse the same scratch with only the previously excluded hubs eligible.
         apxchol::detail::selection_access::reset(selected, n);
         const auto hubs = std::span<const apxchol::node_index>(candidates).subspan(leaves);
-        p.find_partition(G, hubs, ctx, selected);
+        p.find_partition(partition_view(G), hubs, ctx, selected);
         EXPECT_EQ(apxchol::detail::selection_access::finalize(selected).data,
                   (std::vector<apxchol::node_index>{leaves, leaves + 1}));
     }
@@ -2005,7 +2011,7 @@ static void check_owned_bounded_selection(
         const apxchol::partition_options& options, std::uint64_t seed,
         std::uint64_t phase, const std::string& receipt_name,
         bool require_unfinished = false) {
-    apxchol::graph graph(n);
+    apxchol::detail::graph graph(n);
     for (const auto e : edges) graph.add_edge(e.u, e.v, 1.0);
     apxchol::detail::gpu_round_shadow_session owner(true);
     auto gpu_owner = apxchol::test::initialize_owned_selector(owner, graph);

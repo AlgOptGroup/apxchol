@@ -5,7 +5,7 @@
 #include "apxchol/solver/factor_options.h"
 #include "apxchol/solver/detail/setup_route.h"
 #include "apxchol/solver/detail/factor_entry.h"
-#include "apxchol/solver/partitioner_list.h"
+#include "apxchol/solver/partitioner.h"
 #include "apxchol/sparse_csc.h"
 #include <Eigen/Sparse>
 #include <cstddef>
@@ -121,12 +121,14 @@ factorization factorize_operator(const Eigen::SparseMatrix<double>& L,
 } // namespace detail
 
 /// Extension overloads validate the operator, apply permitted lumping and
-/// regularization, then run the chosen partitioner and eliminator.
+/// regularization, then run the chosen partitioner and eliminator. A passed
+/// partitioner instance replaces `opts.partitioner`; otherwise
+/// `opts.partitioner` names the built-in one.
 ///
 /// Custom-eliminator overload: substitute your own star-vertex elimination
 /// rule (see elimination/elimination.h for the `eliminator` contract).
-/// The default overloads build the tree_elimination rule from `opts`.
-template<typename Partitioner = detail::block_greedy_partitioner, eliminator E>
+/// Overloads without an eliminator build the built-in rule from `opts`.
+template<eliminator E>
 factorization factorize(const Eigen::SparseMatrix<double>& L, const E& elim,
                         const factor_options& opts = {});
 

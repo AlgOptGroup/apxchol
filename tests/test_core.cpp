@@ -28,7 +28,7 @@
 
 class GraphTest : public ::testing::Test {
 protected:
-    using Graph = apxchol::graph;
+    using Graph = apxchol::detail::graph;
 
     static Graph make_path(int n) {
         Graph G(n);
@@ -54,7 +54,7 @@ protected:
 
 TEST(ActiveState, ParallelClearsSharingWordsDoNotLoseUpdates) {
     constexpr apxchol::node_index n = 4096;
-    apxchol::graph G(n);
+    apxchol::detail::graph G(n);
 
 #pragma omp parallel for schedule(static, 1)
     for (apxchol::node_index v = 0; v < n; ++v)
@@ -67,7 +67,7 @@ TEST(ActiveState, ParallelClearsSharingWordsDoNotLoseUpdates) {
 }
 
 TEST(ActiveState, RepeatedDeactivateDoesNotDoubleCount) {
-    apxchol::graph G(65);
+    apxchol::detail::graph G(65);
     G.deactivate(64);
     G.deactivate(64);
     EXPECT_EQ(G.num_active(), 64u);
@@ -150,7 +150,7 @@ TEST(SegmentedPool, ParallelClaimsAreDisjoint) {
 }
 
 TEST_F(GraphTest, BasicConstruction) {
-    using Graph = apxchol::graph;
+    using Graph = apxchol::detail::graph;
     Graph G(5);
     G.add_edge(0, 1, 2.0);
     G.add_edge(1, 2, 3.0);
@@ -159,7 +159,7 @@ TEST_F(GraphTest, BasicConstruction) {
 }
 
 TEST_F(GraphTest, DeactivateAndPrune) {
-    using Graph = apxchol::graph;
+    using Graph = apxchol::detail::graph;
     Graph G(4);
     G.add_edge(0, 1, 1.0);
     G.add_edge(0, 2, 2.0);
@@ -188,7 +188,7 @@ TEST_F(GraphTest, ForNeighbors) {
 }
 
 TEST_F(GraphTest, WeightedDegree) {
-    using Graph = apxchol::graph;
+    using Graph = apxchol::detail::graph;
     Graph G(3);
     G.add_edge(0, 1, 2.0);
     G.add_edge(0, 2, 5.0);
@@ -208,8 +208,8 @@ namespace {
 
 
 
-apxchol::graph make_sparsify_graph() {
-    apxchol::graph G(8);
+apxchol::detail::graph make_sparsify_graph() {
+    apxchol::detail::graph G(8);
     // Two connected components, both with many off-tree alternatives. Distinct
     // weights make the coarse maximum-weight forest deterministic.
     for (const auto& [u, v, w] : std::vector<std::tuple<int, int, double>>{
@@ -221,7 +221,7 @@ apxchol::graph make_sparsify_graph() {
     return G;
 }
 
-auto canonical_edges(const apxchol::graph& G) {
+auto canonical_edges(const apxchol::detail::graph& G) {
     std::vector<std::tuple<apxchol::node_index,
                            apxchol::node_index, double>> result;
     for (apxchol::node_index u = 0; u < G.n(); ++u)
@@ -232,7 +232,7 @@ auto canonical_edges(const apxchol::graph& G) {
     return result;
 }
 
-bool reachable_within(const apxchol::graph& G,
+bool reachable_within(const apxchol::detail::graph& G,
                       apxchol::node_index first,
                       apxchol::node_index last) {
     std::vector<unsigned char> seen(G.n(), 0);
@@ -252,7 +252,7 @@ bool reachable_within(const apxchol::graph& G,
     return true;
 }
 
-auto adjacency_records(const apxchol::graph& G) {
+auto adjacency_records(const apxchol::detail::graph& G) {
     std::vector<std::tuple<apxchol::node_index,
                            apxchol::node_index, double>> result;
     for (apxchol::node_index u = 0; u < G.n(); ++u)
@@ -271,7 +271,7 @@ TEST(ResidualSparsifyTest,
     std::vector<apxchol::node_index> active(n);
     std::iota(active.begin(), active.end(), apxchol::node_index{0});
     auto make_dense = [=] {
-        apxchol::graph G(n);
+        apxchol::detail::graph G(n);
         for (apxchol::node_index u = 0; u < n; ++u)
             for (apxchol::node_index v = u + 1; v < n; ++v)
                 G.add_edge(u, v, 1000.0 - 17.0 * u - v);
@@ -335,7 +335,7 @@ TEST(ResidualSparsifyTest, OffTreeWeightsAreUnbiased) {
     double weight_sum = 0.0;
     int retained = 0;
     for (int seed = 0; seed < trials; ++seed) {
-        apxchol::graph G(3);
+        apxchol::detail::graph G(3);
         G.add_edge(0, 1, 10.0);
         G.add_edge(1, 2, 9.0);
         // Coalesces to one off-tree edge of weight 1 and multiplicity 2.
@@ -364,15 +364,15 @@ TEST(ResidualSparsifyTest, OffTreeWeightsAreUnbiased) {
 
 // ── Laplacian tests (storage-independent) ────────────
 
-static apxchol::graph make_path_vec(int n) {
-    apxchol::graph G(n);
+static apxchol::detail::graph make_path_vec(int n) {
+    apxchol::detail::graph G(n);
     for (int i = 0; i + 1 < n; ++i)
         G.add_edge(i, i + 1, 1.0);
     return G;
 }
 
-static apxchol::graph make_grid_vec(int rows, int cols) {
-    apxchol::graph G(rows * cols);
+static apxchol::detail::graph make_grid_vec(int rows, int cols) {
+    apxchol::detail::graph G(rows * cols);
     auto id = [cols](int r, int c) { return r * cols + c; };
     for (int r = 0; r < rows; ++r)
         for (int c = 0; c < cols; ++c) {
@@ -384,7 +384,7 @@ static apxchol::graph make_grid_vec(int rows, int cols) {
 
 TEST(Laplacian, RowSumsZero) {
     auto G = make_grid_vec(10, 10);
-    auto L = apxchol::laplacian(G);
+    auto L = apxchol::detail::laplacian(G);
     Eigen::VectorXd ones = Eigen::VectorXd::Ones(L.rows());
     Eigen::VectorXd res = L * ones;
     EXPECT_LT(res.norm(), 1e-12);
@@ -392,14 +392,14 @@ TEST(Laplacian, RowSumsZero) {
 
 TEST(Laplacian, Symmetric) {
     auto G = make_grid_vec(8, 8);
-    auto L = apxchol::laplacian(G);
+    auto L = apxchol::detail::laplacian(G);
     Eigen::SparseMatrix<double> diff = L - Eigen::SparseMatrix<double>(L.transpose());
     EXPECT_LT(diff.norm(), 1e-12);
 }
 
 TEST(Laplacian, PositiveDiagonal) {
     auto G = make_grid_vec(5, 5);
-    auto L = apxchol::laplacian(G);
+    auto L = apxchol::detail::laplacian(G);
     for (int k = 0; k < L.outerSize(); ++k)
         for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it) {
             if (it.row() == it.col()) {
@@ -410,7 +410,7 @@ TEST(Laplacian, PositiveDiagonal) {
 
 TEST(Laplacian, PathGraph) {
     auto G = make_path_vec(3);  // 0-1-2, weights 1.0
-    auto L = apxchol::laplacian(G);
+    auto L = apxchol::detail::laplacian(G);
     // L should be [[1,-1,0],[-1,2,-1],[0,-1,1]]
     EXPECT_EQ(L.rows(), 3);
     EXPECT_NEAR(L.coeff(0, 0), 1.0, 1e-15);
@@ -422,7 +422,7 @@ TEST(Laplacian, PathGraph) {
 namespace {
 void expect_directed_csc_matches_general(const Eigen::SparseMatrix<double>& L) {
     const auto reference = reference_graph(L);
-    const auto candidate = apxchol::make_graph(L);
+    const auto candidate = apxchol::detail::make_graph(L);
     ASSERT_EQ(reference.n(), candidate.n());
     ASSERT_EQ(reference.m(), candidate.m());
     for (apxchol::node_index v = 0; v < reference.n(); ++v) {
@@ -472,9 +472,9 @@ TEST(DirectedCscGraph, FullColumnsKeepCanonicalWeightsZerosAndIsolatedVertices) 
 TEST(PooledGraph, NestedTeamConsumesEveryLogicalColumnRange) {
     const int prior_levels = omp_get_max_active_levels();
     omp_set_max_active_levels(1);
-    auto L = apxchol::laplacian(make_grid_vec(20, 20));
+    auto L = apxchol::detail::laplacian(make_grid_vec(20, 20));
     for (int v = 0; v < L.rows(); ++v) L.coeffRef(v,v) += 0.125;
-    const auto reference = apxchol::make_graph(L);
+    const auto reference = apxchol::detail::make_graph(L);
     int observed_outer = 0, observed_inner = 0;
     #pragma omp parallel num_threads(2)
     {
@@ -488,7 +488,7 @@ TEST(PooledGraph, NestedTeamConsumesEveryLogicalColumnRange) {
                 observed_inner = omp_get_num_threads();
             }
             const auto check = [&]() {
-                const auto candidate = apxchol::make_graph(L);
+                const auto candidate = apxchol::detail::make_graph(L);
                 ASSERT_EQ(candidate.n(), reference.n());
                 ASSERT_EQ(candidate.m(), reference.m());
                 for (apxchol::node_index v = 0; v < reference.n(); ++v) {
@@ -541,9 +541,9 @@ TEST(DirectedCscGraph, BitIdenticalProofBuildsTheSameGraph) {
     L.setFromTriplets(entries.begin(), entries.end());
     L.makeCompressed();
 
-    using G = apxchol::graph;
+    using G = apxchol::detail::graph;
     auto same_graph = [&] {
-        const G searched = apxchol::make_graph(L);
+        const G searched = apxchol::detail::make_graph(L);
         const G proven = apxchol::detail::make_graph_from_operator(L, true);
         ASSERT_EQ(searched.n(), proven.n());
         ASSERT_EQ(searched.m(), proven.m());

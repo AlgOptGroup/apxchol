@@ -18,8 +18,9 @@ interfaces throughout the 1.x series:
 - Reading [solver archives](serialization.md) written by any earlier 1.x release.
 
 The [partitioner and eliminator extension contracts](extending.md), and the
-graph/context operations they require, are **experimental**: they may change in
-minor 1.x releases, and each change is noted in the [changelog](../CHANGELOG.md).
+`partition_graph`, `partition_context` and `selection` operations they require,
+are **experimental**: they may change in minor 1.x releases, and each change is
+noted in the [changelog](../CHANGELOG.md).
 
 The research controls in `factor_options::experimental` (the
 `experimental_options` struct) are outside this promise: they may change or
@@ -35,9 +36,9 @@ policy begins with v1.0; it does not apply to earlier prereleases.
 
 Some implementation headers must be installed for C++ templates. Installation
 alone does not make every declaration public. The triangular solves, allocator,
-graph storage, built-in partitioners, operator validation, the per-stage timing
-tree and the CPU, CUDA and Metal routes behind `solver` live in `detail`
-namespaces. Outside the documented contracts above, `detail` namespaces, private
+graph storage, built-in partitioners and clique sampler, operator validation,
+the per-stage timing tree and the CPU, CUDA and Metal routes behind `solver`
+live in `detail` namespaces. Outside the documented contracts above, `detail` namespaces, private
 members, device kernels, internal mutators, benchmark scripts and diagnostic
 output are implementation details.
 

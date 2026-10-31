@@ -20,11 +20,9 @@
 #include <omp.h>
 #endif
 
-namespace apxchol {
+namespace apxchol::detail {
 
-namespace detail {
 struct residual_coalescer;
-}
 
 // Residual-pool edge weights are stored in fp32. The residual graph is a
 // MULTIGRAPH: adjacency writes APPEND new edges and weights are never
@@ -814,8 +812,6 @@ private:
     std::vector<double> excess_;
 };
 
-namespace detail {
-
 /// Internal access seam for the one-shot late-residual rebuild. Keeping these
 /// operations here avoids growing graph's public API for one factorizer policy.
 struct residual_coalescer {
@@ -833,6 +829,4 @@ struct residual_coalescer {
     }
 };
 
-} // namespace detail
-
-} // namespace apxchol
+} // namespace apxchol::detail

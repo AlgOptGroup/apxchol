@@ -53,8 +53,7 @@ random streams, factors can differ across thread counts because parallel
 accumulation and the selected order can differ.
 
 `as_eliminator(lambda)` adapts a matching callable. An instance is passed by
-const reference, allowing immutable configuration. The built-in
-`tree_elimination` also supports `exact_clique_max_degree`.
+const reference, allowing immutable configuration.
 [custom_eliminator.cpp](../examples/custom_eliminator.cpp) demonstrates exact
 clique elimination, including end-to-end solution checks.
 
@@ -65,10 +64,9 @@ The concatenation of selected rounds defines the elimination order. Implement
 
 ```cpp
 struct my_partitioner {
-    static constexpr std::string_view name = "mine";
     static constexpr bool degree_prepass = true;
 
-    void find_partition(apxchol::graph& G,
+    void find_partition(const apxchol::partition_graph& G,
                         std::span<const apxchol::node_index> candidates,
                         const apxchol::partition_context& ctx,
                         apxchol::selection& out);
@@ -98,21 +96,16 @@ compute conflict decisions, synchronize, and then apply changes. Both the
 selected set and insertion order must be deterministic for the same graph,
 context, and team size; dynamic arrival order must not choose the result.
 
-The graph is mutable only to permit pruning already-dead incidences.
-`G.adj(v)` yields incidence records whose `.to` member is the neighbor,
-`G.neighbors(v)` yields `{to, w}` pairs with FP64 weights, and `G.is_active(u)`
-tells whether a neighbor is still live. Incidences to eliminated vertices stay
-in `G.adj(v)` until pruned; `G.prune_and_degree(v)` and
-`G.prune_and_visit(v, f)` remove them, calling `f(u)` for each live neighbor.
-Do not otherwise mutate the represented graph. `G.m()` counts ever-added
-edges, not current live edges.
+`G` is a read-only view of the residual graph. `G.n()` is the vertex count,
+including eliminated vertices, and `G.is_active(v)` tells whether `v` is still
+live. `G.for_each_neighbor(v, f)` calls `f(u)` for each live neighbor `u`,
+once per parallel edge, and returns that count; `G.degree(v)` returns the
+count alone. Both are safe to call concurrently for distinct `v`.
 
-Partitioner instances are passed by value. Callable adapters are
-`as_partitioner` and `as_prepass_partitioner`. Direct template use requires no
-registry change; dispatch through `factor_options::partitioner`, the CLI and
-bindings requires adding the type to `partitioner_list` and a matching
-`partitioner_kind` value and name. [custom_order.cpp](../examples/custom_order.cpp) shows
-complete integration.
+Pass a partitioner instance to `factorize`, alone or with an eliminator; it is
+taken by value and replaces `factor_options::partitioner`. Callable adapters
+are `as_partitioner` and `as_prepass_partitioner`.
+[custom_order.cpp](../examples/custom_order.cpp) shows complete integration.
 
 ## Reusing a custom factor
 
@@ -143,7 +136,8 @@ conventions. The factor `L` is a read-only view; build factors with
 `factorize` or load them from an archive. A custom factor uses
 `storage = automatic`, so the solver applies its dropping and storage options.
 
-Graph storage is the directed AoS pool. Custom partitioners and eliminators
-operate on the same graph. The PCG recurrence, factor-column formula, and triangular-solve
-kernels are not additional template seams. Preserve the current defaults and
-[precision contract](precision.md); retired options are not supported APIs.
+Custom partitioners and eliminators see the residual graph only through
+`partition_graph` and the neighbor span. The PCG recurrence, factor-column
+formula, and triangular-solve kernels are not additional template seams.
+Preserve the current defaults and [precision contract](precision.md); retired
+options are not supported APIs.

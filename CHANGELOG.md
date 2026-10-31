@@ -58,6 +58,11 @@
 - Breaking: the CMake helpers `apxchol_openmp_runtime()`, `apxchol_configure_core()`, `apxchol_install_core()` and the `APXCHOL_ARCH_FLAG` variable are internal (`_apxchol_*` and `_APXCHOL_ARCH_FLAG`); `find_package(apxchol)` and `apxchol_add_core()` are the supported entry points.
 - Breaking: Python `Solver.L`, `Solver.D` and `Solver.fill_ratio` are removed (use `chol()`, `P` and `factor_nnz`), `Solver.lumped` is renamed `lumped_offdiag`, and `apxchol.DEFAULT_TOL`/`DEFAULT_MAXITER` are no longer public.
 - Breaking: the raw MATLAB/Octave `apxchol_mex` entry point moves to `octave/private/`; use the `apxchol_*` wrappers.
+- Breaking: custom partitioners receive a read-only `apxchol::partition_graph` (`n`, `is_active`, `for_each_neighbor`, `degree`) instead of the mutable graph; `graph`, `make_graph` and `laplacian` move to `apxchol::detail`.
+- Breaking: partitioners no longer declare a `name`, and `partitioner_list.h` with `dispatch_partitioner` is removed; pass a custom partitioner as an instance to `factorize`.
+- Breaking: `factorize(A, eliminator, opts)` no longer takes a partitioner template argument, and now uses the partitioner `opts.partitioner` names instead of always `block_greedy`; pass an instance to use another partitioner.
+- Breaking: `tree_elimination` moves to `apxchol::detail`; configure the built-in rule through `factor_options`.
+- Breaking: `sparse_csc::kEdgeMax` is removed; use `std::numeric_limits<apxchol::edge_index>::max()`.
 - New `apxchol.as_operator(M)`, `apxchol_as_operator(M)` and CLI `--convert-input`: a finite symmetric matrix with at least one off-diagonal entry, all of them positive, becomes its graph Laplacian `L = D - M` (self-loops cancel), any other finite symmetric matrix is used as given and checked by the solver, and asymmetric or non-finite input is an error.
 - The CLI solves an `n` by `k` `--rhs` file as one batch, writes an `n` by `k` solution with `-o`, and logs iterations and residuals per column.
 - The v1 API compatibility scope is documented.

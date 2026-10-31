@@ -9,10 +9,9 @@
 /// ── The interface (one shape for every partitioner) ──
 ///
 ///   struct my_partitioner {
-///       static constexpr std::string_view name = "mine";  // dispatch string
 ///       static constexpr bool degree_prepass = true;      // optional trait
 ///
-///       void find_partition(graph& G,
+///       void find_partition(const partition_graph& G,
 ///                           std::span<const node_index> candidates,
 ///                           const partition_context& ctx, selection& out);
 ///   };
@@ -77,23 +76,11 @@
 ///     lands in a per-thread buffer that is later concatenated — sort the
 ///     result, or partition the work statically.
 ///
-/// `G` is non-const only so the pruning helpers can run. Queries
-/// (see graph/graph.h):
-///   G.n(), G.m()            — vertex / edge counts
-///   G.adj(v)                — {to, w} adjacency records (may still contain
-///                             eliminated vertices until pruned)
-///   G.is_active(u)          — u not yet eliminated?
-///   G.prune_and_degree(v)   — drop v's dead edges, return its live degree
-///   G.prune_and_visit(v, f) — same, calling f(u) for each live neighbor
-/// Pruning removes only edges to eliminated vertices — it never changes the
-/// graph being represented. It is the ONLY mutation a partitioner may
-/// perform; anything else is out of contract.
+/// `G` is a read-only view of the residual graph (see partition_graph).
 ///
-/// Use a custom partitioner as a configured instance
-/// (factorize(A, my_partitioner{...}, opts)), as a template argument with a
-/// custom eliminator (factorize<my_partitioner>(A, my_eliminator{}, opts)), or
-/// add it to partitioner_list for dispatch through factor_options::partitioner,
-/// the CLI and bindings.
+/// Use a custom partitioner as a configured instance:
+/// factorize(A, my_partitioner{...}, opts), or
+/// factorize(A, my_partitioner{...}, my_eliminator{}, opts).
 /// Lambdas: as_partitioner(fn) or as_prepass_partitioner(fn) — identical
 /// callable signature, differing only in the trait they declare;
 /// zero-overhead template wrappers, no type erasure.
@@ -114,11 +101,9 @@
 #include "apxchol/solver/partitioner_helpers.h"
 #include "apxchol/solver/factor_options.h"
 #include "apxchol/solver/partition.h"
-#include <concepts>
 #include <limits>
 #include <type_traits>
 #include <span>
-#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -126,7 +111,35 @@
 
 namespace apxchol {
 
-namespace detail { struct selection_access; }
+namespace detail {
+struct selection_access;
+struct partition_graph_access;
+}
+
+/// Read-only view of the residual graph during selection. Vertex IDs are the
+/// operator's row indices; eliminated vertices stay in the ID range.
+class partition_graph {
+public:
+    /// Vertex count, including eliminated vertices.
+    node_index n() const { return g_->n(); }
+    /// True while v has not been eliminated.
+    bool is_active(node_index v) const { return g_->is_active(v); }
+    /// Calls f(u) for each live neighbor u of v, repeating u once per
+    /// parallel edge, and returns that count. Safe concurrently for distinct v.
+    template<typename F>
+    node_index for_each_neighbor(node_index v, F&& f) const {
+        return g_->prune_and_visit(v, std::forward<F>(f));
+    }
+    /// Live degree of v: the count for_each_neighbor returns.
+    node_index degree(node_index v) const { return g_->prune_and_degree(v); }
+
+private:
+    friend struct detail::partition_graph_access;
+    explicit partition_graph(detail::graph& g) : g_(&g) {}
+    // Visiting drops incidences of eliminated vertices from v's list, which
+    // leaves the represented graph unchanged.
+    detail::graph* g_;
+};
 
 /// Read-only services the orchestrator hands to a partitioner call.
 /// Everything except `degrees` is constant for the whole factorize() run.
@@ -207,6 +220,12 @@ struct selection_access {
     static const partition_result& finalize(selection& s) { return s.finalize(); }
 };
 
+/// Orchestrator and built-in side of `partition_graph`.
+struct partition_graph_access {
+    static partition_graph view(graph& g) { return partition_graph(g); }
+    static graph& graph_of(const partition_graph& G) { return *G.g_; }
+};
+
 // ── Trait queries (with defaults) ──
 
 template<typename P>
@@ -237,8 +256,7 @@ inline constexpr size_t partitioner_residual_handoff_v = [] {
 
 template<typename T>
 concept partitioner =
-    requires { { T::name } -> std::convertible_to<std::string_view>; } &&
-    requires(T t, graph& G,
+    requires(T t, const partition_graph& G,
              std::span<const node_index> candidates,
              const partition_context& ctx, selection& out) {
         t.find_partition(G, candidates, ctx, out);
@@ -250,13 +268,12 @@ concept partitioner =
 /// and ctx.degrees is filled. The callable signature is the same for both.
 template<typename F, bool Prepass>
 struct callable_partitioner {
-    static constexpr std::string_view name = "callable";
     static constexpr bool degree_prepass = Prepass;
 
     explicit callable_partitioner(F f) : fn(std::move(f)) {}
     F fn;
 
-    void find_partition(graph& G,
+    void find_partition(const partition_graph& G,
                         std::span<const node_index> candidates,
                         const partition_context& ctx, selection& out) {
         fn(G, candidates, ctx, out);

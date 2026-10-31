@@ -16,7 +16,6 @@
 namespace apxchol::detail {
 
 struct priority_greedy_partitioner {
-    static constexpr std::string_view name = "priority_greedy";
     static constexpr size_t residual_handoff_threshold = 500;
     static constexpr bool degree_prepass = true;
 
@@ -24,9 +23,9 @@ struct priority_greedy_partitioner {
     /// Parallel fixed-priority passes before the exact serial fallback.
     int parallel_passes = 16;
 
-    void find_partition(graph& G, std::span<const node_index> candidates,
+    void find_partition(const partition_graph& G, std::span<const node_index> candidates,
                         const partition_context& ctx, selection& out) {
-        select_into_chosen_k0(G, candidates, out, ctx);
+        select_into_chosen_k0(partition_graph_access::graph_of(G), candidates, out, ctx);
         ++round;
     }
 
