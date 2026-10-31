@@ -242,58 +242,12 @@ Each application computes `z = M^{-1} r` with the prepared factor; the other
 solver controls the iteration and its stopping test.
 
 For Eigen's iterative solvers, a small adapter is enough. It is an example
-outside apxchol's stable API; copy it into your code. `A` is the
-`Eigen::SparseMatrix<double>` the conjugate gradient iterates on, compressed,
-and the solver borrows its arrays:
+outside apxchol's stable API; copy it into your code. The solver borrows the
+compressed `Eigen::SparseMatrix<double>` while it is built:
 
-```cpp
-#include <apxchol.h>
-#include <Eigen/IterativeLinearSolvers>
-
-class apxchol_preconditioner
-    : public Eigen::SparseSolverBase<apxchol_preconditioner> {
-public:
-    using Scalar = double;
-    using StorageIndex = int;
-    enum { ColsAtCompileTime = Eigen::Dynamic, MaxColsAtCompileTime = Eigen::Dynamic };
-
-    void attach(apxchol::solver& s) { solver_ = &s; m_isInitialized = true; }
-
-    // The attached solver already holds the factor.
-    template<class Matrix> apxchol_preconditioner& analyzePattern(const Matrix&) { return *this; }
-    template<class Matrix> apxchol_preconditioner& factorize(const Matrix&) { return *this; }
-    template<class Matrix> apxchol_preconditioner& compute(const Matrix&) { return *this; }
-
-    Eigen::Index rows() const { return solver_->rows(); }
-    Eigen::Index cols() const { return solver_->rows(); }
-    Eigen::ComputationInfo info() const { return Eigen::Success; }
-
-    template<class Rhs, class Dest>
-    void _solve_impl(const Rhs& b, Dest& x) const {
-        const Eigen::VectorXd r = b;
-        const std::vector<double> z =
-            solver_->apply({r.data(), static_cast<std::size_t>(r.size())});
-        x = Eigen::Map<const Eigen::VectorXd>(z.data(), static_cast<Eigen::Index>(z.size()));
-    }
-
-private:
-    apxchol::solver* solver_ = nullptr;
-};
-
-A.makeCompressed();
-const auto n = static_cast<std::size_t>(A.rows()), nnz = static_cast<std::size_t>(A.nonZeros());
-apxchol::solver s(apxchol::csc_view{A.rows(), {A.outerIndexPtr(), n + 1},
-                                    {A.innerIndexPtr(), nnz}, {A.valuePtr(), nnz}});
-Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower | Eigen::Upper,
-                         apxchol_preconditioner> cg;
-cg.preconditioner().attach(s);
-cg.setTolerance(1e-10);
-cg.compute(A);
-Eigen::VectorXd x = cg.solve(b);
+```{literalinclude} ../examples/input_formats/eigen_cg.cpp
+:language: cpp
 ```
-
-Eigen default-constructs the preconditioner, so the adapter holds a pointer
-set by `attach`; the solver must outlive `cg`.
 
 A GPU-backed SciPy operator exchanges host vectors with the device on each
 application. Native `solve` keeps iteration vectors on the GPU, so prefer it
