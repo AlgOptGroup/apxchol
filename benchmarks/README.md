@@ -111,7 +111,27 @@ comments, Pages or README measurements.
   destruction and are not comparable as solve-held RSS. GNU child peak RSS keeps
   its separate whole-process definition; do not infer a memory win from that
   boundary correction.
-- Measure GPU memory in separate runs: polling `nvidia-smi` during a timed C++ or ParAC call perturbs its setup.
+- GPU memory is this process's device memory as NVML attributes it to its PID on
+  the benchmark's device, in MiB. Every GPU solver in the benchmark binary (apxchol,
+  AMGCL, Hypre) is measured the same way. Right after CUDA context creation, before
+  any solver allocates, the binary prints
+  `[bench] gpu_memory pid=… bus_id=… baseline_mib=… other_processes=… other_mib=…`.
+  - `vram_baseline_mb`: that raw baseline (CUDA context only).
+  - `setup_vram_mb`: usage above the baseline after setup returns.
+  - `solve_vram_mb`: usage above the baseline at solve end, while the solver still
+    holds its operator, factor or hierarchy and vectors.
+  - Both reads are outside the setup and solve timers. Memory a solver keeps across
+    repetitions (caches, pools) stays in later readings; run one GPU solver per process.
+  - `gpu_other_processes`/`gpu_other_mb`: other compute processes on the device at
+    the baseline. They are excluded from every value above; `gpu_shared=true` flags
+    the cell because they still compete for the device. Graphics-only clients (a
+    display server) are not compute processes and are neither counted nor flagged.
+  - When NVML cannot attribute memory to the process (no NVML, MIG, an unsupported
+    device or driver, PID not listed), the baseline is unavailable with a reason in
+    `vram_unavailable`, and the deltas are absent. A device-wide number is never
+    substituted. Older binaries' device-wide `solve_vram_mb` is not stored.
+- The runners do not report peak GPU memory. Polling `nvidia-smi` during a timed
+  C++ or ParAC call perturbs its setup, so timed runs never poll.
 
 ### Backend and factor accounting
 

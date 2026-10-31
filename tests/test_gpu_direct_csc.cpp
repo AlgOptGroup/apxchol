@@ -22,6 +22,8 @@
 #include <string>
 #include <vector>
 
+using csc_access = apxchol::detail::sparse_csc_access;
+
 namespace {
 using apxchol::node_index;
 using matrix = Eigen::SparseMatrix<double>;
@@ -349,8 +351,8 @@ TEST(GpuDirectCsc, FirstSelectorHasCorrectCandidatesAndIndependentProgress) {
         std::unique_ptr<apxchol::detail::gpu_block_frontend> direct;
         owner.initialize_owned_csc(apxchol::detail::gpu_owned_csc_host_buffers(A), direct);
         apxchol::partition_options options;
-        options.degree_quantile = quantile; options.degree_tiebreak = ties;
-        const auto got = direct->prepare(active, options);
+        options.degree_quantile = quantile;
+        const auto got = direct->prepare(active, options, 42, 0, ties);
         const auto degrees = direct->host_active_degrees();
         std::size_t degree_sum = 0;
         for (node_index v : active) degree_sum += graph.adj_count(v);
@@ -422,10 +424,10 @@ TEST(GpuDirectCsc, InitialOwnerOutlivesInputAndRetiresEveryBorrowedSelectorRead)
         std::vector<node_index> degrees(graph.n()), candidates, expected_selected;
         std::size_t degree_sum = 0;
         for (auto v : active) { degrees[v] = graph.adj_count(v); degree_sum += degrees[v]; }
-        // The oracle must resolve the by-route sentinel exactly as the library
+        // The oracle must resolve an unset quantile exactly as the library
         // does, or it grades the selector against a cap nobody asked for.
-        const double q_cap = apxchol::degree_quantile_or_host_default(
-            options.degree_quantile);
+        const double q_cap = options.degree_quantile.value_or(
+            apxchol::detail::degree_quantile_host_default);
         double threshold = options.degree_multiplier * double(degree_sum) / graph.n();
         if (q_cap > 0.0 && q_cap < 1.0) {
             auto sorted = degrees; std::sort(sorted.begin(), sorted.end());
@@ -439,7 +441,7 @@ TEST(GpuDirectCsc, InitialOwnerOutlivesInputAndRetiresEveryBorrowedSelectorRead)
             return z ^ (z >> 31);
         };
         auto precedes = [&](node_index a, node_index b) {
-            if (options.degree_tiebreak && degrees[a] != degrees[b]) return degrees[a] < degrees[b];
+            if (degrees[a] != degrees[b]) return degrees[a] < degrees[b];
             const auto ha = key(a), hb = key(b);
             return ha != hb ? ha < hb : a < b;
         };
@@ -521,8 +523,8 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
         ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
         EXPECT_TRUE(preconditioner.trsv().fp16());
         EXPECT_GT(preconditioner.trsv().drop_stats().rel,0.0);
-        EXPECT_TRUE(preconditioner.factor().L.vals_.empty());
-        EXPECT_TRUE(preconditioner.factor().L.inner_.empty());
+        EXPECT_TRUE(csc_access::vals(preconditioner.factor().L).empty());
+        EXPECT_TRUE(csc_access::inner(preconditioner.factor().L).empty());
         EXPECT_GT(preconditioner.factor().rounds.size(),2u);
         apxchol::solve_options options; options.tol=1e-8; options.max_iter=1000;
         options.backend = apxchol::solve_backend::gpu;

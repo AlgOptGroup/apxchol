@@ -70,7 +70,7 @@ result = solver.solve(b)
 
 The matrix is square with `len(indptr) - 1` rows. Integer indices may be 32- or
 64-bit; the native importer sorts columns and sums duplicate entries. SciPy
-is needed for `factorize(A)`, `laplacian`, `aslinearoperator`, and sparse factor
+is needed for `factorize(A)`, `as_operator`, `aslinearoperator`, and sparse factor
 exports. NumPy-only solves and preconditioner application do not import it.
 
 ## Reuse, batches and initial guesses
@@ -129,8 +129,8 @@ restored = apxchol.Solver.load("system.apxchol", backend="cpu")
 result = restored.solve(b)
 ```
 
-Saving requires `keep_factor=True`, the reusable solver's default. It creates
-a new file and refuses to replace an existing one. The archive stores the
+Saving requires `keep_factor=True`, the reusable solver's default. It replaces
+an existing file, writing to `<path>.tmp` first and renaming it into place. The archive stores the
 original operator and FP32 factor; RHSs, initial guesses and device workspace
 are not saved. Loading adopts the factor without repeating factorization.
 
@@ -166,14 +166,11 @@ support fewer construction choices.
 
 | Keyword | Meaning |
 |---|---|
-| `degree_quantile` | Degree cutoff quantile; `0` selects the multiplier-based cutoff |
+| `sampler` | Clique sampler: `"gks"` (default) or `"trace_cycle"` (CPU and CUDA only) |
+| `degree_quantile` | Degree cutoff quantile in `[0, 1)`; `0` selects the multiplier-based cutoff (Metal requires `(0, 1)`); `None` uses the backend default |
 | `degree_multiplier` | Positive degree multiplier, used only when `degree_quantile=0` |
-| `degree_tiebreak` | Prefer lower-degree vertices in selection conflicts |
-| `exact_clique_max_degree` | Maximum degree for exact clique elimination; `0` disables it |
-| `residual_peel` | Residual pivot order: `"natural"`, `"min_degree"` or `"bk_serial"` |
-| `cpu_schedule` | CPU triangular-solve scheduling: `"auto"` or `"levels"` |
 | `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
-| `regularization` | Nonnegative diagonal fraction added during factor construction; `0` disables it |
+| `regularization` | Minimum diagonal excess of the preconditioner, as a fraction of each diagonal after lumping; excess below 1e-12 of the diagonal counts as zero first; `A` is not modified; `0` disables it |
 | `lump_max_mass` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
 | `verbose` | Print setup diagnostics; off by default |
 
@@ -204,16 +201,15 @@ FP32, regardless of backend or internal storage:
 ```python
 P = solver.P                          # P[original vertex] = elimination position
 G = solver.chol()                     # lower CSC factor, including its diagonal
-L, D = solver.L, solver.D             # unit lower CSC factor and diagonal
 p = P.argsort()
-# A[p][:, p] ≈ G @ G.T ≈ L @ diags(D) @ L.T
+# A[p][:, p] ≈ G @ G.T
 ```
 
-`chol()`, `L` and `D` return independent copies. For a Laplacian, they represent
+`chol()` returns an independent copy. For a Laplacian, it represents
 the nonsingular subspace; see the [factor reference](https://algoptgroup.github.io/apxchol/docs/reference/python.html).
 
 Use `keep_factor=False` to save the extra host factor copy when export is
-unnecessary. Repeated solves, `P`, `factor_nnz` and `fill_ratio` remain available.
+unnecessary. Repeated solves, `P` and `factor_nnz` remain available.
 
 Matrix import is limited to signed 32-bit dimensions and stored-entry counts.
 The native library's wide-index build options do not enlarge this binding.

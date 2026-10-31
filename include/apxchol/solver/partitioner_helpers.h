@@ -33,7 +33,7 @@ inline double candidate_degree_cap(std::span<const node_index> degrees,
                                    size_t n_active, double avg_deg,
                                    const partition_options& popts,
                                    std::vector<node_index>& scratch) {
-    const double q = degree_quantile_or_host_default(popts.degree_quantile);
+    const double q = popts.degree_quantile.value_or(detail::degree_quantile_host_default);
     if (q > 0.0 && q < 1.0 && n_active > 0) {
         scratch.assign(degrees.begin(), degrees.begin() + n_active);
         size_t k = static_cast<size_t>(q * n_active);

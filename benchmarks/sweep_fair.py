@@ -281,6 +281,7 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
             BUILD.update(rc.parse_build_meta(e.stderr))
             diag = _diag(None, e.output, e.stderr)
             diag.update(device_init(e.stderr))
+            diag.update(rc.parse_gpu_memory(e.stderr))
             return "timeout", diag
         BUILD.update(rc.parse_build_meta(p.stderr))   # what built the binary that just ran
         st,m = classify(rc.parse_csv(p.stdout))
@@ -306,6 +307,7 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
             m["warmup_repeats"] = WARMUP
             m["repeat_receipts"] = [line for line in p.stderr.splitlines() if line.startswith("BENCH_REPEAT ")]
             m.update(device_init(p.stderr))
+            m.update(rc.parse_gpu_memory(p.stderr))
             rss = rc.parse_peak_rss_mb(p.stderr)
             if rss is not None:
                 m["max_rss_mb"] = rss

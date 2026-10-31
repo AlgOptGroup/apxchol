@@ -136,9 +136,8 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
             unsigned(validated.scan().offdiag_nnz - validated.lumped()), options.factor_opts.seed,
             graph.ptr, graph.idx, graph.values, regularization,
             unsigned(unchanged && validated.scan().triangles_bit_identical), options.factor_opts,
-            options.factor_opts.parallel_residual_threshold == std::numeric_limits<std::size_t>::max()
-                ? block_greedy_partitioner::residual_handoff_threshold
-                : options.factor_opts.parallel_residual_threshold);
+            options.factor_opts.experimental.parallel_residual_threshold.value_or(
+                block_greedy_partitioner::residual_handoff_threshold));
         if (cp)
             (*cp)("metal_factorize");
         const bool laplacian = !raw.data().state->has_excess;
@@ -175,10 +174,11 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         if (!options.keep_factor) {
             F.perm.assign(static_cast<unsigned *>(finalized.permutation.contents),
                           static_cast<unsigned *>(finalized.permutation.contents) + n);
-            F.L.resize(n, n);
+            detail::sparse_csc_access::resize(F.L, n);
+            auto& outer = detail::sparse_csc_access::outer(F.L);
             for (unsigned row = 0; row < n; ++row)
-                F.L.outer_[row] = data.columns[row].begin + row;
-            F.L.outer_[n] = data.state->entries + n;
+                outer[row] = data.columns[row].begin + row;
+            outer[n] = data.state->entries + n;
         }
         F.rounds.reserve(data.state->round);
         for (unsigned r = 0; r < data.state->round; ++r) {

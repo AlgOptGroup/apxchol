@@ -717,7 +717,7 @@ public:
 private:
     static void validate_options(const factor_options& options) {
         detail::validate_factor_options(options);
-        if (options.cpu_schedule != cpu_sptrsv_schedule::automatic)
+        if (options.experimental.cpu_schedule != cpu_sptrsv_schedule::automatic)
             throw std::invalid_argument("CPU triangular-solve schedules are unavailable on CUDA");
     }
 
