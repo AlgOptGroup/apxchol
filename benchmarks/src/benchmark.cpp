@@ -825,6 +825,7 @@ static BenchResult run_apxchol_v1(
     r.execution_route = gpu_route ? "metal" : "cpu";
 #else
     r.execution_route = gpu_route ? "gpu" : "cpu";
+#endif
 #if defined(APXCHOL_USE_CUDA)
     const auto read_vram = [&] {
         const auto begin = std::chrono::high_resolution_clock::now();
