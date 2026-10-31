@@ -32,7 +32,7 @@ elseif (APXCHOL_DEVICE STREQUAL "CUDA")
     find_package(CUDAToolkit 13.3 REQUIRED)
 endif()
 
-function(apxchol_configure_core target)
+function(_apxchol_configure_core target)
     get_filename_component(root "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/.." ABSOLUTE)
     target_sources(${target} PRIVATE
         ${root}/src/factorization.cpp
@@ -45,8 +45,8 @@ function(apxchol_configure_core target)
     set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
     target_compile_options(${target} PRIVATE
         -Wall -Wextra "$<$<COMPILE_LANGUAGE:C,CXX,OBJCXX>:-Wpedantic>")
-    if (APXCHOL_ARCH_FLAG)
-        target_compile_options(${target} PUBLIC "${APXCHOL_ARCH_FLAG}")
+    if (_APXCHOL_ARCH_FLAG)
+        target_compile_options(${target} PUBLIC "${_APXCHOL_ARCH_FLAG}")
     endif()
 
     set(APXCHOL_GIT_SHA "unknown")
@@ -120,7 +120,7 @@ function(apxchol_add_core)
     string(REGEX MATCH "^[0-9]+\\.[0-9]+" soversion "${APXCHOL_VERSION}")
     set_target_properties(apxchol_core PROPERTIES EXPORT_NAME core POSITION_INDEPENDENT_CODE ON
         VERSION "${APXCHOL_VERSION}" SOVERSION "${soversion}")
-    apxchol_configure_core(apxchol_core)
+    _apxchol_configure_core(apxchol_core)
     include(${CMAKE_CURRENT_FUNCTION_LIST_DIR}/apxchol_install.cmake)
-    apxchol_install_core()
+    _apxchol_install_core()
 endfunction()
