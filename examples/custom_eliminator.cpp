@@ -25,7 +25,9 @@ static_assert(apxchol::eliminator<exact_clique_eliminator>);
 
 int main() {
     auto L = grid_laplacian(60);
-    Eigen::VectorXd b = apxchol::generate_test_rhs(L.rows());
+    Eigen::VectorXd b = Eigen::VectorXd::Zero(L.rows());   // unit source and sink
+    b(0) = 1.0;
+    b(L.rows() - 1) = -1.0;
     apxchol::factor_options opts;
 
     // Reference: the default tree-sampling eliminator (default storage).

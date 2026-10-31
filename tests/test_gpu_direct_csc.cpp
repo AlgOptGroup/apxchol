@@ -263,7 +263,7 @@ TEST(GpuDirectCsc, InitialArraysMatchHostBuilderIncludingRoundingAndSignedZero) 
                 [](double x) { return x > 0.0; }));
             EXPECT_EQ(got.initial.active, std::vector<std::uint8_t>(A.rows(), 1));
             for (const auto& edge : got.initial.incidences) {
-                const double canonical = static_cast<double>(static_cast<apxchol::detail::pool_value_t>(
+                const double canonical = static_cast<double>(static_cast<float>(
                     -A.coeff(std::max(edge.owner,edge.neighbor),std::min(edge.owner,edge.neighbor))));
                 EXPECT_EQ(std::bit_cast<std::uint64_t>(double(edge.weight)), std::bit_cast<std::uint64_t>(canonical));
             }
@@ -328,11 +328,9 @@ TEST(GpuDirectCsc, InvalidNumericalInputsFailWithoutPublishingAnInitialSnapshot)
         const double reg = fault == 3 ? std::numeric_limits<double>::infinity() : 0.0;
         EXPECT_THROW((void)apxchol::detail::gpu_initial_owned_csc_for_test(A, reg), std::invalid_argument);
     }
-#ifdef APXCHOL_POOL_FP32
     const double overflow = 2.0 * static_cast<double>(std::numeric_limits<float>::max());
     auto A = make_matrix(2, {{0,1,overflow}});
     EXPECT_THROW((void)apxchol::detail::gpu_initial_owned_csc_for_test(A), std::invalid_argument);
-#endif
 #endif
 }
 

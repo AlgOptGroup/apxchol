@@ -40,6 +40,10 @@
 - Breaking: `factorization` drops `peak_graph_bytes` and the diagnostic `round_stats` fields `avg_deg`, `nnz_added` and `nnz_total`; its CUDA device factor is private.
 - Breaking: `solve_result::lumped_offdiag` is removed; read `solver.factor().lumped_offdiag`.
 - Breaking: `solve_options::keep_factor_values` is renamed `keep_factor`, matching Python and MATLAB/Octave.
+- Breaking: the `APXCHOL_POOL_FP32` build option is removed; graph weights are always stored in FP32, as in default builds.
+- Breaking: `apxchol::generate_test_rhs` is removed; build the right-hand side in the caller.
+- Breaking: the `APXCHOL_SPTRSV_BACKEND` macro is removed from `apxchol/version.h`; CLI `--version` prints the device (`cpu`, `cuda` or `metal`) instead.
+- Breaking: CLI `--random-rhs` uses a new generator, so its values change; they are now the same on every platform for a given `--seed`.
 - Breaking: the CLI and bindings no longer accept an adjacency matrix as if it were the operator. Previously both solved adjacency input as the operator and failed without a clear error; now validation rejects it and the error suggests the conversion.
 - Breaking: the factor type `sparse_csc` is a read-only view with `col_ptrs()`, `row_indices()`, `values()` and `has_values()`; its storage members, raw-pointer accessors and build mutators are no longer public.
 - Breaking: the CMake helpers `apxchol_openmp_runtime()`, `apxchol_configure_core()`, `apxchol_install_core()` and the `APXCHOL_ARCH_FLAG` variable are internal (`_apxchol_*` and `_APXCHOL_ARCH_FLAG`); `find_package(apxchol)` and `apxchol_add_core()` are the supported entry points.

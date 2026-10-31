@@ -30,19 +30,9 @@ using edge_index = std::uint32_t;
 
 namespace detail {
 
-// Residual-pool edge weight storage type. This lives beside the index types so
-// the default directed-incidence layout can store {target, weight}
-// directly in its adjacency slabs without introducing a graph/incidence
-// include cycle.
-#ifdef APXCHOL_POOL_FP32
-using pool_value_t = float;
-#else
-using pool_value_t = double;
-#endif
-
 struct directed_pool_edge {
     node_index to;
-    pool_value_t w;
+    float w;
 
     friend bool operator<(const directed_pool_edge& a,
                           const directed_pool_edge& b) {

@@ -26,8 +26,6 @@ disappear in any release. The stable factorization options are `seed`,
 `partition.degree_multiplier`, plus `verbose`; the
 [usage guide](usage.md#option-names) lists their names in each interface.
 
-`generate_test_rhs` is a test and diagnostic helper outside this promise.
-
 Numerical results and performance may change within the documented
 [precision and convergence contracts](precision.md). This compatibility
 policy begins with v1.0; it does not apply to earlier prereleases.

@@ -406,7 +406,7 @@ TEST(CycleSampler, TraceObjectiveMatchesEveryOutcomeAndBestSuffix) {
 
 TEST(CycleSampler, PreservesRepresentableSubnormalEdges) {
     for (auto kind : {clique_sampler::trace_cycle}) {
-        const double tiny = std::sqrt(double(std::numeric_limits<detail::pool_value_t>::min())) * .1;
+        const double tiny = std::sqrt(double(std::numeric_limits<float>::min())) * .1;
         std::vector<weighted_neighbor> n{{0,tiny},{1,tiny},{2,tiny}};
         std::vector<deferred_edge> edges;
         tree_elimination rule{.sampler=kind};
@@ -414,7 +414,7 @@ TEST(CycleSampler, PreservesRepresentableSubnormalEdges) {
         ASSERT_EQ(edges.size(),3u);
         for (const auto& edge : edges) {
             EXPECT_DOUBLE_EQ(edge.w,tiny*tiny);
-            const detail::directed_pool_edge stored{edge.v,static_cast<detail::pool_value_t>(edge.w)};
+            const detail::directed_pool_edge stored{edge.v,static_cast<float>(edge.w)};
             EXPECT_GT(stored.w,0);
             EXPECT_EQ(std::fpclassify(stored.w),FP_SUBNORMAL);
         }
@@ -422,7 +422,7 @@ TEST(CycleSampler, PreservesRepresentableSubnormalEdges) {
 }
 
 TEST(CycleSampler, InputOnlyFallbackMatchesGksAtEverySeed) {
-    const double tiny = std::sqrt(double(std::numeric_limits<detail::pool_value_t>::denorm_min())) * .25;
+    const double tiny = std::sqrt(double(std::numeric_limits<float>::denorm_min())) * .25;
     const std::vector<std::vector<weighted_neighbor>> profiles{
         {{0,tiny},{1,tiny},{2,tiny}}, // prospective cycle edges round to zero
         {{0,0.},{1,1.},{2,2.},{3,3.}}, // a rounded-zero neighbor from earlier fill
@@ -468,11 +468,9 @@ TEST(CycleSampler, RejectsNonpositiveAndNonfinitePoolEdges) {
     for (double value : {0.,-1.,std::numeric_limits<double>::infinity(),
                          std::numeric_limits<double>::quiet_NaN()})
         EXPECT_THROW(detail::require_pool_edge(value),std::domain_error);
-    EXPECT_NO_THROW(detail::require_pool_edge(std::numeric_limits<detail::pool_value_t>::denorm_min()));
-    EXPECT_NO_THROW(detail::require_pool_edge(std::numeric_limits<detail::pool_value_t>::max()));
-    if constexpr (sizeof(detail::pool_value_t)<sizeof(double)) {
-        EXPECT_THROW(detail::require_pool_edge(double(std::numeric_limits<detail::pool_value_t>::max())*2),std::domain_error);
-    }
+    EXPECT_NO_THROW(detail::require_pool_edge(std::numeric_limits<float>::denorm_min()));
+    EXPECT_NO_THROW(detail::require_pool_edge(std::numeric_limits<float>::max()));
+    EXPECT_THROW(detail::require_pool_edge(double(std::numeric_limits<float>::max())*2),std::domain_error);
 }
 
 TEST(CycleSampler, G3CircuitRepresentableSubnormalParent) {
@@ -490,10 +488,8 @@ TEST(CycleSampler, G3CircuitRepresentableSubnormalParent) {
     ASSERT_EQ(edges.size(),7u);
     auto parent=std::find_if(edges.begin(),edges.end(),[](const auto& edge){return edge.u==639860;});
     ASSERT_NE(parent,edges.end());
-    EXPECT_GT(static_cast<detail::pool_value_t>(parent->w),0);
-    if constexpr(sizeof(detail::pool_value_t)==4) {
-        EXPECT_EQ(std::fpclassify(static_cast<detail::pool_value_t>(parent->w)),FP_SUBNORMAL);
-    }
+    EXPECT_GT(static_cast<float>(parent->w),0);
+    EXPECT_EQ(std::fpclassify(static_cast<float>(parent->w)),FP_SUBNORMAL);
 }
 
 TEST(CycleSampler, G3CircuitZeroRoundingUsesOriginalGksSeed) {
@@ -502,23 +498,17 @@ TEST(CycleSampler, G3CircuitZeroRoundingUsesOriginalGksSeed) {
         {642504,3.755542722575982e-13},{641515,1.8731658769788402e-10}};
     constexpr double D=21959.66929534227;
     detail::trace_cycle_plan plan;plan.prepare(n);ASSERT_EQ(plan.cut,2u);
-    if constexpr(sizeof(detail::pool_value_t)==4) {
-        EXPECT_EQ(static_cast<detail::pool_value_t>(plan.parent_weight(n,D,0,1)),0);
-        EXPECT_EQ(static_cast<detail::pool_value_t>(plan.parent_weight(n,D,0,4)),0);
-        for(std::uint64_t seed : {5420014876489129564ULL,0ULL,1ULL,42ULL}) {
-            auto copy=n;std::vector<deferred_edge> expected,got;
-            tree_elimination{}.sample_clique(copy,D,seed,edge_emitter(expected));
-            tree_elimination{.sampler=clique_sampler::trace_cycle}.sample_clique(n,D,seed,edge_emitter(got));
-            ASSERT_EQ(got.size(),expected.size());
-            for(std::size_t i=0;i<got.size();++i) {
-                EXPECT_EQ(got[i].u,expected[i].u);EXPECT_EQ(got[i].v,expected[i].v);
-                EXPECT_DOUBLE_EQ(got[i].w,expected[i].w);
-            }
-            EXPECT_EQ(static_cast<detail::pool_value_t>(got.front().w),0);
+    EXPECT_EQ(static_cast<float>(plan.parent_weight(n,D,0,1)),0);
+    EXPECT_EQ(static_cast<float>(plan.parent_weight(n,D,0,4)),0);
+    for(std::uint64_t seed : {5420014876489129564ULL,0ULL,1ULL,42ULL}) {
+        auto copy=n;std::vector<deferred_edge> expected,got;
+        tree_elimination{}.sample_clique(copy,D,seed,edge_emitter(expected));
+        tree_elimination{.sampler=clique_sampler::trace_cycle}.sample_clique(n,D,seed,edge_emitter(got));
+        ASSERT_EQ(got.size(),expected.size());
+        for(std::size_t i=0;i<got.size();++i) {
+            EXPECT_EQ(got[i].u,expected[i].u);EXPECT_EQ(got[i].v,expected[i].v);
+            EXPECT_DOUBLE_EQ(got[i].w,expected[i].w);
         }
-    } else {
-        std::vector<deferred_edge> got;
-        ASSERT_NO_THROW((tree_elimination{.sampler=clique_sampler::trace_cycle}.sample_clique(n,D,42,edge_emitter(got))));
-        EXPECT_EQ(got.size(),5u);
+        EXPECT_EQ(static_cast<float>(got.front().w),0);
     }
 }

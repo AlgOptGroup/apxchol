@@ -26,9 +26,9 @@ namespace detail {
 struct residual_coalescer;
 }
 
-// Residual-pool edge weight storage type. fp32 under -DAPXCHOL_POOL_FP32 (ON by
-// default; pass =OFF for fp64). The residual graph is a MULTIGRAPH: adjacency writes
-// APPEND new edges and weights are never re-summed in place (the per-vertex
+// Residual-pool edge weights are stored in fp32. The residual graph is a
+// MULTIGRAPH: adjacency writes APPEND new edges and weights are never
+// re-summed in place (the per-vertex
 // dedup/weighted-degree aggregation is done transiently in fp64 at read), so each
 // stored weight is a TERMINAL write -- fp32 is safe (verified: PCG iters/residual
 // unchanged across IPM incl. high-DR, social, grid). fp32 halves the 16 B edge
@@ -74,8 +74,8 @@ public:
     // ── mutation ──
 
     void add_edge(node_index u, node_index v, double w) {
-        adj_.push(u, {v, static_cast<detail::pool_value_t>(w)});
-        adj_.push(v, {u, static_cast<detail::pool_value_t>(w)});
+        adj_.push(u, {v, static_cast<float>(w)});
+        adj_.push(v, {u, static_cast<float>(w)});
         ++m_;
     }
 
@@ -95,7 +95,7 @@ public:
     /// into a slab already sized by adj_bulk_reserve_parallel().
     void adj_atomic_push_directed(node_index from, node_index to, double w) {
         adj_.atomic_push_reserved(
-            from, detail::directed_pool_edge{to, static_cast<detail::pool_value_t>(w)});
+            from, detail::directed_pool_edge{to, static_cast<float>(w)});
     }
 
     /// Directed-inline vec_pool: write an incidence at a caller-assigned
@@ -104,7 +104,7 @@ public:
                                         node_index to, double w) {
         adj_.write_reserved_at(
             from, offset,
-            detail::directed_pool_edge{to, static_cast<detail::pool_value_t>(w)});
+            detail::directed_pool_edge{to, static_cast<float>(w)});
     }
 
     /// Publish all preassigned suffix slots for one vec_pool vertex.
@@ -670,7 +670,7 @@ private:
                         const item& edge = items[i];
                         if (!edge.kept) continue;
                         const double inv_p = 1.0 / probability(i);
-                        const detail::pool_value_t weight = static_cast<detail::pool_value_t>(
+                        const float weight = static_cast<float>(
                             edge.weight * inv_p);
                         const node_index u = dense_of[edge.u];
                         const node_index v = dense_of[edge.v];
@@ -706,9 +706,9 @@ private:
                     const double inv_p = 1.0 / probability(i);
                     const double weight = edge.weight * inv_p;
                     rebuilt.adj_.push(
-                        edge.u, {edge.v, static_cast<detail::pool_value_t>(weight)});
+                        edge.u, {edge.v, static_cast<float>(weight)});
                     rebuilt.adj_.push(
-                        edge.v, {edge.u, static_cast<detail::pool_value_t>(weight)});
+                        edge.v, {edge.u, static_cast<float>(weight)});
                     ++rebuilt.m_;
                 }
             }

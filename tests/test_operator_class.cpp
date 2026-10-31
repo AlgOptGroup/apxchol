@@ -15,6 +15,7 @@
 //     passed, or the residual it reports is for a different system.
 #include <gtest/gtest.h>
 #include "grid_laplacian.h"
+#include "test_rhs.h"
 
 #include <omp.h>
 
@@ -800,7 +801,7 @@ TEST(MMatrixLumping, OperatorIsBitIdenticalAfterPreconditionerConstruction) {
     EXPECT_TRUE(snap.identical_to(A))
         << "preconditioner construction modified the caller's operator";
 
-    const Eigen::VectorXd b = apxchol::generate_test_rhs(A.rows());
+    const Eigen::VectorXd b = apxchol::test::random_rhs(A.rows());
     const auto res = slv.solve(b);
     EXPECT_TRUE(snap.identical_to(A)) << "solving modified the caller's operator";
 
@@ -815,7 +816,7 @@ TEST(MMatrixLumping, NearlySddmOperatorConvergesAgainstTheTrueOperator) {
     const Sparse A = nearly_sddm(30, 30, 40);
     ASSERT_GT(scan_operator(A).offdiag_pos, 0);
 
-    const Eigen::VectorXd b = apxchol::generate_test_rhs(A.rows());
+    const Eigen::VectorXd b = apxchol::test::random_rhs(A.rows());
     apxchol::solver slv(A, {.tol = 1e-8, .max_iter = 300});
     EXPECT_EQ(slv.factor().lumped_offdiag, 80);   // 40 pairs
     const auto res = slv.solve(b);
@@ -829,7 +830,7 @@ TEST(MMatrixLumping, PureLaplacianAndSddmAreUnchangedByTheFeature) {
     // triggered, no behaviour change, and the factor reports zero.
     for (const Sparse& A : {grid_laplacian(30, 30), grid_sddm(30, 30)}) {
         const raw_snapshot snap(A);
-        const Eigen::VectorXd b = apxchol::generate_test_rhs(A.rows());
+        const Eigen::VectorXd b = apxchol::test::random_rhs(A.rows());
         apxchol::solver slv(A, {.tol = 1e-8, .max_iter = 300});
         EXPECT_EQ(slv.factor().lumped_offdiag, 0);
         const auto res = slv.solve(b);

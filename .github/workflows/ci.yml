@@ -94,12 +94,12 @@ jobs:
             cxx: g++-14
             packages: g++-14
             native_arch: 'ON'
-          - name: GCC 14, portable, 64-bit nodes, FP64 pool
+          - name: GCC 14, portable, 64-bit nodes
             cc: gcc-14
             cxx: g++-14
             packages: g++-14
             native_arch: 'OFF'
-            cmake_args: -DAPXCHOL_INDEX_WIDTH=64 -DAPXCHOL_POOL_FP32=OFF
+            cmake_args: -DAPXCHOL_INDEX_WIDTH=64
           - name: Clang 18, portable
             cc: clang-18
             cxx: clang++-18

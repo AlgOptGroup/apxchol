@@ -21,6 +21,7 @@
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"
 #include "mtx_input.h"
+#include "test_rhs.h"
 
 using apxchol::describe_input;
 using apxchol::detail::adjacency_laplacian;
@@ -275,7 +276,7 @@ TEST(AdjacencyInputRegression, RawAdjacencyIsRefusedByTheOperatorContract) {
                       },
                       +[](const Sparse& M) {
                           (void)apxchol::solve(
-                              M, apxchol::generate_test_rhs(M.rows()),
+                              M, apxchol::test::random_rhs(M.rows()),
                               {.tol = 1e-8, .max_iter = 200});
                       }}) {
         try {
@@ -303,7 +304,7 @@ TEST(AdjacencyInputRegression, ConvertedAdjacencyHasPlausibleFillAndConverges) {
     EXPECT_GT(offdiag_factor_nnz(F), kEdges)
         << "factor shows no fill at all -- the clique sampler bailed out again";
 
-    const Eigen::VectorXd b = apxchol::generate_test_rhs(L.rows());
+    const Eigen::VectorXd b = apxchol::test::random_rhs(L.rows());
     const auto res = apxchol::solve(L, b, {.tol = 1e-8, .max_iter = 200});
     EXPECT_GT(res.iterations, 0);
     EXPECT_LT(res.residual, 1e-8);
@@ -316,7 +317,7 @@ TEST(AdjacencyInputRegression, ConversionRoutesAnAdjacencyMatrixToConvergence) {
     ASSERT_TRUE(is_graph_adjacency(M));
     M = adjacency_laplacian(M);
 
-    const Eigen::VectorXd b = apxchol::generate_test_rhs(M.rows());
+    const Eigen::VectorXd b = apxchol::test::random_rhs(M.rows());
     const auto res = apxchol::solve(M, b, {.tol = 1e-8, .max_iter = 200});
     EXPECT_GT(res.iterations, 0);
     EXPECT_LT(res.residual, 1e-8);
@@ -332,7 +333,7 @@ TEST(AdjacencyInputRegression, SddmInputIsStillSolvedAsAnOperator) {
     EXPECT_EQ(scan_input(L).excess_rows, L.rows());
     ASSERT_FALSE(is_graph_adjacency(L));
 
-    const Eigen::VectorXd b = apxchol::generate_test_rhs(L.rows());
+    const Eigen::VectorXd b = apxchol::test::random_rhs(L.rows());
     const auto res = apxchol::solve(L, b, {.tol = 1e-8, .max_iter = 200});
     EXPECT_GT(res.iterations, 0);
     EXPECT_LT(res.residual, 1e-8);

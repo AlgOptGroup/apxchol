@@ -73,9 +73,6 @@ struct batch_solve_result {
     checkpoint timings;
 };
 
-/// Generate a random zero-mean unit RHS vector using Eigen's global std::rand state.
-Eigen::VectorXd generate_test_rhs(Eigen::Index n);
-
 /// Reusable solver owning one CPU or GPU backend, selected once at setup.
 /// solve_backend::cpu keeps setup and solves on CPU, also in GPU builds.
 /// Owns its input data. solve() and apply() use this object's workspace, so

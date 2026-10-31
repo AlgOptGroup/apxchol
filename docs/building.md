@@ -144,7 +144,6 @@ backend selection and factor storage are runtime settings; see the
 |---|---|---|
 | `APXCHOL_DEVICE` | `CPU` | `CPU` only, or CPU plus `CUDA` / `METAL` |
 | `APXCHOL_NATIVE_ARCH` | ON for standalone root, local Python and benchmarks; OFF for embedding, the SDK and wheels | Tune for the build machine; turn OFF for distribution. Ignored when `CMAKE_CXX_FLAGS` sets `-march`/`-mcpu` |
-| `APXCHOL_POOL_FP32` | ON | Store mutable graph weights in FP32; OFF uses FP64 |
 | `APXCHOL_INDEX_WIDTH` | `32` | `32`, `64_EDGES` or `64`; see layouts below |
 | `APXCHOL_BUILD_CLI` | ON standalone; OFF when embedded | Build the CLI and its input/logging dependencies |
 | `APXCHOL_BUILD_TESTS` | ON standalone; OFF when embedded | Build the test suite |

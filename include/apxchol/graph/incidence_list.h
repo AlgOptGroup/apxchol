@@ -399,7 +399,7 @@ template<typename Value> struct basic_vec_pool_incidence {
                 ++i;
             } while (i < before && p[i].to == target);
             if (is_live(target))
-                p[out++] = {target, static_cast<pool_value_t>(weight)};
+                p[out++] = {target, static_cast<float>(weight)};
         }
         count_[v] = out;
         return {before, out};
