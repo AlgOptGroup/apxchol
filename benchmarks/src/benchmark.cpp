@@ -67,7 +67,9 @@
 #endif
 
 #ifdef APXCHOL_USE_CUDA
-#include <cuda_runtime.h>   // cudaMemGetInfo for read_vram_mb().
+#include <cuda_runtime.h>
+#include <unistd.h>         // getpid for the GPU memory receipt.
+#include "gpu_memory.h"
 #include "apxchol/solver/detail/gpu_solve_session.h"
 #endif
 
@@ -565,21 +567,18 @@ static double read_vmrss_mb() {
     return -1.0;
 }
 
-// Device memory in use (MB), the GPU analog of read_vmrss_mb: total - free from
-// cudaMemGetInfo. Includes the CUDA context (~300-600MB) + caching-allocator footprint,
-// so it overcounts the minimal working set the same way VmRSS overcounts host -- read at
-// solve end to record the SOLVE-held VRAM (operator + factor + SpSV bufs + PCG vectors).
-// Returns -1 when CUDA isn't compiled in or the query fails (CPU solvers stay unmeasured).
-// [[maybe_unused]]: BOTH call sites sit inside `#ifdef APXCHOL_USE_CUDA` blocks, so a
-// CPU build defines this and never calls it. Conditionally used, not dead -- deleting it
-// breaks the CUDA build.
+// Device memory (MiB) this process holds above the post-context baseline, the GPU
+// analog of read_vmrss_mb (see gpu_memory.h). Read after setup and at solve end while
+// the solver still holds its memory, outside the timed intervals. Returns -1 when CUDA
+// isn't compiled in or NVML cannot attribute memory to this process.
+// [[maybe_unused]]: every call site sits inside an `#ifdef APXCHOL_USE_CUDA` block, so
+// a CPU build defines this and never calls it.
 [[maybe_unused]] static double read_vram_mb() {
 #ifdef APXCHOL_USE_CUDA
-    size_t mf = 0, mt = 0;
-    if (cudaMemGetInfo(&mf, &mt) == cudaSuccess && mt >= mf)
-        return (mt - mf) / (1024.0 * 1024.0);
-#endif
+    return gpu_memory_above_baseline_mib();
+#else
     return -1.0;
+#endif
 }
 
 // Diagnostic only: stored diagonals are optional for zero rows. Subtracting the
@@ -605,6 +604,21 @@ static void warm_up_cuda_once() {
         std::chrono::high_resolution_clock::now() - begin).count();
     std::cerr << "[bench] cuda_init (once, before any timed solver): "
               << std::fixed << std::setprecision(1) << init_ms << " ms\n";
+    // GPU memory baseline: this process after context creation, before any solver
+    // allocates. The runner's untimed peak sampler matches this pid and bus id.
+    const auto& memory = record_gpu_memory_baseline();
+    std::cerr << "[bench] gpu_memory pid=" << getpid()
+              << " bus_id=" << (memory.bus_id.empty() ? "unknown" : memory.bus_id)
+              << " baseline_mib=";
+    if (memory.unavailable.empty()) std::cerr << memory.self_mib;
+    else std::cerr << "unavailable reason=" << memory.unavailable;
+    std::cerr << " other_processes=";
+    if (memory.other_processes < 0) std::cerr << "unknown";
+    else std::cerr << memory.other_processes;
+    std::cerr << " other_mib=";
+    if (memory.other_mib < 0) std::cerr << "unknown";
+    else std::cerr << memory.other_mib;
+    std::cerr << '\n';
     initialized = true;
 }
 #endif
@@ -626,7 +640,7 @@ static void print_result_pretty(const BenchResult& r) {
 }
 
 static void print_csv_header() {
-    std::cout << "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz,solve_rss_mb,solve_vram_mb,retained_repeats,representative_repeat,max_repeat_rel_res,stop_contract,solve_passes,stop_check_s,execution_route\n";
+    std::cout << "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz,solve_rss_mb,solve_vram_mb,setup_vram_mb,retained_repeats,representative_repeat,max_repeat_rel_res,stop_contract,solve_passes,stop_check_s,execution_route\n";
 }
 
 static void print_result_csv(const BenchResult& r) {
@@ -643,6 +657,7 @@ static void print_result_csv(const BenchResult& r) {
               << r.us_per_nnz << ","
               << std::setprecision(1) << r.solve_rss_mb << ","
               << std::setprecision(1) << r.solve_vram_mb << ","
+              << std::setprecision(1) << r.setup_vram_mb << ","
               << r.retained_repeats << "," << r.representative_repeat << ","
               << std::scientific << std::setprecision(17)
               << r.max_repeat_rel_residual << "," << bench_stop::contract << ","
@@ -747,6 +762,7 @@ static BenchResult run_apxchol_v1(
     };
 
     const auto t_wall_start = std::chrono::high_resolution_clock::now();
+    double memory_read_s = 0; // GPU memory reads, removed from the wall interval
     apxchol::solve_result res;
     auto* cp = &res.timings;
     cp->descend("setup"); cp->tick();
@@ -758,6 +774,14 @@ static BenchResult run_apxchol_v1(
     if (route == apxchol::solve_backend::gpu) {
         Eigen::initParallel();
         apxchol::detail::gpu_solve_session solver(L, opts, res);
+        const auto read_vram = [&] {
+            const auto begin = std::chrono::high_resolution_clock::now();
+            const double mib = read_vram_mb();
+            memory_read_s += std::chrono::duration<double>(
+                std::chrono::high_resolution_clock::now() - begin).count();
+            return mib;
+        };
+        r.setup_vram_mb = read_vram();
         Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
             [&](double request, int remaining, bool, Eigen::VectorXd& current) {
                 solver.solve(b, res, request, remaining);
@@ -768,8 +792,7 @@ static BenchResult run_apxchol_v1(
         res.iterations = r.iterations;
         capture_fill(solver.preconditioner());
         r.solve_rss_mb = read_vmrss_mb();
-        r.solve_vram_mb = read_vram_mb();   // device VRAM held at solve end, before
-                                            // the session releases its device state.
+        r.solve_vram_mb = read_vram(); // the session still holds its device state
     } else
 #endif
     {
@@ -787,7 +810,7 @@ static BenchResult run_apxchol_v1(
     }
     const auto t_wall_end = std::chrono::high_resolution_clock::now();
     const double wall_total =
-        std::chrono::duration<double>(t_wall_end - t_wall_start).count();
+        std::chrono::duration<double>(t_wall_end - t_wall_start).count() - memory_read_s;
 
     // Honest accounting:
     //   setup_time   — preconditioner build (from checkpoint, accurate)
@@ -1840,7 +1863,7 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
     bool unavailable = false;
     long long measured_offdiag = 0;
     bool measured_fill = true;
-    double rss=0, vram=-1;   // combined solve-held RSS/VRAM = MAX over components (peak
+    double rss=0, vram=-1, setup_vram=-1;   // combined solve-held RSS/VRAM = MAX over components (peak
                              // resident during the largest sub-solve); else the combined
                              // cell loses these and shows blank on the memory heatmaps.
     const bool dbg = std::getenv("SPLIT_DEBUG") != nullptr;
@@ -1883,6 +1906,7 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
         if (rc.factor_offdiag >= 0) measured_offdiag += rc.factor_offdiag;
         if (rc.solve_rss_mb > rss) rss = rc.solve_rss_mb;       // peak over components
         if (rc.solve_vram_mb > vram) vram = rc.solve_vram_mb;
+        if (rc.setup_vram_mb > setup_vram) setup_vram = rc.setup_vram_mb;
         // Adapters normalize by one when the component RHS is zero. Undo that
         // same normalization; multiplying by zero would hide a failed solve.
         const double sbn=subb.norm(); const double rnc = rc.rel_residual*(sbn>0?sbn:1.0);
@@ -1927,7 +1951,7 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
     r.iterations=unavailable?-1:it;
     r.rel_residual = unavailable?-1.0:std::sqrt(res2)/(bn>0?bn:1.0);
     r.us_per_nnz = r.total_time/std::max(1,r.nnz)*1e6;
-    r.solve_rss_mb = rss; r.solve_vram_mb = vram;   // carry peak over components
+    r.solve_rss_mb = rss; r.solve_vram_mb = vram; r.setup_vram_mb = setup_vram;   // carry peak over components
     if (!r.execution_route.empty()) {
         r.factor_offdiag = measured_fill ? measured_offdiag : -1;
         const long long adj_nnz = stored_offdiagonal_entries(L);
@@ -2531,6 +2555,7 @@ static BenchResult run_hypre_boomeramg_gpu(
     std::vector<double> x_host(m);
     hypre_array<double> x_out(x_host.data(), x_host.size());
     r.setup_time = t.elapsed();
+    r.setup_vram_mb = read_vram_mb();   // outside both timers
 
     t.start();
     Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
@@ -2551,7 +2576,7 @@ static BenchResult run_hypre_boomeramg_gpu(
 
     r.fillin = 0;
     r.us_per_nnz = r.total_time / r.nnz * 1e6;
-    r.solve_vram_mb = read_vram_mb();   // device VRAM held at solve end (GPU AMG hierarchy
+    r.solve_vram_mb = read_vram_mb();   // device memory held at solve end (GPU AMG hierarchy
                                         // + ParCSR operator + PCG vectors), before destroy.
 
     if (is_laplacian)
