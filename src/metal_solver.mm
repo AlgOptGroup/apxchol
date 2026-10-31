@@ -448,7 +448,7 @@ struct metal_solver::impl {
         detail::validate_solve_options(opts);
         if (opts.backend == solve_backend::cpu)
             throw std::invalid_argument("metal_solver cannot execute an explicit CPU request");
-        if (opts.factor_opts.cpu_schedule != cpu_sptrsv_schedule::automatic)
+        if (opts.factor_opts.experimental.cpu_schedule != cpu_sptrsv_schedule::automatic)
             throw std::invalid_argument("Metal cannot use a CPU triangular-solve schedule");
         factor_fp16 = detail::resolve_fp16_storage(opts.factor_opts.factor_storage, false);
         if (!metal_solver::available())
