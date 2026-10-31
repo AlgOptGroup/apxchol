@@ -27,7 +27,7 @@ using csc_access = apxchol::detail::sparse_csc_access;
 namespace {
 using apxchol::node_index;
 using matrix = Eigen::SparseMatrix<double>;
-using host_graph = apxchol::graph;
+using host_graph = apxchol::detail::graph;
 using apxchol::detail::gpu_round_shadow_input;
 
 struct weighted_edge { int u, v; double weight; };
@@ -57,7 +57,7 @@ matrix make_matrix(int n, const std::vector<weighted_edge>& edges, double shift 
 }
 
 [[maybe_unused]] gpu_round_shadow_input host_snapshot(const matrix& A, double reg_eps = 0.0) {
-    auto graph = apxchol::make_graph(A);
+    auto graph = apxchol::detail::make_graph(A);
     if (reg_eps > 0.0)
         for (node_index v = 0; v < graph.n(); ++v)
             graph.excess(v) = std::max(graph.excess(v), reg_eps * A.coeff(v, v));
@@ -341,7 +341,7 @@ TEST(GpuDirectCsc, FirstSelectorHasCorrectCandidatesAndIndependentProgress) {
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
     scoped_omp_threads serial(1);
     const auto A = selector_matrix();
-    const auto graph = apxchol::make_graph(A);
+    const auto graph = apxchol::detail::make_graph(A);
     ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(A));
     std::vector<node_index> active(graph.n()); std::iota(active.begin(),active.end(),node_index{0});
     for (bool ties : {false, true}) for (double quantile : {0.0, 0.3, 0.8}) {
@@ -410,7 +410,7 @@ TEST(GpuDirectCsc, InitialOwnerOutlivesInputAndRetiresEveryBorrowedSelectorRead)
         auto owner = std::make_unique<apxchol::detail::gpu_round_shadow_session>(true);
         std::unique_ptr<apxchol::detail::gpu_block_frontend> direct;
         const auto original = selector_matrix();
-        const auto graph = apxchol::make_graph(original);
+        const auto graph = apxchol::detail::make_graph(original);
         {
             auto temporary = original;
             ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(temporary));
@@ -526,9 +526,9 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
         EXPECT_TRUE(csc_access::vals(preconditioner.factor().L).empty());
         EXPECT_TRUE(csc_access::inner(preconditioner.factor().L).empty());
         EXPECT_GT(preconditioner.factor().rounds.size(),2u);
-        apxchol::solve_options options; options.tol=1e-8; options.max_iter=1000;
+        apxchol::solve_options options;
         options.backend = apxchol::solve_backend::gpu;
-        const auto solved = apxchol::solve(A,b,options);
+        const auto solved = apxchol::solve(A, b, 1e-8, 1000, nullptr, options);
         ASSERT_EQ(solved.x.size(),n);
         EXPECT_LE((A*solved.x-b).norm()/b.norm(),1e-8);
     }

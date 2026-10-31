@@ -799,8 +799,8 @@ TEST(GpuSolveHonesty, ZeroIterationPublicSolveReportsRelativeResidual) {
     for (double scale : {1e-12, 1.0, 1e6}) {
         SCOPED_TRACE(scale);
         const Eigen::VectorXd b = Eigen::VectorXd::Constant(n, scale);
-        const auto result = apxchol::solve(A, b, {.tol = 1e-8, .max_iter = 0,
-                                                 .backend = apxchol::solve_backend::gpu});
+        const auto result = apxchol::solve(A, b, 1e-8, 0,
+                                                 nullptr, {.backend = apxchol::solve_backend::gpu});
         ASSERT_EQ(result.x.size(), n);
         EXPECT_TRUE(result.x.isZero(0.0));
         EXPECT_EQ(result.iterations, 0);

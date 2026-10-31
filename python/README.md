@@ -39,7 +39,7 @@ assert result.converged
 x = result.x
 ```
 
-For one solve, use `apxchol.solve(A, b)`. Results include `x`, `iters`,
+For one solve, use `apxchol.solve(A, b)`. Results include `x`, `iterations`,
 `residual` and `converged`. Convergence is always checked against the original
 `A` and `b`; inspect `converged` for success.
 
@@ -138,7 +138,7 @@ repeating factorization, so solves match the saved solver bit for bit on the
 same backend and thread count.
 
 `backend="auto"` adopts on CPU; `backend="gpu"` uploads to a compatible GPU.
-The file fixes the storage dtype and dropping, so `factor_storage_dtype` and
+The file fixes the storage dtype and dropping, so `factor_storage` and
 `drop_tolerance` have no effect when loading. Pass `lump_max_mass` again if the
 saved operator requires positive-entry lumping.
 
@@ -152,10 +152,10 @@ Pass these keywords to `factorize` or the one-shot `solve`:
 | `num_threads` | CPU thread ceiling; `0` inherits the caller's OpenMP setting |
 | `seed` | Sampling seed; `None` uses the native default |
 | `partitioner` | `"block_greedy"`, `"priority_greedy"` or `"baumann_kyng"`; `None` uses the native default |
-| `factor_storage_dtype` | `np.float16`, `np.float32`, or `None` for the backend default; dtype names also work |
+| `factor_storage` | `"auto"` (default) for the backend default, `"float16"` or `"float32"`; NumPy dtypes also work |
 
 Read the chosen route from `solver.backend` and storage type from
-`solver.factor_storage_dtype`. See [backend and thread selection](https://algoptgroup.github.io/apxchol/docs/usage.html)
+`solver.factor_storage`, a NumPy dtype. See [backend and thread selection](https://algoptgroup.github.io/apxchol/docs/usage.html)
 for automatic selection and explicit-request behavior.
 
 Storage defaults to FP32 on CPU/Metal and FP16 on CUDA. This affects
@@ -177,7 +177,10 @@ support fewer construction choices.
 | `lump_max_mass` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
 | `verbose` | Print setup diagnostics; off by default |
 
-Unknown keywords raise `ValueError`. The [Python reference](https://algoptgroup.github.io/apxchol/docs/reference/python.html)
+Unknown keywords raise `ValueError`, like other invalid input or options;
+execution failures raise `RuntimeError` (see
+[results and errors](https://algoptgroup.github.io/apxchol/docs/usage.html#results-and-errors)).
+The [Python reference](https://algoptgroup.github.io/apxchol/docs/reference/python.html)
 and [native option reference](https://algoptgroup.github.io/apxchol/docs/reference/cpp.html) describe the controls.
 
 ## Use with a SciPy solver

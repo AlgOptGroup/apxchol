@@ -4,7 +4,6 @@
 #include <span>
 #include <vector>
 #include <cstddef>
-#include <limits>
 
 namespace apxchol {
 
@@ -44,8 +43,6 @@ namespace detail { struct sparse_csc_access; }
 /// finalize code build and release the storage through detail::sparse_csc_access.
 class sparse_csc {
 public:
-    static constexpr edge_index kEdgeMax = std::numeric_limits<edge_index>::max();
-
     sparse_csc() = default;
 
     node_index rows() const { return n_; }

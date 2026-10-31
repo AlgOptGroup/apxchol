@@ -17,7 +17,7 @@
 
 #include <omp.h>
 
-namespace apxchol {
+namespace apxchol::detail {
 
 /// Build the graph Laplacian L = D - A as a sparse matrix.
 template<typename G>
@@ -39,8 +39,6 @@ Eigen::SparseMatrix<double> laplacian(const G& g) {
     L.setFromTriplets(trips.begin(), trips.end());
     return L;
 }
-
-namespace detail {
 
 /// make_graph with the caller's proof about the operator. `triangles_bit_identical`
 /// must come from a fresh `operator_scan` of this very matrix
@@ -288,8 +286,6 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
     return g;
 }
 
-} // namespace detail
-
 /// Build a graph from a Laplacian or SDDM matrix.
 ///
 /// Off-diagonal entries become weighted edges (negated).
@@ -299,4 +295,4 @@ inline graph make_graph(const Eigen::SparseMatrix<double>& L) {
     return detail::make_graph_from_operator(L, /*triangles_bit_identical=*/false);
 }
 
-} // namespace apxchol
+} // namespace apxchol::detail

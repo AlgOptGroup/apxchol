@@ -87,8 +87,6 @@ apxchol::solve_options cpu_options() {
     apxchol::solve_options options;
     options.backend = apxchol::solve_backend::cpu;
     options.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
-    options.tol = 1e-10;
-    options.max_iter = 400;
     return options;
 }
 
@@ -98,7 +96,8 @@ bool same_bytes(const T* left, const T* right, std::size_t count) {
 }
 
 void expect_solution(const Sparse& matrix, const Eigen::VectorXd& rhs,
-                     const Eigen::Ref<const Eigen::VectorXd>& x, double tolerance = 1e-10) {
+                     const Eigen::Ref<const Eigen::VectorXd>& x,
+                     double tolerance = apxchol::default_tol) {
     ASSERT_EQ(x.size(), matrix.rows());
     EXPECT_TRUE(x.allFinite());
     EXPECT_LT((matrix * x - rhs).norm() / rhs.norm(), tolerance);
@@ -143,8 +142,8 @@ TEST(Solver, EigenConjugateGradientUsesPreconditioner) {
         apxchol::solver owner(matrix, options);
         Eigen::ConjugateGradient<Sparse, Eigen::Lower, eigen_preconditioner> cg;
         cg.preconditioner().attach(owner);
-        cg.setTolerance(options.tol);
-        cg.setMaxIterations(options.max_iter);
+        cg.setTolerance(apxchol::default_tol);
+        cg.setMaxIterations(apxchol::default_max_iter);
         cg.compute(matrix);
         ASSERT_EQ(cg.info(), Eigen::Success);
         const Eigen::VectorXd x = cg.solve(rhs);
@@ -512,7 +511,7 @@ TEST(Solver, CpuCallerOutputAndWarmStartsUseEachOwnersStorage) {
         EXPECT_EQ(result.residual, expected.residual);
         EXPECT_TRUE(same_bytes(output.data(), expected.x.data(), output.size()));
         expect_solution(matrix, rhs, output);
-        const auto warm = owner.solve(rhs, output, options.tol, 0, &expected.x);
+        const auto warm = owner.solve(rhs, output, apxchol::default_tol, 0, &expected.x);
         EXPECT_EQ(warm.x.size(), 0);
         EXPECT_EQ(warm.iterations, 0);
         expect_solution(matrix, rhs, output);
@@ -575,7 +574,7 @@ TEST(Solver, ReportsSetupAndSolveSeconds) {
     EXPECT_EQ(copy.setup_seconds(), setup);
     const apxchol::solver adopted(matrix, apxchol::factorize(matrix), cpu_options());
     EXPECT_TRUE(positive(adopted.setup_seconds())) << adopted.setup_seconds();
-    const auto one_shot = apxchol::solve(matrix, b, cpu_options());
+    const auto one_shot = apxchol::solve(matrix, b, std::nullopt, std::nullopt, nullptr, cpu_options());
     EXPECT_TRUE(one_shot.converged);
     EXPECT_TRUE(positive(one_shot.solve_seconds)) << one_shot.solve_seconds;
 }
@@ -597,19 +596,19 @@ TEST(Solver, CpuScalesExtremeRhsAndWarmStarts) {
             const Eigen::VectorXd rhs = magnitude * unit;
             const Eigen::VectorXd x0 = 0.25 * rhs;
             for (const Eigen::VectorXd* guess : {static_cast<const Eigen::VectorXd*>(nullptr), &x0}) {
-                const auto result = owner.solve(rhs, options.tol, options.max_iter, guess);
+                const auto result = owner.solve(rhs, apxchol::default_tol, apxchol::default_max_iter, guess);
                 EXPECT_TRUE(result.x.allFinite());
-                EXPECT_LT(result.residual, options.tol);
+                EXPECT_LT(result.residual, apxchol::default_tol);
                 EXPECT_TRUE(result.converged);
-                EXPECT_LT((result.x - rhs).stableNorm() / rhs.stableNorm(), options.tol);
+                EXPECT_LT((result.x - rhs).stableNorm() / rhs.stableNorm(), apxchol::default_tol);
             }
             Eigen::VectorXd output(matrix.rows());
-            const auto exact = owner.solve(rhs, output, options.tol, 0, &rhs);
+            const auto exact = owner.solve(rhs, output, apxchol::default_tol, 0, &rhs);
             EXPECT_EQ(exact.iterations, 0);
             EXPECT_EQ(exact.residual, 0.0);
             EXPECT_TRUE(exact.converged);
             EXPECT_EQ(output, rhs);
-            const auto stopped = owner.solve(rhs, options.tol, 0);
+            const auto stopped = owner.solve(rhs, apxchol::default_tol, 0);
             EXPECT_EQ(stopped.iterations, 0);
             EXPECT_EQ(stopped.residual, 1.0);
             EXPECT_FALSE(stopped.converged);
@@ -620,7 +619,7 @@ TEST(Solver, CpuScalesExtremeRhsAndWarmStarts) {
         EXPECT_TRUE(zero.converged);
         EXPECT_TRUE(zero.x.isZero(0.0));
         const Eigen::VectorXd tiny = 1e-200 * unit, huge = 1e200 * unit;
-        EXPECT_THROW(owner.solve(tiny, options.tol, 0, &huge), std::invalid_argument);
+        EXPECT_THROW(owner.solve(tiny, apxchol::default_tol, 0, &huge), std::invalid_argument);
     }
 }
 
@@ -776,26 +775,13 @@ TEST(Solver, InvalidDropTolerancePrecedesBackendSelection) {
     }
 }
 
-TEST(Solver, RejectsInvalidDefaultsAndResolvedOverrides) {
+TEST(Solver, RejectsInvalidOptionsAndLimits) {
     const scoped_omp_threads threads(1);
     const Sparse matrix = operator_matrix();
     const auto defaults = cpu_options();
-    const auto reject = [&](apxchol::solve_options options) {
-        EXPECT_THROW(apxchol::solver(matrix, options), std::invalid_argument);
-    };
-    for (double tol : {0.0, -1.0, std::numeric_limits<double>::quiet_NaN(),
-                       std::numeric_limits<double>::infinity(),
-                       -std::numeric_limits<double>::infinity()}) {
-        auto options = defaults;
-        options.tol = tol;
-        reject(options);
-    }
     auto invalid = defaults;
-    invalid.max_iter = -1;
-    reject(invalid);
-    invalid = defaults;
     invalid.backend = static_cast<apxchol::solve_backend>(99);
-    reject(invalid);
+    EXPECT_THROW(apxchol::solver(matrix, invalid), std::invalid_argument);
     apxchol::solver owner(matrix, defaults);
     const Eigen::VectorXd b = Eigen::VectorXd::Ones(matrix.rows());
     Eigen::MatrixXd B = b.replicate(1, 2), X(matrix.rows(), 2);
@@ -806,22 +792,23 @@ TEST(Solver, RejectsInvalidDefaultsAndResolvedOverrides) {
         EXPECT_THROW(owner.solve(b, tol), std::invalid_argument);
         EXPECT_THROW(owner.solve(B, X, tol), std::invalid_argument);
         EXPECT_THROW(owner.solve(empty, empty_output, tol), std::invalid_argument);
+        EXPECT_THROW(apxchol::solve(matrix, b, tol, std::nullopt, nullptr, defaults),
+                     std::invalid_argument);
     }
     for (int max_iter : {-1, -7}) {
         EXPECT_THROW(owner.solve(b, std::nullopt, max_iter), std::invalid_argument);
         EXPECT_THROW(owner.solve(B, X, std::nullopt, max_iter), std::invalid_argument);
+        EXPECT_THROW(apxchol::solve(matrix, b, std::nullopt, max_iter, nullptr, defaults),
+                     std::invalid_argument);
     }
     EXPECT_TRUE(owner.solve(b).converged);
-    EXPECT_FALSE(owner.solve(b, defaults.tol, 0).converged);
+    EXPECT_FALSE(owner.solve(b, apxchol::default_tol, 0).converged);
 }
 
-TEST(Solver, OmittedLimitsUseConstructorOptions) {
+TEST(Solver, OmittedLimitsUseLibraryDefaults) {
     const scoped_omp_threads threads(1);
     const Sparse matrix = operator_matrix();
-    auto options = cpu_options();
-    options.tol = 1e-3;
-    options.max_iter = 2;
-    apxchol::solver owner(matrix, options);
+    apxchol::solver owner(matrix, cpu_options());
     const Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     const Eigen::MatrixXd B = Eigen::MatrixXd::Random(matrix.rows(), 3);
     const auto same = [](const apxchol::solve_result& left, const apxchol::solve_result& right) {
@@ -829,21 +816,19 @@ TEST(Solver, OmittedLimitsUseConstructorOptions) {
         EXPECT_EQ(left.residual, right.residual);
         EXPECT_EQ(left.converged, right.converged);
     };
-    const auto check = [&](auto& instance) {
-        const auto implicit = instance.solve(b);
-        const auto explicit_limits = instance.solve(b, options.tol, options.max_iter);
-        same(implicit, explicit_limits);
-        EXPECT_TRUE(same_bytes(implicit.x.data(), explicit_limits.x.data(), b.size()));
-        EXPECT_LE(implicit.iterations, options.max_iter);
-        Eigen::MatrixXd X(B.rows(), B.cols()), Y(B.rows(), B.cols());
-        const auto batch = instance.solve(B, X);
-        const auto explicit_batch = instance.solve(B, Y, options.tol, options.max_iter);
-        ASSERT_EQ(batch.columns.size(), explicit_batch.columns.size());
-        for (std::size_t c = 0; c < batch.columns.size(); ++c)
-            same(batch.columns[c], explicit_batch.columns[c]);
-        EXPECT_TRUE(same_bytes(X.data(), Y.data(), X.size()));
-    };
-    check(owner);
+    const auto implicit = owner.solve(b);
+    const auto explicit_limits = owner.solve(b, apxchol::default_tol, apxchol::default_max_iter);
+    same(implicit, explicit_limits);
+    EXPECT_TRUE(same_bytes(implicit.x.data(), explicit_limits.x.data(), b.size()));
+    Eigen::MatrixXd X(B.rows(), B.cols()), Y(B.rows(), B.cols());
+    const auto batch = owner.solve(B, X);
+    const auto explicit_batch = owner.solve(B, Y, apxchol::default_tol, apxchol::default_max_iter);
+    ASSERT_EQ(batch.columns.size(), explicit_batch.columns.size());
+    for (std::size_t c = 0; c < batch.columns.size(); ++c)
+        same(batch.columns[c], explicit_batch.columns[c]);
+    EXPECT_TRUE(same_bytes(X.data(), Y.data(), X.size()));
+    const auto one_shot = apxchol::solve(matrix, b, std::nullopt, std::nullopt, nullptr, cpu_options());
+    same(implicit, one_shot);
 }
 
 TEST(Solver, CpuScalarViewsRejectWrongSizesAndAliasing) {
@@ -882,7 +867,7 @@ TEST(Solver, CpuRejectsUnrepresentableSolutions) {
         const Eigen::VectorXd rhs = Eigen::VectorXd::Constant(4, diagonal < 1 ? 1e275 : 1e-275);
         const auto finite = owner.solve(rhs);
         ASSERT_TRUE(finite.x.allFinite());
-        EXPECT_LT((matrix * finite.x - rhs).stableNorm() / rhs.stableNorm(), options.tol);
+        EXPECT_LT((matrix * finite.x - rhs).stableNorm() / rhs.stableNorm(), apxchol::default_tol);
         const Eigen::VectorXd outside_range = Eigen::VectorXd::Constant(4, diagonal < 1 ? 1e300 : 1e-300);
         Eigen::MatrixXd panel(matrix.rows(), 4), output(matrix.rows(), 4);
         panel.col(0) = rhs;
@@ -1132,49 +1117,49 @@ TEST(Solver, CudaWarmStartsPreserveOriginalResidualAndIterationBudget) {
             apxchol::solver owner(matrix, options);
             const double shift = kind == 0 ? 0.0 : 8.0;
             Eigen::VectorXd x0 = exact.array() + shift;
-            auto result = owner.solve(rhs, options.tol, options.max_iter, &x0);
+            auto result = owner.solve(rhs, apxchol::default_tol, apxchol::default_max_iter, &x0);
             EXPECT_EQ(result.iterations, 0);
             EXPECT_DOUBLE_EQ(result.residual, 0.0);
             EXPECT_EQ(result.x, exact);
             if (kind != 0) {
                 const Eigen::VectorXd incompatible = rhs.array() + 1.0;
-                result = owner.solve(incompatible, options.tol, 0, &x0);
+                result = owner.solve(incompatible, apxchol::default_tol, 0, &x0);
                 EXPECT_NEAR(result.residual, std::sqrt(double(n)) / incompatible.norm(), 1e-14);
-                EXPECT_GT(result.residual, options.tol);
+                EXPECT_GT(result.residual, apxchol::default_tol);
             }
 
             x0 = ((1.0 - 0x1p-20) * exact).array() + shift;
-            result = owner.solve(rhs, 0x1p-19, options.max_iter, &x0);
+            result = owner.solve(rhs, 0x1p-19, apxchol::default_max_iter, &x0);
             EXPECT_EQ(result.iterations, 0);
             EXPECT_NEAR(result.residual, 0x1p-20, 1e-14);
 
             x0 = (0.25 * exact).array() + shift;
-            result = owner.solve(rhs, options.tol, 0, &x0);
+            result = owner.solve(rhs, apxchol::default_tol, 0, &x0);
             EXPECT_EQ(result.iterations, 0);
             EXPECT_NEAR(result.residual, 0.75, 1e-14);
             EXPECT_NEAR((matrix * result.x - rhs).norm() / rhs.norm(), result.residual, 1e-14);
             EXPECT_EQ(result.x, 0.25 * exact);
-            result = owner.solve(rhs, options.tol, 1, &x0);
+            result = owner.solve(rhs, apxchol::default_tol, 1, &x0);
             EXPECT_EQ(result.iterations, 1);
             EXPECT_NEAR((matrix * result.x - rhs).norm() / rhs.norm(), result.residual, 1e-12);
 
             Eigen::VectorXd output(n);
-            const auto into = owner.solve(rhs, output, options.tol, options.max_iter, &x0);
+            const auto into = owner.solve(rhs, output, apxchol::default_tol, apxchol::default_max_iter, &x0);
             EXPECT_GT(into.iterations, 0);
             EXPECT_EQ(into.x.size(), 0);
             expect_solution(matrix, rhs, output);
             if (kind != 0) {
                 EXPECT_NEAR(output.mean(), 0.0, 1e-12);
             }
-            result = owner.solve(rhs, options.tol, options.max_iter, &x0);
+            result = owner.solve(rhs, apxchol::default_tol, apxchol::default_max_iter, &x0);
             expect_solution(matrix, rhs, result.x);
 
             const auto cold = owner.solve(rhs);
-            result = owner.solve(rhs, options.tol, options.max_iter, &zero);
+            result = owner.solve(rhs, apxchol::default_tol, apxchol::default_max_iter, &zero);
             EXPECT_EQ(result.iterations, cold.iterations);
             EXPECT_EQ(result.x, cold.x);
             EXPECT_EQ(result.residual, cold.residual);
-            result = owner.solve(zero, options.tol, 0, &x0);
+            result = owner.solve(zero, apxchol::default_tol, 0, &x0);
             EXPECT_EQ(result.iterations, 0);
             EXPECT_EQ(result.residual, 0.0);
             EXPECT_EQ(result.x, zero);
@@ -1201,10 +1186,10 @@ TEST(Solver, CudaOwnerHonorsIterationBudgetWithPoorWarmStart) {
     auto options = cpu_options();
     options.backend = apxchol::solve_backend::gpu;
     apxchol::solver owner(matrix, options);
-    const auto first = owner.solve(rhs, options.tol, 1, &x0);
+    const auto first = owner.solve(rhs, apxchol::default_tol, 1, &x0);
     ASSERT_EQ(first.iterations, 1);
     ASSERT_GT(first.residual, 0.5);
-    const auto next = owner.solve(rhs, options.tol, 2, &x0);
+    const auto next = owner.solve(rhs, apxchol::default_tol, 2, &x0);
     EXPECT_EQ(next.iterations, 2);
 #endif
 }
@@ -1233,13 +1218,13 @@ TEST(Solver, CudaScalesRhsAndWarmStartsForFloatPreconditioner) {
             const Eigen::VectorXd rhs = magnitude * unit;
             const Eigen::VectorXd x0 = 0.25 * rhs;
             const auto cold = owner.solve(rhs);
-            const auto warm = owner.solve(rhs, options.tol, options.max_iter, &x0);
+            const auto warm = owner.solve(rhs, apxchol::default_tol, apxchol::default_max_iter, &x0);
             for (const auto* result : {&cold, &warm}) {
                 EXPECT_GT(result->iterations, 0);
-                EXPECT_LT(result->residual, options.tol);
+                EXPECT_LT(result->residual, apxchol::default_tol);
                 EXPECT_LT((matrix * result->x - rhs).stableNorm() / rhs.stableNorm(), 1e-9);
             }
-            const auto exact = owner.solve(rhs, options.tol, 0, &rhs);
+            const auto exact = owner.solve(rhs, apxchol::default_tol, 0, &rhs);
             EXPECT_EQ(exact.iterations, 0);
             EXPECT_EQ(exact.residual, 0.0);
             EXPECT_EQ(exact.x, rhs);
@@ -1253,7 +1238,7 @@ TEST(Solver, CudaScalesRhsAndWarmStartsForFloatPreconditioner) {
             EXPECT_THROW(owner.apply(invalid), std::invalid_argument);
         }
         const Eigen::VectorXd tiny = 1e-100 * unit, huge = 1e200 * unit;
-        EXPECT_THROW(owner.solve(tiny, options.tol, 0, &huge), std::invalid_argument);
+        EXPECT_THROW(owner.solve(tiny, apxchol::default_tol, 0, &huge), std::invalid_argument);
     }
 #endif
 }
@@ -1323,7 +1308,7 @@ TEST(Solver, GpuOwnerPreservesStorageAndAdoptsItsFactor) {
             EXPECT_LT((applied - reference_applied).norm() / reference_applied.norm(), 2e-5);
         }
         Eigen::VectorXd output(matrix.rows());
-        const auto warm = adopted.solve(rhs, output, options.tol, 0, &result.x);
+        const auto warm = adopted.solve(rhs, output, apxchol::default_tol, 0, &result.x);
         EXPECT_EQ(warm.iterations, 0);
         EXPECT_EQ(warm.x.size(), 0);
         expect_solution(matrix, rhs, output);

@@ -91,7 +91,7 @@ def test_storage_dtype_preserves_original_system_accuracy(dtype):
     A = random_sddm(80, seed=9)
     b = np.random.default_rng(10).standard_normal(A.shape[0])
     try:
-        solver = apxchol.factorize(A, backend="cpu", factor_storage_dtype=dtype)
+        solver = apxchol.factorize(A, backend="cpu", factor_storage=dtype)
     except RuntimeError as exc:
         assert dtype == np.float16 and str(exc) == "FP16 factor storage requires AVX/F16C or Apple ARM64"
         assert (platform.system(), platform.machine()) != ("Darwin", "arm64"), str(exc)
@@ -99,7 +99,7 @@ def test_storage_dtype_preserves_original_system_accuracy(dtype):
     result = solver.solve(b)
     assert result.converged
     assert np.linalg.norm(A @ result.x - b) / np.linalg.norm(b) < 1e-8
-    assert solver.factor_storage_dtype == dtype
+    assert solver.factor_storage == dtype
     assert solver.chol().dtype == np.float64
 
 
@@ -640,12 +640,12 @@ def test_binding_imports_csc_layouts(offset_dtype, index_dtype, layout):
     if layout == "strided":
         inputs = tuple(np.repeat(value, 2)[::2] for value in inputs)
     before = tuple(value.copy() for value in inputs)
-    solver = _apxchol.Solver(*inputs, {"factor_storage_dtype": "float32"})
+    solver = _apxchol.Solver(*inputs, {"factor_storage": "float32"})
     b = np.array([1.0, 2.0])
     result = solver.solve(b, 1e-12, 20)
     np.testing.assert_allclose(A @ result["x"], b, rtol=1e-11, atol=1e-12)
     assert result["converged"]
-    assert solver.factor_storage_dtype() == "float32"
+    assert solver.factor_storage() == "float32"
     assert solver.factor_csc()[2].dtype == np.float64
     for actual, original in zip(inputs, before):
         np.testing.assert_array_equal(actual, original)
@@ -682,7 +682,7 @@ def test_omitted_solver_defaults_match_compiled_defaults():
     implicit = solver.solve(b)
     explicit = solver.solve(b, rtol=_apxchol.DEFAULT_TOL, maxiter=np.int64(_apxchol.DEFAULT_MAXITER))
     np.testing.assert_array_equal(implicit.x, explicit.x)
-    assert (implicit.iters, implicit.residual, implicit.converged) == (explicit.iters, explicit.residual, explicit.converged)
+    assert (implicit.iterations, implicit.residual, implicit.converged) == (explicit.iterations, explicit.residual, explicit.converged)
 
 
 @pytest.mark.parametrize("construct", [apxchol.Solver, apxchol.factorize])
@@ -758,7 +758,7 @@ def test_placeholder_column_per_component():
 def test_apply_matches_explicit_factor_solve():
     """apply(r) == P^T G^{-T} G^{-1} P r, assembled from the exported factor."""
     A = grid2d_sddm(20)
-    slv = apxchol.factorize(A, seed=11, factor_storage_dtype=np.float32)
+    slv = apxchol.factorize(A, seed=11, factor_storage=np.float32)
     assert slv.sddm
     P = slv.P
     p = np.argsort(P)
@@ -785,7 +785,7 @@ def test_chol_is_the_installed_preconditioner(dtype):
     """apply(r) == P^T G^{-T} G^{-1} P r for the exported G, dropped and rounded."""
     A = random_sddm(60, seed=3)
     try:
-        slv = apxchol.factorize(A, backend="cpu", num_threads=1, factor_storage_dtype=dtype,
+        slv = apxchol.factorize(A, backend="cpu", num_threads=1, factor_storage=dtype,
                                 drop_tolerance=0.05)
     except RuntimeError as error:
         if dtype not in ("float16", np.float16) or "FP16 factor storage requires" not in str(error):
@@ -838,7 +838,7 @@ def test_x0_warm_start_needs_no_iterations():
     res = slv.solve(b, rtol=1e-10)
     assert res.converged
     warm = slv.solve(b, rtol=1e-8, x0=res.x)
-    assert warm.iters == 0
+    assert warm.iterations == 0
     assert warm.converged
 
 
@@ -924,3 +924,11 @@ def test_copy_keeps_subclass_attributes():
     assert type(clone) is Tagged and clone.tag == "kept"
     b = np.sin(np.arange(L.shape[0])); b -= b.mean()
     np.testing.assert_array_equal(clone.solve(b).x, solver.solve(b).x)
+
+
+def test_execution_failures_raise_runtime_error():
+    # The solution 1e330 is outside the float64 range: an execution failure,
+    # which the native layer reports as std::overflow_error.
+    solver = apxchol.factorize(sp.identity(4, format="csc") * 1e-30, backend="cpu")
+    with pytest.raises(RuntimeError, match="finite range"):
+        solver.solve(np.full(4, 1e300))

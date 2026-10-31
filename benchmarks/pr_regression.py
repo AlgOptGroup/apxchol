@@ -44,11 +44,14 @@ def owner(side, route):
     import apxchol
 
     # Revisions before keep_factor's removal retained an extra factor copy by default.
-    legacy = {"keep_factor": False} if "keep_factor" in inspect.signature(apxchol.factorize).parameters else {}
+    parameters = inspect.signature(apxchol.factorize).parameters
+    legacy = {"keep_factor": False} if "keep_factor" in parameters else {}
+    # Revisions before the rename spell the storage option factor_storage_dtype.
+    legacy["factor_storage" if "factor_storage" in parameters else "factor_storage_dtype"] = np.float32
 
     def factor(A):
         solver = apxchol.factorize(A, backend=route, num_threads=THREADS, seed=SEED,
-                                  factor_storage_dtype=np.float32, **legacy)
+                                  **legacy)
         if solver.backend != route:
             raise ValueError(f"requested {route}, selected {solver.backend}")
         return solver

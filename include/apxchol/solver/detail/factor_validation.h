@@ -13,7 +13,7 @@ namespace apxchol::detail {
 inline void validate_adopted_operator(const Eigen::SparseMatrix<double>& A,
                                       const factorization& F, double lump_max_mass) {
     if (A.rows() == 0 || A.rows() != A.cols() || static_cast<Eigen::Index>(F.L.rows()) != A.rows())
-        throw std::invalid_argument("solver: factorization dimension mismatch");
+        throw std::invalid_argument("apxchol: factor dimension does not match the operator");
     require_operator(A, lump_max_mass);
     if (!F.sddm) {
         for (Eigen::Index col = 0; col < A.cols(); ++col) {

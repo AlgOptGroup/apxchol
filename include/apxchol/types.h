@@ -55,7 +55,7 @@ inline constexpr std::uint64_t splitmix64_mix(std::uint64_t z) noexcept {
 
 /// Reject factor or incidence-pool offsets that exceed edge_index capacity.
 [[noreturn]] inline void edge_index_overflow(const char* where) {
-    throw std::length_error(std::string("apxchol: ") + where
+    throw std::overflow_error(std::string("apxchol: ") + where
         + ": an edge_index counter exceeded its "
         + std::to_string(sizeof(edge_index) * 8) + "-bit capacity. "
           "Rebuild with -DAPXCHOL_INDEX_WIDTH=64_EDGES or 64.");
