@@ -10,9 +10,9 @@ Public API:
     Solver.apply(r)                  ->  numpy.ndarray   (M^{-1} r)
     Solver.from_csc(data, indices, indptr, **opts) -> Solver
     Solver.save(path) / Solver.load(path, **opts) -> portable archive / Solver
-    Solver.lumped                    ->  int  (positive off-diagonals lumped)
+    Solver.lumped_offdiag            ->  int  (positive off-diagonals lumped)
     Solver.aslinearoperator()        ->  scipy LinearOperator
-    Solver.P / Solver.chol() / Solver.L / Solver.D   ->  factor export
+    Solver.P / Solver.chol()         ->  factor export
 """
 from __future__ import annotations
 
@@ -27,9 +27,6 @@ __all__ = [
     "factorize", "solve", "as_operator",
     "Solver", "SolveResult", "__version__",
 ]
-
-DEFAULT_TOL = _apxchol.DEFAULT_TOL
-DEFAULT_MAXITER = _apxchol.DEFAULT_MAXITER
 
 __version__ = _apxchol.__version__
 
@@ -203,11 +200,9 @@ class Solver:
     def _initialize(self, impl, keep_factor):
         self._impl = impl
         self._n = int(impl.rows())
-        self._nnz_A = int(impl.operator_nnz())
         self._keep_factor = bool(keep_factor)
         self._chol = None            # lazily built scipy factor (permuted space)
         self._P = None
-        self._LD = None
 
     @property
     def shape(self):
@@ -230,7 +225,7 @@ class Solver:
         return np.dtype(self._impl.factor_storage_dtype())
 
     @property
-    def lumped(self) -> int:
+    def lumped_offdiag(self) -> int:
         """Number of positive off-diagonal entries moved during preconditioning.
 
         Zero for a Laplacian or SDDM matrix. Each positive pair is moved to
@@ -241,7 +236,7 @@ class Solver:
 
     def __repr__(self) -> str:
         try:
-            fac = f"factor_nnz={self.factor_nnz}, fill_ratio={self.fill_ratio:.2f}"
+            fac = f"factor_nnz={self.factor_nnz}"
             if not self._keep_factor:
                 fac += ", values=released"     # export unavailable
         except Exception:
@@ -337,46 +332,10 @@ class Solver:
             self._chol = sp.csc_matrix((data, indices, indptr), shape=(self._n, self._n))
         return self._chol.copy()
 
-    def _ld(self):
-        if self._LD is None:
-            G = self.chol()
-            d = G.diagonal()
-            # Each column's diagonal is stored first, so dividing column j by
-            # d[j] turns G into the unit-lower L of the L·D·L^T form.
-            inv = np.where(d != 0.0, 1.0 / np.where(d != 0.0, d, 1.0), 1.0)
-            G.data *= np.repeat(inv, np.diff(G.indptr))
-            self._LD = (G, d ** 2)
-        return self._LD
-
-    @property
-    def L(self):
-        """Unit-lower-triangular factor in permuted space (G with unit diagonal).
-
-        `A[p][:, p] ≈ L @ diags(D) @ L.T` with `p = np.argsort(self.P)`; the
-        same Laplacian caveat as :meth:`chol` applies. A fresh matrix is
-        returned on every access.
-        """
-        return self._ld()[0].copy()
-
-    @property
-    def D(self) -> np.ndarray:
-        """Diagonal of the L·D·L^T form, i.e. `diag(chol())**2` (fresh copy)."""
-        return self._ld()[1].copy()
-
     @property
     def factor_nnz(self) -> int:
         """nnz of the lower-triangular factor G (diagonal included)."""
         return int(self._impl.factor_nnz())
-
-    @property
-    def fill_ratio(self) -> float:
-        """Fill relative to the input: `(2 * factor_nnz - n) / nnz(A)`.
-
-        Symmetric convention: the numerator counts the factor G's pattern
-        reflected to a full symmetric one (the diagonal once), matching
-        `nnz(A)` for a full symmetric A.
-        """
-        return (2 * self.factor_nnz - self._n) / self._nnz_A
 
 
 def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
@@ -395,7 +354,7 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
         Laplacian RHS must sum to zero within each connected component.
 
         Positive off-diagonal pairs are lumped onto the diagonal for
-        preconditioning, subject to `lump_max_mass` (see :attr:`Solver.lumped`).
+        preconditioning, subject to `lump_max_mass` (see :attr:`Solver.lumped_offdiag`).
         PCG and residual checks still use the original `A`.
     backend : {"auto", "cpu", "gpu"}
         Auto may prefer CPU for small systems when it supports the requested storage;
@@ -414,9 +373,9 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
         "baumann_kyng". None uses the C++ default. Unknown names raise
         ``ValueError``.
     keep_factor : bool
-        Retain an extra host factor copy for ``save()``, ``chol()``, ``L``
-        and ``D`` export; enabled by default. ``False`` saves this memory while still
-        allowing repeated solves, ``P``, ``factor_nnz`` and ``fill_ratio``.
+        Retain an extra host factor copy for ``save()`` and ``chol()``
+        export; enabled by default. ``False`` saves this memory while still
+        allowing repeated solves, ``P`` and ``factor_nnz``.
     factor_storage_dtype : numpy dtype, dtype name, or None
         ``np.float16`` or ``np.float32`` selects triangular-solve storage;
         dtype names also work. ``None`` uses the backend default: FP32 on

@@ -195,16 +195,15 @@ FP32, regardless of backend or internal storage:
 ```python
 P = solver.P                          # P[original vertex] = elimination position
 G = solver.chol()                     # lower CSC factor, including its diagonal
-L, D = solver.L, solver.D             # unit lower CSC factor and diagonal
 p = P.argsort()
-# A[p][:, p] ≈ G @ G.T ≈ L @ diags(D) @ L.T
+# A[p][:, p] ≈ G @ G.T
 ```
 
-`chol()`, `L` and `D` return independent copies. For a Laplacian, they represent
+`chol()` returns an independent copy. For a Laplacian, it represents
 the nonsingular subspace; see the [factor reference](https://algoptgroup.github.io/apxchol/docs/reference/python.html).
 
 Use `keep_factor=False` to save the extra host factor copy when export is
-unnecessary. Repeated solves, `P`, `factor_nnz` and `fill_ratio` remain available.
+unnecessary. Repeated solves, `P` and `factor_nnz` remain available.
 
 Matrix import is limited to signed 32-bit dimensions and stored-entry counts.
 The native library's wide-index build options do not enlarge this binding.

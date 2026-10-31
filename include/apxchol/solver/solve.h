@@ -4,6 +4,7 @@
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <array>
+#include <filesystem>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -157,6 +158,14 @@ public:
     solve_backend backend() const;
     /// Installed triangular-solve storage: fp16 or fp32, never automatic.
     factor_storage_type factor_storage() const;
+
+    /// Save the original operator and retained FP32 factor in a portable binary
+    /// file. Creates a new file; an existing destination is an error. Requires
+    /// keep_factor_values=true at construction.
+    void save(const std::filesystem::path& path) const;
+    /// Restore a saved solver without factorizing again. Backend, storage and
+    /// solve options apply as with solver(A, F, opts); automatic adoption uses CPU.
+    static solver load(const std::filesystem::path& path, const solve_options& opts = {});
 
 private:
     batch_solve_result solve_batch(const_matrix_view B, matrix_view X,

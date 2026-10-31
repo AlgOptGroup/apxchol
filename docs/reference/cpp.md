@@ -16,7 +16,7 @@ Inspect `converged`; reaching the iteration limit is not an exception.
 A warm start is an initial solution estimate supplied through `x0`.
 
 ```{doxygenclass} apxchol::solver
-:members: solver, solve, apply, factor, rows, operator_nnz, backend, factor_storage
+:members: solver, solve, apply, factor, rows, operator_nnz, backend, factor_storage, save, load
 :undoc-members:
 ```
 
@@ -143,13 +143,8 @@ A solver can also retain a factor built on CUDA or Metal: enable
 Pass a copy to `solver(A, F, opts)` to reuse it. Automatic adoption uses CPU;
 set `opts.backend = solve_backend::gpu` to upload it to a GPU.
 The original matrix `A` is still needed for PCG and residual checks.
-For cross-process reuse, [save the operator and factor together](../serialization.md).
-
-```{doxygenfunction} apxchol::save_solver
-```
-
-```{doxygenfunction} apxchol::load_solver
-```
+For cross-process reuse, `solver.save(path)` and `solver::load(path, opts)`
+[store the operator and factor together](../serialization.md).
 
 ## Eigen integration
 

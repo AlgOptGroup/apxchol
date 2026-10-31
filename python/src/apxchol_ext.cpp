@@ -13,7 +13,6 @@
 #include <vector>
 
 #include "apxchol.h"
-#include "apxchol/solver/archive.h"
 #include "apxchol/detail/csc_import.h"
 #include "apxchol/operator_class.h"
 #include "apxchol/version.h"
@@ -132,17 +131,16 @@ public:
 
     void save(const std::filesystem::path& path) const {
         py::gil_scoped_release release;
-        apxchol::save_solver(path, slv_);
+        slv_.save(path);
     }
 
     static Solver load(const std::filesystem::path& path, const py::dict& options) {
         const auto parsed = parse_options(options);
         py::gil_scoped_release release;
-        return Solver(apxchol::load_solver(path, parsed));
+        return Solver(apxchol::solver::load(path, parsed));
     }
 
     Eigen::Index rows() const { return slv_.rows(); }
-    Eigen::Index operator_nnz() const { return slv_.operator_nnz(); }
     const char* backend() const {
         return slv_.backend() == apxchol::solve_backend::cpu ? "cpu" : "gpu";
     }
@@ -388,7 +386,6 @@ PYBIND11_MODULE(_apxchol, m) {
              py::arg("x0") = py::none(), py::arg("out") = py::none())
         .def("apply", &Solver::apply, py::arg("r"))
         .def("rows", &Solver::rows)
-        .def("operator_nnz", &Solver::operator_nnz)
         .def("backend", &Solver::backend)
         .def("sddm", &Solver::sddm)
         .def("factor_storage_dtype", &Solver::factor_storage_dtype)
