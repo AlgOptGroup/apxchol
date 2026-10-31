@@ -31,16 +31,18 @@ public:
     cuda_route(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
                       checkpoint* cp, factorization* F)
         : opts_(opts.factor_opts) {
+        auto factor = std::make_shared<factorization>();
         if (F) {
             if (factorization_access::device_factor(*F))
                 throw std::invalid_argument("GPU solver: supply a host factor without a device capsule");
             if (!F->sddm && F->L.rows() == 1)
                 throw std::invalid_argument("CUDA cannot adopt a scalar Laplacian factor");
-            *F_ = std::move(*F);
-            install_factor(cp);
+            *factor = std::move(*F);
+            install_factor(*factor, cp);
         } else {
-            factorize(A, cp);
+            factorize(*factor, A, cp);
         }
+        F_ = std::move(factor);
         // Lumping changes only the factorization; the GPU operator uses A itself.
         if (cp) { cp->descend("setup"); cp->tick(); }
         const auto operator_setup_begin = gpu_setup_diagnostic_clock::now(opts_.verbose);
@@ -141,17 +143,17 @@ public:
     Eigen::SparseMatrix<double> original_operator() const;
 
 private:
-    void factorize(const Eigen::SparseMatrix<double>& A, checkpoint* cp) {
+    void factorize(factorization& F, const Eigen::SparseMatrix<double>& A, checkpoint* cp) {
         [[maybe_unused]] const auto factorize_install_begin =
             gpu_setup_diagnostic_clock::now(opts_.verbose);
         cuda_context::prewarm();
-        *F_ = factorize_for_solver(A, opts_, cp, setup_route::gpu);
+        F = factorize_for_solver(A, opts_, cp, setup_route::gpu);
         // Reject inadmissible factors before installation can initialize
         // CUDA or upload host arrays.
-        const auto& device = factorization_access::device_factor(*F_);
+        const auto& device = factorization_access::device_factor(F);
         if (!device || device.use_count() != 1 || device->empty())
             throw std::invalid_argument("GPU route requires a unique nonempty device-owned factor");
-        install_factor(cp);
+        install_factor(F, cp);
         // Complete the adopted factor's queued setup work before returning.
         const auto setup_completion = cudaDeviceSynchronize();
         if (setup_completion != cudaSuccess)
@@ -168,20 +170,20 @@ private:
                 "n=%lld rounds=%zu raw_factor_nnz=%zu stored_nnz=%llu adopted=%d "
                 "fp16=%d host_factor_array_bytes=%zu adoption_download_bytes=%zu "
                 "factor_drop_rel=%.17g dropped_threshold=%llu dropped_flush=%llu\n",
-                factorize_install_wall_s, static_cast<long long>(F_->perm.size()),
-                F_->rounds.size(), static_cast<std::size_t>(F_->L.nonZeros()),
+                factorize_install_wall_s, static_cast<long long>(F.perm.size()),
+                F.rounds.size(), static_cast<std::size_t>(F.L.nonZeros()),
                 static_cast<unsigned long long>(trsv_.stored_nnz()),
                 trsv_.adopted_device_factor() ? 1 : 0, trsv_.fp16() ? 1 : 0,
-                F_->L.row_indices().size() * sizeof(node_index) + F_->L.values().size() * sizeof(factor_value_t),
+                F.L.row_indices().size() * sizeof(node_index) + F.L.values().size() * sizeof(factor_value_t),
                 trsv_.adoption_host_download_bytes(), drop.rel,
                 static_cast<unsigned long long>(drop.dropped_threshold),
                 static_cast<unsigned long long>(drop.dropped_flush));
         }
     }
 
-    /// Device triangular-solve setup from F_: adopts its device capsule, or
+    /// Device triangular-solve setup from F: adopts its device capsule, or
     /// uploads its host arrays.
-    void install_factor(checkpoint* cp) {
+    void install_factor(factorization& F, checkpoint* cp) {
         // SpTRSV setup is setup work: record it under "setup" so the
         // setup/solve split stays complete.
         if (cp) { cp->descend("setup"); cp->tick(); }
@@ -194,28 +196,28 @@ private:
         if (opts_.verbose)
             std::fprintf(stderr, "[sptrsv-setup gpu] %-22s %8.2f ms  (context creation %.2f ms)\n",
                          "cuda_init", cuda_init_s * 1e3, cuda_context::context_seconds() * 1e3);
-        auto& device = factorization_access::device_factor(*F_);
+        auto& device = factorization_access::device_factor(F);
         if (device) {
             trsv_.setup_adopting_device_factor(std::move(*device), opts_);
             device.reset();
         } else {
-            const auto n = static_cast<node_index>(F_->L.rows());
-            const node_index m = F_->sddm ? n : n - 1;
-            if (F_->storage == factor_storage_type::automatic)
-                trsv_.setup(F_->L, m, opts_);
+            const auto n = static_cast<node_index>(F.L.rows());
+            const node_index m = F.sddm ? n : n - 1;
+            if (F.storage == factor_storage_type::automatic)
+                trsv_.setup(F.L, m, opts_);
             else
-                trsv_.install_exact(F_->L, m, F_->storage == factor_storage_type::fp16,
-                                    F_->scale.data(), opts_);
+                trsv_.install_exact(F.L, m, F.storage == factor_storage_type::fp16,
+                                    F.scale.data(), opts_);
         }
         if (cp) { (*cp)("sptrsv_setup"); cp->ascend(); }
         // The device holds its own copy; installed_factor() downloads it.
-        detail::sparse_csc_access::release_values(F_->L);
-        std::vector<float>().swap(F_->scale);
+        detail::sparse_csc_access::release_values(F.L);
+        std::vector<float>().swap(F.scale);
     }
 
     factor_options opts_;
-    // Shared by copies; written only during construction.
-    std::shared_ptr<factorization> F_ = std::make_shared<factorization>();
+    // Shared by copies and immutable once constructed.
+    std::shared_ptr<const factorization> F_;
     cuda_sptrsv trsv_;
     cuda_pcg gpcg_;
     // Host workspace of apply_columns.

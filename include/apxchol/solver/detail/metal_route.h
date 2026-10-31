@@ -1,9 +1,9 @@
 #pragma once
 // Metal route of solver: PCG with reusable factor, operator and workspace.
 // solver validates options and arguments, selects the route and rejects
-// overlapping calls; the route trusts its arguments. It cannot be copied:
-// impl holds the factor, operator, lane plans (built on first four-column
-// solve), command queue and PCG buffers together.
+// overlapping calls; the route trusts its arguments. Copies share the factor,
+// plans and operator in device memory, and each copy has its own command
+// queue and PCG workspace.
 #include "apxchol/detail/checkpoint.h"
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"
@@ -46,7 +46,7 @@ public:
     ~metal_route();
     metal_route(metal_route&&) noexcept;
     metal_route& operator=(metal_route&&) noexcept;
-    metal_route(const metal_route&) = delete;
+    metal_route(const metal_route& other);
     metal_route& operator=(const metal_route&) = delete;
 
     /// Solves the columns of B, a panel of one of solve_widths, into X.
@@ -71,6 +71,7 @@ public:
     Eigen::SparseMatrix<double> original_operator() const;
 
 private:
+    struct device_state;
     struct impl;
     struct impl_deleter {
         void operator()(impl*) const;
