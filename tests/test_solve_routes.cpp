@@ -60,7 +60,7 @@ std::vector<apxchol::solve_options> host_only_options() {
 
 TEST(SolveRoutes, CpuPreconditionerTypeIsIndependentOfCudaBuild) {
     static_assert(std::is_same_v<decltype(std::declval<apxchol::apx_cholesky&>().trsv()),
-                                 apxchol::omp_sptrsv&>);
+                                 const apxchol::omp_sptrsv&>);
     SUCCEED();
 }
 
