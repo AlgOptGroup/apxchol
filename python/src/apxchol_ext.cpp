@@ -53,10 +53,8 @@ Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
 // ── options dict -> solve_options ────────────────────────────────────────────
 // Every key the binding understands, in the order reported by the error message.
 const char* const kValidKeys[] = {
-    "backend", "num_threads", "seed", "partitioner", "keep_factor", "factor_storage_dtype",
-    "degree_quantile", "degree_multiplier", "degree_tiebreak",
-    "exact_clique_max_degree",
-    "residual_peel", "cpu_schedule", "drop_tolerance",
+    "backend", "num_threads", "seed", "partitioner", "sampler", "keep_factor",
+    "factor_storage_dtype", "degree_quantile", "degree_multiplier", "drop_tolerance",
     "regularization", "lump_max_mass", "verbose",
 };
 
@@ -76,15 +74,6 @@ apxchol::solve_backend parse_backend(const std::string& name) {
     throw std::invalid_argument("backend must be auto, cpu or gpu");
 }
 
-apxchol::residual_peel_strategy parse_peel(const std::string& name) {
-    if (name == "natural")    return apxchol::residual_peel_strategy::natural;
-    if (name == "min_degree") return apxchol::residual_peel_strategy::min_degree;
-    if (name == "bk_serial")  return apxchol::residual_peel_strategy::bk_serial;
-    throw std::invalid_argument(
-        "unknown residual_peel '" + name +
-        "'; valid: natural, min_degree, bk_serial");
-}
-
 apxchol::solve_options parse_options(const py::dict& d) {
     apxchol::solve_options so{.collect_timings = false};
     for (auto item : d) {
@@ -97,18 +86,18 @@ apxchol::solve_options parse_options(const py::dict& d) {
         else if (key == "keep_factor")       so.keep_factor_values = v.cast<bool>();
         // factor_options
         else if (key == "seed")               so.factor_opts.seed = v.cast<unsigned>();
-        else if (key == "partitioner")        so.factor_opts.is_select = v.cast<std::string>();
-        else if (key == "degree_quantile")    so.factor_opts.partition.degree_quantile = v.cast<double>();
+        else if (key == "partitioner")
+            so.factor_opts.partitioner = apxchol::detail::parse_option_name(
+                apxchol::detail::partitioner_names, v.cast<std::string>(), key);
+        else if (key == "sampler")
+            so.factor_opts.sampler = apxchol::detail::parse_option_name(
+                apxchol::detail::clique_sampler_names, v.cast<std::string>(), key);
+        else if (key == "degree_quantile") {
+            if (!v.is_none()) so.factor_opts.partition.degree_quantile = v.cast<double>();
+        }
         else if (key == "degree_multiplier")  so.factor_opts.partition.degree_multiplier = v.cast<double>();
-        else if (key == "degree_tiebreak")    so.factor_opts.partition.degree_tiebreak = v.cast<bool>();
-        else if (key == "exact_clique_max_degree")
-            so.factor_opts.exact_clique_max_degree = v.cast<std::size_t>();
-        else if (key == "residual_peel")
-            so.factor_opts.residual_peel = parse_peel(v.cast<std::string>());
         else if (key == "factor_storage_dtype")
             so.factor_opts.factor_storage = apxchol::detail::parse_factor_storage(v.cast<std::string>());
-        else if (key == "cpu_schedule")
-            so.factor_opts.cpu_schedule = apxchol::detail::parse_cpu_schedule(v.cast<std::string>());
         else if (key == "drop_tolerance")     so.factor_opts.drop_tolerance = v.cast<double>();
         else if (key == "regularization")     so.factor_opts.regularization = v.cast<double>();
         else if (key == "lump_max_mass")       so.factor_opts.lump_max_mass = v.cast<double>();
@@ -131,12 +120,14 @@ apxchol::solve_options parse_options(const py::dict& d) {
     return so;
 }
 
-// Python marshalling around the common solver.
+// Python marshalling around the common solver. Factorization, solves and
+// applications release the GIL once inputs are converted; a call made while
+// another thread uses the same solver raises RuntimeError.
 class Solver {
 public:
     Solver(py::array indptr, py::array indices, py::array data,
            const py::dict& options)
-        : slv_(csc_to_eigen(indptr, indices, data), parse_options(options)) {}
+        : slv_(setup(csc_to_eigen(indptr, indices, data), parse_options(options))) {}
 
     void save(const std::filesystem::path& path) const {
         py::gil_scoped_release release;
@@ -168,17 +159,28 @@ public:
     using Array = py::array_t<double, py::array::forcecast>;
     using Stride = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
 
-    py::object apply(Array r) const {
+    py::object apply(Array r) {
         r = checked_rhs(r);
-        if (r.ndim() == 1)
-            return py::cast(slv_.apply(r.cast<Eigen::VectorXd>()));
+        if (r.ndim() == 1) {
+            const auto rhs = r.cast<Eigen::VectorXd>();
+            Eigen::VectorXd z;
+            {
+                py::gil_scoped_release release;
+                z = slv_.apply(rhs);
+            }
+            return py::cast(std::move(z));
+        }
         auto out = output_array(r, py::none());
-        slv_.apply(matrix(r), mutable_matrix(out));
+        auto z = mutable_matrix(out);
+        {
+            py::gil_scoped_release release;
+            slv_.apply(matrix(r), z);
+        }
         return out;
     }
 
     py::dict solve(Array b, double tol, int maxiter,
-                   py::object x0, py::object out_arr) const {
+                   py::object x0, py::object out_arr) {
         apxchol::detail::validate_solve_parameters(tol, maxiter);
         b = checked_rhs(b);
         auto output = output_array(b, out_arr);
@@ -204,9 +206,13 @@ public:
         if (b.ndim() == 1) {
             Eigen::VectorXd x0v;
             if (!x0.is_none()) x0v = guess.cast<Eigen::VectorXd>();
+            const auto rhs = b.cast<Eigen::VectorXd>();
             Eigen::Map<Eigen::VectorXd> x(output.mutable_data(), rows());
-            const auto res = slv_.solve(b.cast<Eigen::VectorXd>(), x, tol, maxiter,
-                                       x0.is_none() ? nullptr : &x0v);
+            apxchol::solve_result res;
+            {
+                py::gil_scoped_release release;
+                res = slv_.solve(rhs, x, tol, maxiter, x0.is_none() ? nullptr : &x0v);
+            }
             out["iters"] = static_cast<int>(res.iterations);
             out["residual"] = res.residual;
             out["converged"] = res.converged;
@@ -214,9 +220,11 @@ public:
             apxchol::batch_solve_result res;
             auto x = mutable_matrix(output);
             if (x0.is_none()) {
+                py::gil_scoped_release release;
                 res = slv_.solve(matrix(b), x, tol, maxiter);
             } else {
                 apxchol::const_matrix_view x0m = matrix(guess);
+                py::gil_scoped_release release;
                 res = slv_.solve(matrix(b), x, tol, maxiter, &x0m);
             }
             const auto count = b.shape(1);
@@ -279,6 +287,12 @@ public:
 
 private:
     explicit Solver(apxchol::solver owner) : slv_(std::move(owner)) {}
+
+    static apxchol::solver setup(const Eigen::SparseMatrix<double>& A,
+                                 const apxchol::solve_options& options) {
+        py::gil_scoped_release release;
+        return apxchol::solver(A, options);
+    }
 
     static bool same_shape(const py::array& a, const py::array& b) {
         return a.ndim() == b.ndim() && std::equal(a.shape(), a.shape() + a.ndim(), b.shape());
@@ -363,6 +377,7 @@ PYBIND11_MODULE(_apxchol, m) {
         .def(py::init<py::array, py::array, py::array, const py::dict&>(),
              py::arg("indptr"), py::arg("indices"), py::arg("data"),
              py::arg("options") = py::dict())
+        .def("__copy__", [](const Solver& self) { return Solver(self); })
         .def("save", &Solver::save, py::arg("path"))
         .def_static("load", &Solver::load, py::arg("path"),
                     py::arg("options") = py::dict())
