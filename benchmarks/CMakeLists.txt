@@ -2,9 +2,6 @@ cmake_minimum_required(VERSION 3.20)
 project(laplacian_benchmarks LANGUAGES C CXX)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_device.cmake)
-if (APXCHOL_DEVICE STREQUAL "METAL")
-    message(FATAL_ERROR "The competitor benchmark supports CPU or CUDA; use the root project for Metal")
-endif()
 
 # The shipped core configuration: C++23, Eigen, OpenMP, the architecture flag,
 # index/pool options and, for CUDA, static cudart. apxchol_v1 below is built by
@@ -221,6 +218,11 @@ set_target_properties(rchol_lib PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 target_compile_options(rchol_lib PRIVATE -w -O3)
+if (APPLE)
+    # rchol_lap.cpp pins threads with Linux-only calls; see the shim.
+    target_compile_options(rchol_lib PRIVATE
+        "SHELL:-include \"${CMAKE_CURRENT_SOURCE_DIR}/src/macos_affinity_shim.h\"")
+endif()
 if (HAVE_METIS)
     target_compile_definitions(rchol_lib PUBLIC HAVE_METIS)
     target_include_directories(rchol_lib PUBLIC ${METIS_INCLUDE})
@@ -599,6 +601,13 @@ if (NOT Boost_FOUND)
 endif()
 if (NOT APXCHOL_DEVICE STREQUAL "CUDA")
     test_solver_rejection(contract_rejects_unavailable_cuda amgcl_cuda)
+endif()
+if (APXCHOL_DEVICE STREQUAL "METAL")
+    add_test(NAME contract_v1_metal_route
+        COMMAND ${CMAKE_COMMAND} -DBENCHMARK=$<TARGET_FILE:benchmark>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_v1_metal_route.cmake)
+    set_tests_properties(contract_v1_metal_route PROPERTIES
+        SKIP_REGULAR_EXPRESSION "SKIP: no usable Metal device")
 endif()
 
 foreach(case requires_class rejects_wrong_class rejects_class_on_graph)

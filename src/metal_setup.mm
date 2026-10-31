@@ -197,6 +197,7 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         out.backward = std::move(finalized.backward);
         out.metadata = finalized.metadata;
         out.half = half;
+        out.drop = finalized.drop;
         F.perm.assign(static_cast<unsigned *>(finalized.permutation.contents),
                       static_cast<unsigned *>(finalized.permutation.contents) + n);
         detail::sparse_csc_access::resize(F.L, n);

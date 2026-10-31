@@ -5,6 +5,7 @@
 #include "apxchol/detail/checkpoint.h"
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"
+#include "apxchol/solver/sptrsv/factor_drop.h"
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <array>
@@ -30,6 +31,7 @@ public:
         std::size_t steps_backward = 0;
         bool operator_double_float = false;  // some operator value is not fp32-exact
         std::string device;
+        factor_drop_stats drop;  // what the factor drop removed before upload
     };
 
     /// Factorizes A on the device, or adopts F when it is not null (exactly,

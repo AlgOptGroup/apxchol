@@ -15,6 +15,7 @@
 #include "mmio.h"
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <charconv>
 #include <cmath>
 #include <cstdlib>
@@ -236,6 +237,32 @@ inline const char* scan_long(const char* p, const char* e, long& out) {
 //   a truncated exponent       REJECTED, value zeroed — see below
 //   out of range               strtod's own answer, and a failure only when it
 //                              overflowed (underflow-to-zero extracts cleanly)
+// Floating-point std::from_chars, or strtod on a bounded copy of the same
+// token where the standard library lacks it (Apple libc++ up to Xcode 16).
+inline std::from_chars_result parse_double(const char* first, const char* last, double& value) {
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L
+    return std::from_chars(first, last, value);
+#else
+    const char* end = first;
+    while (end < last && (is_digit(*end) || *end == '.' || *end == 'e' || *end == 'E' ||
+                          (*end == '-' && end == first) ||
+                          ((*end == '+' || *end == '-') && end > first &&
+                           (end[-1] == 'e' || end[-1] == 'E'))))
+        ++end;
+    const std::string token(first, end);
+    char* stop = nullptr;
+    errno = 0;
+    const double parsed = std::strtod(token.c_str(), &stop);
+    if (stop == token.c_str()) return {first, std::errc::invalid_argument};
+    const char* ptr = first + (stop - token.c_str());
+    // strtod also flags subnormal results, which from_chars returns normally.
+    if (errno == ERANGE && (parsed == 0.0 || std::abs(parsed) == HUGE_VAL))
+        return {ptr, std::errc::result_out_of_range};
+    value = parsed;
+    return {ptr, std::errc()};
+#endif
+}
+
 inline const char* scan_double(const char* p, const char* e, double& out) {
     p = skip_ws(p, e);
     if (p == e) return nullptr;  // sentry failure: `out` keeps the caller's value
@@ -249,7 +276,7 @@ inline const char* scan_double(const char* p, const char* e, double& out) {
 
     double     v     = 0.0;
     const auto start = (*p == '+') ? p + 1 : p;
-    const auto r     = std::from_chars(start, e, v);
+    const auto r     = parse_double(start, e, v);
     if (r.ec == std::errc()) {
         // num_get is greedier than from_chars about an exponent marker: on
         // "1.5e" it swallows the 'e', hands "1.5e" to strtod and fails with a

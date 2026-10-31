@@ -1195,6 +1195,22 @@ TEST_F(MetalDevice, ResidentDropToleranceMatchesHostReference) {
                 const auto result = solver.solve(b, 1e-8, 1000);
                 EXPECT_TRUE(result.converged);
                 EXPECT_LE(true_residual(A, b, result.x), 1e-8);
+
+                // factor() is the installed factor: the entries kept after the drop.
+                const auto installed = solver.factor();
+                const auto& L = installed.L;
+                const auto m = static_cast<node_index>(A.rows() - (laplacian ? 1 : 0));
+                std::uint64_t stored = 0;
+                for (node_index j = 0; j < m; ++j)
+                    for (auto p = L.col_ptrs()[j]; p < L.col_ptrs()[j + 1]; ++p)
+                        stored += L.row_indices()[p] < m;
+                const auto st = metal(solver).stats().drop;
+                EXPECT_EQ(st.rel, drop);
+                EXPECT_EQ(st.nnz_stored, stored);
+                EXPECT_EQ(st.dropped, st.nnz_factor - st.nnz_stored);
+                EXPECT_EQ(st.dropped, st.dropped_threshold + st.dropped_flush);
+                if (drop == 0.0) EXPECT_EQ(st.dropped, 0u);
+                if (drop == 1.0) EXPECT_GT(st.dropped_threshold, 0u);
             }
         }
     }

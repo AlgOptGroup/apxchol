@@ -27,7 +27,8 @@
 //   --csv              output in CSV format
 //   --seed <int>       RNG seed                             (default: 42)
 //   --repeat <int>     repetitions per solver (median taken)  (default: 1)
-//   --v1-backend <b>   auto | cpu | gpu, complete setup/solve route (default: auto)
+//   --v1-backend <b>   auto | cpu | gpu, complete setup/solve route (default: auto);
+//                      a Metal build reports its gpu route as execution_route=metal
 //   --factor-storage <s> auto | float16 | float32; apxchol v1 only
 //   --cpu-schedule <s> auto | levels; apxchol v1 only
 //   --factor-drop <x>, --regularization <x>, --lump-max-mass <x>,
@@ -70,6 +71,9 @@
 #include <cuda_runtime.h>
 #include <unistd.h>         // getpid for the GPU memory receipt.
 #include "gpu_memory.h"
+#endif
+#if defined(__APPLE__)
+#include <mach/mach.h>      // task_info for read_vmrss_mb().
 #endif
 
 #include <Eigen/Core>
@@ -555,17 +559,27 @@ static void print_header_pretty() {
     std::cout << std::string(136, '-') << "\n";
 }
 
-// Current host resident-set size (MB) from /proc/self/status. Read at the end of each
+// Current host resident-set size (MB) from /proc/self/status (Linux) or mach
+// task_info (macOS). Read at the end of each
 // solver's solve phase (factor+operator+vectors still alive, setup pool already freed)
 // to record the SOLVE-held memory; the process peak (setup-dominated) comes from
 // /usr/bin/time externally, so peak - solve_held = the setup transient.
 static double read_vmrss_mb() {
+#if defined(__APPLE__)
+    mach_task_basic_info_data_t info{};
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS)
+        return -1.0;
+    return info.resident_size / (1024.0 * 1024.0);
+#else
     std::ifstream f("/proc/self/status"); std::string ln;
     while (std::getline(f, ln))
         if (ln.rfind("VmRSS:", 0) == 0) {
             try { return std::stol(ln.substr(6)) / 1024.0; } catch (...) { return -1.0; }
         }
     return -1.0;
+#endif
 }
 
 // Device memory (MiB) this process holds above the post-context baseline, the GPU
@@ -620,6 +634,31 @@ static void warm_up_cuda_once() {
     if (memory.other_mib < 0) std::cerr << "unknown";
     else std::cerr << memory.other_mib;
     std::cerr << '\n';
+    initialized = true;
+}
+#endif
+
+#if defined(APXCHOL_USE_METAL) && defined(HAVE_APXCHOL_V1)
+// The first Metal setup in a process creates the device and compiles every
+// kernel library. Like CUDA initialization, that one-time cost is reported once
+// and kept out of each solver's measured setup: one small explicit-Metal setup
+// and solve with the caller's options runs first.
+static void warm_up_metal_once(apxchol::solve_options opts) {
+    static bool initialized = false;
+    if (initialized) return;
+    const auto begin = std::chrono::high_resolution_clock::now();
+    opts.backend = apxchol::solve_backend::gpu;
+    const auto L = laplacian_from_adj(grid_graph(16, 16, 1.0, 1.0));
+    Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(L.rows(), -1.0, 1.0);
+    b.array() -= b.mean();
+    apxchol::solver warm(L, opts);
+    (void)warm.solve(b, 1e-6, 100);
+    const double init_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::high_resolution_clock::now() - begin).count();
+    std::ostringstream line;
+    line << "[bench] metal_init (once, before any timed solver): "
+         << std::fixed << std::setprecision(1) << init_ms << " ms\n";
+    std::cerr << line.str();
     initialized = true;
 }
 #endif
@@ -744,6 +783,9 @@ static BenchResult run_apxchol_v1(
     // Warm the compatible runtime outside timing; input eligibility is setup work.
     if (apxchol::detail::select_solve_backend(opts) == apxchol::solve_backend::gpu)
         warm_up_cuda_once();
+#elif defined(APXCHOL_USE_METAL)
+    if (apxchol::detail::select_solve_backend(opts, &L) == apxchol::solve_backend::gpu)
+        warm_up_metal_once(opts);
 #endif
     long long factor_nnz = 0, factor_rows = 0;
     std::uint64_t stored_nnz = 0, l11_nnz = 0, dropped = 0;
@@ -757,14 +799,17 @@ static BenchResult run_apxchol_v1(
             factor_rows = static_cast<long long>(route.factor().L.rows());
         }, apxchol::detail::solver_access::route(owner));
         if (report_fill) {
+            auto keep = [&](const auto& stats) {
+                stored_nnz = stats.nnz_stored;
+                l11_nnz = stats.nnz_factor;
+                dropped = stats.dropped;
+                drop_rel = stats.rel;
+            };
             std::visit([&](const auto& route) {
-                if constexpr (requires { route.trsv().drop_stats(); }) {
-                    const auto& stats = route.trsv().drop_stats();
-                    stored_nnz = stats.nnz_stored;
-                    l11_nnz = stats.nnz_factor;
-                    dropped = stats.dropped;
-                    drop_rel = stats.rel;
-                }
+                if constexpr (requires { route.trsv().drop_stats(); })
+                    keep(route.trsv().drop_stats());
+                else if constexpr (requires { route.stats().drop; })
+                    keep(route.stats().drop);
             }, apxchol::detail::solver_access::route(owner));
         }
     };
@@ -778,7 +823,12 @@ static BenchResult run_apxchol_v1(
     // retries reuse the same concrete owner.
     apxchol::solver solver = apxchol::detail::solver_access::with_timings(L, opts, timings);
     const bool gpu_route = solver.backend() == apxchol::solve_backend::gpu;
+#ifdef APXCHOL_USE_METAL
+    // Its own label, so a Metal cell can never be taken for a CUDA one.
+    r.execution_route = gpu_route ? "metal" : "cpu";
+#else
     r.execution_route = gpu_route ? "gpu" : "cpu";
+#endif
 #if defined(APXCHOL_USE_CUDA)
     const auto read_vram = [&] {
         const auto begin = std::chrono::high_resolution_clock::now();

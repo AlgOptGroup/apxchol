@@ -594,6 +594,7 @@ void detail::metal_route::impl::setup(const Eigen::SparseMatrix<double>& A, chec
         arguments.preconditioner_scale = source.preconditioner_scale;
     };
     if (resident) {
+        stats.drop = resident->drop;
         adopt_device_operator(*resident);
     } else {
         // Keep compensated dropping in the shared FP64 host implementation.
@@ -608,7 +609,8 @@ void detail::metal_route::impl::setup(const Eigen::SparseMatrix<double>& A, chec
         } else {
             scales = detail::gpu_factor_prep::column_scales(backward);
             if (factor_fp16) detail::gpu_factor_prep::normalize_fp16_scales(backward, scales);
-            detail::gpu_factor_prep::apply_factor_drop(backward, scales, opts.factor_opts.drop_tolerance, factor_fp16);
+            stats.drop = detail::gpu_factor_prep::apply_factor_drop(backward, scales,
+                opts.factor_opts.drop_tolerance, factor_fp16);
         }
         std::vector<float>().swap(F.scale);
         if (cp) (*cp)("metal_factor_prep");
