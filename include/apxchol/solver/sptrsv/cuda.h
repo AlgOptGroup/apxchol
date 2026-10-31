@@ -18,10 +18,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
-#include <atomic>
 #include <initializer_list>
 #include <memory>
-#include <mutex>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -329,7 +327,7 @@ public:
     /// and allocates its own solve workspace on the factor's device. Copies
     /// may solve concurrently on different streams.
     cuda_sptrsv(const cuda_sptrsv& other) : data_(other.data_) {
-        if (data_ && data_->ready) allocate_workspace();
+        if (data_ && data_->ready) allocate_workspace(*data_);
     }
     cuda_sptrsv& operator=(const cuda_sptrsv&) = delete;
 
@@ -401,11 +399,12 @@ private:
                     bool fp16, bool exact, const float* exact_scale) {
         validate_options(options);
         destroy();
-        data_ = std::make_shared<state>();
-        data_->verbose = options.verbose;
-        data_->m = static_cast<int64_t>(m);
-        const bool trace = data_->verbose;
-        auto t_prev = detail::gpu_setup_diagnostic_clock::now(data_->verbose);
+        const auto next = std::make_shared<state>();
+        state& s = *next;
+        s.verbose = options.verbose;
+        s.m = static_cast<int64_t>(m);
+        const bool trace = s.verbose;
+        auto t_prev = detail::gpu_setup_diagnostic_clock::now(s.verbose);
         auto mark = [&](const char* what) {
             if (!trace) return;
             cudaDeviceSynchronize();
@@ -415,59 +414,59 @@ private:
             t_prev = std::chrono::steady_clock::now();
         };
 
-        data_->fp16 = fp16;
-        if (data_->verbose)
+        s.fp16 = fp16;
+        if (s.verbose)
             std::fprintf(stderr, "[apxchol] GPU SpTRSV backend: %s (%s storage)\n",
-                         backend_name(), data_->fp16 ? "fp16" : "fp32");
+                         backend_name(), s.fp16 ? "fp16" : "fp32");
         const double factor_drop_rel = exact ? 0.0 : options.drop_tolerance;
 
         // Build L11 = top-left m×m block of the factor in CSC, with checked
         // 32-bit indices for the dataflow kernels.
         // The same three arrays are CSR of L^T (the back solve's operand).
-        gpu_factor_prep::csr_int<sptrsv_value_t> LT = gpu_factor_prep::build_L11_csc_int<sptrsv_value_t>(L, data_->m);
+        gpu_factor_prep::csr_int<sptrsv_value_t> LT = gpu_factor_prep::build_L11_csc_int<sptrsv_value_t>(L, s.m);
         mark("build_L11");
 
         std::vector<float> col_scale;
         if (exact) {
-            if (data_->fp16) col_scale.assign(exact_scale, exact_scale + data_->m);
-            data_->stats = {};
-            data_->stats.nnz_factor = data_->stats.nnz_stored = static_cast<std::uint64_t>(LT.nnz);
+            if (s.fp16) col_scale.assign(exact_scale, exact_scale + s.m);
+            s.stats = {};
+            s.stats.nnz_factor = s.stats.nnz_stored = static_cast<std::uint64_t>(LT.nnz);
         } else {
             // Per-column scales (the drop's threshold reference; the fp16
             // storage's scale), from the factor BEFORE the drop.
-            if (factor_drop_rel > 0.0 || data_->fp16) col_scale = gpu_factor_prep::column_scales(LT);
-            if (data_->fp16) gpu_factor_prep::normalize_fp16_scales(LT, col_scale);
+            if (factor_drop_rel > 0.0 || s.fp16) col_scale = gpu_factor_prep::column_scales(LT);
+            if (s.fp16) gpu_factor_prep::normalize_fp16_scales(LT, col_scale);
 
             // ── Compacting drop (factor_drop.h; see the class comment) ──
-            data_->stats = gpu_factor_prep::apply_factor_drop(LT, col_scale, factor_drop_rel, data_->fp16);
+            s.stats = gpu_factor_prep::apply_factor_drop(LT, col_scale, factor_drop_rel, s.fp16);
         }
-        data_->nnz = LT.nnz;
+        s.nnz = LT.nnz;
         mark("col_scale+drop");
 
         size_t free_before = 0, total = 0;
-        APXCHOL_CUDA_CHECK(cudaGetDevice(&data_->cuda_device));
+        APXCHOL_CUDA_CHECK(cudaGetDevice(&s.cuda_device));
         APXCHOL_CUDA_CHECK(cudaMemGetInfo(&free_before, &total));
-        data_->cleanup_needed = true;
-        data_->factor_bytes = 0;
+        s.cleanup_needed = true;
+        s.factor_bytes = 0;
         // Both storage formats use the same transpose, upload and plan construction.
         auto upload_transpose = [&](const auto& back, const char* stage) {
             const auto forward = gpu_factor_prep::transpose_csr(back);
             mark(stage);
-            upload_factor(data_->L_row_ptr, forward.ptr.data(), data_->m + 1);
-            upload_factor(data_->L_col_idx, forward.idx.get(), data_->nnz);
-            upload_factor(data_->L_values, forward.vals.get(), data_->nnz);
+            upload_factor(s, s.L_row_ptr, forward.ptr.data(), s.m + 1);
+            upload_factor(s, s.L_col_idx, forward.idx.get(), s.nnz);
+            upload_factor(s, s.L_values, forward.vals.get(), s.nnz);
             mark("upload_L");
-            setup_kernel_backend(back.ptr, forward.ptr);
+            setup_kernel_backend(s, back.ptr, forward.ptr);
             mark("kernel_backend_tables");
         };
 
         // Structure of CSR(L^T) (every storage).
-        upload_factor(data_->LT_row_ptr, LT.ptr.data(), data_->m + 1);
-        upload_factor(data_->LT_col_idx, LT.idx.get(), data_->nnz);
+        upload_factor(s, s.LT_row_ptr, LT.ptr.data(), s.m + 1);
+        upload_factor(s, s.LT_col_idx, LT.idx.get(), s.nnz);
 
         mark("upload_LT_struct");
 
-        if (data_->fp16) {
+        if (s.fp16) {
             // FP16 per-column-scaled storage (gpu_factor_prep.h contract): values of
             // CSR(L^T) narrowed on the host, fp32 diagonal and fp64 inverse squares alongside,
             // then the transpose (carrying the same 16-bit patterns) for CSR(L).
@@ -475,21 +474,21 @@ private:
                 ? gpu_factor_prep::installed_fp16_arrays(LT, col_scale)
                 : gpu_factor_prep::narrow_fp16_scaled(LT, col_scale);
             mark("  fp16_narrow");
-            data_->fp16_flushed = h16.flushed; data_->fp16_subnormal = h16.subnormal;
+            s.fp16_flushed = h16.flushed; s.fp16_subnormal = h16.subnormal;
             // Fail LOUDLY on a factor the fp16 storage cannot represent
             // (unreachable after the scale fallback above -- a guard, not a
             // policy): a non-finite diag/inv_scale would dissolve the solve
             // into NaN with no error anywhere.
-            for (int64_t j = 0; j < data_->m; ++j)
+            for (int64_t j = 0; j < s.m; ++j)
                 if (!(std::isfinite(h16.diag[j]) && h16.diag[j] != 0.0f && std::isfinite(h16.inv_scale2[j])))
                     throw std::runtime_error(
                         "apxchol cuda_sptrsv: fp16 factor storage cannot represent column " + std::to_string(j) +
                         " (diag=" + std::to_string(h16.diag[j]) + ", inv_scale^2=" + std::to_string(h16.inv_scale2[j]) +
                         "); select factor_storage=fp32");
-            upload_factor(data_->LT_values, h16.vals.get(), data_->nnz);
-            upload_factor(data_->diag, h16.diag.data(), data_->m);
-            upload_factor(data_->inv_scale2, h16.inv_scale2.data(), data_->m);
-            upload_factor(data_->scale, col_scale.data(), data_->m);
+            upload_factor(s, s.LT_values, h16.vals.get(), s.nnz);
+            upload_factor(s, s.diag, h16.diag.data(), s.m);
+            upload_factor(s, s.inv_scale2, h16.inv_scale2.data(), s.m);
+            upload_factor(s, s.scale, col_scale.data(), s.m);
             // CSR of L for the forward solve: transpose of (structure of LT,
             // fp16 values).
             gpu_factor_prep::csr_int<_Float16> LT16;
@@ -499,44 +498,46 @@ private:
             mark("  fp16_diag+uploads");
             upload_transpose(LT16, "  fp16_transpose");
         } else {
-            upload_factor(data_->LT_values, LT.vals.get(), data_->nnz);
+            upload_factor(s, s.LT_values, LT.vals.get(), s.nnz);
             mark("upload_LT_vals");
             upload_transpose(LT, "transpose");
         }
-        allocate_workspace();
+        build_lane_plans(s, s.L_row_ptr, s.LT_row_ptr);
+        allocate_workspace(s);
         // Pageable uploads may still be in flight; solves run on other streams.
         APXCHOL_CUDA_CHECK(cudaDeviceSynchronize());
         size_t free_after = 0;
         APXCHOL_CUDA_CHECK(cudaMemGetInfo(&free_after, &total));
-        data_->device_delta_bytes = free_before >= free_after ? free_before - free_after : 0;
+        s.device_delta_bytes = free_before >= free_after ? free_before - free_after : 0;
 
-        if (data_->verbose) {
-            const std::uint64_t off = data_->stats.nnz_stored - static_cast<std::uint64_t>(data_->m);
-            const std::uint64_t off0 = off + data_->stats.dropped;
+        if (s.verbose) {
+            const std::uint64_t off = s.stats.nnz_stored - static_cast<std::uint64_t>(s.m);
+            const std::uint64_t off0 = off + s.stats.dropped;
             std::fprintf(stderr,
                 "[apxchol] sptrsv storage GPU/%s %s: stored_nnz=%llu offdiag=%llu%s"
                 " | factor device bytes=%.1f MB (cudaMemGetInfo delta %.1f MB; free %.2f -> %.2f of %.2f GB)\n",
                 backend_name(),
-                data_->fp16 ? "fp16 (per-column scaled, diag fp32 + rounding residual)" : value_name,
-                static_cast<unsigned long long>(data_->stats.nnz_stored), static_cast<unsigned long long>(off),
-                data_->fp16 ? (" flushed_to_zero=" + std::to_string(data_->fp16_flushed) + " subnormal=" + std::to_string(data_->fp16_subnormal)).c_str() : "",
-                data_->factor_bytes / 1e6, data_->device_delta_bytes / 1e6, free_before / 1e9, free_after / 1e9, total / 1e9);
-            if (data_->stats.rel > 0.0)
+                s.fp16 ? "fp16 (per-column scaled, diag fp32 + rounding residual)" : value_name,
+                static_cast<unsigned long long>(s.stats.nnz_stored), static_cast<unsigned long long>(off),
+                s.fp16 ? (" flushed_to_zero=" + std::to_string(s.fp16_flushed) + " subnormal=" + std::to_string(s.fp16_subnormal)).c_str() : "",
+                s.factor_bytes / 1e6, s.device_delta_bytes / 1e6, free_before / 1e9, free_after / 1e9, total / 1e9);
+            if (s.stats.rel > 0.0)
                 std::fprintf(stderr,
                     "[apxchol] factor drop (drop_tolerance=%g): dropped=%llu"
                     " (%.4f%% of %llu off-diagonals; threshold=%llu, format_zero=%llu)"
                     " stored_nnz %llu -> %llu (%.4f%% of factor)\n",
-                    data_->stats.rel,
-                    static_cast<unsigned long long>(data_->stats.dropped),
-                    100.0 * static_cast<double>(data_->stats.dropped) / static_cast<double>(off0 ? off0 : 1),
+                    s.stats.rel,
+                    static_cast<unsigned long long>(s.stats.dropped),
+                    100.0 * static_cast<double>(s.stats.dropped) / static_cast<double>(off0 ? off0 : 1),
                     static_cast<unsigned long long>(off0),
-                    static_cast<unsigned long long>(data_->stats.dropped_threshold),
-                    static_cast<unsigned long long>(data_->stats.dropped_flush),
-                    static_cast<unsigned long long>(data_->stats.nnz_factor),
-                    static_cast<unsigned long long>(data_->stats.nnz_stored),
-                    100.0 * static_cast<double>(data_->stats.nnz_stored) / static_cast<double>(data_->stats.nnz_factor ? data_->stats.nnz_factor : 1));
+                    static_cast<unsigned long long>(s.stats.dropped_threshold),
+                    static_cast<unsigned long long>(s.stats.dropped_flush),
+                    static_cast<unsigned long long>(s.stats.nnz_factor),
+                    static_cast<unsigned long long>(s.stats.nnz_stored),
+                    100.0 * static_cast<double>(s.stats.nnz_stored) / static_cast<double>(s.stats.nnz_factor ? s.stats.nnz_factor : 1));
         }
-        data_->ready = true;
+        s.ready = true;
+        data_ = next;
     }
 
 public:
@@ -567,7 +568,8 @@ public:
         // precondition concrete before adopting another owner.
         destroy();
         validate_options(options);
-        data_ = std::make_shared<state>();
+        const auto next = std::make_shared<state>();
+        state& s = *next;
         if (factor.empty())
             throw std::invalid_argument(
                 "apxchol cuda_sptrsv adoption: factor ownership capsule is empty");
@@ -578,7 +580,7 @@ public:
             throw std::invalid_argument(
                 "apxchol cuda_sptrsv adoption: active CUDA device differs from the factor owner");
         const bool requested_fp16 = fp16_resolved(options.factor_storage);
-        data_->verbose = options.verbose;
+        s.verbose = options.verbose;
         const bool factor_fp16 =
             factor.data_.format == cuda_sptrsv_device_factor::storage::fp16_scaled;
         if (requested_fp16 != factor_fp16)
@@ -624,8 +626,8 @@ public:
             account(factor.data_.scale, rows * sizeof(float), "fp16 column scale");
         }
 
-        const bool trace = data_->verbose;
-        auto t_prev = detail::gpu_setup_diagnostic_clock::now(data_->verbose);
+        const bool trace = s.verbose;
+        auto t_prev = detail::gpu_setup_diagnostic_clock::now(s.verbose);
         auto mark = [&](const char* what) {
             if (!trace) return;
             APXCHOL_CUDA_CHECK(cudaDeviceSynchronize());
@@ -682,49 +684,51 @@ public:
         size_t free_before = 0, total = 0;
         APXCHOL_CUDA_CHECK(cudaMemGetInfo(&free_before, &total));
         try {
-            data_->cleanup_needed = true;
-            data_->m = factor.data_.m;
-            data_->nnz = factor.data_.nnz;
-            data_->fp16 = factor_fp16;
-            data_->adopted_device_factor = true;
-            data_->cuda_device = current_device;
-            data_->adoption_host_download_bytes = adoption_download_bytes;
-            data_->factor_bytes = adopted_bytes;
+            s.cleanup_needed = true;
+            s.m = factor.data_.m;
+            s.nnz = factor.data_.nnz;
+            s.fp16 = factor_fp16;
+            s.adopted_device_factor = true;
+            s.cuda_device = current_device;
+            s.adoption_host_download_bytes = adoption_download_bytes;
+            s.factor_bytes = adopted_bytes;
 
             if (factor.data_.finalized_sorted_triangular)
-                setup_device_kernel_backend(factor);
+                setup_device_kernel_backend(s, factor);
             else
-                setup_kernel_backend(LT_ptr, L_ptr);
+                setup_kernel_backend(s, LT_ptr, L_ptr);
             mark("kernel backend tables");
-            allocate_workspace();
+            build_lane_plans(s, factor.data_.L_row_ptr, factor.data_.LT_row_ptr);
+            allocate_workspace(s);
             // Solves run on other streams than the plan construction.
             APXCHOL_CUDA_CHECK(cudaDeviceSynchronize());
             mark("allocate solve workspace");
 
             size_t free_after = 0;
             APXCHOL_CUDA_CHECK(cudaMemGetInfo(&free_after, &total));
-            data_->device_delta_bytes =
+            s.device_delta_bytes =
                 free_before >= free_after ? free_before - free_after : 0;
 
             // Final no-throw ownership commit. Until here `factor` remained the
             // sole owner of every input allocation.
-            static_cast<cuda_sptrsv_device_factor::factor_state&>(*data_) = factor.data_;
+            static_cast<cuda_sptrsv_device_factor::factor_state&>(s) = factor.data_;
             factor.clear();
-            data_->ready = true;
+            s.ready = true;
+            data_ = next;
 
-            if (data_->verbose)
+            if (s.verbose)
                 std::fprintf(stderr,
                     "[apxchol] sptrsv storage GPU/dataflow adopted %s: "
                     "stored_nnz=%llu factor_device_bytes=%.1f MB "
                     "host_structure_download=%.1f MB install_delta=%.1f MB\n",
-                    data_->fp16 ? "fp16" : value_name,
-                    static_cast<unsigned long long>(data_->stats.nnz_stored),
-                    data_->factor_bytes / 1e6,
-                    data_->adoption_host_download_bytes / 1e6,
-                    data_->device_delta_bytes / 1e6);
+                    s.fp16 ? "fp16" : value_name,
+                    static_cast<unsigned long long>(s.stats.nnz_stored),
+                    s.factor_bytes / 1e6,
+                    s.adoption_host_download_bytes / 1e6,
+                    s.device_delta_bytes / 1e6);
         } catch (...) {
             // Factor pointers have not moved before the no-throw commit above;
-            // destroy() owns only partial solve/plan allocations here.
+            // next owns the partial plan allocations and destroy() the workspace.
             destroy();
             throw;
         }
@@ -765,7 +769,6 @@ public:
         require_ready();
         constexpr unsigned RhsLanes = Columns == 4 ? 4 : 1;
         if constexpr (Columns > 1) reserve_panel_workspace<Columns>();
-        if constexpr (RhsLanes == 4) reserve_lane_plan();
         solve_LLt_dev_impl<Columns, RhsLanes>(stream, active, d_in, d_out, active_stride);
     }
 
@@ -799,6 +802,8 @@ public:
     /// Device CSR(L) values; copies share them.
     const void* device_factor_values() const { return shared().L_values; }
 private:
+    struct state;
+
     static void validate_options(const factor_options& options) {
         detail::validate_factor_options(options);
         if (options.experimental.cpu_schedule != cpu_sptrsv_schedule::automatic)
@@ -823,20 +828,20 @@ private:
     }
 
     template<class Device, class Host>
-    void upload_factor(Device*& device, const Host* host, std::size_t count) {
+    static void upload_factor(state& s, Device*& device, const Host* host, std::size_t count) {
         if constexpr (!std::is_void_v<Device>)
             static_assert(sizeof(Device) == sizeof(Host));
         const auto bytes = count * sizeof(Host);
         APXCHOL_CUDA_CHECK(cudaMalloc(&device, bytes));
-        data_->factor_bytes += bytes;
+        s.factor_bytes += bytes;
         APXCHOL_CUDA_CHECK(cudaMemcpy(device, host, bytes, cudaMemcpyHostToDevice));
     }
 
     // The dataflow backend's host-side tables (cuda_dataflow.h): no levels at
     // all -- the warp batch tables of both directions (from the CSR row
     // lengths), the m tagged words, the control ints, the resident grid.
-    void setup_kernel_backend(std::span<const int> LT_ptr, std::span<const int> L_ptr) {
-        const int mi = static_cast<int>(data_->m);
+    void setup_kernel_backend(state& s, std::span<const int> LT_ptr, std::span<const int> L_ptr) {
+        const int mi = static_cast<int>(s.m);
         // Row segmentation: each direction gets its own threshold, from its
         // own row-length histogram (the two differ a lot -- an elimination
         // factor's hub rows land in CSR of L, its columns stay bounded).
@@ -845,68 +850,68 @@ private:
         for (bool reverse : {false, true}) {
             const auto ptr = reverse ? LT_ptr : L_ptr;
             const auto stats = gpu_factor_prep::dataflow_row_stats(ptr);
-            const unsigned split = stats.split_threshold(data_->nnz);
-            data_->df_split_min[reverse] = split;
+            const unsigned split = stats.split_threshold(s.nnz);
+            s.df_split_min[reverse] = split;
             const auto plan = df::pack(ptr.data(), {unsigned(mi), reverse}, blocks, split);
             const int batches = plan.words.size() / df::lanes;
             const int splits = plan.segments.size() - plan.slots;
-            (reverse ? data_->bck_batches : data_->fwd_batches) = batches;
-            data_->df_slots = std::max(data_->df_slots, static_cast<int>(plan.slots));
-            data_->df_split_rows += splits;
+            (reverse ? s.bck_batches : s.fwd_batches) = batches;
+            s.df_slots = std::max(s.df_slots, static_cast<int>(plan.slots));
+            s.df_split_rows += splits;
             if (!plan.words.empty())
-                upload_factor(reverse ? data_->d_bck_words : data_->d_fwd_words, plan.words.data(), plan.words.size());
+                upload_factor(s, reverse ? s.d_bck_words : s.d_fwd_words, plan.words.data(), plan.words.size());
             if (!plan.segments.empty())
-                upload_factor(reverse ? data_->d_bck_segments : data_->d_fwd_segments, plan.segments.data(), plan.segments.size());
-            if (data_->verbose)
-                dataflow_print_direction_stats(stats, split, reverse, batches, plan.slots, splits);
+                upload_factor(s, reverse ? s.d_bck_segments : s.d_fwd_segments, plan.segments.data(), plan.segments.size());
+            if (s.verbose)
+                dataflow_print_direction_stats(s, stats, split, reverse, batches, plan.slots, splits);
         }
-        initialize_dataflow_state();
+        initialize_dataflow_state(s);
     }
 
     // Only the private finalizer supplies sorted triangular CSR ownership.
     // Generic capsules must retain full structure validation in the host route.
-    void setup_device_kernel_backend(const cuda_sptrsv_device_factor& factor) {
+    void setup_device_kernel_backend(state& s, const cuda_sptrsv_device_factor& factor) {
         for (int direction = 0; direction < 2; ++direction) {
             const bool reverse = direction != 0;
             const auto plan = detail::build_dataflow_device_plan(
-                static_cast<int>(data_->m), reverse, static_cast<int>(data_->nnz),
+                static_cast<int>(s.m), reverse, static_cast<int>(s.nnz),
                 reverse ? factor.data_.LT_row_ptr : factor.data_.L_row_ptr, -1,
-                !reverse && data_->fp16 ? factor.data_.diag : nullptr,
-                !reverse && data_->fp16 ? factor.data_.inv_scale2 : nullptr);
-            data_->df_split_min[reverse] = plan.stats.split_threshold(data_->nnz);
+                !reverse && s.fp16 ? factor.data_.diag : nullptr,
+                !reverse && s.fp16 ? factor.data_.inv_scale2 : nullptr);
+            s.df_split_min[reverse] = plan.stats.split_threshold(s.nnz);
             // Consume allocations immediately, before any operation can throw.
             // The outer setup catch then owns every partial plan via destroy().
-            (reverse ? data_->d_bck_words : data_->d_fwd_words) = plan.words;
-            (reverse ? data_->d_bck_segments : data_->d_fwd_segments) = plan.segments;
-            (reverse ? data_->bck_batches : data_->fwd_batches) = plan.n_batches;
-            data_->df_slots = std::max(data_->df_slots, plan.n_slots);
-            data_->df_split_rows += plan.n_split;
-            data_->factor_bytes += plan.bytes;
-            data_->adoption_host_download_bytes += plan.host_download_bytes;
-            if (data_->verbose) {
-                dataflow_print_direction_stats(plan.stats, data_->df_split_min[reverse],
+            (reverse ? s.d_bck_words : s.d_fwd_words) = plan.words;
+            (reverse ? s.d_bck_segments : s.d_fwd_segments) = plan.segments;
+            (reverse ? s.bck_batches : s.fwd_batches) = plan.n_batches;
+            s.df_slots = std::max(s.df_slots, plan.n_slots);
+            s.df_split_rows += plan.n_split;
+            s.factor_bytes += plan.bytes;
+            s.adoption_host_download_bytes += plan.host_download_bytes;
+            if (s.verbose) {
+                dataflow_print_direction_stats(s, plan.stats, s.df_split_min[reverse],
                     reverse, plan.n_batches, plan.n_slots, plan.n_split);
             }
         }
-        initialize_dataflow_state();
+        initialize_dataflow_state(s);
     }
 
-    void initialize_dataflow_state() {
-        const std::size_t tag_words = static_cast<std::size_t>(data_->m) + static_cast<std::size_t>(data_->df_slots);
-        data_->df_grid = dataflow_grid_size();
+    static void initialize_dataflow_state(state& s) {
+        const std::size_t tag_words = static_cast<std::size_t>(s.m) + static_cast<std::size_t>(s.df_slots);
+        s.df_grid = dataflow_grid_size();
 
-        if (data_->verbose) { size_t mf=0, mt=0; cudaMemGetInfo(&mf,&mt);
+        if (s.verbose) { size_t mf=0, mt=0; cudaMemGetInfo(&mf,&mt);
             fprintf(stderr,"[mem] SpTRSV dataflow: 2x factor (CSR L+L^T)=%.2fGB (%zuB/value) "
                     "fwd_batches=%d bck_batches=%d grid=%dx%d tag=%.1fMB slots=%d split_rows=%d | GPU free=%.2f/%.2f GB\n",
-                    2.0*data_->nnz*(4.0+(double)value_bytes_effective())/1e9, value_bytes_effective(),
-                    data_->fwd_batches, data_->bck_batches, data_->df_grid, kDataflowBlock, tag_words * 4.0 / 1e6,
-                    data_->df_slots, data_->df_split_rows, mf/1e9, mt/1e9); }
+                    2.0*s.nnz*(4.0+(double)(s.fp16 ? 2 : value_bytes))/1e9, (s.fp16 ? 2 : value_bytes),
+                    s.fwd_batches, s.bck_batches, s.df_grid, kDataflowBlock, tag_words * 4.0 / 1e6,
+                    s.df_slots, s.df_split_rows, mf/1e9, mt/1e9); }
     }
 
-    void dataflow_print_direction_stats(const detail::gpu_dataflow::row_stats& st,
+    static void dataflow_print_direction_stats(const state& s, const detail::gpu_dataflow::row_stats& st,
             unsigned split_min, bool reverse,
-            int batches, int slots, int splits) const {
-        const auto m = data_->m, nnz = data_->nnz;
+            int batches, int slots, int splits) {
+        const auto m = s.m, nnz = s.nnz;
         constexpr int base = detail::gpu_dataflow::chunk_size;
         std::fprintf(stderr, "[df-stats] %s: m=%d nnz=%lld mean_len=%.2f max_len=%d C=%d\n",
                      reverse ? "back (CSR L^T)" : "fwd (CSR L)", static_cast<int>(m),
@@ -930,11 +935,11 @@ private:
 
 
     // This copy's scalar vectors, value tags and ticket on the factor's device.
-    void allocate_workspace() {
-        const detail::cuda_device_scope device(data_->cuda_device, detail::cuda_device_scope::checked{});
-        const std::size_t rows = static_cast<std::size_t>(data_->m);
-        const std::size_t tag_words = rows + static_cast<std::size_t>(data_->df_slots);
-        ws_.device = data_->cuda_device;
+    void allocate_workspace(const state& s) {
+        const detail::cuda_device_scope device(s.cuda_device, detail::cuda_device_scope::checked{});
+        const std::size_t rows = static_cast<std::size_t>(s.m);
+        const std::size_t tag_words = rows + static_cast<std::size_t>(s.df_slots);
+        ws_.device = s.cuda_device;
         APXCHOL_CUDA_CHECK(cudaMalloc(&ws_.d_x, rows * sizeof(sptrsv_value_t)));
         APXCHOL_CUDA_CHECK(cudaMalloc(&ws_.d_y, rows * sizeof(sptrsv_value_t)));
         APXCHOL_CUDA_CHECK(cudaMalloc(&ws_.d_df_tag, tag_words * sizeof(unsigned)));
@@ -967,21 +972,18 @@ private:
         ws_.panel_capacity = Columns;
     }
 
-    // Built once per shared factor, on first use by any copy; the builder
-    // completes on the device before any copy can read the plan.
-    void reserve_lane_plan() const {
-        std::call_once(data_->lane_plan_once, [this] { build_lane_plan(); });
-    }
-
-    void build_lane_plan() const {
+    // The four-column panels' plan, built with the factor so the shared state
+    // never changes after setup. Adoption passes the capsule's row pointers,
+    // which move into s only at its final commit.
+    static void build_lane_plans(state& s, const int* L_row_ptr, const int* LT_row_ptr) {
         std::array<detail::dataflow_device_plan, 2> next{};
         try {
             for (unsigned reverse = 0; reverse < 2; ++reverse) {
                 next[reverse] = detail::build_dataflow_device_plan(
-                    static_cast<int>(data_->m), reverse, static_cast<int>(data_->nnz),
-                    reverse ? data_->LT_row_ptr : data_->L_row_ptr, data_->df_split_min[reverse],
+                    static_cast<int>(s.m), reverse, static_cast<int>(s.nnz),
+                    reverse ? LT_row_ptr : L_row_ptr, s.df_split_min[reverse],
                     nullptr, nullptr, 8);
-                if (next[reverse].n_slots > data_->df_slots)
+                if (next[reverse].n_slots > s.df_slots)
                     throw std::logic_error("GPU RHS-lane plan changed segment storage");
             }
         } catch (...) {
@@ -991,11 +993,9 @@ private:
             }
             throw;
         }
-        data_->lane_plans = next;
-        for (const auto& plan : next) {
-            data_->factor_bytes += plan.bytes;
-            data_->adoption_host_download_bytes += plan.host_download_bytes;
-        }
+        s.lane_plans = next;
+        // The plan is part of the factor's device footprint, not of adoption.
+        for (const auto& plan : next) s.factor_bytes += plan.bytes;
     }
 
     template<unsigned Columns = 1, unsigned RhsLanes = 1>
@@ -1025,8 +1025,8 @@ private:
     }
 
     // Shared by copies: the factor, the dataflow plans and the setup
-    // statistics. Read-only after setup, except the lane plan, which
-    // lane_plan_once guards. The last owner frees the device arrays.
+    // statistics. Built by setup and immutable once published to data_; the
+    // last owner frees the device arrays.
     struct state : cuda_sptrsv_device_factor::factor_state {
         state() = default;
         state(const state&) = delete;
@@ -1050,11 +1050,11 @@ private:
 
         // What the compacting drop did (factor_drop.h) and the device footprint.
         // The lane plan adds to both byte counts after sharing.
-        std::atomic<std::size_t> factor_bytes = 0;  // cudaMalloc'd factor arrays (see factor_device_bytes)
+        std::size_t factor_bytes = 0;  // cudaMalloc'd factor arrays (see factor_device_bytes)
         std::size_t device_delta_bytes = 0;   // cudaMemGetInfo free delta over setup
         bool adopted_device_factor = false;
         int cuda_device = -1;
-        std::atomic<std::size_t> adoption_host_download_bytes = 0;
+        std::size_t adoption_host_download_bytes = 0;
 
         unsigned* d_fwd_words = nullptr;
         unsigned* d_bck_words = nullptr;
@@ -1066,7 +1066,6 @@ private:
         int           df_grid         = 0;
         std::array<unsigned, 2> df_split_min{};
         std::array<detail::dataflow_device_plan, 2> lane_plans{};
-        std::once_flag lane_plan_once;
         // fp16 storage: binary16
         // values of CSR(L~^T) and CSR(L~), the fp32 scaled diagonal and the
         // back solve's per-row input scale inv_scale^2 -- held in DOUBLE (r_j^2
@@ -1112,7 +1111,7 @@ private:
         return data_ ? *data_ : empty;
     }
 
-    std::shared_ptr<state> data_;
+    std::shared_ptr<const state> data_;
     mutable workspace ws_;
 };
 

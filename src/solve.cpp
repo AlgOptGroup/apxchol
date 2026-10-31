@@ -1209,13 +1209,10 @@ struct solver::impl {
     detail::call_guard calls;
 
     static detail::solver_route copy_route(const detail::solver_route& route) {
-        if (const auto* cpu = std::get_if<detail::cpu_route>(&route))
-            return detail::solver_route(std::in_place_type<detail::cpu_route>, *cpu);
-#if defined(APXCHOL_USE_CUDA)
-        if (const auto* gpu = std::get_if<detail::cuda_route>(&route))
-            return detail::solver_route(std::in_place_type<detail::cuda_route>, *gpu);
-#endif
-        throw std::runtime_error("solver: a Metal solver cannot be copied; construct one per thread");
+        return std::visit([](const auto& owner) {
+            using route_type = std::decay_t<decltype(owner)>;
+            return detail::solver_route(std::in_place_type<route_type>, owner);
+        }, route);
     }
 
     static detail::solver_route make_route(const Eigen::SparseMatrix<double>& A,

@@ -973,13 +973,17 @@ TEST(Solver, CudaOwnerRejectsOverlappingCalls) {
 #endif
 }
 
-TEST(Solver, CudaCopiesShareTheDeviceFactorAndSolveConcurrently) {
-#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
-    GTEST_SKIP() << "32-bit-node CUDA owner required";
+TEST(Solver, GpuCopiesShareTheDeviceFactorAndSolveConcurrently) {
+#if !(defined(APXCHOL_USE_CUDA) || defined(APXCHOL_USE_METAL)) || defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node GPU owner required";
 #else
     if (!apxchol::backend_available(apxchol::solve_backend::gpu))
         GTEST_SKIP() << "GPU unavailable";
+#if defined(APXCHOL_USE_CUDA)
     using session = apxchol::detail::cuda_route;
+#else
+    using session = apxchol::detail::metal_route;
+#endif
     const auto route = [](const apxchol::solver& owner) -> const session& {
         return std::get<session>(apxchol::detail::solver_access::route(owner));
     };
@@ -997,20 +1001,23 @@ TEST(Solver, CudaCopiesShareTheDeviceFactorAndSolveConcurrently) {
             solved.push_back(original->solve(rhs.back()).x);
             applied.push_back(original->apply(rhs.back()));
         }
-        // Five columns run a four-column panel, whose lane plan the copies
-        // build on first use, then a scalar solve.
+        // Five columns run a four-column panel, then a scalar solve. On Metal
+        // the copies build the shared lane plans on first use.
         Eigen::MatrixXd panel(matrix.rows(), 5);
         for (int q = 0; q < panel.cols(); ++q)
             panel.col(q) = Eigen::VectorXd::LinSpaced(matrix.rows(), q - 2.0, 1.0 + q);
 
         std::vector<apxchol::solver> owners(callers, *original);
         for (int t = 0; t < callers; ++t) {
+            // On Metal the factor lives with the shared plans and operator.
             EXPECT_EQ(&route(owners[t]).factor(), &route(*original).factor());
+#if defined(APXCHOL_USE_CUDA)
             EXPECT_EQ(route(owners[t]).trsv().device_factor_values(),
                       route(*original).trsv().device_factor_values());
             EXPECT_EQ(route(owners[t]).pcg().device_operator_values(),
                       route(*original).pcg().device_operator_values());
             EXPECT_NE(route(owners[t]).pcg().stream(), route(*original).pcg().stream());
+#endif
         }
         const auto run = [&](std::vector<apxchol::solver>& copies) {
             std::vector<Eigen::VectorXd> x(callers), z(callers);

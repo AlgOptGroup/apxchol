@@ -162,8 +162,8 @@ class Solver:
         """Return a solver that shares this factor and operator.
 
         The copy has its own workspace, so another thread can solve with it
-        while this solver is in use. A CUDA copy shares the device factor and
-        solves on its own stream. Metal-backed solvers cannot be copied.
+        while this solver is in use. A GPU copy shares the device factor and
+        solves on its own CUDA stream or Metal command queue.
         """
         copy = type(self).__new__(type(self))
         copy.__dict__.update(self.__dict__)
