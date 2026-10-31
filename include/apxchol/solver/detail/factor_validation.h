@@ -13,7 +13,7 @@ namespace apxchol::detail {
 inline void validate_adopted_operator(csc_ref<double> A,
                                       const factorization& F, double lump_max_mass) {
     if (A.n == 0 || F.L.rows() != A.n)
-        throw std::invalid_argument("solver: factorization dimension mismatch");
+        throw std::invalid_argument("apxchol: factor dimension does not match the operator");
     require_operator(A, lump_max_mass);
     if (!F.sddm) {
         for (node_index col = 0; col < A.n; ++col) {

@@ -244,8 +244,8 @@ inline void validate_owned_factor_columns(
         if (metadata) {
             // outer[i] = i + sum_{j<i} offdiagonal_count[j]. Both terms
             // are integers; this is exactly build_csc(false)'s recurrence.
-            if (i > sparse_csc::kEdgeMax ||
-                next_entry > sparse_csc::kEdgeMax - i)
+            if (i > std::numeric_limits<edge_index>::max() ||
+                next_entry > std::numeric_limits<edge_index>::max() - i)
                 edge_index_overflow("factor_metadata(nnz)");
             permutation[c.vertex] = static_cast<node_index>(i);
             raw_offsets[i] = static_cast<edge_index>(next_entry + i);
@@ -255,7 +255,8 @@ inline void validate_owned_factor_columns(
     if (next_entry != entry_count)
         throw std::logic_error("GPU-owned complete factor entry extent mismatch");
     if (metadata) {
-        if (n > sparse_csc::kEdgeMax || next_entry > sparse_csc::kEdgeMax - n)
+        constexpr auto edge_max = std::numeric_limits<edge_index>::max();
+        if (n > edge_max || next_entry > edge_max - n)
             edge_index_overflow("factor_metadata(nnz)");
         raw_offsets[n] = static_cast<edge_index>(next_entry + n);
     }

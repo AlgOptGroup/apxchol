@@ -926,8 +926,8 @@ TEST_F(MetalDevice, OutOfRangeOperatorIsADomainError) {
     for (double value : {0x1p-101, 0x1p101}) {
         SCOPED_TRACE(value);
         A.diagonal().setConstant(value);
-        EXPECT_THROW(apxchol::solver(A, F, options), std::domain_error);
-        EXPECT_THROW(apxchol::solver(A, options), std::domain_error);
+        EXPECT_THROW(apxchol::solver(A, F, options), std::invalid_argument);
+        EXPECT_THROW(apxchol::solver(A, options), std::invalid_argument);
     }
 }
 
@@ -1076,7 +1076,7 @@ TEST_F(MetalDevice, CommonSolverApiRespectsBackendSelection) {
         const auto result = apxchol::detail::solver_access::with_timings(A, options, timings).solve(b);
         EXPECT_EQ(result.backend, backend == apxchol::solve_backend::gpu
             ? apxchol::solve_backend::gpu : apxchol::solve_backend::cpu);
-        EXPECT_LT(true_residual(A, b, result.x), options.tol);
+        EXPECT_LT(true_residual(A, b, result.x), apxchol::default_tol);
         EXPECT_GT(timings.total("setup"), 0.0);
         EXPECT_GT(timings.total("pcg"), 0.0);
     }
@@ -1086,13 +1086,13 @@ TEST_F(MetalDevice, CommonSolverApiRespectsBackendSelection) {
     options.backend = apxchol::solve_backend::automatic;
     apxchol::solver automatic(large, options);
     EXPECT_EQ(automatic.backend(), apxchol::solve_backend::gpu);
-    EXPECT_LT(true_residual(large, large_rhs, automatic.solve(large_rhs).x), options.tol);
+    EXPECT_LT(true_residual(large, large_rhs, automatic.solve(large_rhs).x), apxchol::default_tol);
     large.coeffRef(0, 1) = 0; // Numerically valid, but the stored zero has no mate.
     large.makeCompressed();
     EXPECT_THROW(apxchol::solver(large, gpu_options(options)), std::invalid_argument);
     apxchol::solver fallback(large, options);
     EXPECT_EQ(fallback.backend(), apxchol::solve_backend::cpu);
-    EXPECT_LT(true_residual(large, large_rhs, fallback.solve(large_rhs).x), options.tol);
+    EXPECT_LT(true_residual(large, large_rhs, fallback.solve(large_rhs).x), apxchol::default_tol);
 }
 
 TEST_F(MetalDevice, CommonSolverAdoptsHostFactorWithCpuOnlyOptions) {
@@ -1260,12 +1260,12 @@ TEST_F(MetalDevice, VerbosityIsPerSolver) {
         options.factor_opts.verbose = verbose;
         testing::internal::CaptureStderr();
         apxchol::solve_result result;
-        try { result = apxchol::solve(A, b, options); }
+        try { result = apxchol::solve(A, b, std::nullopt, std::nullopt, nullptr, options); }
         catch (...) { (void)testing::internal::GetCapturedStderr(); throw; }
         const auto output = testing::internal::GetCapturedStderr();
         EXPECT_EQ(output.find("[apxchol] Metal PCG") != std::string::npos, verbose) << output;
         EXPECT_TRUE(result.converged);
-        EXPECT_LE(true_residual(A, b, result.x), options.tol);
+        EXPECT_LE(true_residual(A, b, result.x), apxchol::default_tol);
     }
 }
 
@@ -1350,7 +1350,7 @@ TEST_F(MetalDevice, Float16TinyColumnScaleKeepsFinitePreconditioning) {
     for (float diagonal : {0x1p-101f, 0x1p101f}) {
         auto F = apxchol::factorize(A);
         csc_access::vals(F.L)[0] = diagonal;
-        EXPECT_THROW(apxchol::solver(A, F, gpu_options(options)), std::domain_error);
+        EXPECT_THROW(apxchol::solver(A, F, gpu_options(options)), std::invalid_argument);
     }
 }
 
@@ -1455,7 +1455,7 @@ TEST_F(MetalDevice, ResidentOwnerKeepsNoHostFactorValues) {
         for (unsigned salt : {1u, 2u, 3u}) {
             const auto rhs_value = rhs(A.rows(), salt, laplacian);
             const auto result = resident.solve(rhs_value);
-            EXPECT_LT(true_residual(A, rhs_value, result.x), options.tol);
+            EXPECT_LT(true_residual(A, rhs_value, result.x), apxchol::default_tol);
         }
     }
 }

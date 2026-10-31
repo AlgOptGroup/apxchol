@@ -802,15 +802,14 @@ TEST(MMatrixLumping, OperatorIsBitIdenticalAfterPreconditionerConstruction) {
     Sparse A = nearly_sddm(20, 20, 12);
     const raw_snapshot snap(A);
 
-    apxchol::solver slv(A, {.tol = 1e-8, .max_iter = 200,
-                                  .backend = apxchol::solve_backend::cpu});
+    apxchol::solver slv(A, {.backend = apxchol::solve_backend::cpu});
     ASSERT_GT(slv.factor().lumped_offdiag, 0)
         << "the test matrix did not actually trigger lumping";
     EXPECT_TRUE(snap.identical_to(A))
         << "preconditioner construction modified the caller's operator";
 
     const Eigen::VectorXd b = apxchol::test::random_rhs(A.rows());
-    const auto res = slv.solve(b);
+    const auto res = slv.solve(b, 1e-8, 300);
     EXPECT_TRUE(snap.identical_to(A)) << "solving modified the caller's operator";
 
     // And the residual really is measured against the matrix passed in.
@@ -825,9 +824,9 @@ TEST(MMatrixLumping, NearlySddmOperatorConvergesAgainstTheTrueOperator) {
     ASSERT_GT(scan_operator(A).offdiag_pos, 0);
 
     const Eigen::VectorXd b = apxchol::test::random_rhs(A.rows());
-    apxchol::solver slv(A, {.tol = 1e-8, .max_iter = 300});
+    apxchol::solver slv(A);
     EXPECT_EQ(slv.factor().lumped_offdiag, 80);   // 40 pairs
-    const auto res = slv.solve(b);
+    const auto res = slv.solve(b, 1e-8, 300);
     EXPECT_GT(res.iterations, 0);
     EXPECT_LT(res.residual, 1e-8);
     EXPECT_LT((b - A * res.x).norm() / b.norm(), 1e-7);
@@ -839,9 +838,9 @@ TEST(MMatrixLumping, PureLaplacianAndSddmAreUnchangedByTheFeature) {
     for (const Sparse& A : {grid_laplacian(30, 30), grid_sddm(30, 30)}) {
         const raw_snapshot snap(A);
         const Eigen::VectorXd b = apxchol::test::random_rhs(A.rows());
-        apxchol::solver slv(A, {.tol = 1e-8, .max_iter = 300});
+        apxchol::solver slv(A);
         EXPECT_EQ(slv.factor().lumped_offdiag, 0);
-        const auto res = slv.solve(b);
+        const auto res = slv.solve(b, 1e-8, 300);
         EXPECT_GT(res.iterations, 0);
         EXPECT_LT(res.residual, 1e-8);
         EXPECT_TRUE(snap.identical_to(A));

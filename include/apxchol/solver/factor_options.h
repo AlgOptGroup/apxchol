@@ -34,7 +34,7 @@ enum class partitioner_kind { block_greedy, priority_greedy, baumann_kyng };
 
 namespace detail {
 
-/// Frontend names, in partitioner_kind and partitioner_list order.
+/// Frontend names, in partitioner_kind order.
 inline constexpr std::array<option_name<partitioner_kind>, 3> partitioner_names{{
     {"block_greedy", partitioner_kind::block_greedy},
     {"priority_greedy", partitioner_kind::priority_greedy},

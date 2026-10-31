@@ -12,7 +12,7 @@ function A = apxchol_as_operator(M)
   % weights. Otherwise A = M, and the solver checks it as an operator. The
   % CLI's --convert-input and Python's apxchol.as_operator apply the same rule.
   if ~issparse(M)
-    error('apxchol:badMatrix', 'M must be sparse (use sparse(M))');
+    error('apxchol:badInput', 'M must be sparse (use sparse(M))');
   end
   A = apxchol_mex('as_operator', double(M));
 end

@@ -35,7 +35,7 @@ inline Layout layout(unsigned n,unsigned e) {
         l.offsets[unsigned(field)]=l.bytes;
         if (count>std::numeric_limits<std::size_t>::max()/sizeof(T) ||
             count*sizeof(T)>std::numeric_limits<std::size_t>::max()-l.bytes)
-            throw std::length_error("Metal setup buffer size overflow");
+            throw std::overflow_error("Metal setup buffer size overflow");
         l.bytes+=count*sizeof(T);
     };
     add.operator()<Edge>(graph0,e);add.operator()<Edge>(graph1,e);

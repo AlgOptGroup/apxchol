@@ -8,7 +8,9 @@
 #include "apxchol/solver/elimination/elimination.h"
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 #include "apxchol/solver/partitioner_helpers.h"
-#include "apxchol/solver/partitioner_list.h"
+#include "apxchol/solver/partition/baumann_kyng.h"
+#include "apxchol/solver/partition/block_greedy.h"
+#include "apxchol/solver/partition/priority_greedy.h"
 #include "apxchol/solver/factorize_workspace.h"
 #include "apxchol/graph/graph.h"
 #include "apxchol/detail/checkpoint.h"
@@ -1023,11 +1025,12 @@ factorization factorize_impl(const Eliminator& elim,
                 incremental_degree_ready = true;
             pctx.degrees = live_degrees;
             if (cp) (*cp)("prune");
-            p.find_partition(g, std::span<const node_index>(
+            p.find_partition(partition_graph_access::view(g),
+                             std::span<const node_index>(
                                  pre_eligible.data(), eligible_count),
                              pctx, sel);
         } else {
-            p.find_partition(g, act, pctx, sel);
+            p.find_partition(partition_graph_access::view(g), act, pctx, sel);
         }
         if (cp) (*cp)("select");
         const partition_result& part = selection_access::finalize(sel);
@@ -1428,15 +1431,31 @@ inline tree_elimination make_tree_elim(const factor_options& opts,
         .sampler = opts.sampler};
 }
 
+// Factorize on the CPU with the built-in partitioner opts.partitioner names.
+template<typename Eliminator>
+factorization factorize_with_named_partitioner(const Eliminator& elim, graph G,
+                                               const factor_options& opts,
+                                               checkpoint* cp) {
+    auto run = [&](auto partitioner) {
+        return factorize_impl(elim, partitioner, std::move(G), opts, cp);
+    };
+    switch (opts.partitioner) {
+    case partitioner_kind::block_greedy:    return run(block_greedy_partitioner{});
+    case partitioner_kind::priority_greedy: return run(priority_greedy_partitioner{});
+    case partitioner_kind::baumann_kyng:    return run(baumann_kyng_partitioner{});
+    }
+    throw std::invalid_argument("invalid partitioner");
+}
+
 } // namespace detail
 
-template<typename Partitioner, eliminator E>
+template<eliminator E>
 factorization factorize(const Eigen::SparseMatrix<double>& L, const E& elim,
                         const factor_options& opts) {
     const detail::eigen_csc input(L);
-    return detail::factorize_operator(detail::factorize_input(input, opts), opts, [&](graph&& G, const auto& graph_options) {
-        Partitioner partitioner;
-        return detail::factorize_impl(elim, partitioner, std::move(G), graph_options, nullptr);
+    return detail::factorize_operator(detail::factorize_input(input, opts), opts, [&](detail::graph&& G, const auto& graph_options) {
+        return detail::factorize_with_named_partitioner(elim, std::move(G),
+                                                        graph_options, nullptr);
     });
 }
 
@@ -1444,7 +1463,7 @@ template<partitioner P>
 factorization factorize(const Eigen::SparseMatrix<double>& L, P part,
                         const factor_options& opts) {
     const detail::eigen_csc input(L);
-    return detail::factorize_operator(detail::factorize_input(input, opts), opts, [&](graph&& G, const auto& graph_options) {
+    return detail::factorize_operator(detail::factorize_input(input, opts), opts, [&](detail::graph&& G, const auto& graph_options) {
         return detail::factorize_impl(detail::make_tree_elim(graph_options), part,
                                       std::move(G), graph_options, nullptr);
     });
@@ -1454,7 +1473,7 @@ template<partitioner P, eliminator E>
 factorization factorize(const Eigen::SparseMatrix<double>& L, P part, const E& elim,
                         const factor_options& opts) {
     const detail::eigen_csc input(L);
-    return detail::factorize_operator(detail::factorize_input(input, opts), opts, [&](graph&& G, const auto& graph_options) {
+    return detail::factorize_operator(detail::factorize_input(input, opts), opts, [&](detail::graph&& G, const auto& graph_options) {
         return detail::factorize_impl(elim, part, std::move(G), graph_options, nullptr);
     });
 }

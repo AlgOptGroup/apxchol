@@ -2,7 +2,7 @@ classdef apxchol_solver < handle
   % APXCHOL_SOLVER  Reusable approximate-Cholesky solver: factor once, solve many b.
   %
   %   s   = apxchol_solver(A, options);   % optional scalar options struct
-  %   res = s.solve(b);                   % res.x, res.iters, res.residual, res.converged,
+  %   res = s.solve(b);                   % res.x, res.iterations, res.residual, res.converged,
   %                                       % res.solve_seconds
   %   res = s.solve(b2, 1e-10, 1000);     % per-solve tol / maxiter
   %   s.save('system.apxchol');            % the installed factor and A
@@ -39,7 +39,7 @@ classdef apxchol_solver < handle
       % Empty construction is used internally by load before adopting its handle.
       if nargin == 0, return; end
       if ~issparse(A)
-        error('apxchol:badMatrix', 'A must be sparse (use sparse(A))');
+        error('apxchol:badInput', 'A must be sparse (use sparse(A))');
       end
       if nargin < 2, options = struct(); end
       [obj.h, obj.setup_seconds] = apxchol_mex('factorize', A, options);
@@ -49,9 +49,9 @@ classdef apxchol_solver < handle
       if nargin < 3, rtol = []; end
       if nargin < 4, maxiter = []; end
       if nargin < 5, x0 = []; end
-      [x, iters, residual, converged, seconds] = ...
+      [x, iterations, residual, converged, seconds] = ...
           apxchol_mex('solve', obj.h, full(b), rtol, maxiter, full(x0));
-      res = struct('x', x, 'iters', iters, 'residual', residual, 'converged', converged, ...
+      res = struct('x', x, 'iterations', iterations, 'residual', residual, 'converged', converged, ...
                    'solve_seconds', seconds);
     end
 

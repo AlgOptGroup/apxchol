@@ -37,7 +37,7 @@ public:
         auto factor = std::make_shared<factorization>();
         if (F) {
             if (factorization_access::device_factor(*F))
-                throw std::invalid_argument("GPU solver: supply a host factor without a device capsule");
+                throw std::invalid_argument("apxchol: supply a host factor without a device capsule");
             if (!F->sddm && F->L.rows() == 1)
                 throw std::invalid_argument("CUDA cannot adopt a scalar Laplacian factor");
             *factor = std::move(*F);

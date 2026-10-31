@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
 #include <vector>
@@ -41,7 +42,7 @@ static void assemble_csc(
     assert(factor_cols.size() == static_cast<std::size_t>(n));
 
     const std::uint64_t edge_max =
-        static_cast<std::uint64_t>(sparse_csc::kEdgeMax);
+        static_cast<std::uint64_t>(std::numeric_limits<edge_index>::max());
     const std::uint64_t nc = factor_cols.size();
     const int max_threads = omp_get_max_threads();
     std::vector<std::uint64_t> block_total(
@@ -221,8 +222,8 @@ void build_csc(factorization& result,
         auto* outer = detail::sparse_csc_access::outer(result.L).data();
         for (node_index i = 0; i < n; ++i) {
             const edge_index offdiag = factor_cols[i].entry_count;
-            if (offdiag == sparse_csc::kEdgeMax ||
-                outer[i] > sparse_csc::kEdgeMax - offdiag - 1)
+            if (offdiag == std::numeric_limits<edge_index>::max() ||
+                outer[i] > std::numeric_limits<edge_index>::max() - offdiag - 1)
                 edge_index_overflow("factor_metadata(nnz)");
             outer[i + 1] = outer[i] + offdiag + 1;
         }
@@ -256,12 +257,8 @@ factorization detail::factorize_for_solver(csc_ref<double> L,
     // Transfer the temporary graph into factorization without copying it.
     auto do_factorize = [&](auto&& G) {
         if (cp) { (*cp)("make_graph"); cp->ascend(); }
-        factorization F = dispatch_partitioner<factorization>(opts.partitioner,
-            [&]<typename P>() -> factorization {
-                P partitioner;
-                return factorize_impl(make_tree_elim(opts, route), partitioner,
-                    std::move(G), opts, cp);
-            });
+        factorization F = factorize_with_named_partitioner(
+            make_tree_elim(opts, route), std::move(G), opts, cp);
         F.lumped_offdiag = op.lumped();
         return F;
     };

@@ -57,7 +57,6 @@ void detail::validate_solve_parameters(double tol, int max_iter) {
 }
 
 void detail::validate_solve_options(const solve_options& opts) {
-    validate_solve_parameters(opts.tol, opts.max_iter);
     if (opts.num_threads < 0)
         throw std::invalid_argument("num_threads must be nonnegative");
     if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu &&
@@ -66,14 +65,15 @@ void detail::validate_solve_options(const solve_options& opts) {
     validate_factor_options(opts.factor_opts);
 }
 
-std::pair<double, int> detail::resolve_solve_parameters(std::optional<double> tol,
-    std::optional<int> max_iter, double default_tolerance, int default_iterations) {
-    const std::pair resolved{tol.value_or(default_tolerance), max_iter.value_or(default_iterations)};
+namespace {
+
+// Omitted values take the library defaults; explicit values must be valid.
+std::pair<double, int> resolve_solve_parameters(std::optional<double> tol,
+                                                std::optional<int> max_iter) {
+    const std::pair resolved{tol.value_or(default_tol), max_iter.value_or(default_max_iter)};
     detail::validate_solve_parameters(resolved.first, resolved.second);
     return resolved;
 }
-
-namespace {
 
 using detail::const_matrix_ref;
 using detail::matrix_ref;
@@ -82,7 +82,7 @@ void check_matrix_views(const_matrix_ref B, matrix_ref X, std::int64_t rows,
                         const const_matrix_ref* X0 = nullptr) {
     if (B.rows() != rows || X.rows() != rows || X.cols() != B.cols() ||
         (X0 && (X0->rows() != rows || X0->cols() != B.cols())))
-        throw std::invalid_argument("solver: RHS, output and warm-start shapes must match");
+        throw std::invalid_argument("apxchol: RHS, output and warm-start shapes must match");
     const auto extent = [](const auto &value) {
         if (!value.size())
             return std::pair<std::uintptr_t, std::uintptr_t>{0, 0};
@@ -101,7 +101,7 @@ void check_matrix_views(const_matrix_ref B, matrix_ref X, std::int64_t rows,
         return output_extent.first < hi && lo < output_extent.second;
     };
     if (overlaps(B) || (X0 && overlaps(*X0)))
-        throw std::invalid_argument("solver: output must not overlap RHS or warm start");
+        throw std::invalid_argument("apxchol: output must not overlap RHS or warm start");
 }
 
 template<solve_backend Route>
@@ -1164,8 +1164,6 @@ void for_panels(std::int64_t columns, const std::array<int, K>& widths, Run run)
 struct solver::impl {
     detail::solver_route route;
     std::int64_t operator_entries;
-    double tol;
-    int max_iter;
     int num_threads;
     // Internal timing tree attached through solver_access; copies start without one.
     detail::checkpoint* timings = nullptr;
@@ -1186,7 +1184,7 @@ struct solver::impl {
                                            factorization* F) {
         detail::validate_solve_options(opts);
         const detail::thread_budget threads(opts.num_threads);
-        if (A.n == 0) throw std::invalid_argument("solver: empty operator");
+        if (A.n == 0) throw std::invalid_argument("apxchol: empty operator");
         if (F) {
             detail::validate_adopted_operator(A, *F, opts.factor_opts.lump_max_mass);
             detail::validate_adopted_factor(*F);
@@ -1220,7 +1218,6 @@ struct solver::impl {
     impl(detail::csc_ref<double> A, const solve_options& opts,
          detail::checkpoint* cp, factorization* F)
         : route(make_route(A, opts, cp, F)), operator_entries(static_cast<std::int64_t>(A.nnz())),
-          tol(opts.tol), max_iter(opts.max_iter),
           num_threads(opts.num_threads), timings(cp) {
 #if defined(APXCHOL_USE_CUDA)
         if (const auto* gpu = std::get_if<detail::cuda_route>(&route))
@@ -1230,20 +1227,13 @@ struct solver::impl {
 
     impl(const impl& other)
         : route(copy_route(other.route)), operator_entries(other.operator_entries),
-          tol(other.tol), max_iter(other.max_iter), num_threads(other.num_threads),
+          num_threads(other.num_threads),
           setup_seconds(other.setup_seconds) {}
 
     std::int64_t rows() const {
         return std::visit([](const auto& owner) {
             return static_cast<std::int64_t>(owner.factor().perm.size());
         }, route);
-    }
-
-    // Negative values select the construction defaults; each public solve
-    // resolves them before touching its output.
-    std::pair<double, int> resolve(std::optional<double> requested_tol,
-                                   std::optional<int> requested_max_iter) const {
-        return detail::resolve_solve_parameters(requested_tol, requested_max_iter, tol, max_iter);
     }
 
     // The only argument checks and panel loop of every solve: the routes
@@ -1257,7 +1247,7 @@ struct solver::impl {
         const detail::thread_budget threads(num_threads);
         check_matrix_views(B, X, rows(), X0);
         if (!detail::vec::all_finite_matrix(B) || (X0 && !detail::vec::all_finite_matrix(*X0)))
-            throw std::invalid_argument("solver: RHS and initial guess must be finite");
+            throw std::invalid_argument("apxchol: RHS and initial guess must be finite");
         std::visit([&](auto& owner) {
             for_panels(B.cols(), owner.solve_widths, [&](std::int64_t first, int width) {
                 std::optional<detail::const_matrix_ref> initial;
@@ -1275,7 +1265,7 @@ struct solver::impl {
         const detail::thread_budget threads(num_threads);
         check_matrix_views(R, Z, rows());
         if (!detail::vec::all_finite_matrix(R))
-            throw std::invalid_argument("solver::apply: RHS must be finite");
+            throw std::invalid_argument("apxchol: preconditioner input must be finite");
         std::visit([&](auto& owner) {
             for_panels(R.cols(), owner.apply_widths, [&](std::int64_t first, int width) {
                 owner.apply_columns(R.middle_cols(first, width), Z.middle_cols(first, width));
@@ -1312,8 +1302,8 @@ const detail::csc_ref<double>& detail::solver_access::solver_input(
     // The checks the route performs first, for a matrix it cannot represent.
     if (!input.square()) {
         validate_solve_options(opts);
-        if (input.rows() == 0) throw std::invalid_argument("solver: empty operator");
-        if (adopted) throw std::invalid_argument("solver: factorization dimension mismatch");
+        if (input.rows() == 0) throw std::invalid_argument("apxchol: empty operator");
+        if (adopted) throw std::invalid_argument("apxchol: factor dimension does not match the operator");
         validate_lump_max_mass(opts.factor_opts.lump_max_mass);
         throw_operator_not_square(input.rows(), input.cols());
     }
@@ -1385,8 +1375,8 @@ solver& solver::operator=(const solver& other) {
 solve_result solver::solve(const Eigen::VectorXd& b, std::optional<double> requested_tol,
                            std::optional<int> requested_max_iter, const Eigen::VectorXd* x0) {
     const auto start = std::chrono::steady_clock::now();
-    const auto [tol, max_iter] = impl_->resolve(requested_tol, requested_max_iter);
-    if (b.size() != rows()) throw std::invalid_argument("solver::solve: RHS length mismatch");
+    const auto [tol, max_iter] = resolve_solve_parameters(requested_tol, requested_max_iter);
+    if (b.size() != rows()) throw std::invalid_argument("apxchol: RHS length does not match the operator");
     solve_result result;
     result.x.resize(rows());
     const auto initial = detail::dense_of(x0 ? *x0 : b);
@@ -1400,7 +1390,7 @@ solve_result solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd>
                            std::optional<double> requested_tol, std::optional<int> requested_max_iter,
                            const Eigen::VectorXd* x0) {
     const auto start = std::chrono::steady_clock::now();
-    const auto [tol, max_iter] = impl_->resolve(requested_tol, requested_max_iter);
+    const auto [tol, max_iter] = resolve_solve_parameters(requested_tol, requested_max_iter);
     solve_result result;
     const auto initial = detail::dense_of(x0 ? *x0 : b);
     result.solve_seconds = impl_->solve(detail::dense_of(b), detail::dense_of(x),
@@ -1414,7 +1404,7 @@ batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X,
                                        std::optional<int> requested_max_iter,
                                        const const_matrix_view *X0) {
     const auto start = std::chrono::steady_clock::now();
-    const auto [tol, max_iter] = impl_->resolve(requested_tol, requested_max_iter);
+    const auto [tol, max_iter] = resolve_solve_parameters(requested_tol, requested_max_iter);
     batch_solve_result result;
     result.columns.resize(B.cols());
     std::optional<detail::const_matrix_ref> initial;
@@ -1426,7 +1416,7 @@ batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X,
 }
 
 Eigen::VectorXd solver::apply(const Eigen::VectorXd& r) {
-    if (r.size() != rows()) throw std::invalid_argument("solver::apply: RHS length mismatch");
+    if (r.size() != rows()) throw std::invalid_argument("apxchol: preconditioner input length does not match the operator");
     Eigen::VectorXd z(rows());
     impl_->apply(detail::dense_of(r), detail::dense_of(z));
     return z;
@@ -1451,10 +1441,16 @@ factor_storage_type solver::factor_storage() const {
 }
 double solver::setup_seconds() const { return impl_->setup_seconds; }
 
-solve_result solve(const Eigen::SparseMatrix<double>& L, const Eigen::VectorXd& b,
-                   const solve_options& opts) {
-    solver owner(L, opts);
-    return owner.solve(b);
+solve_result solve(const Eigen::SparseMatrix<double>& A, const Eigen::VectorXd& b,
+                   std::optional<double> tol, std::optional<int> max_iter,
+                   const Eigen::VectorXd* x0, const solve_options& opts) {
+    // Reject invalid limits and lengths before paying for setup.
+    resolve_solve_parameters(tol, max_iter);
+    if (b.size() != A.rows()) throw std::invalid_argument("apxchol: RHS length does not match the operator");
+    if (x0 && x0->size() != A.rows())
+        throw std::invalid_argument("apxchol: initial guess length does not match the operator");
+    solver owner(A, opts);
+    return owner.solve(b, tol, max_iter, x0);
 }
 
 } // namespace apxchol

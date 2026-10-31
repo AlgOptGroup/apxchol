@@ -589,7 +589,7 @@ void detail::metal_route::device_state::setup(detail::csc_ref<double> A, checkpo
     laplacian = !F.sddm;
     const auto m = static_cast<std::uint32_t>(laplacian ? n - 1 : n);
     if (F.L.col_ptrs()[m] > static_cast<edge_index>(std::numeric_limits<int>::max()))
-        throw std::length_error("Metal: the factor exceeds the device's 32-bit offsets");
+        throw std::invalid_argument("Metal: the factor exceeds the device's 32-bit offsets");
 
     if (cp) { cp->descend("setup"); cp->tick(); }
     detail::gpu_factor_prep::csr_int<float> backward;
@@ -647,7 +647,7 @@ void detail::metal_route::device_state::setup(detail::csc_ref<double> A, checkpo
         else {
         // Both triangles are stored: up to twice the stored entries of one triangle.
         if (A.nnz() > static_cast<edge_index>(std::numeric_limits<int>::max() / 2))
-            throw std::length_error("Metal: operators with 2^30 or more stored entries exceed the "
+            throw std::invalid_argument("Metal: operators with 2^30 or more stored entries exceed the "
                                     "device's 32-bit offsets");
         op = detail::build_permuted_full_symmetric_csr(A, F.perm);
         int max_row = 0;
@@ -678,7 +678,7 @@ void detail::metal_route::device_state::setup(detail::csc_ref<double> A, checkpo
             if (!exact) lo[p] = d.lo;
         }
         if (!in_range)
-            throw std::domain_error("Metal: an operator value is non-finite or outside [2^-100, 2^100]");
+            throw std::invalid_argument("Metal: an operator value is non-finite or outside [2^-100, 2^100]");
         // A fixed positive PCG preconditioner scale preserves x while balancing
         // rho and curvature exponents; diagonal extremes include mixed scales.
         arguments.preconditioner_scale = 1;

@@ -59,7 +59,7 @@ input_buffers upload(id<MTLDevice> device, csc_ref<double> A) {
         }
     }
     if (!valid)
-        throw std::domain_error("Metal device setup requires finite entries with nonzero "
+        throw std::invalid_argument("Metal device setup requires finite entries with nonzero "
                                 "magnitudes in [2^-100, 2^100]");
     out.operator_exact = exact;
     out.max_operator_row = max_row;

@@ -32,7 +32,7 @@ function test_apxchol()
   end
 
   function assert_same_solve(actual, expected, label)
-    assert(actual.iters == expected.iters && actual.converged == expected.converged, ...
+    assert(actual.iterations == expected.iterations && actual.converged == expected.converged, ...
            '%s: solve status differs', label);
     assert(norm(actual.x - expected.x) <= 1e-14 && ...
            abs(actual.residual - expected.residual) <= 1e-14, ...
@@ -46,7 +46,7 @@ function test_apxchol()
   assert(res.converged, 'laplacian: not converged');
   assert(res.residual <= 1e-8, 'laplacian: residual %g > tol', res.residual);
   assert(norm(L * res.x - b) / norm(b) <= 1e-6, 'laplacian: true residual too big');
-  ok = ok + 1; fprintf('ok %d  laplacian solve converges (it=%d)\n', ok, res.iters);
+  ok = ok + 1; fprintf('ok %d  laplacian solve converges (it=%d)\n', ok, res.iterations);
 
   % ── 2. SDDM solve converges ──
   n = 400;
@@ -55,7 +55,7 @@ function test_apxchol()
   bs = randn(n, 1);
   res = apxchol_solve(Ls, bs);
   assert(res.converged && res.residual <= 1e-8, 'sddm: not converged to tol');
-  ok = ok + 1; fprintf('ok %d  sddm solve converges (it=%d)\n', ok, res.iters);
+  ok = ok + 1; fprintf('ok %d  sddm solve converges (it=%d)\n', ok, res.iterations);
 
   % ── 3. factor reused across many b ──
   L = grid2d_laplacian(40);
@@ -277,7 +277,7 @@ function test_apxchol()
   };
   for k = 1:size(valid_options, 1)
     r = sopts.solve(zopts, valid_options{k, 1}, valid_options{k, 2});
-    assert(r.iters == 0 && r.residual == 0 && all(r.x == 0) && r.converged);
+    assert(r.iterations == 0 && r.residual == 0 && all(r.x == 0) && r.converged);
   end
   ok = ok + 1; fprintf('ok %d  accepted scalar options (%d cases)\n', ok, size(valid_options, 1));
 
@@ -295,11 +295,11 @@ function test_apxchol()
     assert_same_solve(invoke(), core_default, 'omitted/empty C++ defaults');
   end
   r = sopts.solve(bopts, 1, 0);
-  assert(r.iters == 0 && r.residual == 1 && ~r.converged && all(r.x == 0));
+  assert(r.iterations == 0 && r.residual == 1 && ~r.converged && all(r.x == 0));
   r = sopts.solve(bopts, 2, 0);
-  assert(r.iters == 0 && r.residual == 1 && r.converged && all(r.x == 0));
+  assert(r.iterations == 0 && r.residual == 1 && r.converged && all(r.x == 0));
   one_shot = apxchol_solve(Aopts, zopts);
-  assert(one_shot.converged && one_shot.iters == 0 && one_shot.residual == 0);
+  assert(one_shot.converged && one_shot.iterations == 0 && one_shot.residual == 0);
   assert_same_solve(apxchol_solve(Aopts, zopts, [], []), one_shot, 'one-shot defaults');
   ok = ok + 1; fprintf('ok %d  shared defaults and convergence\n', ok);
 
@@ -313,7 +313,7 @@ function test_apxchol()
     controlled = apxchol_solver(Aopts, options);
     r = controlled.solve(bopts);
     assert(r.converged && norm(Aopts * r.x - bopts) / norm(bopts) < 1e-8);
-    assert_same_solve(apxchol_solve(Aopts, bopts, [], [], options), r, 'one-shot setup options');
+    assert_same_solve(apxchol_solve(Aopts, bopts, [], [], [], options), r, 'one-shot setup options');
   end
   bad_options = {struct('num_threads', 1.5), struct('num_threads', -1), ...
                  struct('seed', 1.5), struct('partitioner', 'unknown'), ...
@@ -349,7 +349,7 @@ function test_apxchol()
       B = A * exact; before = B;
       result = batch_solver.solve(B, 1e-9, 500);
       assert(isequal(size(result.x), [n width]));
-      assert(isequal(size(result.iters), [1 width]));
+      assert(isequal(size(result.iterations), [1 width]));
       assert(isequal(size(result.residual), [1 width]));
       assert(isequal(size(result.converged), [1 width]) && islogical(result.converged));
       assert(all(result.converged));
@@ -362,9 +362,9 @@ function test_apxchol()
         assert(norm(Z(:, j) - scalar_z) <= 1e-11 * max(1, norm(scalar_z)));
       end
       warm = batch_solver.solve(B, 1e-9, 0, exact);
-      assert(all(warm.converged) && all(warm.iters == 0));
+      assert(all(warm.converged) && all(warm.iterations == 0));
       limited = batch_solver.solve(B, 1e-14, 0);
-      assert(all(limited.iters == 0));
+      assert(all(limited.iterations == 0));
       assert(all(limited.converged == all(B == 0, 1)));
       assert(isequal(B, before), 'matrix input was changed');
     end
@@ -384,11 +384,11 @@ function test_apxchol()
   assert_same_solve(row, sopts.solve(bopts), 'legacy row vector');
   assert(isequal(size(sopts.apply(bopts')), [2 1]));
   exact = [1 2 3 4; -2 -3 -4 -5]; B = Aopts * exact;
-  warm = apxchol_solve(Aopts, B, 1e-9, 0, struct(), exact);
-  assert(all(warm.converged) && all(warm.iters == 0));
+  warm = apxchol_solve(Aopts, B, 1e-9, 0, exact);
+  assert(all(warm.converged) && all(warm.iterations == 0));
   assert(norm(warm.x - exact) < 1e-14);
   row_warm = sopts.solve(B(:, 1)', 1e-9, 0, exact(:, 1)');
-  assert(row_warm.converged && row_warm.iters == 0);
+  assert(row_warm.converged && row_warm.iterations == 0);
   ok = ok + 1; fprintf('ok %d  scalar/row shapes and one-shot warm starts\n', ok);
 
   % ── 16. matrix and initial-guess errors leave the owner usable ──

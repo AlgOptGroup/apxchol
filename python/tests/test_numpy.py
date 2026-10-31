@@ -25,7 +25,7 @@ def check_solve_and_apply(solver, width):
     np.testing.assert_allclose(A @ result.x, rhs, rtol=1e-8, atol=1e-12)
     assert np.isfinite(solver.apply(rhs)).all()
     warm = solver.solve(rhs, x0=exact)
-    assert np.all(warm.converged) and np.all(np.asarray(warm.iters) == 0)
+    assert np.all(warm.converged) and np.all(np.asarray(warm.iterations) == 0)
     assert solver.shape == A.shape and solver.P.shape == (3,)
 
 
@@ -116,7 +116,7 @@ def gpu_solver(storage):
     import os
     try:
         solver = apxchol.Solver.from_csc(DATA, INDICES, INDPTR, backend="gpu",
-                                        factor_storage_dtype=storage)
+                                        factor_storage=storage)
     except (ValueError, RuntimeError) as exc:
         unavailable = (
             "GPU route requested but GPU support is not built",
