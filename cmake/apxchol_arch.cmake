@@ -4,10 +4,15 @@ if (MSVC)
     message(FATAL_ERROR "apxchol does not support MSVC or clang-cl; use GCC or Clang on Linux or macOS")
 endif()
 
+# User flags for the configuration being built: CMAKE_BUILD_TYPE, or Release
+# under a multi-config generator, whose per-configuration flags would
+# otherwise be missed.
 set(_apxchol_user_flags "${CMAKE_CXX_FLAGS}")
 if (CMAKE_BUILD_TYPE)
     string(TOUPPER "${CMAKE_BUILD_TYPE}" _apxchol_config)
     string(APPEND _apxchol_user_flags " ${CMAKE_CXX_FLAGS_${_apxchol_config}}")
+elseif (CMAKE_CONFIGURATION_TYPES)
+    string(APPEND _apxchol_user_flags " ${CMAKE_CXX_FLAGS_RELEASE}")
 endif()
 
 set(_APXCHOL_ARCH_FLAG "")
@@ -24,34 +29,39 @@ else()
     endif()
 endif()
 
-# The arch flag stays private, but Eigen derives its heap alignment from the
-# instruction set: AVX selects 32 bytes and AVX-512 64, where plain malloc
-# gives 16. A vector allocated in the core and freed by a consumer compiled
-# without the flag would then use mismatched allocators. Export the core's
-# alignment when it exceeds 16, so consumers keep their own flags.
+# The arch flag stays private, but Eigen objects cross the library boundary.
+# Eigen derives its alignment from the instruction set (16 bytes by default,
+# 32 with AVX, 64 with AVX-512) and above 16 allocates through its own
+# aligned allocator instead of malloc. Consumers get the core's
+# EIGEN_MAX_ALIGN_BYTES, so neither side assumes more alignment than the
+# other provides, and EIGEN_MALLOC_ALREADY_ALIGNED=0, so both sides allocate
+# and free through the same allocator whichever instruction set each uses.
 get_target_property(_apxchol_eigen_includes Eigen3::Eigen INTERFACE_INCLUDE_DIRECTORIES)
 string(REGEX REPLACE "\\$<BUILD_INTERFACE:([^>]*)>" "\\1" _apxchol_eigen_includes "${_apxchol_eigen_includes}")
 string(GENEX_STRIP "${_apxchol_eigen_includes}" _apxchol_eigen_includes)
+include(CheckCXXSourceCompiles)
+include(CMakePushCheckState)
 set(_APXCHOL_EIGEN_ALIGN_BYTES "")
-foreach (_apxchol_align 64 32)
+foreach (_apxchol_align 64 32 16)
     string(MAKE_C_IDENTIFIER "APXCHOL_EIGEN_ALIGN_${_apxchol_align}_${_apxchol_user_flags}_${_APXCHOL_ARCH_FLAG}"
            _apxchol_probe)
+    cmake_push_check_state(RESET)
     set(CMAKE_REQUIRED_FLAGS "${_apxchol_user_flags} ${_APXCHOL_ARCH_FLAG}")
     set(CMAKE_REQUIRED_INCLUDES "${_apxchol_eigen_includes}")
     set(CMAKE_REQUIRED_QUIET ON)
-    include(CheckCXXSourceCompiles)
     check_cxx_source_compiles("#include <Eigen/Core>
 static_assert(EIGEN_MAX_ALIGN_BYTES == ${_apxchol_align}, \"\");
 int main() { return 0; }" ${_apxchol_probe})
-    unset(CMAKE_REQUIRED_FLAGS)
-    unset(CMAKE_REQUIRED_INCLUDES)
-    unset(CMAKE_REQUIRED_QUIET)
+    cmake_pop_check_state()
     if (${_apxchol_probe})
         set(_APXCHOL_EIGEN_ALIGN_BYTES ${_apxchol_align})
-        message(STATUS "apxchol: exporting EIGEN_MAX_ALIGN_BYTES=${_apxchol_align} to match the core")
         break()
     endif()
 endforeach()
+if (NOT _APXCHOL_EIGEN_ALIGN_BYTES)
+    message(FATAL_ERROR "apxchol: could not determine Eigen's alignment for the core's flags")
+endif()
+message(STATUS "apxchol: exporting EIGEN_MAX_ALIGN_BYTES=${_APXCHOL_EIGEN_ALIGN_BYTES} to match the core")
 unset(_apxchol_align)
 unset(_apxchol_probe)
 unset(_apxchol_eigen_includes)

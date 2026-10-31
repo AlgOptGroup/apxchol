@@ -85,9 +85,7 @@ project's scope. Set `APXCHOL_DEVICE` when configuring the consuming project.
 This builds portable code by default; CUDA consumers must also choose
 `CMAKE_CUDA_ARCHITECTURES` for distribution instead of its `native` default.
 The core keeps its `-march` flag private. A `-march` or `-mcpu` in
-`CMAKE_CXX_FLAGS` replaces apxchol's own. When the core's flag raises Eigen's
-alignment above 16 bytes, `apxchol::core` exports `EIGEN_MAX_ALIGN_BYTES` so
-consumers allocate and free Eigen objects the same way.
+`CMAKE_CXX_FLAGS` (or `CMAKE_CXX_FLAGS_<CONFIG>`) replaces apxchol's own.
 
 Alternatively, embed the repository root directly:
 
@@ -170,5 +168,8 @@ Standard CMake controls also apply: `CMAKE_BUILD_TYPE`, `BUILD_SHARED_LIBS`,
 
 Portable x86 builds use x86-64-v2 and dispatch supported FP16/SIMD kernels at
 runtime. Native tuning can require a newer CPU than this baseline.
-`apxchol::core` propagates architecture and C++23 requirements to consumers;
-these matter because Eigen objects cross the library boundary.
+`apxchol::core` propagates C++23 and two Eigen settings to consumers, because
+Eigen objects cross the library boundary: `EIGEN_MAX_ALIGN_BYTES`, the
+alignment the core's flags give Eigen, and `EIGEN_MALLOC_ALREADY_ALIGNED=0`,
+so both sides allocate and free through Eigen's own aligned allocator. A
+consumer can then target a narrower or wider instruction set than the core.

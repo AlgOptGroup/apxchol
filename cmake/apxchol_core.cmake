@@ -61,9 +61,8 @@ function(_apxchol_configure_core target)
     if (_APXCHOL_ARCH_FLAG)
         target_compile_options(${target} PRIVATE "${_APXCHOL_ARCH_FLAG}")
     endif()
-    if (_APXCHOL_EIGEN_ALIGN_BYTES)
-        target_compile_definitions(${target} PUBLIC EIGEN_MAX_ALIGN_BYTES=${_APXCHOL_EIGEN_ALIGN_BYTES})
-    endif()
+    target_compile_definitions(${target} PUBLIC
+        EIGEN_MAX_ALIGN_BYTES=${_APXCHOL_EIGEN_ALIGN_BYTES} EIGEN_MALLOC_ALREADY_ALIGNED=0)
 
     set(APXCHOL_GIT_SHA "unknown")
     execute_process(COMMAND git -C "${root}" rev-parse --show-toplevel
