@@ -85,9 +85,18 @@ detail::csc_matrix<double> read_matrix_body(std::istream& f,
     return detail::csc_from_triplets(static_cast<node_index>(header.nrows), entries);
 }
 
+// A dense matrix body. The header's shape is checked before allocating, so a
+// crafted header cannot size the array smaller than the entries it addresses.
 dense_file read_dense_body(std::istream& f, const fast_matrix_market::matrix_market_header& header) {
     dense_file out{header.nrows, header.ncols, {}};
-    out.values.resize(static_cast<std::size_t>(header.nrows * header.ncols));
+    std::int64_t count = 0;
+    if (header.nrows < 0 || header.ncols < 0 ||
+        __builtin_mul_overflow(header.nrows, header.ncols, &count) ||
+        static_cast<std::uint64_t>(count) > out.values.max_size())
+        throw std::invalid_argument(fmt::format(
+            "apxchol: dense matrix file claims {}x{} entries, more than can be stored",
+            header.nrows, header.ncols));
+    out.values.resize(static_cast<std::size_t>(count));
     fast_matrix_market::dense_adding_parse_handler handler(
         out.values.begin(), fast_matrix_market::col_major, header.nrows, header.ncols);
     fast_matrix_market::read_matrix_market_body(f, header, handler, 1.0);
