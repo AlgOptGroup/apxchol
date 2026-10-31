@@ -32,6 +32,12 @@
 - Breaking: `apxchol::cpu_solver` is removed; use `apxchol::solver` with `solve_backend::cpu`.
 - Breaking: `save_solver`/`load_solver` are replaced by `solver::save` and `solver::load`.
 - Breaking: `apxchol::apx_cholesky` is removed from the public API; use `apxchol::solver` (`apply` inside an external Krylov solver).
+- Breaking: the triangular solves, CUDA PCG, allocator, graph storage pools, elimination workspace, built-in partitioners and their helpers, the partitioner name list and operator validation (`operator_scan`, `require_operator`, `operator_view`, ...) move to `apxchol::detail`.
+- Breaking: the `factorize(graph, ...)` overloads are removed; pass the operator matrix to `factorize`.
+- Breaking: the partitioner interface no longer exposes `selection::reset`/`finalize`, `partition_result` or `partition_context::cp`.
+- Breaking: `factorization` drops `peak_graph_bytes` and the diagnostic `round_stats` fields `avg_deg`, `nnz_added` and `nnz_total`; its CUDA device factor is private.
+- Breaking: `solve_result::lumped_offdiag` is removed; read `solver.factor().lumped_offdiag`.
+- Breaking: `solve_options::keep_factor_values` is renamed `keep_factor`, matching Python and MATLAB/Octave.
 - Breaking: the CLI and bindings no longer accept an adjacency matrix as if it were the operator. Previously both solved adjacency input as the operator and failed without a clear error; now validation rejects it and the error suggests the conversion.
 - Breaking: the factor type `sparse_csc` is a read-only view with `col_ptrs()`, `row_indices()`, `values()` and `has_values()`; its storage members, raw-pointer accessors and build mutators are no longer public.
 - Breaking: the CMake helpers `apxchol_openmp_runtime()`, `apxchol_configure_core()`, `apxchol_install_core()` and the `APXCHOL_ARCH_FLAG` variable are internal (`_apxchol_*` and `_APXCHOL_ARCH_FLAG`); `find_package(apxchol)` and `apxchol_add_core()` are the supported entry points.

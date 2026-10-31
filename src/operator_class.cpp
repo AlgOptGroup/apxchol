@@ -13,7 +13,7 @@
 
 #include <omp.h>
 
-namespace apxchol {
+namespace apxchol::detail {
 namespace {
 
 /// Relative slack on a row sum before it counts as a dominance violation (or as
@@ -407,8 +407,6 @@ std::string describe_operator(const operator_scan& s, Eigen::Index lumped) {
     return out;
 }
 
-namespace detail {
-
 bool is_graph_adjacency(const Eigen::SparseMatrix<double>& M) {
     const std::string kConversion = "Input conversion needs a square, finite, symmetric matrix. ";
     if (M.rows() != M.cols())
@@ -446,6 +444,4 @@ Eigen::SparseMatrix<double> adjacency_laplacian(const Eigen::SparseMatrix<double
     return L;
 }
 
-} // namespace detail
-
-} // namespace apxchol
+} // namespace apxchol::detail

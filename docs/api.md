@@ -33,10 +33,11 @@ Numerical results and performance may change within the documented
 policy begins with v1.0; it does not apply to earlier prereleases.
 
 Some implementation headers must be installed for C++ templates. Installation
-alone does not make every declaration public. Outside the documented contracts
-above, `detail` namespaces, device kernels and capsules, `research_*` members,
-internal mutators, benchmark scripts and diagnostic output are implementation
-details.
+alone does not make every declaration public. The triangular solves, allocator,
+graph storage, built-in partitioners and operator validation live in `detail`
+namespaces. Outside the documented contracts above, `detail` namespaces,
+private members, device kernels, internal mutators, benchmark scripts and
+diagnostic output are implementation details.
 
 There is no stable C++ binary ABI. Rebuild compiled C++ consumers with
 compatible apxchol headers, compiler and standard library, OpenMP runtime,

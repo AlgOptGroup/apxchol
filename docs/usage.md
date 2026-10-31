@@ -86,7 +86,7 @@ iteration budget as solve arguments.
 |---|---|---|---|
 | `solve_options::backend` | `--backend` | `backend` | CPU only |
 | `solve_options::num_threads` | `--threads` | `num_threads` | `num_threads` |
-| `solve_options::keep_factor_values` | | `keep_factor` | `keep_factor` |
+| `solve_options::keep_factor` | | `keep_factor` | `keep_factor` |
 | `solve_options::tol` | `--tol` | `rtol` (solve argument) | `rtol` (solve argument) |
 | `solve_options::max_iter` | `--max-iter` | `maxiter` (solve argument) | `maxiter` (solve argument) |
 | `factor_options::seed` | `--seed` | `seed` | `seed` |
@@ -227,7 +227,7 @@ Exported factor values are FP32. Internal triangular-solve storage can be
 FP16 or FP32 independently; see [storage choices](precision.md).
 
 C++ defaults to releasing factor values after preparation. Set
-`keep_factor_values=true` when you need them later through `solver.factor()`.
+`keep_factor=true` when you need them later through `solver.factor()`.
 Python's reusable solver instead defaults to `keep_factor=True`, enabling
 `chol()`, `L` and `D` exports. Set it to `False` to save memory; the permutation
 `P` remains available.

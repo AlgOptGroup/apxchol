@@ -26,7 +26,7 @@ namespace apxchol {
 //     lowprec.h) -- that is a per-setup choice of storage type, never a
 //     compile-time typedef.
 using factor_value_t = float;
-using sptrsv_value_t = float;
+namespace detail { using sptrsv_value_t = float; }
 
 namespace detail { struct sparse_csc_access; }
 
@@ -52,7 +52,7 @@ public:
     node_index cols() const { return n_; }
     edge_index nonZeros() const { return outer_.empty() ? edge_index(0) : outer_.back(); }
     /// False once the row indices and values were released after the SpTRSV
-    /// setup (factor_options::keep_factor_values = false); the column pointers stay.
+    /// setup (solve_options::keep_factor = false); the column pointers stay.
     bool has_values() const { return !vals_.empty(); }
 
     /// rows()+1 cumulative column pointers.

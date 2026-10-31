@@ -455,7 +455,7 @@ enum class matrix_kind {
 // actually measures is the SIZE of the largest diagonal, not the rank of L.
 //
 // The structural scan the class is now checked against does not have that
-// defect: apxchol::scan_operator tests each row against ITS OWN diagonal
+// defect: apxchol::detail::scan_operator tests each row against ITS OWN diagonal
 // (slack_i = 1e-10 * max(|L_ii|, 1)) instead of against the global maximum, so a
 // uniform shift shows up as an excess on every row rather than as a small global
 // ratio. It is a CHECK, not the decider — see the --class assertion in main().
@@ -1049,7 +1049,7 @@ struct Args {
     // --class laplacian|sddm: what the assembled operator IS. MANDATORY with
     // --kind operator and rejected otherwise, empty by default so an undeclared
     // operator file is a hard error rather than a guess. Checked against
-    // apxchol::scan_operator before anything runs.
+    // apxchol::detail::scan_operator before anything runs.
     std::string cls;
     std::string dump_mtx;          // if set: write the built Laplacian to this path and exit
     std::string dump_rhs;          // export the common RHS after component projection
@@ -2810,7 +2810,7 @@ int main(int argc, char** argv) try {
 
     // ── assemble the operator the whole suite will solve ──────────────────────
     Eigen::SparseMatrix<double> L;
-    apxchol::operator_scan op_scan{};
+    apxchol::detail::operator_scan op_scan{};
     if (kind == matrix_kind::op) {
         L = std::move(published);
         // Assert the class rather than trusting the declaration: require_operator
@@ -2818,7 +2818,7 @@ int main(int argc, char** argv) try {
         // adjacency signature) with counts, so a file mis-declared `operator`
         // dies here with a diagnosis instead of quietly producing nonsense.
         try {
-            op_scan = apxchol::require_operator(L,
+            op_scan = apxchol::detail::require_operator(L,
 #ifdef HAVE_APXCHOL_V1
                 args.v1_options.factor_opts.lump_max_mass
 #else
@@ -2860,7 +2860,7 @@ int main(int argc, char** argv) try {
                                                          : "sddm (full-rank)") << "\n"
                    "  scanned:  " << (scan_laplacian ? "laplacian (singular)"
                                                      : "sddm (full-rank)") << "\n"
-                   "  apxchol::scan_operator over " << op_scan.rows << " rows: "
+                   "  apxchol::detail::scan_operator over " << op_scan.rows << " rows: "
                 << op_scan.excess_rows << " with a positive diagonal excess, "
                 << op_scan.deficient_rows << " with a negative row sum";
             if (op_scan.deficient_rows > 0)

@@ -422,7 +422,7 @@ solver solver::load(const std::filesystem::path& path, const solve_options& opti
     const auto sizes = archive.read_vector<std::uint64_t>(rounds);
     for (auto count : sizes) {
         if (count > n) invalid("invalid elimination round size");
-        F.rounds.push_back({0, static_cast<std::size_t>(count), std::numeric_limits<double>::quiet_NaN(), 0, 0});
+        F.rounds.push_back({0, static_cast<std::size_t>(count)});
     }
     solver restored(A, std::move(F), options);
     detail::solver_archive_access::restore_input_entries(restored, static_cast<Eigen::Index>(input_entries));

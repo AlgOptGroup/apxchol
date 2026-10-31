@@ -121,7 +121,7 @@ apxchol::solve_options setup_options(const mxArray* options) {
             else if (name == "verbose" || name == "keep_factor") {
                 const double flag = scalar_option(value, name.c_str());
                 if (flag != 0 && flag != 1) fail("apxchol:badInput", name + " must be logical or 0/1");
-                if (name == "keep_factor") result.keep_factor_values = flag != 0;
+                if (name == "keep_factor") result.keep_factor = flag != 0;
                 else result.factor_opts.verbose = flag != 0;
             } else fail("apxchol:badInput", "unknown option '" + name + "'");
         }

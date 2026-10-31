@@ -24,14 +24,13 @@
 #include <immintrin.h>
 #endif
 
-namespace apxchol {
+namespace apxchol::detail {
 
 // Minimum level-set size before sharing a level among SpTRSV workers.
 // Below this threshold, the thread-dispatch overhead exceeds the
 // computational benefit of parallelizing a single level's rows/cols.
 inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 
-namespace detail {
 
 // A level whose row ids are the implicit contiguous interval [first, last).
 // Elimination appends factor columns round-major, so the round-derived base
@@ -127,7 +126,6 @@ private:
     round_level_ranges ranges_;
 };
 
-} // namespace detail
 
 /// OpenMP sparse triangular solver: shared row arithmetic under either the
 /// established level-set schedule (Anderson & Saad 1989; Naumov 2011) or the
@@ -1482,7 +1480,7 @@ private:
     // larger than the dTLB reach of base pages. big_alloc requests huge pages
     // where available to reduce address-translation overhead.
     template<typename T>
-    using big_vec = std::vector<T, util::big_alloc<T>>;
+    using big_vec = std::vector<T, big_alloc<T>>;
     // Index/value output arrays are overwritten in full by the immediately
     // following parallel transpose/copy. Leave their mmap pages lazy and do
     // not value-initialize the elements: the writer threads then perform the
@@ -1490,7 +1488,7 @@ private:
     // (MADV_POPULATE_WRITE plus vector::resize value initialization).
     template<typename T>
     using big_output_vec =
-        std::vector<T, util::big_alloc<T, 32, false, false>>;
+        std::vector<T, big_alloc<T, 32, false, false>>;
 
     // CSR of L11 (forward solve). row_ptr is an offset array (edge_index);
     // col_idx holds column ids (node_index). Exactly ONE of the two value
@@ -1758,4 +1756,4 @@ public:
     }
 };
 
-} // namespace apxchol
+} // namespace apxchol::detail

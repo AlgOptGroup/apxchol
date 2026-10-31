@@ -208,12 +208,12 @@ public:
 #if defined(APXCHOL_USE_CUDA)
         [[maybe_unused]] const auto factorize_install_begin = detail::gpu_setup_diagnostic_clock::now(opts_.verbose);
 #endif
-        if constexpr (on_gpu) cuda_ctx::prewarm();
+        if constexpr (on_gpu) cuda_context::prewarm();
         auto next = std::make_shared<installed>();
         next->F = detail::factorize_for_solver(A, opts_, cp_, Route, keep_factor_);
 #if defined(APXCHOL_USE_CUDA)
         if constexpr (on_gpu) {
-            if (!next->F.research_device_factor)
+            if (!factorization_access::device_factor(next->F))
                 throw std::invalid_argument("GPU route requires a unique nonempty device-owned factor");
         }
 #endif
@@ -261,7 +261,7 @@ public:
     basic_preconditioner& set_factor(factorization F) {
         if constexpr (!on_gpu) detail::validate_adopted_factor(F);
 #if defined(APXCHOL_USE_CUDA)
-        else if (!F.research_device_factor) {
+        else if (!factorization_access::device_factor(F)) {
             detail::validate_adopted_factor(F);
             if (!F.sddm && F.L.rows() == 1)
                 throw std::invalid_argument("CUDA cannot adopt a scalar Laplacian factor");
@@ -288,9 +288,9 @@ private:
         if constexpr (Route == setup_route::gpu) {
             // Reject inadmissible factors before installation can initialize
             // CUDA or upload host arrays.
-            if (F.research_device_factor &&
-                (F.research_device_factor.use_count() != 1 ||
-                 F.research_device_factor->empty()))
+            if (factorization_access::device_factor(F) &&
+                (factorization_access::device_factor(F).use_count() != 1 ||
+                 factorization_access::device_factor(F)->empty()))
                 throw std::invalid_argument(
                     "GPU route requires a unique nonempty device-owned factor");
         }
@@ -342,15 +342,15 @@ private:
             // context lazily inside the first CUDA call. factorize() prewarms it
             // on a helper thread; pay only the REMAINING wait here, under
             // "cuda_init", so sptrsv_setup below reports its own work only.
-            const double cuda_init_s = cuda_ctx::ensure_context();
+            const double cuda_init_s = cuda_context::ensure_context();
             if (cp_) (*cp_)("cuda_init");
             if (opts_.verbose)
                 std::fprintf(stderr, "[sptrsv-setup gpu] %-22s %8.2f ms  (context creation %.2f ms)\n",
-                             "cuda_init", cuda_init_s * 1e3, cuda_ctx::context_seconds() * 1e3);
-            if (F.research_device_factor) {
-                trsv.setup_adopting_device_factor_for_research(
-                    std::move(*F.research_device_factor), opts_);
-                F.research_device_factor.reset();
+                             "cuda_init", cuda_init_s * 1e3, cuda_context::context_seconds() * 1e3);
+            if (factorization_access::device_factor(F)) {
+                trsv.setup_adopting_device_factor(
+                    std::move(*factorization_access::device_factor(F)), opts_);
+                factorization_access::device_factor(F).reset();
             } else {
                 trsv.setup(F.L, static_cast<node_index>(F.sddm ? n : n - 1), opts_);
             }

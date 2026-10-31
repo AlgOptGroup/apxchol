@@ -98,11 +98,11 @@ gpu_round_shadow_input make_input(
         input.seeds.push_back(
             apxchol::detail::gpu_round_shadow_pivot_seed(run_seed, pivot));
 
-    std::vector<std::vector<std::pair<node_index, apxchol::pool_value_t>>> adjacency(n);
+    std::vector<std::vector<std::pair<node_index, apxchol::detail::pool_value_t>>> adjacency(n);
     for (const auto& edge : edges) {
         // A real directed-AoS graph narrows each edge once on insertion and
         // promotes it back to double when process_vertex reads the slab.
-        const auto stored = static_cast<apxchol::pool_value_t>(edge.weight);
+        const auto stored = static_cast<apxchol::detail::pool_value_t>(edge.weight);
         adjacency[edge.u].push_back({edge.v, stored});
         adjacency[edge.v].push_back({edge.u, stored});
     }
@@ -220,13 +220,13 @@ checked_cpu_round run_authoritative_cpu_round(
     for (node_index vertex = 0; vertex < input.vertex_count; ++vertex)
         graph.excess(vertex) = input.excess[vertex];
 
-    apxchol::factorize_workspace workspace;
+    apxchol::detail::factorize_workspace workspace;
     workspace.threads.resize(workers);
     for (auto& thread : workspace.threads)
         thread.factor_entries =
             std::make_unique<std::pmr::monotonic_buffer_resource>();
 
-    apxchol::partition_result partition;
+    apxchol::detail::partition_result partition;
     partition.data = input.pivots;
     apxchol::factor_options options;
     options.seed = input.pivots.empty() ? 0 :
@@ -268,11 +268,11 @@ apxchol::detail::gpu_round_shadow_cpu_comparison run_serial_cpu_round(
         const gpu_round_shadow_report& expected,
         std::span<const gpu_round_shadow_excess_bound> excess_bounds,
         apxchol::detail::gpu_round_shadow_factor_log* factor_log = nullptr) {
-    apxchol::factorize_workspace workspace;
+    apxchol::detail::factorize_workspace workspace;
     workspace.threads.resize(1);
     workspace.threads.front().factor_entries =
         std::make_unique<std::pmr::monotonic_buffer_resource>();
-    apxchol::partition_result partition;
+    apxchol::detail::partition_result partition;
     partition.data = input.pivots;
     apxchol::factor_options options;
     options.seed = input.pivots.empty() ? 0 :
@@ -416,10 +416,10 @@ std::uint64_t check_complete_factor_action(
     EXPECT_EQ(csc_access::outer(metadata.L), csc_access::outer(reference.L));
     const apxchol::factor_options factor_options{
         .factor_storage = apxchol::factor_storage_type::fp32, .drop_tolerance = 0};
-    apxchol::cuda_sptrsv expected_trsv, actual_trsv;
+    apxchol::detail::cuda_sptrsv expected_trsv, actual_trsv;
     expected_trsv.setup(reference.L, n, factor_options);
     auto factor = session.finalize_device_factor(metadata.perm, n, factor_options.factor_storage, 0);
-    actual_trsv.setup_adopting_device_factor_for_research(std::move(*factor), factor_options);
+    actual_trsv.setup_adopting_device_factor(std::move(*factor), factor_options);
     std::uint64_t digest = 14695981039346656037ULL;
     for (node_index basis = 0; basis < n; ++basis) {
         std::vector<double> wanted(n), actual(n);
@@ -502,13 +502,13 @@ parallel_cpu_round_result run_parallel_cpu_round(
         std::span<const gpu_round_shadow_excess_bound> excess_bounds) {
     // Keep the explicit team configuration local to this parallel fixture.
     scoped_omp_threads declared_team(kResidentProvenanceWorkers);
-    apxchol::factorize_workspace workspace;
+    apxchol::detail::factorize_workspace workspace;
     constexpr std::size_t workers = kResidentProvenanceWorkers;
     workspace.threads.resize(workers);
     for (auto& thread : workspace.threads)
         thread.factor_entries =
             std::make_unique<std::pmr::monotonic_buffer_resource>();
-    apxchol::partition_result partition;
+    apxchol::detail::partition_result partition;
     partition.data = input.pivots;
     apxchol::factor_options options;
     options.seed = input.pivots.empty() ? 0 :
@@ -825,7 +825,7 @@ TEST(GpuRoundShadowReference, PoolStorageRetainsDoubleDegreeAccumulation) {
         const auto input = make_input(4, edges, pivots);
         double expected = 0.0;
         for (const auto& edge : edges)
-            expected += double(static_cast<apxchol::pool_value_t>(edge.weight));
+            expected += double(static_cast<apxchol::detail::pool_value_t>(edge.weight));
         const auto report = apxchol::detail::reference_gpu_round_shadow(input);
         ASSERT_EQ(report.pivots.size(), 1u);
         EXPECT_EQ(report.pivots[0].total_degree_bits,
@@ -1991,11 +1991,11 @@ TEST(GpuOwnedPrefix, ResidualFillCollisionsPreserveLaterRoundAssociation) {
         ASSERT_EQ(csc_access::vals(reference_factor.L).size(), reference_factor.L.nonZeros());
         const apxchol::factor_options factor_options{
             .factor_storage = apxchol::factor_storage_type::fp32, .drop_tolerance = 0};
-        apxchol::cuda_sptrsv reference_trsv, actual_trsv;
+        apxchol::detail::cuda_sptrsv reference_trsv, actual_trsv;
         reference_trsv.setup(reference_factor.L, 4, factor_options);
         auto device_factor = session.finalize_device_factor(reference_factor.perm, 4, factor_options.factor_storage, 0);
         ASSERT_NE(device_factor, nullptr);
-        actual_trsv.setup_adopting_device_factor_for_research(std::move(*device_factor), factor_options);
+        actual_trsv.setup_adopting_device_factor(std::move(*device_factor), factor_options);
         std::ostringstream receipt;
         for (const auto& selected : sequence) {
             receipt << "selected";
@@ -2134,7 +2134,7 @@ TEST(GpuOwnedPrefix, TwoRoundsPreserveOrderedHandbackAndCpuPeel) {
     EXPECT_GE(std::count_if(graph.neighbors(0).begin(), graph.neighbors(0).end(),
                            [](const auto& e) { return e.to == 1; }), 3);
 
-    apxchol::factorize_workspace actual_ws, expected_ws;
+    apxchol::detail::factorize_workspace actual_ws, expected_ws;
     for (auto* ws : {&actual_ws, &expected_ws}) {
         ws->threads.resize(1);
         ws->threads[0].factor_entries = std::make_unique<std::pmr::monotonic_buffer_resource>();
@@ -2503,10 +2503,10 @@ TEST(GpuOwnedPrefix, ContinuousRoundsMatchIndependentReferenceThroughEmptyResidu
     apxchol::detail::build_csc(reference_factor, reference_columns, kOwnedVertices, nullptr);
     const apxchol::factor_options factor_options{
         .factor_storage = apxchol::factor_storage_type::fp32, .drop_tolerance = 0};
-    apxchol::cuda_sptrsv expected_trsv, owned_trsv;
+    apxchol::detail::cuda_sptrsv expected_trsv, owned_trsv;
     expected_trsv.setup(reference_factor.L, kOwnedVertices, factor_options);
     auto device_factor = session.finalize_device_factor(reference_factor.perm, kOwnedVertices, factor_options.factor_storage, 0);
-    owned_trsv.setup_adopting_device_factor_for_research(std::move(*device_factor), factor_options);
+    owned_trsv.setup_adopting_device_factor(std::move(*device_factor), factor_options);
     // Basis vectors exercise the full inverse operator, not just one RHS.
     for (std::size_t basis = 0; basis < kOwnedVertices; ++basis) {
         std::vector<double> expected_x(kOwnedVertices), owned_x(kOwnedVertices);
@@ -3253,7 +3253,7 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     auto A = owned_solve_matrix(64, 1.0);
     auto exported = apxchol::factorize(A, factor_options);
     EXPECT_EQ(csc_access::vals(exported.L).size(), exported.L.nonZeros());
-    EXPECT_FALSE(exported.research_device_factor);
+    EXPECT_FALSE(apxchol::detail::factorization_access::device_factor(exported));
     apxchol::detail::gpu_preconditioner owner;
     owner.set_options(factor_options);
     ASSERT_NO_THROW(owner.set_factor(exported));
@@ -3268,7 +3268,7 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     Eigen::VectorXd permuted(A.rows()), expected(A.rows());
     for (Eigen::Index v = 0; v < A.rows(); ++v) permuted[exported.perm[v]] = rhs[v];
     // The direct CUDA reference uses the same FP32 arithmetic as the owner.
-    apxchol::cuda_sptrsv uploaded;
+    apxchol::detail::cuda_sptrsv uploaded;
     uploaded.setup(exported.L, static_cast<node_index>(A.rows()), factor_options);
     uploaded.solve_LLt(permuted.data(), expected.data());
     const Eigen::VectorXd actual = owner.solve(rhs);
@@ -3321,16 +3321,16 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
             for(node_index pivot=0;pivot<count;++pivot)for(unsigned j=0;j<degree[pivot];++j) {
                 // Profiles 3/4/5 cover representable subnormals, zero inputs,
                 // and zero-rounding output, for normal and oversized rows.
-                const auto boundary=profile==9 ? (pivot%3==0 ? apxchol::pool_value_t{2} :
-                    std::nextafter(apxchol::pool_value_t{2},pivot%3==1 ? apxchol::pool_value_t{0} :
-                        std::numeric_limits<apxchol::pool_value_t>::infinity())) : apxchol::pool_value_t{1};
+                const auto boundary=profile==9 ? (pivot%3==0 ? apxchol::detail::pool_value_t{2} :
+                    std::nextafter(apxchol::detail::pool_value_t{2},pivot%3==1 ? apxchol::detail::pool_value_t{0} :
+                        std::numeric_limits<apxchol::detail::pool_value_t>::infinity())) : apxchol::detail::pool_value_t{1};
                 const double weight = profile==0 || profile==8 ? 1. : profile==3 ? std::exp2(-70) :
-                    profile==4 ? (j==0 ? 0. : 1.) : profile==5 ? std::exp2(sizeof(apxchol::pool_value_t)==4?-90:-600) :
+                    profile==4 ? (j==0 ? 0. : 1.) : profile==5 ? std::exp2(sizeof(apxchol::detail::pool_value_t)==4?-90:-600) :
                     profile==7 ? 1.+double(j%17)/64. :
                     profile==9 ? (j==0 ? 1. : double(boundary)) :
                     profile==11 ? (j==0 ? std::exp2(-10) : 1.) :
                     profile==12 ? std::ldexp(1.+double((j*37)%127)/128.,-int((j*23)%61)) :
-                    profile==10 ? (j==0 ? std::numeric_limits<apxchol::pool_value_t>::denorm_min() : std::exp2(sizeof(apxchol::pool_value_t)==4?-70:-500)) :
+                    profile==10 ? (j==0 ? std::numeric_limits<apxchol::detail::pool_value_t>::denorm_min() : std::exp2(sizeof(apxchol::detail::pool_value_t)==4?-70:-500)) :
                     std::exp2(int(j%11)-5);
                 stars[pivot].push_back({n,weight});
                 if(profile==2) {edges.push_back({pivot,n,.25*weight});edges.push_back({pivot,n,.75*weight});}
@@ -3344,7 +3344,7 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
                 apxchol::tree_elimination{.sampler=numerical_fallback?apxchol::clique_sampler::gks:sampler}.sample_clique(stars[pivot],D,
                     apxchol::detail::gpu_round_shadow_pivot_seed(run_seed,pivot),apxchol::edge_emitter(fill));
                 for(auto edge:fill)expected.emplace_back(std::min(edge.u,edge.v),std::max(edge.u,edge.v),
-                    static_cast<double>(static_cast<apxchol::pool_value_t>(edge.w)));
+                    static_cast<double>(static_cast<apxchol::detail::pool_value_t>(edge.w)));
             }
             std::sort(expected.begin(),expected.end());
             std::vector<std::tuple<node_index,node_index,double>> previous;
@@ -3384,9 +3384,9 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
                     if(v<u)got.emplace_back(v,u,static_cast<double>(w));
                 }
                 std::sort(got.begin(),got.end());ASSERT_EQ(got.size(),expected.size());
-                if (profile==3 && sizeof(apxchol::pool_value_t)==4) {
+                if (profile==3 && sizeof(apxchol::detail::pool_value_t)==4) {
                     for (const auto& edge:got)
-                        EXPECT_EQ(std::fpclassify(static_cast<apxchol::pool_value_t>(std::get<2>(edge))),FP_SUBNORMAL);
+                        EXPECT_EQ(std::fpclassify(static_cast<apxchol::detail::pool_value_t>(std::get<2>(edge))),FP_SUBNORMAL);
                 }
                 std::vector<node_index> owner(n),rank(n);
                 for(node_index pivot=0;pivot<count;++pivot)
@@ -3407,7 +3407,7 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
                     EXPECT_EQ(std::get<0>(got[i]),std::get<0>(expected[i]));
                     EXPECT_EQ(std::get<1>(got[i]),std::get<1>(expected[i]));
                     EXPECT_NEAR(std::get<2>(got[i]),std::get<2>(expected[i]),
-                        8*std::numeric_limits<apxchol::pool_value_t>::epsilon()*std::get<2>(expected[i]));
+                        8*std::numeric_limits<apxchol::detail::pool_value_t>::epsilon()*std::get<2>(expected[i]));
                 }
                 // The device emission is item-parallel and its folds need not reproduce the
                 // scalar cut, so verify the law rather than the realization for every sampled
@@ -3458,10 +3458,10 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
                             ++core_degree[i];++core_degree[j];core.emplace_back(i,j);
                             reference=ai*aj/D*(h-1)*.5L;
                         }
-                        const auto rounded=static_cast<apxchol::pool_value_t>(reference);
-                        const double tolerance=(8*std::numeric_limits<apxchol::pool_value_t>::epsilon()+
+                        const auto rounded=static_cast<apxchol::detail::pool_value_t>(reference);
+                        const double tolerance=(8*std::numeric_limits<apxchol::detail::pool_value_t>::epsilon()+
                             128*std::numeric_limits<double>::epsilon()*(d+1))*std::abs(double(rounded))+
-                            2*double(std::numeric_limits<apxchol::pool_value_t>::denorm_min());
+                            2*double(std::numeric_limits<apxchol::detail::pool_value_t>::denorm_min());
                         EXPECT_NEAR(w,double(rounded),tolerance);
                     }
                     ASSERT_EQ(core.size(),h);
