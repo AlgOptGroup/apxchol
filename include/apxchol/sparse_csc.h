@@ -51,8 +51,8 @@ public:
     node_index rows() const { return n_; }
     node_index cols() const { return n_; }
     edge_index nonZeros() const { return outer_.empty() ? edge_index(0) : outer_.back(); }
-    /// False once the row indices and values were released after the SpTRSV
-    /// setup (solve_options::keep_factor = false); the column pointers stay.
+    /// False once a solver released the row indices and values after its
+    /// SpTRSV setup; the column pointers stay.
     bool has_values() const { return !vals_.empty(); }
 
     /// rows()+1 cumulative column pointers.

@@ -39,7 +39,7 @@ argument keeps the default, and an explicit invalid value throws
 `std::invalid_argument`.
 
 ```{doxygenstruct} apxchol::solve_options
-:members: tol, max_iter, keep_factor, factor_opts, backend, num_threads
+:members: tol, max_iter, factor_opts, backend, num_threads
 :undoc-members:
 ```
 
@@ -120,30 +120,37 @@ Custom partitioner and eliminator overloads are described in the
 ```
 
 ```{doxygenstruct} apxchol::factorization
-:members: L, perm, sddm, rounds
+:members: L, perm, sddm, rounds, storage, scale
 :undoc-members:
 ```
 
-`L` stores FP32 lower-triangular columns in compressed sparse column (CSC)
-form, with each diagonal first. `perm[original_vertex]` gives its elimination
-position.
+`L` stores lower-triangular columns in compressed sparse column (CSC) form,
+with each diagonal first. `perm[original_vertex]` gives its elimination
+position. With S = diag(`scale`), or S = I when `scale` is empty, the
+preconditioner is M = Pᵀ L S² Lᵀ P. Keep `L`, the permutation, operator
+kind, round metadata, `storage` and `scale` together when handing a factor to
+another solver.
 
 ```{doxygenclass} apxchol::sparse_csc
 :members: rows, cols, nonZeros, has_values, col_ptrs, row_indices, values
 ```
 
 `sparse_csc` is a read-only view: `col_ptrs()`, `row_indices()` and `values()`
-return spans over the factor's own arrays. A solver that does not keep factor
-values releases the row indices and values after setup; `has_values()` is then
-false, and the column pointers remain.
+return spans over the factor's own arrays.
 
-Keep `L`, the permutation, operator kind and round metadata together when
-handing a factor to another solver.
+`storage` distinguishes two forms. `factorize()` returns a construction
+factor (`automatic`): a solver that adopts it applies its own
+`drop_tolerance` and `factor_storage`. `solver.factor()` returns the installed
+factor (`fp32` or `fp16`), after dropping and storage rounding; for a
+Laplacian its last row and column are empty. A solver adopts an installed
+factor exactly and ignores those two options. With `fp16`, every
+off-diagonal of `L` is a binary16 value, each diagonal is FP32 and `scale`
+holds the FP32 column scales.
 
-A solver can also retain a factor built on CUDA or Metal: enable
-`keep_factor` before construction, then read `solver.factor()`.
-Pass a copy to `solver(A, F, opts)` to reuse it. Automatic adoption uses CPU;
-set `opts.backend = solve_backend::gpu` to upload it to a GPU.
+Any solver, including one built on CUDA or Metal, exports its installed
+factor through `solver.factor()`. Pass it to `solver(A, F, opts)` to reuse
+it. Automatic adoption uses CPU; set `opts.backend = solve_backend::gpu` to
+upload it to a GPU.
 The original matrix `A` is still needed for PCG and residual checks.
 For cross-process reuse, `solver.save(path)` and `solver::load(path, opts)`
 [store the operator and factor together](../serialization.md).

@@ -688,7 +688,6 @@ factorization factorize_impl(const Eliminator& elim,
                              checkpoint* cp,
                              const Eigen::SparseMatrix<double>* initial_csc = nullptr,
                              detail::setup_route route = detail::setup_route::cpu,
-                             [[maybe_unused]] bool keep_factor = false,
                              const detail::factorization_controls& controls = {}) {
     detail::validate_factor_options(opts_in);
     const node_index n = initial_csc ? static_cast<node_index>(initial_csc->rows()) : G.n();
@@ -841,17 +840,7 @@ factorization factorize_impl(const Eliminator& elim,
                 if (!active.empty()) gpu_round_shadow.advance_selector(*gpu_frontend);
                 ++ws.round_index;
             }
-            std::vector<detail::factor_entry> entries;
-            const auto headers = gpu_round_shadow.complete_owned_factorization(
-                result.perm, result.L, keep_factor ? &entries : nullptr);
-            if (keep_factor) {
-                std::vector<detail::factor_col> columns;
-                columns.reserve(n);
-                for (const auto& c : headers)
-                    columns.push_back({c.vertex, c.diag,
-                        c.entry_count ? entries.data() + c.entry_begin : nullptr, c.entry_count});
-                detail::build_csc(result, columns, n, cp);
-            }
+            gpu_round_shadow.complete_owned_factorization(result.perm, result.L, nullptr);
             gpu_frontend.reset();
             if (cp) (*cp)("gpu_owned_factorization");
         }
@@ -1404,17 +1393,11 @@ factorization factorize_impl(const Eliminator& elim,
             const std::size_t omitted_payload_bytes =
                 (static_cast<std::size_t>(result.L.nonZeros()) - n) * sizeof(detail::factor_entry);
             std::fprintf(stderr,
-                "[gpu-factor-assembly] host_csc=%s host_csc_array_bytes=%zu "
-                "host_metadata_bytes=%zu raw_factor_nnz=%zu "
-                "host_factor_entry_download_bytes=%zu host_factor_entry_omitted_bytes=%zu\n",
-                keep_factor ? "retained" : "omitted",
-                detail::sparse_csc_access::inner(result.L).capacity() * sizeof(node_index) +
-                    detail::sparse_csc_access::vals(result.L).capacity() * sizeof(factor_value_t),
+                "[gpu-factor-assembly] host_metadata_bytes=%zu raw_factor_nnz=%zu "
+                "host_factor_entry_omitted_bytes=%zu\n",
                 result.perm.size() * sizeof(node_index) +
                     result.L.col_ptrs().size() * sizeof(edge_index),
-                static_cast<std::size_t>(result.L.nonZeros()),
-                keep_factor ? omitted_payload_bytes : 0,
-                keep_factor ? 0 : omitted_payload_bytes);
+                static_cast<std::size_t>(result.L.nonZeros()), omitted_payload_bytes);
         }
     }
 #endif

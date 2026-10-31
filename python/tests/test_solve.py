@@ -100,7 +100,7 @@ def test_storage_dtype_preserves_original_system_accuracy(dtype):
     assert result.converged
     assert np.linalg.norm(A @ result.x - b) / np.linalg.norm(b) < 1e-8
     assert solver.factor_storage_dtype == dtype
-    assert solver.chol().dtype == np.float32
+    assert solver.chol().dtype == np.float64
 
 
 def test_factor_reused_across_many_b():
@@ -574,24 +574,22 @@ def test_factor_export_algebra_sddm():
 
 
 def test_factor_export_algebra_laplacian():
-    """Same identity for a singular Laplacian, plus the placeholder column."""
+    """Same identities for a singular Laplacian, whose last column is empty."""
     A = grid2d_laplacian(20)
     n = A.shape[0]
     slv = apxchol.factorize(A, seed=7)
     assert not slv.sddm
     G = slv.chol()
     assert G.shape == (n, n)
-    assert G.dtype == np.float32
+    assert G.dtype == np.float64
 
-    # One connected component => exactly one placeholder column, the last one
-    # eliminated: a bare diagonal 1.0 standing in for the dropped rank.
+    # The installed factor leaves the grounded last row and column empty.
     Gc = G.tocsc()
-    single = np.flatnonzero(np.diff(Gc.indptr) == 1)
-    assert single.tolist() == [n - 1]
-    assert Gc[n - 1, n - 1] == 1.0
+    assert np.flatnonzero(np.diff(Gc.indptr) == 0).tolist() == [n - 1]
+    assert Gc.getrow(n - 1).nnz == 0
 
     # The G G^T identity holds on the rank-(n−1) subspace: check the leading
-    # block, which excludes the placeholder's row/column.
+    # block, which excludes the grounded row/column.
     p = np.argsort(slv.P)
     A_perm = A.tocsr()[p][:, p]
     GGt = (G @ G.T).tocsc()
@@ -600,12 +598,12 @@ def test_factor_export_algebra_laplacian():
             / spnorm(A_perm[lead, lead])) < 0.5
 
 
-def test_export_supports_float32_triangular_solve():
+def test_export_supports_triangular_solve():
     G = apxchol.factorize(random_sddm(30, seed=5)).chol()
-    exact = np.linspace(0.5, 1.5, G.shape[0], dtype=np.float32)
+    exact = np.linspace(0.5, 1.5, G.shape[0])
     result = spsolve_triangular(G, G @ exact, lower=True)
-    assert result.dtype == np.float32
-    np.testing.assert_allclose(result, exact, rtol=1e-6)
+    assert result.dtype == np.float64
+    np.testing.assert_allclose(result, exact, rtol=1e-12)
 
 
 @pytest.mark.parametrize("field, values", [
@@ -642,14 +640,13 @@ def test_binding_imports_csc_layouts(offset_dtype, index_dtype, layout):
     if layout == "strided":
         inputs = tuple(np.repeat(value, 2)[::2] for value in inputs)
     before = tuple(value.copy() for value in inputs)
-    solver = _apxchol.Solver(*inputs, {"keep_factor": True,
-                                     "factor_storage_dtype": "float32"})
+    solver = _apxchol.Solver(*inputs, {"factor_storage_dtype": "float32"})
     b = np.array([1.0, 2.0])
     result = solver.solve(b, 1e-12, 20)
     np.testing.assert_allclose(A @ result["x"], b, rtol=1e-11, atol=1e-12)
     assert result["converged"]
     assert solver.factor_storage_dtype() == "float32"
-    assert solver.factor_csc()[2].dtype == np.float32
+    assert solver.factor_csc()[2].dtype == np.float64
     for actual, original in zip(inputs, before):
         np.testing.assert_array_equal(actual, original)
 
@@ -696,7 +693,7 @@ def test_factor_settings_match_native_options(construct, options):
     A = grid2d_sddm(8).tocsc()
     solver = construct(A, backend="cpu", num_threads=1, **options)
     native = apxchol._apxchol.Solver(A.indptr, A.indices, A.data,
-                                   dict(backend="cpu", num_threads=1, keep_factor=True, **options))
+                                   dict(backend="cpu", num_threads=1, **options))
     G = solver.chol()
     np.testing.assert_array_equal(solver.P, native.perm())
     for actual, expected in zip((G.indptr, G.indices, G.data), native.factor_csc()):
@@ -746,13 +743,16 @@ def test_factor_settings_are_per_instance():
 
 
 def test_placeholder_column_per_component():
-    """A k-component Laplacian carries k bare-diagonal placeholder columns."""
+    """A k-component Laplacian carries k-1 bare-diagonal placeholder columns.
+
+    The last eliminated column, the grounded one, is empty.
+    """
     A = sp.block_diag((grid2d_laplacian(8), grid2d_laplacian(6)), format="csr")
     G = apxchol.factorize(A, seed=7).chol().tocsc()
     single = np.flatnonzero(np.diff(G.indptr) == 1)
-    assert single.shape[0] == 2                       # one per component
-    assert single[-1] == A.shape[0] - 1               # last eliminated overall
-    assert np.allclose(G.diagonal()[single], 1.0)
+    placeholders = single[G.diagonal()[single] == 1.0]
+    assert placeholders.shape[0] == 1                 # the other component
+    assert np.flatnonzero(np.diff(G.indptr) == 0).tolist() == [A.shape[0] - 1]
 
 
 def test_apply_matches_explicit_factor_solve():
@@ -775,15 +775,30 @@ def test_apply_matches_explicit_factor_solve():
     assert np.allclose(z, z_ref, rtol=1e-4, atol=1e-4 * np.abs(z_ref).max())
 
 
-def test_keep_factor_false_disables_export():
-    A = grid2d_sddm(15)
-    slv = apxchol.factorize(A, keep_factor=False)
-    with pytest.raises(RuntimeError):
-        slv.chol()
-    assert slv.factor_nnz > 0            # column pointers survive the release
-    # solving still works with the factor values released
-    b = np.random.default_rng(13).standard_normal(A.shape[0])
-    assert slv.solve(b).converged
+def test_removed_keep_factor_option_is_rejected():
+    with pytest.raises(ValueError, match="unknown option 'keep_factor'"):
+        apxchol.factorize(grid2d_sddm(3), keep_factor=False)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float16])
+def test_chol_is_the_installed_preconditioner(dtype):
+    """apply(r) == P^T G^{-T} G^{-1} P r for the exported G, dropped and rounded."""
+    A = random_sddm(60, seed=3)
+    try:
+        slv = apxchol.factorize(A, backend="cpu", num_threads=1, factor_storage_dtype=dtype,
+                                drop_tolerance=0.05)
+    except RuntimeError as error:
+        if dtype not in ("float16", np.float16) or "FP16 factor storage requires" not in str(error):
+            raise
+        pytest.skip("CPU lacks FP16 conversion support")
+    G = slv.chol().tocsr()
+    assert G.nnz == slv.factor_nnz
+    p = np.argsort(slv.P)
+    r = np.random.default_rng(4).standard_normal(A.shape[0])
+    w = spsolve_triangular(G, r[p], lower=True)
+    z_ref = spsolve_triangular(G.T.tocsr(), w, lower=False)[slv.P]
+    z = slv.apply(r)
+    assert np.linalg.norm(z - z_ref) / np.linalg.norm(z_ref) < 1e-5
 
 
 def test_factor_nnz_and_version():
@@ -840,7 +855,7 @@ def test_solve_into_out_buffer():
     A = grid2d_sddm(12)
     n = A.shape[0]
     b = np.ones(n)
-    s = apxchol.factorize(A, keep_factor=False)
+    s = apxchol.factorize(A)
     x = np.zeros(n)
     res = s.solve(b, out=x)
     assert res.x is x                      # solution written into caller memory

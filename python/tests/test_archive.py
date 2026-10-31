@@ -29,19 +29,27 @@ def test_numpy_archive_round_trip(tmp_path):
     assert second.read_bytes() == path.read_bytes()
 
 
-@pytest.mark.parametrize("loaded", [False, True])
-def test_archive_save_requires_retained_factor(tmp_path, loaded):
-    if loaded:
-        path = tmp_path / "source.apxchol"
-        owner().save(path)
-        solver = apxchol.Solver.load(path, keep_factor=False)
-    else:
-        solver = owner(keep_factor=False)
-    check_solve_and_apply(solver, 4)
-    destination = tmp_path / "released.apxchol"
-    with pytest.raises(ValueError):
-        solver.save(destination)
-    assert not destination.exists()
+@pytest.mark.parametrize("dtype", ["float32", "float16"])
+def test_archive_reinstalls_the_installed_factor_exactly(tmp_path, dtype):
+    try:
+        original = owner(seed=3, num_threads=1, factor_storage_dtype=dtype)
+    except RuntimeError as error:
+        if dtype != "float16" or "FP16 factor storage requires" not in str(error):
+            raise
+        pytest.skip("CPU lacks FP16 conversion support")
+    path = tmp_path / "exact.apxchol"
+    original.save(path)
+    # Storage and dropping come from the file, not from load options.
+    restored = apxchol.Solver.load(path, num_threads=1, factor_storage_dtype="float32",
+                                   drop_tolerance=0.5)
+    assert restored.factor_storage_dtype == original.factor_storage_dtype
+    assert restored.factor_nnz == original.factor_nnz
+    before, after = original.chol(), restored.chol()
+    for name in ("indptr", "indices", "data"):
+        np.testing.assert_array_equal(getattr(after, name), getattr(before, name))
+    b = np.linspace(-1.0, 1.0, original.shape[0])
+    np.testing.assert_array_equal(restored.apply(b), original.apply(b))
+    np.testing.assert_array_equal(restored.solve(b).x, original.solve(b).x)
 
 
 def test_archive_replaces_existing_file(tmp_path):

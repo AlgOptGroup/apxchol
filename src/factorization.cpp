@@ -235,8 +235,7 @@ void build_csc(factorization& result,
 factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
                                           const factor_options& opts_in,
                                           checkpoint* cp,
-                                          setup_route route,
-                                          [[maybe_unused]] bool keep_factor) {
+                                          setup_route route) {
     // Assert the operator contract and lump positive off-diagonals if the
     // matrix needs it. Same `operator_view` the header's factorize() overloads
     // use — one implementation, so the CLI, the C++ API and both bindings
@@ -281,7 +280,7 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
         if (cp) { (*cp)("gpu_csc_eligibility"); cp->ascend(); }
         block_greedy_partitioner partitioner;
         auto F = factorize_impl(make_tree_elim(opts, route), partitioner,
-            graph{}, opts, cp, &A, route, keep_factor);
+            graph{}, opts, cp, &A, route);
         F.lumped_offdiag = op.lumped();
         return F;
 #else

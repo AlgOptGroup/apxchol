@@ -129,14 +129,18 @@ restored = apxchol.Solver.load("system.apxchol", backend="cpu")
 result = restored.solve(b)
 ```
 
-Saving requires `keep_factor=True`, the reusable solver's default. It replaces
-an existing file, writing to `<path>.tmp` first and renaming it into place. The archive stores the
-original operator and FP32 factor; RHSs, initial guesses and device workspace
-are not saved. Loading adopts the factor without repeating factorization.
+Saving replaces an existing file, writing to `<path>.tmp` first and renaming it
+into place. The archive
+stores the original operator and the installed factor, the preconditioner the
+solves actually use, in its storage dtype; RHSs, initial guesses and device
+workspace are not saved. Loading reinstalls that factor exactly without
+repeating factorization, so solves match the saved solver bit for bit on the
+same backend and thread count.
 
 `backend="auto"` adopts on CPU; `backend="gpu"` uploads to a compatible GPU.
-Storage and preparation options use the same defaults as construction. Pass
-`lump_max_mass` again if the saved operator requires positive-entry lumping.
+The file fixes the storage dtype and dropping, so `factor_storage_dtype` and
+`drop_tolerance` have no effect when loading. Pass `lump_max_mass` again if the
+saved operator requires positive-entry lumping.
 
 ## Setup options
 
@@ -148,7 +152,6 @@ Pass these keywords to `factorize` or the one-shot `solve`:
 | `num_threads` | CPU thread ceiling; `0` inherits the caller's OpenMP setting |
 | `seed` | Sampling seed; `None` uses the native default |
 | `partitioner` | `"block_greedy"`, `"priority_greedy"` or `"baumann_kyng"`; `None` uses the native default |
-| `keep_factor` | Retain exportable arrays; defaults to `True` for `factorize`, `False` for one-shot `solve` |
 | `factor_storage_dtype` | `np.float16`, `np.float32`, or `None` for the backend default; dtype names also work |
 
 Read the chosen route from `solver.backend` and storage type from
@@ -156,7 +159,7 @@ Read the chosen route from `solver.backend` and storage type from
 for automatic selection and explicit-request behavior.
 
 Storage defaults to FP32 on CPU/Metal and FP16 on CUDA. This affects
-triangular-solve storage, not export or outer solve precision. Unsupported
+triangular-solve storage and the exported factor, not outer solve precision. Unsupported
 FP16 requests fail; FP64 storage is unavailable. See [precision](https://algoptgroup.github.io/apxchol/docs/precision.html).
 
 ### Advanced options
@@ -205,11 +208,12 @@ p = P.argsort()
 # A[p][:, p] ≈ G @ G.T
 ```
 
-`chol()` returns an independent copy. For a Laplacian, it represents
-the nonsingular subspace; see the [factor reference](https://algoptgroup.github.io/apxchol/docs/reference/python.html).
-
-Use `keep_factor=False` to save the extra host factor copy when export is
-unnecessary. Repeated solves, `P` and `factor_nnz` remain available.
+`chol()`, `P` and `factor_nnz` describe the preconditioner actually used: the
+factor after dropping and storage rounding. `chol()` returns a float64 copy, `P`
+an `int64` permutation and `factor_nnz` an integer. For a Laplacian, they
+represent the nonsingular subspace and the last row and column
+are empty; see the [factor reference](https://algoptgroup.github.io/apxchol/docs/reference/python.html).
+A GPU-backed solver downloads the factor on the first export and caches it.
 
 Matrix import is limited to signed 32-bit dimensions and stored-entry counts.
 The native library's wide-index build options do not enlarge this binding.

@@ -489,8 +489,7 @@ detail::cpu_route::cpu_route(const Eigen::SparseMatrix<double>& A,
     } else {
         const bool _pcg_trace = opts_.factor_opts.verbose;
         const auto _t_compute_start = std::chrono::high_resolution_clock::now();
-        install_factor(detail::factorize_for_solver(A, opts_.factor_opts, cp, setup_route::cpu,
-                                                    opts_.keep_factor), cp);
+        install_factor(detail::factorize_for_solver(A, opts_.factor_opts, cp, setup_route::cpu), cp);
         if (_pcg_trace) {
             const double dt = std::chrono::duration<double>(
                 std::chrono::high_resolution_clock::now() - _t_compute_start).count();
@@ -531,17 +530,21 @@ void detail::cpu_route::install_factor(factorization F, checkpoint* cp) {
         }
         trsv.set_round_bounds(std::move(bounds));
     }
-    // Hand the factor over unless the caller wants to read it afterwards:
-    // the SpTRSV then releases F.L's row/value arrays at the first point it
-    // no longer reads them (Laplacian path: right after its L11 copy), so its
-    // setup transient does not sit on a dead copy of the factor.
-    // keep_factor=true keeps them for callers that export or adopt L.
-    if (opts_.keep_factor) trsv.setup(factor.L, factor_dim, opts_.factor_opts);
-    else                   trsv.setup_consuming(factor.L, factor_dim, opts_.factor_opts);
+    // Hand the factor over: the SpTRSV releases F.L's row/value arrays at the
+    // first point it no longer reads them (Laplacian path: right after its L11
+    // copy), so its setup transient does not sit on a dead copy of the
+    // factor. An installed factor is reinstalled exactly; installed_factor()
+    // exports it again from the SpTRSV.
+    if (factor.storage == factor_storage_type::automatic)
+        trsv.setup_consuming(factor.L, factor_dim, opts_.factor_opts);
+    else
+        trsv.install_exact(factor.L, factor_dim, factor.storage == factor_storage_type::fp16,
+                           factor.scale.data(), opts_.factor_opts);
     if (cp) { (*cp)("sptrsv_setup"); cp->ascend(); }
     // The PCG loop only uses trsv, never F.L. Release whatever row/value
     // arrays setup_consuming left (idempotent); column pointers remain.
-    if (!opts_.keep_factor) detail::sparse_csc_access::release_values(factor.L);
+    detail::sparse_csc_access::release_values(factor.L);
+    std::vector<float>().swap(factor.scale);
     scratch_.resize(n_);
     scratch2_.resize(n_);
     installed_ = std::move(next);
@@ -631,6 +634,18 @@ detail::cpu_route::cpu_route(const cpu_route& other)
 
 factor_storage_type detail::cpu_route::factor_storage() const {
     return trsv().fp16() ? factor_storage_type::fp16 : factor_storage_type::fp32;
+}
+
+factorization detail::cpu_route::installed_factor() const {
+    const auto& source = factor();
+    factorization F;
+    F.perm = source.perm;
+    F.sddm = source.sddm;
+    F.lumped_offdiag = source.lumped_offdiag;
+    F.rounds = source.rounds;
+    F.storage = factor_storage();
+    trsv().export_installed(F.L, static_cast<node_index>(n_), F.scale);
+    return F;
 }
 
 template<int C>
@@ -1306,11 +1321,9 @@ const detail::solver_route& detail::solver_access::route(const solver& owner) {
 }
 
 void detail::solver_access::save(const std::filesystem::path& path, const solver& owner) {
-    const auto& F = owner.factor();
-    validate_adopted_factor(F); // Reject released values before copying/downloading A.
-    if (F.rounds.size() > F.L.rows())
-        throw std::invalid_argument("solver archive: too many elimination rounds");
     const thread_budget threads(owner.impl_->num_threads);
+    const auto F = std::visit([](const auto& backend) { return backend.installed_factor(); },
+                              owner.impl_->route);
     auto A = std::visit([](const auto& backend) { return backend.original_operator(); },
                         owner.impl_->route);
     save_solver_data(path, A, F, owner.operator_nnz());
@@ -1427,9 +1440,9 @@ void solver::apply(const_matrix_view R, matrix_view Z) {
     impl_->apply(R, Z);
 }
 
-const factorization& solver::factor() const {
-    return std::visit([](const auto& owner) -> const factorization& { return owner.factor(); },
-                      impl_->route);
+factorization solver::factor() const {
+    const detail::thread_budget threads(impl_->num_threads);
+    return std::visit([](const auto& owner) { return owner.installed_factor(); }, impl_->route);
 }
 Eigen::Index solver::rows() const { return impl_->rows(); }
 Eigen::Index solver::operator_nnz() const { return impl_->operator_entries; }

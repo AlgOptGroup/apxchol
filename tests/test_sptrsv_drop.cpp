@@ -1085,6 +1085,7 @@ prepared_adoption prepare_adoption(
         narrowed.diag.data(), static_cast<std::size_t>(m));
     auto* d_inv_scale2 = allocations.upload(
         inv_scale2.data(), static_cast<std::size_t>(m));
+    auto* d_scale = allocations.upload(scales.data(), static_cast<std::size_t>(m));
     if (corrupt_L_extent) {
         const int bad = L16.ptr.back() - 1;
         apxchol::detail::check_cuda(
@@ -1101,6 +1102,7 @@ prepared_adoption prepare_adoption(
          {d_LT_val, static_cast<std::size_t>(LT16.nnz) * sizeof(__half)}},
         {d_diag, static_cast<std::size_t>(m) * sizeof(float)},
         {d_inv_scale2, static_cast<std::size_t>(m) * sizeof(double)},
+        {d_scale, static_cast<std::size_t>(m) * sizeof(float)},
         stats,
         narrowed.flushed, narrowed.subnormal);
     allocations.relinquish();

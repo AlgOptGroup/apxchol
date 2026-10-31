@@ -26,10 +26,6 @@ struct solve_options {
     double tol       = default_tol;
     /// Nonnegative default iteration budget; zero only checks the initial guess.
     int    max_iter  = default_max_iter;
-    /// Retain FP32 host factor values for export or adoption by another solver.
-    /// Costs an additional host copy; false keeps the permutation but releases
-    /// row/value arrays. Python factorize() enables retention by default.
-    bool keep_factor = false;
     /// Factor construction and triangular-solve storage controls.
     factor_options factor_opts{};
     /// Select a complete setup/solve route; execution errors never change it.
@@ -87,7 +83,9 @@ class solver {
 public:
     explicit solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts = {});
     /// Adopt F without rebuilding or regularizing it. lump_max_mass still bounds
-    /// operator validation; factor storage, dropping and solve options apply.
+    /// operator validation and solve options apply. Factor storage and
+    /// dropping apply to a construction factor from factorize(); an installed
+    /// factor from factor() is adopted exactly (factorization.h).
     solver(const Eigen::SparseMatrix<double>& A, factorization F, const solve_options& opts = {});
     ~solver();
     solver(solver&&) noexcept;
@@ -128,9 +126,11 @@ public:
     }
     void apply(const_matrix_view R, matrix_view Z);
 
-    /// Factor metadata; L's row/value arrays require keep_factor=true.
-    /// The returned reference is owned by this solver.
-    const factorization& factor() const;
+    /// The installed preconditioner, the factor the solves actually use
+    /// (factorization.h): after dropping and storage rounding, in the
+    /// solver's storage. Built on demand from the triangular-solve arrays; a
+    /// GPU solver downloads them.
+    factorization factor() const;
     /// Operator dimension.
     Eigen::Index rows() const;
     /// Stored entries in the original operator, after input canonicalization
@@ -144,12 +144,13 @@ public:
     /// including reading the file. Copies keep the original's value.
     double setup_seconds() const;
 
-    /// Save the original operator and retained FP32 factor in a portable binary
-    /// file. Creates a new file; an existing destination is an error. Requires
-    /// keep_factor=true at construction.
+    /// Save the original operator and the installed factor (factor()) in a
+    /// portable binary file (docs/serialization.md). Creates a new file; an
+    /// existing destination is an error.
     void save(const std::filesystem::path& path) const;
-    /// Restore a saved solver without factorizing again. Backend, storage and
-    /// solve options apply as with solver(A, F, opts); automatic adoption uses CPU.
+    /// Restore a saved solver without factorizing again. Storage and dropping
+    /// come from the file; backend, threads, lump_max_mass and solve options
+    /// apply as with solver(A, F, opts). Automatic adoption uses CPU.
     static solver load(const std::filesystem::path& path, const solve_options& opts = {});
 
 private:

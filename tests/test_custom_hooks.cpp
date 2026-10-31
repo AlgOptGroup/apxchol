@@ -183,19 +183,20 @@ TEST(SetFactor, ExternalFactorizationInPreconditioner) {
     EXPECT_GT(z.norm(), 0.0);
 }
 
-TEST(KeepFactor, ValuesSurviveWhenRequested) {
+TEST(FactorExport, InstalledFactorIsAlwaysAvailable) {
     auto L = grid_laplacian(10, 10);
     apxchol::solve_options opts;
     opts.backend = apxchol::solve_backend::cpu;
 
-    apxchol::solver released(L, opts);
-    EXPECT_TRUE(csc_access::vals(released.factor().L).empty());
-
-    opts.keep_factor = true;
-    apxchol::solver kept(L, opts);
-    const auto& FL = kept.factor().L;
-    EXPECT_EQ(csc_access::vals(FL).size(), size_t(FL.nonZeros()));
-    EXPECT_EQ(csc_access::inner(FL).size(), size_t(FL.nonZeros()));
+    apxchol::solver owner(L, opts);
+    const auto F = owner.factor();
+    EXPECT_EQ(F.storage, apxchol::factor_storage_type::fp32);
+    EXPECT_EQ(csc_access::vals(F.L).size(), size_t(F.L.nonZeros()));
+    EXPECT_EQ(csc_access::inner(F.L).size(), size_t(F.L.nonZeros()));
+    // A Laplacian's installed factor has an empty last row and column.
+    const auto n = F.L.rows();
+    EXPECT_EQ(csc_access::outer(F.L)[n - 1], csc_access::outer(F.L)[n]);
+    for (auto row : csc_access::inner(F.L)) EXPECT_LT(row, n - 1);
 }
 
 TEST(InitialGuess, ExactX0ConvergesImmediately) {
@@ -272,9 +273,11 @@ TEST(SolveHonesty, ZeroRhsReturnsZeroWithWarmStart) {
 
 TEST(SetFactor, ReleasedFactorIsRejected) {
     auto L = grid_laplacian(10, 10);
-    apxchol::solver slv(L, on_cpu);  // default: factor values released after setup
+    apxchol::solver slv(L, on_cpu);
+    auto F = slv.factor();
+    csc_access::release_values(F.L);
 
-    EXPECT_THROW(apxchol::solver(L, slv.factor(), on_cpu),
+    EXPECT_THROW(apxchol::solver(L, F, on_cpu),
                  std::invalid_argument);
 }
 

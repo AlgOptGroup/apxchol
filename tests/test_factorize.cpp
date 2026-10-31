@@ -45,7 +45,7 @@ static apxchol::factorization factorize_controlled(
     apxchol::detail::block_greedy_partitioner partitioner;
     return apxchol::detail::factorize_impl(apxchol::detail::make_tree_elim(options), partitioner,
         std::move(graph), options, checkpoint, nullptr,
-        apxchol::detail::setup_route::cpu, false, controls);
+        apxchol::detail::setup_route::cpu, controls);
 }
 
 TEST(SetupDiagnostics, EndpointRadixSortMatchesComparisonSort) {
@@ -1875,7 +1875,7 @@ TEST(FactorAdoption, PreservesCustomEntriesAndRoundMetadata) {
         for (int col = 0; col < 3; ++col)
             A(row, col) = permuted(factor.perm[row], factor.perm[col]);
     const Eigen::SparseMatrix<double> sparse = A.sparseView();
-    apxchol::solver owner(sparse, factor, {.keep_factor = true,
+    apxchol::solver owner(sparse, factor, {
         .factor_opts = {.drop_tolerance = 0}, .backend = apxchol::solve_backend::cpu});
     EXPECT_EQ(csc_access::inner(owner.factor().L), csc_access::inner(factor.L));
     EXPECT_EQ(csc_access::vals(owner.factor().L), csc_access::vals(factor.L));
