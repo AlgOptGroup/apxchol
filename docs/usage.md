@@ -21,17 +21,16 @@ valid operator. To start from a graph instead, convert the input first:
 |---|---|---|
 | `--convert-input` | `A = apxchol.as_operator(M)` | `A = apxchol_as_operator(M)` |
 
-All three apply the same rule, like NumPy's `asarray`:
+All three apply the same rule, like NumPy's `asarray`. `M` must be square,
+finite and symmetric; otherwise the conversion fails and says why.
 
-- If `M` passes the operator check (a symmetric Laplacian or SDDM matrix,
-  possibly nearly SDDM), it is used unchanged. A diagonal-only matrix with a
-  positive diagonal passes.
-- Otherwise, if `M` has no negative off-diagonal entry, it is a graph
+- If `M` has off-diagonal entries and none of them is negative, it is a graph
   adjacency matrix, and its Laplacian `L = D - M` is used, where `D` holds the
   row sums of `M`. A diagonal entry (self-loop) adds to `D` and is subtracted
   again, so it cancels. Pattern input (a Matrix Market `pattern` file, a
   MATLAB logical matrix, a boolean SciPy matrix) has unit weights.
-- Otherwise the conversion fails, explaining why `M` is neither.
+- Otherwise `M` is used unchanged, and the solver checks it as an operator.
+  This covers Laplacian, SDDM and nearly SDDM matrices and diagonal matrices.
 
 Without conversion, when a matrix fails as an operator but has no negative
 off-diagonal entry, the error suggests the conversion for each interface.
@@ -175,3 +174,28 @@ workloads may use fewer threads.
 The setting also covers CPU work in a GPU build; it does not control GPU
 threadgroups. More CPU threads need not be faster. To choose which cores run those CPU workers,
 see [thread placement](../benchmarks/README.md#thread-placement).
+
+## Thread safety
+
+Use one solver per thread. A solver reuses its workspace across `solve`,
+`apply` and batch solves. In C++ these methods are non-const, and concurrent
+non-const calls on one object are not allowed: use a copy, or batch the
+right-hand sides. As a safety net, a call made while another thread is using
+the same solver throws (`RuntimeError` in Python) instead of waiting.
+
+Copies are cheap: a copy shares the factor, the triangular-solve structures
+and the operator, which are read-only after setup, and allocates only its
+own workspace. Copy a solver once per thread, with `solver copy = original;`
+in C++ or `copy.copy(solver)` in Python, and the copies solve in parallel
+with the same results as serial calls. Copies stay valid after the original
+is destroyed. This covers `solver`, `cpu_solver` and `apx_cholesky`; a new
+factor installed in one copy of an `apx_cholesky` leaves the others unchanged.
+GPU solvers cannot be copied: construct one per thread, or batch the
+right-hand sides. A `metal_solver` used directly must not be called
+concurrently.
+
+To solve many right-hand sides from one thread, pass them to `solve(B)` as the
+columns of one matrix; the batched solver shares work between columns.
+
+Python releases the GIL during factorization, `solve` and `apply`, but holds it
+while reading the input matrix.

@@ -70,7 +70,7 @@ result = solver.solve(b)
 
 The matrix is square with `len(indptr) - 1` rows. Integer indices may be 32- or
 64-bit; the native importer sorts columns and sums duplicate entries. SciPy
-is needed for `factorize(A)`, `laplacian`, `aslinearoperator`, and sparse factor
+is needed for `factorize(A)`, `as_operator`, `aslinearoperator`, and sparse factor
 exports. NumPy-only solves and preconditioner application do not import it.
 
 ## Reuse, batches and initial guesses
@@ -105,8 +105,12 @@ result = solver.solve(b2, x0=first.x)
 The [native reference](https://algoptgroup.github.io/apxchol/docs/reference/cpp.html#solve-defaults) shows the
 compiled tolerance and iteration defaults.
 
-Overlapping inputs are copied before writing `out`. Use separate solver
-instances for concurrent calls; each solver shares mutable workspace.
+Overlapping inputs are copied before writing `out`. Factorization, `solve`
+and `apply` release the GIL while they run native code; reading the input
+matrix holds it. A call made while another thread uses the same solver raises
+`RuntimeError`. For CPU solvers, give each thread `copy.copy(solver)`, which
+shares the factor and allocates only new workspace. GPU-backed solvers cannot
+be copied; pass all right-hand sides to one `solve(B)`.
 
 ## Save and reload
 
@@ -163,7 +167,7 @@ support fewer construction choices.
 | `residual_peel` | Residual pivot order: `"natural"`, `"min_degree"` or `"bk_serial"` |
 | `cpu_schedule` | CPU triangular-solve scheduling: `"auto"` or `"levels"` |
 | `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
-| `regularization` | Nonnegative diagonal fraction added during factor construction; `0` disables it |
+| `regularization` | Minimum diagonal excess of the preconditioner, as a fraction of each diagonal after lumping; excess below 1e-12 of the diagonal counts as zero first; `A` is not modified; `0` disables it |
 | `lump_max_mass` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
 | `verbose` | Print setup diagnostics; off by default |
 

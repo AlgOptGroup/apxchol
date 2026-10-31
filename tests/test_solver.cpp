@@ -6,15 +6,19 @@
 
 #include <Eigen/IterativeLinearSolvers>
 #include <Eigen/Sparse>
+#include <atomic>
 #include <cmath>
+#include <functional>
 #include <future>
 #include <cstring>
 #include <cstdlib>
+#include <latch>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -30,8 +34,8 @@ using Sparse = Eigen::SparseMatrix<double>;
 
 static_assert(std::is_move_constructible_v<apxchol::solver>);
 static_assert(std::is_move_assignable_v<apxchol::solver>);
-static_assert(!std::is_copy_constructible_v<apxchol::solver>);
-static_assert(!std::is_copy_assignable_v<apxchol::solver>);
+static_assert(std::is_copy_constructible_v<apxchol::solver>);
+static_assert(std::is_copy_assignable_v<apxchol::solver>);
 static_assert(noexcept(apxchol::backend_available(apxchol::solve_backend::gpu)));
 
 Sparse operator_matrix(int n = 64) {
@@ -99,6 +103,11 @@ TEST(Solver, CpuInterfacesRejectEmptyOperator) {
     EXPECT_THROW(apxchol::cpu_solver(empty, cpu_options()), std::invalid_argument);
     apxchol::apx_cholesky preconditioner;
     EXPECT_THROW(preconditioner.compute(empty), std::invalid_argument);
+}
+
+TEST(Solver, TestRhsOfAnEmptySystemIsEmpty) {
+    EXPECT_EQ(apxchol::generate_test_rhs(0).size(), 0);
+    EXPECT_THROW(apxchol::generate_test_rhs(-1), std::invalid_argument);
 }
 
 TEST(Solver, EigenConjugateGradientUsesPreconditioner) {
@@ -199,6 +208,213 @@ TEST(Solver, CpuOwnerSurvivesInputsAndMovesAndReusesItsFactor) {
     }
 }
 
+namespace {
+constexpr const char* busy_message =
+    "this solver is already in use by another thread; use a separate solver per thread, "
+    "or pass all right-hand sides to solve() as one matrix";
+
+void expect_busy(const std::function<void()>& call) {
+    try {
+        call();
+        ADD_FAILURE() << "overlapping call was accepted";
+    } catch (const std::runtime_error& error) {
+        EXPECT_STREQ(error.what(), busy_message);
+    }
+}
+
+// Two threads start together and call one object until one call is rejected.
+// Accepted calls must match their serial results.
+void expect_overlap_rejected(const std::function<void()>& call) {
+    std::atomic<bool> rejected = false;
+    std::latch start(2);
+    const auto run = [&] {
+        start.arrive_and_wait();
+        for (int i = 0; i < 1000 && !rejected; ++i) {
+            try {
+                call();
+            } catch (const std::runtime_error& error) {
+                EXPECT_STREQ(error.what(), busy_message);
+                rejected = true;
+            }
+        }
+    };
+    std::thread other(run);
+    run();
+    other.join();
+    EXPECT_TRUE(rejected);
+}
+}  // namespace
+
+TEST(Solver, CallGuardRejectsOtherThreadsAndAllowsReentry) {
+    const apxchol::detail::call_guard guard;
+    std::latch entered(1), release(1);
+    std::thread holder([&] {
+        const auto scope = guard.enter();
+        { const auto nested = guard.enter(); }
+        entered.count_down();
+        release.wait();
+    });
+    entered.wait();
+    expect_busy([&] { (void)guard.enter(); });
+    const apxchol::detail::call_guard copy = guard;
+    { const auto scope = copy.enter(); }
+    release.count_down();
+    holder.join();
+    { const auto scope = guard.enter(); }
+}
+
+TEST(Solver, OverlappingCallsOnOneOwnerThrow) {
+    const scoped_omp_threads threads(1);
+    const Sparse matrix = operator_matrix(3000);
+    const auto options = cpu_options();
+    apxchol::solver owner(matrix, options);
+    const apxchol::cpu_solver cpu(matrix, options);
+    const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, -2.0);
+    const Eigen::MatrixXd panel = Eigen::MatrixXd::Ones(matrix.rows(), 3);
+    const Eigen::VectorXd solved = owner.solve(rhs).x, applied = owner.apply(rhs);
+    Eigen::MatrixXd expected_panel(matrix.rows(), 3);
+    cpu.solve(panel, expected_panel);
+    expect_overlap_rejected([&] { EXPECT_EQ(owner.solve(rhs).x, solved); });
+    expect_overlap_rejected([&] { EXPECT_EQ(owner.apply(rhs), applied); });
+    expect_overlap_rejected([&] { EXPECT_EQ(cpu.solve(rhs).x, solved); });
+    expect_overlap_rejected([&] { EXPECT_EQ(cpu.apply(rhs), applied); });
+    expect_overlap_rejected([&] { EXPECT_EQ(cpu.preconditioner().solve(rhs), applied); });
+    expect_overlap_rejected([&] {
+        Eigen::MatrixXd x(matrix.rows(), 3);
+        cpu.solve(panel, x);
+        EXPECT_EQ(x, expected_panel);
+    });
+    // A solve and an application share the preconditioner workspace.
+    std::atomic<bool> rejected = false;
+    std::latch start(2);
+    std::thread solver_thread([&] {
+        start.arrive_and_wait();
+        for (int i = 0; i < 1000 && !rejected; ++i)
+            try {
+                EXPECT_EQ(cpu.solve(rhs).x, solved);
+            } catch (const std::runtime_error& error) {
+                EXPECT_STREQ(error.what(), busy_message);
+                rejected = true;
+            }
+    });
+    start.arrive_and_wait();
+    for (int i = 0; i < 1000 && !rejected; ++i)
+        try {
+            EXPECT_EQ(cpu.preconditioner().solve(rhs), applied);
+        } catch (const std::runtime_error& error) {
+            EXPECT_STREQ(error.what(), busy_message);
+            rejected = true;
+        }
+    solver_thread.join();
+    EXPECT_TRUE(rejected);
+}
+
+TEST(Solver, RefactoringOneCopyKeepsTheOthersAndFailuresKeepTheOldFactor) {
+    const scoped_omp_threads threads(1);
+    const Sparse small = operator_matrix(64), large = operator_matrix(200);
+    apxchol::apx_cholesky original;
+    original.compute(small);
+    apxchol::apx_cholesky copy = original;
+    const Eigen::VectorXd r = Eigen::VectorXd::LinSpaced(small.rows(), 1.0, 2.0);
+    const Eigen::VectorXd expected = original.solve(r);
+    const auto* shared = &original.factor();
+    ASSERT_EQ(&copy.factor(), shared);
+
+    // A new factor replaces only this copy's shared state.
+    copy.compute(large);
+    EXPECT_EQ(copy.rows(), large.rows());
+    EXPECT_NE(&copy.factor(), shared);
+    EXPECT_EQ(original.rows(), small.rows());
+    EXPECT_EQ(&original.factor(), shared);
+    EXPECT_EQ(Eigen::VectorXd(original.solve(r)), expected);
+
+    // A failed refactor keeps the old factor and its dimension.
+    Sparse asymmetric = large;
+    asymmetric.coeffRef(0, 1) = 5.0;
+    EXPECT_THROW(original.compute(asymmetric), std::invalid_argument);
+    EXPECT_EQ(original.rows(), small.rows());
+    EXPECT_EQ(&original.factor(), shared);
+    EXPECT_EQ(Eigen::VectorXd(original.solve(r)), expected);
+}
+
+TEST(Solver, CopiesShareTheFactorAndSolveInParallel) {
+    // Direct preconditioner applications use the caller's OpenMP setting.
+    const scoped_omp_threads threads(2);
+    const Sparse matrix = operator_matrix(20000);
+    auto options = cpu_options();
+    options.num_threads = 2;
+    std::optional<apxchol::solver> original(std::in_place, matrix, options);
+    const apxchol::cpu_solver cpu(matrix, options);
+    constexpr int callers = 4;
+    // Two independent parallel factorizations need not match bit for bit, so
+    // each object family is compared with references from its own source.
+    std::vector<Eigen::VectorXd> rhs, solved, applied, cpu_solved, cpu_applied;
+    for (int t = 0; t < callers; ++t) {
+        rhs.push_back(Eigen::VectorXd::LinSpaced(matrix.rows(), t + 1.0, -2.0 * t));
+        solved.push_back(original->solve(rhs.back()).x);
+        applied.push_back(original->apply(rhs.back()));
+        cpu_solved.push_back(cpu.solve(rhs.back()).x);
+        cpu_applied.push_back(cpu.apply(rhs.back()));
+    }
+    const Eigen::MatrixXd panel = Eigen::MatrixXd::Ones(matrix.rows(), 3);
+    Eigen::MatrixXd expected_panel(matrix.rows(), 3);
+    cpu.solve(panel, expected_panel);
+
+    std::vector<apxchol::solver> owners(callers, *original);
+    std::vector<apxchol::cpu_solver> cpus(callers, cpu);
+    std::vector<apxchol::apx_cholesky> preconditioners(callers, cpu.preconditioner());
+    for (int t = 0; t < callers; ++t) {
+        EXPECT_EQ(&owners[t].factor(), &original->factor());
+        EXPECT_EQ(&cpus[t].preconditioner().factor(), &cpu.preconditioner().factor());
+        EXPECT_EQ(&cpus[t].preconditioner().trsv(), &cpu.preconditioner().trsv());
+        EXPECT_EQ(&preconditioners[t].trsv(), &cpu.preconditioner().trsv());
+    }
+    const auto* shared_factor = &original->factor();
+    original.reset();
+    for (int round = 0; round < 3; ++round) {
+        std::vector<Eigen::VectorXd> x(callers), z(callers), y(callers), w(callers), v(callers);
+        std::vector<Eigen::MatrixXd> batch(callers, Eigen::MatrixXd(matrix.rows(), 3));
+        std::vector<std::thread> workers;
+        for (int t = 0; t < callers; ++t)
+            workers.emplace_back([&, t] {
+                const scoped_omp_threads worker_threads(2);
+                x[t] = owners[t].solve(rhs[t]).x;
+                z[t] = owners[t].apply(rhs[t]);
+                y[t] = cpus[t].solve(rhs[t]).x;
+                w[t] = cpus[t].apply(rhs[t]);
+                v[t] = preconditioners[t].solve(rhs[t]);
+                cpus[t].solve(panel, batch[t]);
+            });
+        for (auto& worker : workers) worker.join();
+        for (int t = 0; t < callers; ++t) {
+            EXPECT_EQ(x[t], solved[t]);
+            EXPECT_EQ(z[t], applied[t]);
+            EXPECT_EQ(y[t], cpu_solved[t]);
+            EXPECT_EQ(w[t], cpu_applied[t]);
+            EXPECT_EQ(v[t], cpu_applied[t]);
+            EXPECT_EQ(batch[t], expected_panel);
+        }
+    }
+    EXPECT_EQ(&owners[0].factor(), shared_factor);
+    // Where the CPU triangular solve picks its hybrid schedule (as on x86
+    // Linux), the parallel solves above also cover per-copy barrier state.
+    RecordProperty("hybrid_schedule", cpu.preconditioner().trsv().uses_hybrid_schedule());
+
+    // Assignment shares the source; a new factor in a copy leaves others intact.
+    const Sparse other_matrix = operator_matrix(500);
+    apxchol::solver assigned(other_matrix, options);
+    apxchol::cpu_solver assigned_cpu(other_matrix, options);
+    assigned = owners[0];
+    assigned_cpu = cpus[0];
+    EXPECT_EQ(&assigned.factor(), shared_factor);
+    EXPECT_EQ(&assigned_cpu.preconditioner().trsv(), &cpu.preconditioner().trsv());
+    EXPECT_EQ(assigned.solve(rhs[1]).x, solved[1]);
+    EXPECT_EQ(assigned_cpu.solve(rhs[1]).x, cpu_solved[1]);
+    preconditioners[0].compute(other_matrix);
+    EXPECT_NE(&preconditioners[0].trsv(), &cpu.preconditioner().trsv());
+    EXPECT_EQ(cpu.preconditioner().solve(rhs[2]), cpu_applied[2]);
+}
+
 TEST(Solver, CpuOwnerAdoptsAnIndependentFactorAndAppliesIt) {
     const scoped_omp_threads threads(1);
     const Sparse matrix = operator_matrix();
@@ -260,7 +476,7 @@ TEST(Solver, AdoptedLaplacianFactorRejectsPositiveExcessBeforeBackendSetup) {
             auto options = cpu_options();
             options.backend = backend;
             try {
-                const apxchol::solver owner(matrix, factor, options);
+                apxchol::solver owner(matrix, factor, options);
                 FAIL() << "accepted a Laplacian factor for an SDDM operator";
             } catch (const std::invalid_argument& error) {
                 EXPECT_NE(std::string(error.what()).find("Laplacian factor"), std::string::npos);
@@ -298,7 +514,7 @@ TEST(Solver, AdoptedSddmFactorCanPreconditionALaplacian) {
     sddm.coeffRef(1, 1) += 1;
     const auto factor = apxchol::factorize(sddm);
     ASSERT_TRUE(factor.sddm);
-    const apxchol::solver owner(laplacian, factor, cpu_options());
+    apxchol::solver owner(laplacian, factor, cpu_options());
     const Eigen::Vector2d rhs(1, -1);
     const auto result = owner.solve(rhs);
     EXPECT_TRUE(result.converged);
@@ -437,7 +653,7 @@ TEST(Solver, CpuPanelsScaleExceptionalColumnsIndependently) {
             continue;
         auto options = cpu_options();
         options.factor_opts.factor_storage = storage;
-        const apxchol::solver owner(matrix, options);
+        apxchol::solver owner(matrix, options);
         for (const bool warm : {false, true})
             for (const int budget : {0, 1, 200}) {
                 SCOPED_TRACE(::testing::Message() << int(storage) << ' ' << warm << ' ' << budget);
@@ -592,7 +808,7 @@ TEST(Solver, RejectsInvalidDefaultsAndResolvedOverrides) {
     invalid = defaults;
     invalid.backend = static_cast<apxchol::solve_backend>(99);
     reject(invalid);
-    const apxchol::solver owner(matrix, defaults);
+    apxchol::solver owner(matrix, defaults);
     const apxchol::cpu_solver cpu(matrix, defaults);
     const Eigen::VectorXd b = Eigen::VectorXd::Ones(matrix.rows());
     Eigen::MatrixXd B = b.replicate(1, 2), X(matrix.rows(), 2);
@@ -622,7 +838,7 @@ TEST(Solver, OmittedLimitsUseConstructorOptions) {
     auto options = cpu_options();
     options.tol = 1e-3;
     options.max_iter = 2;
-    const apxchol::solver owner(matrix, options);
+    apxchol::solver owner(matrix, options);
     const apxchol::cpu_solver cpu(matrix, options);
     const Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     const Eigen::MatrixXd B = Eigen::MatrixXd::Random(matrix.rows(), 3);
@@ -631,7 +847,7 @@ TEST(Solver, OmittedLimitsUseConstructorOptions) {
         EXPECT_EQ(left.residual, right.residual);
         EXPECT_EQ(left.converged, right.converged);
     };
-    const auto check = [&](const auto& instance) {
+    const auto check = [&](auto& instance) {
         const auto implicit = instance.solve(b);
         const auto explicit_limits = instance.solve(b, options.tol, options.max_iter);
         same(implicit, explicit_limits);
@@ -652,7 +868,7 @@ TEST(Solver, OmittedLimitsUseConstructorOptions) {
 TEST(Solver, CpuScalarViewsRejectWrongSizesAndAliasing) {
     const scoped_omp_threads threads(1);
     const Sparse matrix = operator_matrix();
-    const apxchol::solver owner(matrix, cpu_options());
+    apxchol::solver owner(matrix, cpu_options());
     const apxchol::cpu_solver cpu(matrix, cpu_options());
     Eigen::VectorXd b = Eigen::VectorXd::Ones(matrix.rows()), x = b;
     const Eigen::VectorXd wrong = Eigen::VectorXd::Ones(matrix.rows() - 1);
@@ -676,7 +892,7 @@ TEST(Solver, TimingsCanBeDisabledWithoutDisablingExitChecks) {
     options.collect_timings = false;
     const Sparse matrix = operator_matrix();
     apxchol::checkpoint setup;
-    const apxchol::solver owner(matrix, options, &setup);
+    apxchol::solver owner(matrix, options, &setup);
     EXPECT_EQ(setup.total("setup"), 0.0);
     const Eigen::VectorXd b = Eigen::VectorXd::Ones(matrix.rows());
     const auto scalar = owner.solve(b);
@@ -764,6 +980,40 @@ TEST(Solver, CudaOwnerReusesOwnedInputAndAppliesFactor) {
         EXPECT_TRUE(applied.allFinite());
         EXPECT_GT(applied.dot(rhs), 0.0);
     }
+#endif
+}
+
+TEST(Solver, CudaOwnerRejectsOverlappingCallsAndCopies) {
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA owner required";
+#else
+    if (!apxchol::backend_available(apxchol::solve_backend::gpu))
+        GTEST_SKIP() << "GPU unavailable";
+    const Sparse matrix = operator_matrix(3000);
+    auto options = cpu_options();
+    options.backend = apxchol::solve_backend::gpu;
+    apxchol::solver owner(matrix, options);
+    ASSERT_EQ(owner.backend(), apxchol::solve_backend::gpu);
+    const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, -2.0);
+    const Eigen::MatrixXd panel = Eigen::MatrixXd::Ones(matrix.rows(), 3);
+    const Eigen::VectorXd solved = owner.solve(rhs).x, applied = owner.apply(rhs);
+    // The odd last column re-enters the scalar solve on the calling thread.
+    Eigen::MatrixXd expected_panel(matrix.rows(), 3);
+    owner.solve(panel, expected_panel);
+    expect_overlap_rejected([&] { EXPECT_EQ(owner.solve(rhs).x, solved); });
+    expect_overlap_rejected([&] { EXPECT_EQ(owner.apply(rhs), applied); });
+    expect_overlap_rejected([&] {
+        Eigen::MatrixXd x(matrix.rows(), 3);
+        owner.solve(panel, x);
+        EXPECT_EQ(x, expected_panel);
+    });
+    try {
+        const apxchol::solver copy(owner);
+        ADD_FAILURE() << "GPU solver was copied";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("GPU solver cannot be copied"), std::string::npos);
+    }
+    EXPECT_EQ(owner.solve(rhs).x, solved);
 #endif
 }
 
@@ -1030,7 +1280,7 @@ TEST(Solver, GpuOwnerPreservesStorageAndAdoptsItsFactor) {
         const apxchol::cpu_solver reference(matrix, exported, reference_options);
         const auto reference_applied = reference.apply(rhs);
         // Resident and host preparation can accumulate entries in different orders.
-        for (const auto* candidate : {owner.get(), &adopted}) {
+        for (auto* candidate : {owner.get(), &adopted}) {
             const auto applied = candidate->apply(rhs);
             ASSERT_EQ(applied.size(), reference_applied.size());
             EXPECT_LT((applied - reference_applied).norm() / reference_applied.norm(), 2e-5);
@@ -1082,7 +1332,7 @@ TEST(Solver, GpuScalarAndBatchedResidualsDescribeReturnedSolutions) {
             auto options = cpu_options();
             options.backend = apxchol::solve_backend::gpu;
             options.factor_opts.factor_storage = storage;
-            const apxchol::solver owner(matrix, options);
+            apxchol::solver owner(matrix, options);
             for (const bool warm : {false, true}) {
                 for (const int budget : {0, 1, 200}) {
                     SCOPED_TRACE(::testing::Message() << laplacian << ' '
@@ -1128,7 +1378,7 @@ TEST(Solver, GpuScalarAndBatchedResidualsDescribeReturnedSolutions) {
     const apxchol::const_matrix_view initial(guess);
     auto options = cpu_options();
     options.backend = apxchol::solve_backend::gpu;
-    const apxchol::solver owner(identity, options);
+    apxchol::solver owner(identity, options);
     const auto batch = owner.solve(rhs, output, 1e-8, 0, &initial);
     ASSERT_EQ(batch.columns.size(), 2u);
     for (int q = 0; q < rhs.cols(); ++q) {
@@ -1215,7 +1465,7 @@ TEST(Solver, CpuMatrixRhsRejectsAliasingAndAcceptsEmptyBatches) {
 
 namespace {
 template<class Owner>
-void check_nonfinite_apply(const Owner& owner) {
+void check_nonfinite_apply(Owner&& owner) {
     const Eigen::VectorXd finite = Eigen::VectorXd::Ones(owner.rows());
     for (const double value : {std::numeric_limits<double>::quiet_NaN(),
                                std::numeric_limits<double>::infinity(),
@@ -1270,7 +1520,7 @@ void check_slow_progress(apxchol::solve_backend backend) {
     matrix.setFromTriplets(entries.begin(), entries.end());
     auto options = cpu_options();
     options.backend = backend;
-    const apxchol::solver owner(matrix, apxchol::factorize(identity), options);
+    apxchol::solver owner(matrix, apxchol::factorize(identity), options);
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(n);
     // With an identity preconditioner this SPD problem initially grows the
     // residual, so the former 50-iteration progress test stopped it early.
@@ -1420,9 +1670,9 @@ void check_thread_budget(const Sparse& matrix, int ambient, int budget,
     options.backend = backend;
     options.num_threads = budget;
     options.keep_factor_values = true;
-    const Owner owner(matrix, options);
+    Owner owner(matrix, options);
     EXPECT_EQ(omp_get_max_threads(), ambient);
-    const Owner adopted(matrix, owner.factor(), options);
+    Owner adopted(matrix, owner.factor(), options);
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     for (int repetition = 0; repetition < 2; ++repetition) {
         expect_solution(matrix, rhs, owner.solve(rhs).x);
@@ -1548,7 +1798,7 @@ void check_verified_tolerance(apxchol::solve_backend backend) {
     auto options = cpu_options();
     options.backend = backend;
     options.factor_opts.seed = 42;
-    const apxchol::solver owner(matrix, apxchol::factorize(identity, options.factor_opts), options);
+    apxchol::solver owner(matrix, apxchol::factorize(identity, options.factor_opts), options);
     Eigen::VectorXd rhs(n);
     for (int i = 0; i < n; ++i) rhs[i] = (17 * i + 13) % 31 - 15 + 0.125;
     // The recursive residual can cross tolerance before the original residual.

@@ -90,6 +90,8 @@ Eigen::VectorXd generate_test_rhs(Eigen::Index n);
 /// Prefer solver with solve_backend::cpu unless direct preconditioner access is
 /// needed. Setup and solves stay on CPU, including in GPU-enabled builds.
 /// The optional checkpoint receives setup timings and is not retained.
+/// A call made while another thread is using the same instance throws; see
+/// docs/usage.md#thread-safety.
 class cpu_solver {
     friend struct detail::solver_archive_access;
 public:
@@ -109,6 +111,11 @@ public:
                const solve_options& opts = {},
                checkpoint* cp = nullptr);
 
+    /// Copies share the factor, triangular-solve structures and operator, and
+    /// get their own workspace, so each thread can solve with its own copy.
+    cpu_solver(const cpu_solver& other);
+    cpu_solver& operator=(const cpu_solver& other);
+
     /// Solve using the retained factor. Omitted tol/max_iter use the
     /// constructor's solve_options; explicit values must be valid. x0 is an
     /// optional initial guess; nullptr starts from zero.
@@ -123,8 +130,7 @@ public:
                std::optional<int> max_iter = std::nullopt,
                const Eigen::VectorXd* x0 = nullptr) const;
     /// Overwrite caller-provided x; supply an initial guess separately in x0.
-    /// The returned result leaves x empty. Calls on one owner must not overlap,
-    /// because solves and preconditioner applications share workspace.
+    /// The returned result leaves x empty.
     solve_result solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
                        std::optional<double> tol = std::nullopt,
                        std::optional<int> max_iter = std::nullopt,
@@ -180,25 +186,34 @@ private:
     void check_solution(const_matrix_view B, const double* x, solve_result* results,
                         checkpoint& timings, double tol) const;
 
+    // Owned row-major FULL symmetric operator for the parallel SpMV; exactly
+    // one matrix is populated (fp32 when every value round-trips float
+    // losslessly). It cannot map constructor input: a reusable solver may
+    // outlive it. Read-only after setup; copies share it.
+    struct pcg_operator {
+        Eigen::SparseMatrix<double, Eigen::RowMajor> Lrm;
+        Eigen::SparseMatrix<float, Eigen::RowMajor>  Lrm_f;
+        bool fp32 = false;
+    };
+
     solve_options opts_;
     apx_cholesky precond_;
-    // Reused PCG workspace, resized when the panel width changes.
-    // Concurrent solves on one cpu_solver are a race.
+    // Reused PCG workspace, resized when the panel width changes. Guarded by
+    // the preconditioner's call guard, which rejects overlapping calls.
     mutable Eigen::VectorXd r_, z_, p_, Ap_, panel_x_;
     // Per-thread partial sums of the fused PCG kernels' deterministic
     // reductions (one cache line per thread; sized to the max team on use).
     mutable std::vector<double> part_;
-    // Owned row-major FULL symmetric operator for the parallel SpMV; exactly
-    // one is populated (fp32 when every value round-trips float losslessly).
-    // These cannot map constructor input: a reusable solver may outlive it.
-    Eigen::SparseMatrix<double, Eigen::RowMajor> Lrm_;
-    Eigen::SparseMatrix<float, Eigen::RowMajor>  Lrm_f_;
-    bool op_fp32_ = false;
+    std::shared_ptr<const pcg_operator> op_;
     Eigen::Index n_ = 0;
 };
 
 /// Reusable solver owning one CPU or GPU backend, selected once at setup.
-/// Owns its input data; movable, noncopyable, and not safe for concurrent calls.
+/// Owns its input data. solve() and apply() use this object's workspace, so
+/// they are non-const. Concurrent non-const calls on one object are not allowed:
+/// use a copy per thread, or batch the right-hand sides
+/// (docs/usage.md#thread-safety). An overlapping call throws.
+/// Copies of a CPU solver share its factor and operator; GPU solvers cannot be copied.
 /// Every solve verifies the returned residual against the original operator/RHS.
 /// Supplied factors use CPU in automatic mode; an explicit GPU request uploads them.
 class solver {
@@ -213,8 +228,8 @@ public:
     ~solver();
     solver(solver&&) noexcept;
     solver& operator=(solver&&) noexcept;
-    solver(const solver&) = delete;
-    solver& operator=(const solver&) = delete;
+    solver(const solver& other);
+    solver& operator=(const solver& other);
 
     /// Solve Ax=b. Omitted tol/max_iter use the constructor's solve_options;
     /// explicit values must be valid. x0 supplies an optional initial guess;
@@ -222,19 +237,19 @@ public:
     /// the iteration budget is exhausted.
     solve_result solve(const Eigen::VectorXd& b, std::optional<double> tol = std::nullopt,
                        std::optional<int> max_iter = std::nullopt,
-                       const Eigen::VectorXd* x0 = nullptr) const;
+                       const Eigen::VectorXd* x0 = nullptr);
     /// Write into an existing result, preserving its setup timing records.
     void solve(const Eigen::VectorXd& b, solve_result& result,
                std::optional<double> tol = std::nullopt,
                std::optional<int> max_iter = std::nullopt,
-               const Eigen::VectorXd* x0 = nullptr) const;
+               const Eigen::VectorXd* x0 = nullptr);
     /// Write into caller storage; the returned result leaves x empty.
     solve_result solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
                        std::optional<double> tol = std::nullopt,
                        std::optional<int> max_iter = std::nullopt,
-                       const Eigen::VectorXd* x0 = nullptr) const;
+                       const Eigen::VectorXd* x0 = nullptr);
     /// Apply the preconditioner to finite scalar or matrix input.
-    Eigen::VectorXd apply(const Eigen::VectorXd& r) const;
+    Eigen::VectorXd apply(const Eigen::VectorXd& r);
     /// Independent RHS columns, with bounded panel workspace. Output must not
     /// overlap the RHS or warm start. tol/max_iter apply to each column.
     template<class Input, class Output>
@@ -244,7 +259,7 @@ public:
     batch_solve_result solve(const Eigen::MatrixBase<Input>& B, Eigen::MatrixBase<Output>& X,
                              std::optional<double> tol = std::nullopt,
                              std::optional<int> max_iter = std::nullopt,
-                             const const_matrix_view* X0 = nullptr) const {
+                             const const_matrix_view* X0 = nullptr) {
         using Stride = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
         const Eigen::Map<const Eigen::MatrixXd, 0, Stride> rhs(B.derived().data(),
             B.rows(), B.cols(), Stride(B.colStride(), B.rowStride()));
@@ -252,7 +267,7 @@ public:
             X.rows(), X.cols(), Stride(X.colStride(), X.rowStride()));
         return solve_batch(const_matrix_view(rhs), matrix_view(out), tol, max_iter, X0);
     }
-    void apply(const_matrix_view R, matrix_view Z) const;
+    void apply(const_matrix_view R, matrix_view Z);
 
     /// Factor metadata; L's row/value arrays require keep_factor_values=true.
     /// The returned reference is owned by this solver.
@@ -270,7 +285,7 @@ public:
 private:
     batch_solve_result solve_batch(const_matrix_view B, matrix_view X,
                                    std::optional<double> tol, std::optional<int> max_iter,
-                                   const const_matrix_view* X0) const;
+                                   const const_matrix_view* X0);
     struct impl;
     std::unique_ptr<impl> impl_;
 };

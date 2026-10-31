@@ -244,7 +244,7 @@ TEST_F(MetalDevice, ScaledMatrixSolvesMatchScalarColumns) {
             options.backend = apxchol::solve_backend::gpu;
             options.factor_opts.seed = 17;
             options.factor_opts.factor_storage = storage;
-            const apxchol::solver owner(A, options);
+            apxchol::solver owner(A, options);
             Eigen::MatrixXd exact(A.rows(), 7);
             for (int q = 0; q < 7; ++q)
                 exact.col(q) = rhs(A.rows(), q + 1, false) * std::scalbn(1.0, -exponent);
@@ -299,7 +299,7 @@ TEST_F(MetalDevice, ScalarAndMatrixSolvesRejectOverflowWhenRestoringScale) {
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::gpu;
         options.factor_opts.factor_storage = storage;
-        const apxchol::solver owner(A, options);
+        apxchol::solver owner(A, options);
         for (const bool warm : {false, true}) {
             SCOPED_TRACE(testing::Message() << int(storage) << ' ' << warm);
             const Eigen::VectorXd b = Eigen::VectorXd::Constant(4, 1e275);
@@ -335,7 +335,7 @@ TEST_F(MetalDevice, ScaledSolutionAccumulatorsPreserveAccuracy) {
             apxchol::solve_options options;
             options.backend = apxchol::solve_backend::gpu;
             options.factor_opts.factor_storage = storage;
-            const apxchol::solver solver(A, options);
+            apxchol::solver solver(A, options);
             for (int width : {1, 2, 4, 7}) {
                 Eigen::MatrixXd B(4, width), X(4, width);
                 for (int q = 0; q < width; ++q) B.col(q).setConstant(q % 2 ? -magnitude : magnitude);
@@ -379,7 +379,7 @@ TEST_F(MetalDevice, FourColumnPlansReuseStorageAfterScalarAndWarmSolves) {
     Eigen::MatrixXd initial = 0.25 * exact;
     initial.col(0) = exact.col(0);
     const apxchol::const_matrix_view warm(initial);
-    auto check = [&](const apxchol::solver& owner) {
+    auto check = [&](apxchol::solver& owner) {
         for (unsigned pass = 0; pass < 3; ++pass) {
             SCOPED_TRACE(pass);
             const auto scalar = owner.solve(first_rhs, 1e-8, 1000);
@@ -399,7 +399,7 @@ TEST_F(MetalDevice, FourColumnPlansReuseStorageAfterScalarAndWarmSolves) {
         auto options = keep_opts();
         options.backend = apxchol::solve_backend::gpu;
         options.factor_opts.factor_storage = storage;
-        const apxchol::solver resident(A, options);
+        apxchol::solver resident(A, options);
         std::vector<unsigned> row_sizes(A.rows());
         for (auto row : resident.factor().L.inner_) ++row_sizes[row];
         ASSERT_TRUE(std::ranges::any_of(resident.factor().rounds, [&](const auto& round) {
@@ -408,7 +408,7 @@ TEST_F(MetalDevice, FourColumnPlansReuseStorageAfterScalarAndWarmSolves) {
                 std::count_if(first, first + round.is_size, [](unsigned size) { return size > 1; }) > 32;
         }));
         check(resident);
-        const apxchol::solver adopted(A, resident.factor(), options);
+        apxchol::solver adopted(A, resident.factor(), options);
         check(adopted);
     }
 }
@@ -420,7 +420,7 @@ TEST_F(MetalDevice, LongRowMatrixSolvesMatchScalarColumns) {
         options.backend = apxchol::solve_backend::gpu;
         options.factor_opts.seed = 17;
         options.factor_opts.factor_storage = storage;
-        const apxchol::solver owner(A, options);
+        apxchol::solver owner(A, options);
         std::vector<unsigned> row_sizes(A.rows());
         for (auto row : owner.factor().L.inner_)
             if (row + 1 < row_sizes.size()) ++row_sizes[row];
@@ -458,7 +458,7 @@ TEST_F(MetalDevice, MatrixResidualsSurviveOverflowingRhsNorms) {
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::gpu;
         options.factor_opts.factor_storage = storage;
-        const apxchol::solver solver(A, options);
+        apxchol::solver solver(A, options);
         for (bool warm : {false, true}) {
             for (int budget : {0, 100}) {
                 const auto result = solver.solve(B, X, 1e-8, budget, warm ? &guess : nullptr);
@@ -665,7 +665,7 @@ TEST_F(MetalDevice, EarlyExitsTruthful) {
         apxchol::solve_options options;
         options.factor_opts.factor_storage = storage;
         options.backend = apxchol::solve_backend::gpu;
-        const apxchol::solver slv(A, options);
+        apxchol::solver slv(A, options);
         ASSERT_EQ(slv.backend(), apxchol::solve_backend::gpu);
         const Eigen::VectorXd b = rhs(A.rows(), 1, true);
         const apxchol::solve_result none = slv.solve(b, 1e-8, 0);
@@ -767,7 +767,7 @@ TEST_F(MetalDevice, ProjectedWarmResidualDoesNotConsumeBudget) {
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::gpu;
         options.factor_opts.factor_storage = storage;
-        const apxchol::solver slv(A, options);
+        apxchol::solver slv(A, options);
         ASSERT_EQ(slv.backend(), apxchol::solve_backend::gpu);
         const auto scalar = slv.solve(incompatible, tolerance, 1000, &guess);
         EXPECT_EQ(scalar.iterations, 0);
@@ -1082,7 +1082,7 @@ TEST_F(MetalDevice, CommonSolverAdoptsHostFactorWithCpuOnlyOptions) {
     const auto F = apxchol::factorize(A, options.factor_opts);
     options.backend = apxchol::solve_backend::gpu;
     EXPECT_THROW(apxchol::solver(A, options), std::invalid_argument);
-    const apxchol::solver adopted(A, F, options);
+    apxchol::solver adopted(A, F, options);
     EXPECT_EQ(adopted.backend(), apxchol::solve_backend::gpu);
     Eigen::MatrixXd B(A.rows(), 4), X(A.rows(), 4);
     for (int q = 0; q < B.cols(); ++q) B.col(q) = rhs(A.rows(), q + 1, false);
@@ -1260,7 +1260,7 @@ TEST_F(MetalDevice, ScalarAndPanelOutputsRejectInputAliasing) {
 
     apxchol::solve_options options;
     options.backend = apxchol::solve_backend::gpu;
-    const apxchol::solver owner(A, options);
+    apxchol::solver owner(A, options);
     Eigen::MatrixXd B = b.replicate(1, 4), X = B;
     EXPECT_THROW(owner.solve(B, B), std::invalid_argument);
     EXPECT_EQ(B, X);

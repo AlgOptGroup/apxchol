@@ -37,6 +37,10 @@ includes CPU and Metal routes and needs Apple's system frameworks, plus libomp.
 The macOS deployment target is 15.0. The release set has Linux CPU, Linux
 CPU+CUDA and macOS CPU+Metal archives; each uses one shared-library and
 index-layout configuration. Use the headers and library from the same archive.
+The library's runtime name includes the major and minor version: the Linux
+soname (for example, `libapxchol_core.so.0.3`) and the macOS install name (for
+example, `libapxchol_core.0.3.dylib`). A program therefore never loads a
+library from a different minor release.
 
 Keep the shared library accessible at runtime when installing your program.
 CMake handles the build-tree library path; set your application's installation

@@ -127,8 +127,8 @@ is still needed for PCG and residual checks.
 
 The factor may come from CPU construction or from a GPU solver created with
 `keep_factor_values=true`: pass its `solver.factor()` to the constructor above.
-The destination rebuilds its own triangular-solve storage. There is no built-in
-save/load format; this handoff is in memory.
+The destination rebuilds its own triangular-solve storage. This handoff is in
+memory; to reuse a factor across processes, [save the solver](serialization.md).
 
 `apxchol::apx_cholesky::set_factor` also accepts a factor for use with an
 Eigen iterative solver. That adapter always applies it on CPU.

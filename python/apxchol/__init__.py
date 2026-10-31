@@ -78,16 +78,16 @@ def _scipy_sparse():
 def as_operator(M):
     """Return `M` as an operator for :func:`factorize` and :func:`solve`.
 
-    Like :func:`numpy.asarray`, a valid input is returned unchanged:
+    Like :func:`numpy.asarray`, an operator is returned unchanged. `M` must
+    be square, finite and symmetric; otherwise a ``ValueError`` says why.
 
-    - If `M` passes the solver's operator check (a symmetric Laplacian or
-      SDDM matrix, possibly nearly SDDM), `M` itself is returned.
-    - Otherwise, if `M` has no negative off-diagonal entry, it is a graph
-      adjacency matrix and its Laplacian ``L = D - M`` is returned, where
-      ``D`` holds the row sums of `M`. A diagonal entry (self-loop) adds to
-      ``D`` and is subtracted again, so it cancels. Boolean (pattern) input
-      has unit weights.
-    - Otherwise a ``ValueError`` explains why `M` is neither.
+    - If `M` has off-diagonal entries and none of them is negative, it is a
+      graph adjacency matrix and its Laplacian ``L = D - M`` is returned,
+      where ``D`` holds the row sums of `M`. A diagonal entry (self-loop)
+      adds to ``D`` and is subtracted again, so it cancels. Boolean
+      (pattern) input has unit weights.
+    - Otherwise `M` itself is returned; :func:`factorize` and :func:`solve`
+      check it as an operator.
 
     The CLI's ``--convert-input`` applies the same rule.
 
@@ -138,6 +138,8 @@ class Solver:
     """Reusable approximate-Cholesky solver: factor built once, solve many b.
 
     Options (all keyword-only) are documented on :func:`factorize`.
+    A call made while another thread uses the same solver raises
+    ``RuntimeError``; give each thread its own ``copy.copy(solver)``.
     """
 
     def __init__(self, A, **opts):
@@ -156,6 +158,17 @@ class Solver:
         self = cls.__new__(cls)
         self._init_csc(data, indices, indptr, **opts)
         return self
+
+    def __copy__(self):
+        """Return a solver that shares this factor and operator.
+
+        The copy has its own workspace, so another thread can solve with it
+        while this solver is in use. GPU-backed solvers cannot be copied.
+        """
+        copy = type(self).__new__(type(self))
+        copy.__dict__.update(self.__dict__)
+        copy._initialize(self._impl.__copy__(), self._keep_factor)
+        return copy
 
     def save(self, path):
         """Save the operator and retained factor to a portable binary file.
@@ -420,7 +433,9 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
         `residual_peel` ("natural" | "min_degree" | "bk_serial"),
         `cpu_schedule` ("auto" | "levels"),
         `drop_tolerance` (in [0, 1]; 0 disables dropping),
-        `regularization` (nonnegative diagonal fraction; 0 disables),
+        `regularization` (minimum diagonal excess of the preconditioner, as a
+        fraction of each diagonal after lumping; excess below 1e-12 of the
+        diagonal counts as zero first; 0 disables),
         `lump_max_mass` (fraction in [0, 1]; 0 rejects positive off-diagonals),
         and `verbose` (default False).
 
