@@ -581,15 +581,12 @@ def test_factor_export_algebra_laplacian():
     assert not slv.sddm
     G = slv.chol()
     assert G.shape == (n, n)
-    assert G.dtype == slv.L.dtype == slv.D.dtype == np.float64
-    assert slv.L.shape == (n, n)
-    assert slv.D.shape == (n,)
+    assert G.dtype == np.float64
 
     # The installed factor leaves the grounded last row and column empty.
     Gc = G.tocsc()
     assert np.flatnonzero(np.diff(Gc.indptr) == 0).tolist() == [n - 1]
     assert Gc.getrow(n - 1).nnz == 0
-    assert slv.D[n - 1] == 0.0
 
     # The G G^T identity holds on the rank-(n−1) subspace: check the leading
     # block, which excludes the grounded row/column.

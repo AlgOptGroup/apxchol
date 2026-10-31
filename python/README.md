@@ -208,10 +208,10 @@ p = P.argsort()
 # A[p][:, p] ≈ G @ G.T
 ```
 
-`chol()`, `L`, `D`, `P` and `factor_nnz` describe the preconditioner actually
-used: the factor after dropping and storage rounding. `chol()`, `L` and `D` are
-float64 copies; `P` is an `int64` permutation and `factor_nnz` an integer. For a
-Laplacian, they represent the nonsingular subspace and the last row and column
+`chol()`, `P` and `factor_nnz` describe the preconditioner actually used: the
+factor after dropping and storage rounding. `chol()` returns a float64 copy, `P`
+an `int64` permutation and `factor_nnz` an integer. For a Laplacian, they
+represent the nonsingular subspace and the last row and column
 are empty; see the [factor reference](https://algoptgroup.github.io/apxchol/docs/reference/python.html).
 A GPU-backed solver downloads the factor on the first export and caches it.
 

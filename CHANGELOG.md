@@ -40,9 +40,9 @@
 - Breaking: the partitioner interface no longer exposes `selection::reset`/`finalize`, `partition_result` or `partition_context::cp`.
 - Breaking: `factorization` drops `peak_graph_bytes` and the diagnostic `round_stats` fields `avg_deg`, `nnz_added` and `nnz_total`; its CUDA device factor is private.
 - Breaking: `solve_result::lumped_offdiag` is removed; read `solver.factor().lumped_offdiag`.
-- Breaking: `solve_options::keep_factor` and the Python and MATLAB/Octave `keep_factor` option are removed; `solver::factor()`, Python `chol()`/`L`/`D`/`P`/`factor_nnz` and `save()` use the installed factor, the preconditioner actually used after dropping and storage rounding.
+- Breaking: `solve_options::keep_factor` and the Python and MATLAB/Octave `keep_factor` option are removed; `solver::factor()`, Python `chol()`/`P`/`factor_nnz` and `save()` use the installed factor, the preconditioner actually used after dropping and storage rounding.
 - Breaking: `solver::factor()` returns a `factorization` by value, with new `storage` and `scale` members describing FP32 or scaled FP16 storage; adopting such a factor reinstalls it exactly.
-- Breaking: Python `chol()`, `L` and `D` return float64 matrices; for a Laplacian the last row and column are empty.
+- Breaking: Python `chol()` returns a float64 matrix; for a Laplacian the last row and column are empty.
 - Breaking: solver archive version 1 stores the installed factor and its storage precision; `load()` takes storage and dropping from the file and reproduces the saved solver's solves bit for bit on the same backend and thread count.
 - Breaking: the `APXCHOL_POOL_FP32` build option is removed; graph weights are always stored in FP32, as in default builds.
 - Breaking: `apxchol::generate_test_rhs` is removed; build the right-hand side in the caller.

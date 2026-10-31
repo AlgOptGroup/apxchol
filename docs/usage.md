@@ -246,7 +246,7 @@ for GPU workloads unless you need another outer solver.
 
 ## Exporting a factor
 
-`solver.factor()` in C++ and `chol()`, `L`, `D` and `P` in Python return the
+`solver.factor()` in C++ and `chol()` and `P` in Python return the
 installed factor: the preconditioner the solves actually use, after dropping
 and in the solver's [storage precision](precision.md). The solver keeps no
 separate copy of the factor; export reads its triangular-solve arrays, and a
