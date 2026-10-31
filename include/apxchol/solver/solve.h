@@ -12,7 +12,9 @@
 namespace apxchol {
 namespace detail { struct checkpoint; struct solver_access; }
 
+/// Relative residual tolerance of a solve that does not pass one.
 inline constexpr double default_tol      = 1e-8;
+/// Iteration budget of a solve that does not pass one.
 inline constexpr int    default_max_iter = 200;
 
 enum class solve_backend { automatic, cpu, gpu };
@@ -21,11 +23,8 @@ enum class solve_backend { automatic, cpu, gpu };
 /// a usable device and compatible compiled kernels; options may still be unsupported.
 bool backend_available(solve_backend backend) noexcept;
 
+/// Setup options. The tolerance and iteration budget are solve arguments.
 struct solve_options {
-    /// Default relative residual tolerance; must be finite and positive.
-    double tol       = default_tol;
-    /// Nonnegative default iteration budget; zero only checks the initial guess.
-    int    max_iter  = default_max_iter;
     /// Factor construction and triangular-solve storage controls.
     factor_options factor_opts{};
     /// Select a complete setup/solve route; execution errors never change it.
@@ -37,11 +36,9 @@ struct solve_options {
 };
 
 namespace detail {
+/// tol must be finite and positive; max_iter nonnegative.
 void validate_solve_parameters(double tol, int max_iter);
 void validate_solve_options(const solve_options& opts);
-/// Omitted values take the owner's defaults; explicit values must be valid.
-std::pair<double, int> resolve_solve_parameters(std::optional<double> tol,
-    std::optional<int> max_iter, double default_tolerance, int default_iterations);
 }
 
 struct solve_result {
@@ -78,12 +75,14 @@ struct batch_solve_result {
 /// Copies share the factor and operator, on a GPU in device memory.
 /// Every solve verifies the returned residual against the original operator/RHS.
 /// Supplied factors use CPU in automatic mode; an explicit GPU request uploads them.
+/// Invalid input or options and unsupported requests throw std::invalid_argument;
+/// execution failures throw std::runtime_error or a type derived from it.
 class solver {
     friend struct detail::solver_access;
 public:
     explicit solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts = {});
     /// Adopt F without rebuilding or regularizing it. lump_max_mass still bounds
-    /// operator validation and solve options apply. Factor storage and
+    /// operator validation, and backend and num_threads apply. Factor storage and
     /// dropping apply to a construction factor from factorize(); an installed
     /// factor from factor() is adopted exactly (factorization.h).
     solver(const Eigen::SparseMatrix<double>& A, factorization F, const solve_options& opts = {});
@@ -93,8 +92,10 @@ public:
     solver(const solver& other);
     solver& operator=(const solver& other);
 
-    /// Solve Ax=b. Omitted tol/max_iter use the constructor's solve_options;
-    /// explicit values must be valid. x0 supplies an optional initial guess;
+    /// Solve Ax=b to relative residual tol within max_iter iterations.
+    /// Omitted values use default_tol and default_max_iter. An explicit tol
+    /// must be finite and positive, an explicit max_iter nonnegative (zero
+    /// only checks the initial guess). x0 supplies an optional initial guess;
     /// nullptr starts from zero. Inspect converged in the result even when
     /// the iteration budget is exhausted.
     solve_result solve(const Eigen::VectorXd& b, std::optional<double> tol = std::nullopt,
@@ -145,12 +146,12 @@ public:
     double setup_seconds() const;
 
     /// Save the original operator and the installed factor (factor()) in a
-    /// portable binary file (docs/serialization.md). Creates a new file; an
-    /// existing destination is an error.
+    /// portable binary file (docs/serialization.md). Writes path.tmp first and
+    /// renames it onto path, so an existing file is replaced atomically.
     void save(const std::filesystem::path& path) const;
     /// Restore a saved solver without factorizing again. Storage and dropping
-    /// come from the file; backend, threads, lump_max_mass and solve options
-    /// apply as with solver(A, F, opts). Automatic adoption uses CPU.
+    /// come from the file; backend, threads and lump_max_mass apply as with
+    /// solver(A, F, opts). Automatic adoption uses CPU.
     static solver load(const std::filesystem::path& path, const solve_options& opts = {});
 
 private:
@@ -163,15 +164,16 @@ private:
     std::unique_ptr<impl> impl_;
 };
 
-/// One-shot solve: factorize L, then solve Lx = b via PCG.
+/// One-shot solve: factorize A, then solve Ax = b via PCG, with tol and
+/// max_iter as in solver::solve.
 /// Automatic selects GPU when the compiled backend is available and compatible,
 /// otherwise CPU. Explicit GPU selects device-owned CUDA or Metal setup and solve,
 /// according to the build.
 /// Unsupported inputs and execution failures are errors, never a CPU retry.
-solve_result solve(const Eigen::SparseMatrix<double>& L,
+solve_result solve(const Eigen::SparseMatrix<double>& A,
                    const Eigen::VectorXd& b,
+                   std::optional<double> tol = std::nullopt,
+                   std::optional<int> max_iter = std::nullopt,
                    const solve_options& opts = {});
-
-
 
 } // namespace apxchol

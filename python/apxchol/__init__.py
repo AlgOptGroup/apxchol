@@ -37,7 +37,7 @@ class SolveResult:
     """Solution and convergence information for the original system.
 
     ``residual`` is checked against the original matrix and RHS. For a
-    matrix RHS, ``iters``, ``residual`` and ``converged`` contain one entry
+    matrix RHS, ``iterations``, ``residual`` and ``converged`` contain one entry
     per column; for a vector RHS they are scalars. ``solve_seconds`` is the
     wall-clock time of the native solve, for all columns together; compare
     it with :attr:`Solver.setup_seconds` to judge whether reusing a factor
@@ -45,22 +45,23 @@ class SolveResult:
     """
 
     x: np.ndarray
-    iters: int | np.ndarray
+    iterations: int | np.ndarray
     residual: float | np.ndarray
     converged: bool | np.ndarray
     solve_seconds: float
 
 
 def _solver_options(*, backend="auto", num_threads=0, seed=None, partitioner=None,
-                    factor_storage_dtype=None, **advanced):
+                    factor_storage="auto", **advanced):
     options = dict(backend=backend, num_threads=index(num_threads))
     if seed is not None:
         options["seed"] = index(seed)
     if partitioner is not None:
         options["partitioner"] = partitioner
     options.update(advanced)
-    if factor_storage_dtype is not None:
-        options["factor_storage_dtype"] = np.dtype(factor_storage_dtype).name
+    if not (isinstance(factor_storage, str) and factor_storage == "auto"):
+        factor_storage = np.dtype(factor_storage).name
+    options["factor_storage"] = factor_storage
     return options
 
 
@@ -185,7 +186,7 @@ class Solver:
 
         Options use the constructor's defaults. The stored factor is
         reinstalled exactly, not factorized again: its storage dtype and
-        dropping come from the file, so ``factor_storage_dtype`` and
+        dropping come from the file, so ``factor_storage`` and
         ``drop_tolerance`` have no effect. ``backend`` and ``num_threads``
         apply; ``backend="auto"`` uses CPU, ``"gpu"`` requests upload.
         ``lump_max_mass`` still bounds the archived operator, so pass it again
@@ -237,9 +238,12 @@ class Solver:
         return self._impl.sddm()
 
     @property
-    def factor_storage_dtype(self) -> np.dtype:
-        """Resolved triangular-solve storage dtype; CPU arithmetic remains float64."""
-        return np.dtype(self._impl.factor_storage_dtype())
+    def factor_storage(self) -> np.dtype:
+        """Installed triangular-solve storage dtype, float16 or float32.
+
+        Never ``"auto"``; CPU arithmetic remains float64.
+        """
+        return np.dtype(self._impl.factor_storage())
 
     @property
     def lumped_offdiag(self) -> int:
@@ -249,7 +253,7 @@ class Solver:
         the diagonal of the preconditioner and counts as two entries. PCG
         and the reported residual still use the original, unchanged matrix.
         """
-        return self._impl.lumped()
+        return self._impl.lumped_offdiag()
 
     def __repr__(self) -> str:
         fac = f"factor_nnz={self.factor_nnz}"
@@ -357,7 +361,7 @@ class Solver:
 
 
 def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
-              factor_storage_dtype=None, **advanced) -> Solver:
+              factor_storage="auto", **advanced) -> Solver:
     """Build the reusable approximate-Cholesky factor of A.
 
     Parameters
@@ -390,10 +394,10 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
         Independent-set selector: "block_greedy", "priority_greedy", or
         "baumann_kyng". None uses the C++ default. Unknown names raise
         ``ValueError``.
-    factor_storage_dtype : numpy dtype, dtype name, or None
-        ``np.float16`` or ``np.float32`` selects triangular-solve storage;
-        dtype names also work. ``None`` uses the backend default: FP32 on
-        CPU/Metal, FP16 on CUDA.
+    factor_storage : {"auto", "float16", "float32"} or numpy dtype
+        Triangular-solve storage; ``np.float16`` and ``np.float32`` also
+        work. ``"auto"`` uses the backend default: FP32 on CPU/Metal, FP16
+        on CUDA.
 
         FP16 stores scaled off-diagonals with FP32 diagonals and scales;
         :meth:`Solver.chol` exports that rounded factor. CPU arithmetic
@@ -419,7 +423,7 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
     quantile in ``(0, 1)`` and includes all vertices tied at its degree cutoff.
     """
     return Solver(A, backend=backend, num_threads=num_threads, seed=seed, partitioner=partitioner,
-                  factor_storage_dtype=factor_storage_dtype, **advanced)
+                  factor_storage=factor_storage, **advanced)
 
 
 def solve(A, b, rtol=None, maxiter=None, *, x0=None, out=None,

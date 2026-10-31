@@ -17,14 +17,14 @@ def operator_matrix():
 
 @pytest.fixture(scope="module")
 def auto_solver(operator_matrix):
-    return apxchol.factorize(operator_matrix, factor_storage_dtype=np.float32)
+    return apxchol.factorize(operator_matrix, factor_storage=np.float32)
 
 
 @pytest.fixture(scope="module")
 def gpu_solver(operator_matrix):
     try:
         solver = apxchol.factorize(operator_matrix, backend="gpu",
-                                   factor_storage_dtype=np.float32)
+                                   factor_storage=np.float32)
     except (ValueError, RuntimeError) as exc:
         unavailable = (
             "GPU route requested but GPU support is not built",
@@ -53,7 +53,7 @@ def test_scalar_automatic_solver_uses_cpu():
     matrix = sp.csc_matrix([[4.0]])
     solver = apxchol.factorize(matrix)
     assert solver.backend == "cpu"
-    assert solver.factor_storage_dtype == np.float32
+    assert solver.factor_storage == np.float32
     rhs = np.ones(1)
     result = solver.solve(rhs)
     assert result.converged
@@ -86,14 +86,14 @@ def test_backend_reuses_factor_and_supports_export_warm_start_and_output(
         pytest.skip("No usable GPU backend in this installation")
     try:
         solver = apxchol.factorize(operator_matrix, backend=backend,
-                                  factor_storage_dtype=dtype)
+                                  factor_storage=dtype)
     except RuntimeError as exc:
         if (backend == "cpu" and dtype == np.float16
                 and str(exc) == "FP16 factor storage requires AVX/F16C or Apple ARM64"):
             pytest.skip("CPU lacks FP16 conversion support")
         raise
     assert solver.backend == backend
-    assert solver.factor_storage_dtype == dtype
+    assert solver.factor_storage == dtype
     factor = solver.chol()
     assert factor.dtype == np.float64
     assert factor.nnz == solver.factor_nnz
@@ -108,7 +108,7 @@ def test_backend_reuses_factor_and_supports_export_warm_start_and_output(
     assert np.linalg.norm(operator_matrix @ result.x - rhs) / np.linalg.norm(rhs) <= 1e-8
 
     warm = solver.solve(rhs, rtol=1e-8, x0=exact)
-    assert warm.converged and warm.iters == 0
+    assert warm.converged and warm.iterations == 0
     np.testing.assert_allclose(operator_matrix @ warm.x, rhs, rtol=1e-12, atol=1e-12)
     rhs2 = operator_matrix @ np.cos(np.arange(rhs.size))
     reused = solver.solve(rhs2, rtol=1e-8)
@@ -142,14 +142,14 @@ else:
 def test_gpu_matrix_rhs_preserves_backend(operator_matrix, gpu_solver, dtype):
     if gpu_solver is None:
         pytest.skip("No usable GPU backend in this installation")
-    solver = apxchol.factorize(operator_matrix, backend="gpu", factor_storage_dtype=dtype)
+    solver = apxchol.factorize(operator_matrix, backend="gpu", factor_storage=dtype)
     exact = np.random.default_rng(5).standard_normal((operator_matrix.shape[0], 3))
     exact[:, 0] = 0
     rhs = operator_matrix @ exact
     out = np.empty_like(rhs, order="F")
     result = solver.solve(rhs, x0=exact, out=out)
     assert result.x is out and result.converged.all()
-    assert (result.iters == 0).all()
+    assert (result.iterations == 0).all()
     np.testing.assert_allclose(operator_matrix @ result.x, rhs, rtol=1e-12, atol=1e-12)
     cold = solver.solve(rhs)
     assert cold.converged.all()

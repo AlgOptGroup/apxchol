@@ -239,8 +239,7 @@ TEST(GpuFactorFinalize, ConsumingSolveAcceptsDefaultFp16AndCompensatedDrop) {
         Eigen::VectorXd b = A * exact;
         apxchol::solve_options opts;
         opts.backend = apxchol::solve_backend::gpu;
-        opts.tol = 1e-8; opts.max_iter = 1000;
-        const auto solved = apxchol::solve(A, b, opts);
+        const auto solved = apxchol::solve(A, b, 1e-8, 1000, opts);
         EXPECT_EQ(solved.backend, apxchol::solve_backend::gpu);
         EXPECT_LE((A * solved.x - b).norm() / b.norm(), 1e-8);
     }

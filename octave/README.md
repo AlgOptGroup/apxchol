@@ -13,7 +13,7 @@ x = res.x;
 res2 = s.solve(b2, 1e-10, 1000);   % tolerance and iteration budget for this call
 ```
 
-For one solve, use `apxchol_solve(A, b)`. Results contain `x`, `iters`,
+For one solve, use `apxchol_solve(A, b)`. Results contain `x`, `iterations`,
 `residual`, `converged` and `solve_seconds`. The built-in solver always checks
 the returned solution against the original matrix and RHS.
 
@@ -25,7 +25,7 @@ costs `setup_seconds / k + solve_seconds` on average, and one batched call of
 [judging whether reuse pays off](../docs/usage.md#judging-whether-reuse-pays-off).
 
 Pass an `n`-by-`k` matrix to solve or apply the preconditioner to `k` RHSs
-through the native batched path. Results have `k` columns; `iters`, `residual`
+through the native batched path. Results have `k` columns; `iterations`, `residual`
 and `converged` are `1`-by-`k` arrays. A row-vector RHS is still accepted and
 returns a column, except that a one-row system treats each column as a RHS.
 
@@ -49,7 +49,7 @@ warm = s.solve(B, 1e-8, 200, X0);  % optional initial guess, same shape as B
 ```
 
 Omit `x0` or pass `[]` to start from zero. The one-shot form accepts it as
-`apxchol_solve(A, B, rtol, maxiter, options, X0)`.
+`apxchol_solve(A, B, rtol, maxiter, X0, options)`, in the order of `s.solve`.
 
 ## Setup options
 
@@ -60,6 +60,10 @@ s = apxchol_solver(A, struct('num_threads', 4, 'factor_storage', 'float32'));
 ```
 
 Unspecified fields use the C++ defaults. Unknown fields are rejected.
+
+Invalid input or options raise errors with the identifier `apxchol:badInput`,
+and execution failures use `apxchol:error` (see
+[results and errors](../docs/usage.md#results-and-errors)).
 
 | Field | Meaning |
 |---|---|

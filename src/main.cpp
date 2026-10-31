@@ -63,7 +63,7 @@ int solve_batch(const Eigen::SparseMatrix<double>& L, const Eigen::MatrixXd& B,
     detail::checkpoint timings;
     solver owner = make_solver(L, cfg, timings);
     Eigen::MatrixXd X(B.rows(), B.cols());
-    const auto res = owner.solve(B, X);
+    const auto res = owner.solve(B, X, cfg.tol, cfg.max_iter);
 
     spdlog::info("backend:    {}", owner.backend() == solve_backend::gpu ? "gpu" : "cpu");
     spdlog::info("columns:    {}", B.cols());
@@ -82,7 +82,7 @@ int solve_batch(const Eigen::SparseMatrix<double>& L, const Eigen::MatrixXd& B,
 
     if (failed)
         spdlog::error("{} of {} columns did not reach tol {} within {} iterations.{}",
-                      failed, B.cols(), cfg.solve_opts.tol, cfg.solve_opts.max_iter,
+                      failed, B.cols(), cfg.tol, cfg.max_iter,
                       diagnose_failure(graph, scan));
     return failed ? 1 : 0;
 }
@@ -167,7 +167,7 @@ int main(int argc, char* argv[]) try {
 
     detail::checkpoint timings;
     solver owner = make_solver(L, cfg, timings);
-    const auto res = owner.solve(b);
+    const auto res = owner.solve(b, cfg.tol, cfg.max_iter);
 
     spdlog::info("backend:    {}", res.backend == solve_backend::gpu ? "gpu" : "cpu");
     spdlog::info("iterations: {}", res.iterations);
@@ -180,7 +180,7 @@ int main(int argc, char* argv[]) try {
 
     if (!res.converged)
         spdlog::error("did not reach tol {} in {} iterations (residual {}).{}",
-                      cfg.solve_opts.tol, res.iterations, res.residual,
+                      cfg.tol, res.iterations, res.residual,
                       diagnose_failure(graph, scan));
     return res.converged ? 0 : 1;
 } catch (const std::exception& e) {

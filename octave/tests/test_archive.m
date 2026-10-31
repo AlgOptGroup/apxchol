@@ -50,14 +50,14 @@ function test_archive()
         rhs = B(:, 1:width);
         result = restored.solve(rhs, 1e-9, 200);
         assert(isequal(size(result.x), [n width]));
-        assert(isequal(size(result.iters), [1 width]));
+        assert(isequal(size(result.iterations), [1 width]));
         assert(isequal(size(result.residual), [1 width]));
         assert(isequal(size(result.converged), [1 width]) && islogical(result.converged));
         assert(all(result.converged));
         errors = sqrt(sum((A * result.x - rhs).^2, 1));
         assert(all(errors <= 1e-9 * sqrt(sum(rhs.^2, 1)) + 1e-12));
         warm = restored.solve(rhs, 1e-9, 0, exact(:, 1:width));
-        assert(all(warm.converged) && all(warm.iters == 0));
+        assert(all(warm.converged) && all(warm.iterations == 0));
         applied = restored.apply(rhs);
         assert(isequal(size(applied), [n width]));
         for j = 1:width

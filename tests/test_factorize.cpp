@@ -644,9 +644,9 @@ TEST(FactorRegularization, AcceptsRepresentableExtremesAndGroundedDefaults) {
         apxchol::solve_options opts;
         opts.backend = apxchol::solve_backend::cpu;
         opts.factor_opts.regularization = regularization;
-        const auto result = apxchol::solve(L, b, opts);
+        const auto result = apxchol::solve(L, b, std::nullopt, std::nullopt, opts);
         EXPECT_TRUE(result.converged);
-        EXPECT_LT((L * result.x - b).norm() / b.norm(), opts.tol);
+        EXPECT_LT((L * result.x - b).norm() / b.norm(), apxchol::default_tol);
     }
     Eigen::SparseMatrix<double> identity(3, 3);
     identity.setIdentity();
@@ -867,13 +867,13 @@ TEST(PruneSkip, HubGridSolvesAtEveryFactorIncludingTheAggressiveOne) {
     for (int v = 0; v < n; ++v) b[v] = std::sin(0.31 * v) + 0.25;
 
     apxchol::solve_options opts;
-    opts.tol = 1e-8; opts.max_iter = 500; opts.factor_opts.seed = 7;
+    opts.factor_opts.seed = 7;
     opts.factor_opts.experimental.omp_threshold = 16;
     auto run = [&](double skip_factor) {
         auto factor = factorize_controlled(apxchol::make_graph(A), opts.factor_opts,
                                            {.prune_skip_factor = skip_factor});
         apxchol::solver solver(A, std::move(factor), opts);
-        return solver.solve(b);
+        return solver.solve(b, 1e-8, 500);
     };
     const auto off = run(0);
     const auto standard = run(4);
@@ -1031,9 +1031,7 @@ protected:
         const Eigen::SparseMatrix<double>& L,
         const Eigen::VectorXd& b,
         double tol = 1e-6, int max_iter = 500) {
-        return apxchol::solve(L, b,
-            {.tol = tol, .max_iter = max_iter,
-             .factor_opts = {.seed = 42}});
+        return apxchol::solve(L, b, tol, max_iter, {.factor_opts = {.seed = 42}});
     }
 };
 
@@ -1171,11 +1169,11 @@ TEST_F(FactorizeTest, LaplacianFlagNotSet) {
 static void expect_repeated_solves_bit_identical(const Eigen::SparseMatrix<double>& A,
                                                  const Eigen::VectorXd& b, bool laplacian) {
     apxchol::solve_options opts;
-    opts.tol = 1e-8; opts.max_iter = 500; opts.factor_opts.seed = 42;
+    opts.factor_opts.seed = 42;
     opts.backend = apxchol::solve_backend::cpu;
     apxchol::solver slv(A, opts);
-    auto r1 = slv.solve(b);
-    auto r2 = slv.solve(b);
+    auto r1 = slv.solve(b, 1e-8, 500);
+    auto r2 = slv.solve(b, 1e-8, 500);
     ASSERT_LT(r1.residual, 1e-8);
     EXPECT_EQ(r1.iterations, r2.iterations);
     EXPECT_EQ(r1.residual, r2.residual);                    // exact, not ULP-tolerant
@@ -1250,10 +1248,10 @@ TEST(Grounding, LaplacianSolutionIsMinNorm) {
     auto L = grid_laplacian(60, 60);
     auto b = apxchol::test::random_rhs(L.rows());
     apxchol::solve_options opts;
-    opts.tol = 1e-8; opts.max_iter = 500; opts.factor_opts.seed = 42;
+    opts.factor_opts.seed = 42;
     opts.backend = apxchol::solve_backend::cpu;
     apxchol::solver slv(L, opts);
-    auto r = slv.solve(b);
+    auto r = slv.solve(b, 1e-8, 500);
     ASSERT_LT(r.residual, 1e-8);
     EXPECT_NEAR(r.x.mean(), 0.0, 1e-14 * r.x.cwiseAbs().maxCoeff());
     EXPECT_LT((L * r.x - b).norm() / b.norm(), 1e-6);
@@ -1357,9 +1355,8 @@ TEST_P(StrategyConvergenceTest, GridConverges) {
     auto [is, name] = GetParam();
     auto L = grid_laplacian(15, 15);
     auto b = apxchol::test::random_rhs(225);
-    auto res = apxchol::solve(L, b,
-        {.tol = 1e-6, .max_iter = 1000,
-         .factor_opts = {.seed = 42, .partitioner = is}});
+    auto res = apxchol::solve(L, b, 1e-6, 1000,
+        {.factor_opts = {.seed = 42, .partitioner = is}});
     EXPECT_LT(res.residual, 1e-4)
         << "strategy " << name << " failed: iters=" << res.iterations
         << " residual=" << res.residual;
@@ -1369,9 +1366,8 @@ TEST_P(StrategyConvergenceTest, SDDMConverges) {
     auto [is, name] = GetParam();
     auto M = sddm_grid(10, 10, 2.0);
     Eigen::VectorXd b = Eigen::VectorXd::Random(100);
-    auto res = apxchol::solve(M, b,
-        {.tol = 1e-6, .max_iter = 1000,
-         .factor_opts = {.seed = 42, .partitioner = is}});
+    auto res = apxchol::solve(M, b, 1e-6, 1000,
+        {.factor_opts = {.seed = 42, .partitioner = is}});
     EXPECT_LT(res.residual, 1e-4)
         << "strategy " << name << " failed on SDDM: iters=" << res.iterations
         << " residual=" << res.residual;
@@ -1435,13 +1431,9 @@ TEST(ExactCliqueOption, Grid40_FewerItersThanSampled) {
     apxchol::factor_options opts;
     opts.seed = 42;
     opts.partitioner = apxchol::partitioner_kind::block_greedy;
-    auto sampled = apxchol::solve(L, b,
-        {.tol = 1e-8, .max_iter = 200,
-         .factor_opts = opts});
+    auto sampled = apxchol::solve(L, b, 1e-8, 200, {.factor_opts = opts});
     opts.experimental.exact_clique_max_degree = 8;
-    auto exact = apxchol::solve(L, b,
-        {.tol = 1e-8, .max_iter = 200,
-         .factor_opts = opts});
+    auto exact = apxchol::solve(L, b, 1e-8, 200, {.factor_opts = opts});
     EXPECT_LT(exact.residual, 1e-6);
     EXPECT_LE(exact.iterations, sampled.iterations)
         << "exact low-degree cliques should not need more PCG iterations: "
@@ -1651,9 +1643,7 @@ TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
         if (::testing::Test::HasFatalFailure()) return;
 
         // And it is still a usable preconditioner.
-        const auto res = apxchol::solve(L, b,
-            {.tol = 1e-8, .max_iter = 200,
-             .factor_opts = with_loop});
+        const auto res = apxchol::solve(L, b, 1e-8, 200, {.factor_opts = with_loop});
         EXPECT_LT(res.residual, 1e-8) << "seed " << seed;
     }
 }
@@ -2133,7 +2123,6 @@ TEST(GpuBoundedSelection, ConsumingSolveChecksOriginalOperatorResidual) {
     for (const unsigned seed : {0u, 42u}) {
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::gpu;
-        options.tol = 1e-8; options.max_iter = 500;
         options.factor_opts.seed = seed;
         options.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
         options.factor_opts.drop_tolerance = 0;
@@ -2142,7 +2131,7 @@ TEST(GpuBoundedSelection, ConsumingSolveChecksOriginalOperatorResidual) {
         Eigen::Index first_iterations = 0;
         for (unsigned repeat = 0; repeat < 2; ++repeat) {
             apxchol::detail::checkpoint timings;
-            const auto solved = apxchol::detail::solver_access::with_timings(A, options, timings).solve(b);
+            const auto solved = apxchol::detail::solver_access::with_timings(A, options, timings).solve(b, 1e-8, 500);
             EXPECT_GT(timings.total("setup.gpu_owned_factorization"), 0.0);
             const double rr = (A * solved.x - b).norm() / b.norm();
             EXPECT_TRUE(std::isfinite(rr)); EXPECT_LE(rr, 1e-8);

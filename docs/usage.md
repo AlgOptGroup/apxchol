@@ -78,20 +78,22 @@ host factor with a GPU solver. See [factor handoff](extending.md#reusing-a-custo
 
 ## Option names
 
-Each interface spells the stable options as follows. Python and MATLAB/Octave
-take setup options as keywords or struct fields, and the solve tolerance and
-iteration budget as solve arguments.
+Each interface spells the stable options as follows. Setup options are
+`solve_options` fields in C++, keywords in Python and struct fields in
+MATLAB/Octave. The tolerance and iteration budget are arguments of each solve
+call in every library interface; omitted, they take the
+[native defaults](reference/cpp.md#solve-defaults).
 
 | C++ | CLI | Python | MATLAB/Octave |
 |---|---|---|---|
 | `solve_options::backend` | `--backend` | `backend` | CPU only |
 | `solve_options::num_threads` | `--threads` | `num_threads` | `num_threads` |
-| `solve_options::tol` | `--tol` | `rtol` (solve argument) | `rtol` (solve argument) |
-| `solve_options::max_iter` | `--max-iter` | `maxiter` (solve argument) | `maxiter` (solve argument) |
+| `tol` (solve argument) | `--tol` | `rtol` (solve argument) | `rtol` (solve argument) |
+| `max_iter` (solve argument) | `--max-iter` | `maxiter` (solve argument) | `maxiter` (solve argument) |
 | `factor_options::seed` | `--seed` | `seed` | `seed` |
 | `factor_options::partitioner` | `--partitioner` | `partitioner` | `partitioner` |
 | `factor_options::sampler` | `--sampler` | `sampler` | `sampler` |
-| `factor_options::factor_storage` | `--factor-storage` | `factor_storage_dtype` | `factor_storage` |
+| `factor_options::factor_storage` | `--factor-storage` | `factor_storage` | `factor_storage` |
 | `factor_options::drop_tolerance` | `--drop-tolerance` | `drop_tolerance` | `drop_tolerance` |
 | `factor_options::regularization` | `--regularization` | `regularization` | `regularization` |
 | `factor_options::lump_max_mass` | `--lump-max-mass` | `lump_max_mass` | `lump_max_mass` |
@@ -101,9 +103,10 @@ iteration budget as solve arguments.
 
 The partitioner (`block_greedy`, `priority_greedy` or `baumann_kyng`) and the
 sampler (`gks` or `trace_cycle`) take the same names everywhere. Factor storage
-is `auto`, `float16` or `float32` in the CLI and MATLAB/Octave, a NumPy dtype
-in Python's `factor_storage_dtype`, and `factor_storage_type::automatic`,
-`fp16` or `fp32` in C++. The research controls in `factor_options::experimental` are
+is `auto`, `float16` or `float32` in the CLI, Python and MATLAB/Octave (Python
+also accepts a NumPy dtype), and `factor_storage_type::automatic`, `fp16` or
+`fp32` in C++. Python's `rtol` and `maxiter` follow SciPy's `cg`, and the CLI's
+`--threads` is the usual command-line spelling. The research controls in `factor_options::experimental` are
 available only from C++; see the [API policy](api.md).
 
 ## Reuse, batches and initial guesses
@@ -125,14 +128,15 @@ For C++:
 #include "apxchol.h"
 apxchol::solver solver(A);
 auto result = solver.solve(b, 1e-8);
-// std::nullopt keeps this solver's tolerance or iteration budget.
+// std::nullopt selects the default tolerance or iteration budget.
 auto warm = solver.solve(b2, std::nullopt, std::nullopt, &result.x);
 Eigen::MatrixXd X(B.rows(), B.cols());
 auto batch = solver.solve(B, X);
 ```
 
-One-shot `apxchol::solve(A, b)` uses the same backend selection. For explicit
-CPU execution, set `solve_options.backend = solve_backend::cpu`.
+One-shot `apxchol::solve(A, b, tol, max_iter, opts)` uses the same backend
+selection. For explicit CPU execution, set
+`solve_options.backend = solve_backend::cpu`.
 
 ### Judging whether reuse pays off
 
@@ -171,6 +175,23 @@ Their language-specific helpers differ:
 | GPU setup and solve | CUDA or Metal when built and available | CPU only |
 | Factor export | Installed factor, float64 copies | Not exposed |
 | External iterative solver | SciPy `LinearOperator` | Function handle for `pcg` |
+
+## Results and errors
+
+Every solve reports the same fields: the solution `x`, `iterations`,
+`residual` and `converged`, plus `solve_seconds`. For a matrix RHS, C++ returns
+one record per column, and Python and MATLAB/Octave return one entry per column
+in each field.
+
+Errors fall into two classes in every interface:
+
+| Cause | C++ | Python | MATLAB/Octave | CLI |
+|---|---|---|---|---|
+| Invalid input or options, or a request the build or backend does not support | `std::invalid_argument` | `ValueError` | `apxchol:badInput` | exit code 2 |
+| Execution failure, such as a solution outside the floating-point range, an unavailable device or a file error | `std::runtime_error` or a type derived from it | `RuntimeError` | `apxchol:error` | exit code 2 |
+
+Not converging within the iteration budget is not an error: check
+`converged` (the CLI exits with code 1).
 
 ## Convergence and cost
 
