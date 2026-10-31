@@ -3,6 +3,7 @@
 #include "scoped_omp_threads.h"
 #include <array>
 #include <cstring>
+#include <limits>
 #include <numeric>
 #include <random>
 
@@ -197,5 +198,24 @@ TEST(PermutedOperator, GeneralFallbackOrdersDuplicateCoordinatesDeterministicall
             SCOPED_TRACE("team=" + std::to_string(team) + " run=" + std::to_string(run));
             check(L, perm, /*use_full_builder=*/true);
         }
+    }
+}
+
+TEST(PermutedOperator, GeneralFallbackRejectsNonFiniteValuesBeforeSorting) {
+    // Lower-only duplicates force the fallback, whose row sort needs finite values.
+    for (double bad : {std::numeric_limits<double>::quiet_NaN(),
+                       std::numeric_limits<double>::infinity()}) {
+        Matrix L(2, 2);
+        const std::array<int, 3> outer{0, 3, 4};
+        const std::array<int, 4> inner{0, 1, 1, 1};
+        const std::array<double, 4> values{2.0, bad, -1.0, 2.0};
+        L.resizeNonZeros(4);
+        std::copy(outer.begin(), outer.end(), L.outerIndexPtr());
+        std::copy(inner.begin(), inner.end(), L.innerIndexPtr());
+        std::copy(values.begin(), values.end(), L.valuePtr());
+        ASSERT_FALSE(accepted(L));
+        const std::vector<node_index> perm{0, 1};
+        EXPECT_THROW(apxchol::detail::build_permuted_full_symmetric_csr(L, perm),
+                     std::invalid_argument);
     }
 }

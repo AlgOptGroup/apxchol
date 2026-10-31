@@ -1271,6 +1271,7 @@ __global__ void count_residual_degrees(
     if (i < count) atomicAdd(degrees + residual[i].owner, 1U);
 }
 
+#if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 __global__ void hash_ordered_residual_incidences(
         const gpu_round_shadow_incidence* residual,
         std::size_t count, const std::uint32_t* owner_offsets,
@@ -1286,6 +1287,7 @@ __global__ void hash_ordered_residual_incidences(
     __shared__ device_digest warp_values[kBlock / 32];
     digest_add_block<kBlock>({item, item}, &semantics->ordered_residual, warp_values);
 }
+#endif
 
 template<bool Audit>
 __global__ void hash_residual_state(

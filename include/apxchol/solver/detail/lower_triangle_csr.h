@@ -2,7 +2,9 @@
 #include <Eigen/Sparse>
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <span>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -11,7 +13,7 @@ namespace apxchol::detail {
 // Reflect compressed L's lower triangle into sorted CSR, retaining duplicates
 // ordered by value. map maps input vertices to output rows; allocate returns
 // writable index/value arrays after the counts establish their size. Each
-// scatter slot is written once.
+// scatter slot is written once. Non-finite values are rejected before sorting.
 template<bool CheckFp32 = false, class Map, class Allocate>
 bool reflect_lower_to_csr(const Eigen::SparseMatrix<double>& L, std::span<int> row_ptr,
                           Map map, Allocate allocate) {
@@ -37,8 +39,8 @@ bool reflect_lower_to_csr(const Eigen::SparseMatrix<double>& L, std::span<int> r
     int* indices = output.first;
     double* values = output.second;
     std::vector<int> pos(row_ptr.begin(), row_ptr.begin() + n);
-    bool exact = true;
-    #pragma omp parallel for schedule(static) reduction(&&:exact)
+    bool exact = true, finite = true;
+    #pragma omp parallel for schedule(static) reduction(&&:exact, finite)
     for (Eigen::Index col = 0; col < n; ++col) {
         const int target = map(col);
         for (int p = outer[col]; p < outer[col + 1]; ++p) {
@@ -46,6 +48,7 @@ bool reflect_lower_to_csr(const Eigen::SparseMatrix<double>& L, std::span<int> r
             if (row < col) continue;
             const int mapped_row = map(row);
             const double value = input[p];
+            if (!std::isfinite(value)) finite = false;
             if constexpr (CheckFp32)
                 if (double(float(value)) != value) exact = false;
             const int slot = std::atomic_ref(pos[mapped_row]).fetch_add(1, std::memory_order_relaxed);
@@ -58,6 +61,8 @@ bool reflect_lower_to_csr(const Eigen::SparseMatrix<double>& L, std::span<int> r
             }
         }
     }
+    if (!finite)
+        throw std::invalid_argument("operator contains a non-finite value");
     #pragma omp parallel
     {
         std::vector<std::pair<int, double>> entries;
