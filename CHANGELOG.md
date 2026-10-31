@@ -28,8 +28,10 @@
 - Breaking: Python 3.10 is no longer supported.
 - Breaking: removed CLI flags `--stagnation-window`, `--graph-storage`, `--fs-compact` and `--fs-filter-append`.
 - Breaking: `solve_result::solve_vram_mb` is removed. It reported device-wide memory in use, including other processes, so it did not measure the solve.
+- Breaking: C++ `solve()` takes `std::optional` tolerance and iteration budget; `std::nullopt` selects the solver's defaults, and a negative value now throws `std::invalid_argument` instead of selecting them.
 - Breaking: the CLI and bindings no longer accept an adjacency matrix as if it were the operator. Previously both solved adjacency input as the operator and failed without a clear error; now validation rejects it and the error suggests the conversion.
 - Breaking: the factor type `sparse_csc` is a read-only view with `col_ptrs()`, `row_indices()`, `values()` and `has_values()`; its storage members, raw-pointer accessors and build mutators are no longer public.
+- Breaking: the CMake helpers `apxchol_openmp_runtime()`, `apxchol_configure_core()`, `apxchol_install_core()` and the `APXCHOL_ARCH_FLAG` variable are internal (`_apxchol_*` and `_APXCHOL_ARCH_FLAG`); `find_package(apxchol)` and `apxchol_add_core()` are the supported entry points.
 - Breaking: the raw MATLAB/Octave `apxchol_mex` entry point moves to `octave/private/`; use the `apxchol_*` wrappers.
 - New `apxchol.as_operator(M)`, `apxchol_as_operator(M)` and CLI `--convert-input`: a finite symmetric matrix with at least one off-diagonal entry, all of them positive, becomes its graph Laplacian `L = D - M` (self-loops cancel), any other finite symmetric matrix is used as given and checked by the solver, and asymmetric or non-finite input is an error.
 - The CLI solves an `n` by `k` `--rhs` file as one batch, writes an `n` by `k` solution with `-o`, and logs iterations and residuals per column.
@@ -43,7 +45,7 @@
 - Breaking: CLI `--is`, `--factor-drop` and `--maxiter` are renamed `--partitioner`, `--drop-tolerance` and `--max-iter`; `--sampler`, `--factor-storage` and `--partitioner` accept names only.
 - Python and MATLAB/Octave accept the same stable setup options, adding `sampler` to Python and `partitioner`, `sampler`, `degree_quantile` and `degree_multiplier` to MATLAB/Octave.
 - Python wheels for CPython 3.11+ on Linux and macOS arm64 (GPU wheels select the backend at runtime), standalone CLI archives, and MATLAB/Octave batched solves with save/load.
-- Wheels declare `License-Expression: BSD-3-Clause` and take the root LICENSE at build time; minimum scikit-build-core is 0.11.
+- Wheels declare a `License-Expression` that matches their contents (BSD-3-Clause, MPL-2.0, Apache-2.0 WITH LLVM-exception and Zlib; Linux CUDA wheels add the NVIDIA CUDA EULA and ship its text) and take the root LICENSE at build time; minimum scikit-build-core is 0.12.
 - Relicensed from BSD-4-Clause to BSD-3-Clause.
 - Breaking: `solver::solve()` and `solver::apply()` are non-const because they use the solver's workspace; concurrent non-const calls on one solver are not allowed.
 

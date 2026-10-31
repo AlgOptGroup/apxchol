@@ -8,15 +8,15 @@ endif()
 
 # The shipped core configuration: C++23, Eigen, OpenMP, the architecture flag,
 # index/pool options and, for CUDA, static cudart. apxchol_v1 below is built by
-# the same apxchol_configure_core() as the root library and Python module.
+# the same _apxchol_configure_core() as the root library and Python module.
 include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_core.cmake)
 set(CMAKE_CXX_STANDARD 17) # The apxchol targets request C++23 explicitly.
 
 # Competitors get the same machine-tuning flag as the core. It is recorded into
 # the binary as BUILD_META's arch_flags (see the benchmark target), so a stored
 # cell records the native tuning or portable baseline used by that build.
-add_compile_options(-Wall -Wextra -Wpedantic ${APXCHOL_ARCH_FLAG})
-set(APXCHOL_BENCH_ARCH_FLAGS "${APXCHOL_ARCH_FLAG}")
+add_compile_options(-Wall -Wextra -Wpedantic ${_APXCHOL_ARCH_FLAG})
+set(APXCHOL_BENCH_ARCH_FLAGS "${_APXCHOL_ARCH_FLAG}")
 
 include(FetchContent)
 
@@ -475,7 +475,7 @@ endif()
 # ApxChol v1 (C++23 solver — multiple IS × elimination combos)
 # ══════════════════════════════════════════════════════
 add_library(apxchol_v1 STATIC)
-apxchol_configure_core(apxchol_v1)
+_apxchol_configure_core(apxchol_v1)
 
 # Boost headers are needed only by AMGCL (HAVE_AMGCL gate below); the apxchol
 # core itself is Boost-free.

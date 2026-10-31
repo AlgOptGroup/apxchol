@@ -9,6 +9,7 @@
 #include <Eigen/Sparse>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace apxchol {
@@ -45,13 +46,17 @@ public:
     /// the device's double-float self-test passed. Checked once per process.
     static bool available() noexcept;
 
-    /// One right-hand side. tol < 0 / max_iter < 0 select the options' values;
-    /// x0 (nullptr = zero) must have length n. b must be finite.
-    solve_result solve(const Eigen::VectorXd& b, double tol = -1.0, int max_iter = -1,
+    /// One right-hand side. Omitted tol/max_iter select the options' values;
+    /// explicit values must be valid. x0 (nullptr = zero) must have length n.
+    /// b must be finite.
+    solve_result solve(const Eigen::VectorXd& b, std::optional<double> tol = std::nullopt,
+                       std::optional<int> max_iter = std::nullopt,
                        const Eigen::VectorXd* x0 = nullptr) const;
     /// Append solve timings to an existing result, as cpu_solver does.
-    void solve(const Eigen::VectorXd& b, solve_result& result, double tol = -1.0,
-               int max_iter = -1, const Eigen::VectorXd* x0 = nullptr) const;
+    void solve(const Eigen::VectorXd& b, solve_result& result,
+               std::optional<double> tol = std::nullopt,
+               std::optional<int> max_iter = std::nullopt,
+               const Eigen::VectorXd* x0 = nullptr) const;
 
     /// One device preconditioner application z = M^{-1} r (centred for a
     /// Laplacian).
