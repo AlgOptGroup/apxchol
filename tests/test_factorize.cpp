@@ -17,9 +17,6 @@
 #include <string>
 #include <tuple>
 #include <typeinfo>
-#include <Eigen/Core>
-#include <Eigen/Sparse>
-#include <Eigen/IterativeLinearSolvers>
 #include <omp.h>
 
 #include "apxchol/solver/factorization.h"
@@ -109,31 +106,27 @@ TEST(EliminationDedup, PooledLocalHashPreservesOrderSumsAndEpochReuse) {
     }
 }
 
-// Convert the owned sparse_csc factor to an Eigen::SparseMatrix for tests
-// (the library no longer stores Eigen factors).
-static Eigen::SparseMatrix<double> factor_to_eigen(const apxchol::sparse_csc& L) {
+using Sparse = apxchol::test::sparse_matrix;
+using Triplet = apxchol::test::triplet;
+
+// The owned sparse_csc factor as a dense matrix, widened to double.
+static apxchol::test::dense_matrix factor_to_dense(const apxchol::sparse_csc& L) {
     const auto* outer = L.col_ptrs().data();
     const auto* inner = L.row_indices().data();
     const auto* vals  = L.values().data();
-    std::vector<Eigen::Triplet<double>> trips;
-    trips.reserve(static_cast<size_t>(L.nonZeros()));
+    apxchol::test::dense_matrix M(L.rows(), L.cols());
     for (apxchol::node_index c = 0; c < L.cols(); ++c)
         for (apxchol::edge_index p = outer[c]; p < outer[c + 1]; ++p)
-            trips.emplace_back(static_cast<int>(inner[p]), static_cast<int>(c),
-                               apxchol::widen(vals[p]));
-    Eigen::SparseMatrix<double> M(static_cast<int>(L.rows()), static_cast<int>(L.cols()));
-    M.setFromTriplets(trips.begin(), trips.end());
+            M(inner[p], c) += apxchol::widen(vals[p]);
     return M;
 }
 
-// Build an Eigen permutation from perm[v] = new position of original vertex v.
-static Eigen::PermutationMatrix<Eigen::Dynamic, Eigen::Dynamic>
-perm_to_eigen(const std::vector<apxchol::node_index>& perm) {
-    Eigen::PermutationMatrix<Eigen::Dynamic, Eigen::Dynamic> P(
-        static_cast<Eigen::Index>(perm.size()));
-    for (Eigen::Index i = 0; i < static_cast<Eigen::Index>(perm.size()); ++i)
-        P.indices()[i] = static_cast<int>(perm[i]);
-    return P;
+using apxchol::test::linspaced;
+// A(i, i) += value on a matrix that stores its diagonal.
+static void add_to_diagonal(Sparse& A, std::int64_t i, double value) {
+    for (auto p = A.col_ptr[i]; p < A.col_ptr[i + 1]; ++p)
+        if (A.row_idx[p] == i) { A.values[p] += value; return; }
+    throw std::logic_error("test matrix has no stored diagonal entry");
 }
 
 // L(i,i): scan column i of the CSC factor for the diagonal entry.
@@ -146,33 +139,31 @@ static double factor_diag(const apxchol::sparse_csc& L, int i) {
     return 0.0;
 }
 
-static Eigen::SparseMatrix<double> path_laplacian(int n) {
+static Sparse path_laplacian(int n) {
     apxchol::detail::graph G(n);
     for (int i = 0; i + 1 < n; ++i)
         G.add_edge(i, i + 1, 1.0);
-    return apxchol::test::to_eigen(apxchol::detail::laplacian(G).ref());
+    return apxchol::test::from_csc(apxchol::detail::laplacian(G).ref());
 }
 
 using apxchol::test::grid_laplacian;
 using apxchol::test::csc;
-using apxchol::test::cspan;
-using apxchol::test::vec;
 
-static Eigen::SparseMatrix<double> star_laplacian(int n) {
+static Sparse star_laplacian(int n) {
     apxchol::detail::graph G(n);
     for (int i = 1; i < n; ++i)
         G.add_edge(0, i, 1.0);
-    return apxchol::test::to_eigen(apxchol::detail::laplacian(G).ref());
+    return apxchol::test::from_csc(apxchol::detail::laplacian(G).ref());
 }
 
-static Eigen::SparseMatrix<double> cycle_laplacian(int n) {
+static Sparse cycle_laplacian(int n) {
     apxchol::detail::graph G(n);
     for (int i = 0; i < n; ++i)
         G.add_edge(i, (i + 1) % n, 1.0);
-    return apxchol::test::to_eigen(apxchol::detail::laplacian(G).ref());
+    return apxchol::test::from_csc(apxchol::detail::laplacian(G).ref());
 }
 
-static Eigen::SparseMatrix<double> weighted_grid_laplacian(int rows, int cols,
+static Sparse weighted_grid_laplacian(int rows, int cols,
                                                            double w_horiz,
                                                            double w_vert) {
     apxchol::detail::graph G(rows * cols);
@@ -182,7 +173,7 @@ static Eigen::SparseMatrix<double> weighted_grid_laplacian(int rows, int cols,
             if (r + 1 < rows) G.add_edge(id(r, c), id(r + 1, c), w_vert);
             if (c + 1 < cols) G.add_edge(id(r, c), id(r, c + 1), w_horiz);
         }
-    return apxchol::test::to_eigen(apxchol::detail::laplacian(G).ref());
+    return apxchol::test::from_csc(apxchol::detail::laplacian(G).ref());
 }
 
 TEST(PartitionerHelpers, ParallelDegreeQuantileMatchesNthElementExactly) {
@@ -251,7 +242,7 @@ TEST(PartitionerHelpers, ParallelActiveFilterIsStable) {
 class FactorizeTest : public ::testing::Test {
 protected:
     apxchol::factorization factorize_with(
-        const Eigen::SparseMatrix<double>& L, unsigned seed = 42) {
+        const Sparse& L, unsigned seed = 42) {
         return apxchol::factorize(csc(L), {.seed = seed});
     }
 };
@@ -322,8 +313,8 @@ TEST_F(FactorizeTest, Deterministic) {
 
     EXPECT_EQ(F1.L.nonZeros(), F2.L.nonZeros());
     EXPECT_EQ(F1.perm, F2.perm);
-    Eigen::SparseMatrix<double> diff = factor_to_eigen(F1.L) - factor_to_eigen(F2.L);
-    EXPECT_LT(diff.norm(), 1e-14);
+    EXPECT_LT(apxchol::test::norm(apxchol::test::difference(
+                  factor_to_dense(F1.L).data, factor_to_dense(F2.L).data)), 1e-14);
 }
 
 // ── Determinism of the PARALLEL selection path ───────
@@ -433,7 +424,7 @@ TEST_F(FactorizeTest, ParallelEliminatorFailureReachesCaller) {
     apxchol::factor_options options;
     options.experimental.omp_threshold = 0;
     options.experimental.parallel_residual_threshold = 0;
-    EXPECT_THROW(apxchol::factorize(csc(apxchol::test::to_eigen(apxchol::detail::laplacian(failure_test_graph()).ref())),
+    EXPECT_THROW(apxchol::factorize(csc(apxchol::test::from_csc(apxchol::detail::laplacian(failure_test_graph()).ref())),
                                     throwing_eliminator{},
                                     options),
                  eliminator_failure);
@@ -624,7 +615,7 @@ TEST(FactorRegularization, RejectsUnrepresentableExcess) {
         const auto L = path_laplacian(n);
         for (const auto& [scale, regularization] :
              {std::pair{1e10, 1e300}, std::pair{1e-30, 1e-300}}) {
-            const Eigen::SparseMatrix<double> A = scale * L;
+            const Sparse A = apxchol::test::scaled(L, scale);
             apxchol::factor_options opts;
             opts.regularization = regularization;
             EXPECT_THROW(apxchol::factorize(csc(A), opts), std::range_error);
@@ -648,18 +639,16 @@ TEST(FactorRegularization, RejectsUnrepresentableStoredDiagonal) {
 TEST(FactorRegularization, AcceptsRepresentableExtremesAndGroundedDefaults) {
     const scoped_threads team(2);
     const auto L = path_laplacian(3);
-    Eigen::VectorXd b(3);
-    b << 1, -2, 1;
+    const std::vector<double> b{1, -2, 1};
     for (double regularization : {0.0, 4.0}) {
         apxchol::solve_options opts;
         opts.backend = apxchol::solve_backend::cpu;
         opts.factor_opts.regularization = regularization;
-        const auto result = apxchol::solve(csc(L), cspan(b), std::nullopt, std::nullopt, {}, opts);
+        const auto result = apxchol::solve(csc(L), b, std::nullopt, std::nullopt, {}, opts);
         EXPECT_TRUE(result.converged);
-        EXPECT_LT((L * vec(result.x) - b).norm() / b.norm(), apxchol::default_tol);
+        EXPECT_LT(apxchol::test::relative_residual(L, result.x, b), apxchol::default_tol);
     }
-    Eigen::SparseMatrix<double> identity(3, 3);
-    identity.setIdentity();
+    const Sparse identity = apxchol::test::identity(3);
     for (double regularization : {1e-300, 1e50}) {
         apxchol::factor_options opts;
         opts.regularization = regularization;
@@ -700,19 +689,17 @@ TEST(VecPoolAos, AutoIncrementalDegreesPreserveTheFactorByteForByte) {
     // rounds before handing the graph back to this host-cache path.
     constexpr int clique_count = 128;
     constexpr int n = clique_size * clique_count;
-    std::vector<Eigen::Triplet<double>> triplets;
+    std::vector<Triplet> triplets;
     triplets.reserve(clique_count * clique_size * clique_size);
     for (int c = 0; c < clique_count; ++c) {
         const int first = c * clique_size;
         for (int u = 0; u < clique_size; ++u) {
-            triplets.emplace_back(first + u, first + u, clique_size - 1.0);
+            triplets.push_back({first + u, first + u, clique_size - 1.0});
             for (int v = 0; v < clique_size; ++v)
-                if (u != v) triplets.emplace_back(first + u, first + v, -1.0);
+                if (u != v) triplets.push_back({first + u, first + v, -1.0});
         }
     }
-    Eigen::SparseMatrix<double> L(n, n);
-    L.setFromTriplets(triplets.begin(), triplets.end());
-    L.makeCompressed();
+    const Sparse L = apxchol::test::from_triplets(n, n, triplets);
 
     apxchol::factor_options opts;
     opts.seed = 19;
@@ -721,7 +708,7 @@ TEST(VecPoolAos, AutoIncrementalDegreesPreserveTheFactorByteForByte) {
     using degree_cache = apxchol::detail::factorization_controls::degree_cache;
     std::vector<double> baseline_degrees;
     auto run = [&](degree_cache mode, std::vector<double>* degrees = nullptr) {
-        return factorize_controlled(apxchol::detail::make_graph(apxchol::test::eigen_csc(L).ref()), opts,
+        return factorize_controlled(apxchol::detail::make_graph(apxchol::test::internal_csc(L).ref()), opts,
                                     {.incremental_degrees = mode,
                                      .round_average_degrees = degrees});
     };
@@ -746,21 +733,19 @@ TEST(VecPoolAos, IncrementalDegreeCacheDoesNotLeakIntoBkResidualLoop) {
     constexpr int small_count = 72;
     constexpr int residual_size = 100;
     constexpr int n = small_size * small_count + residual_size;
-    std::vector<Eigen::Triplet<double>> triplets;
+    std::vector<Triplet> triplets;
     auto add_clique = [&](int first, int count) {
         for (int u = 0; u < count; ++u) {
-            triplets.emplace_back(first + u, first + u, count - 1.0);
+            triplets.push_back({first + u, first + u, count - 1.0});
             for (int v = 0; v < count; ++v)
                 if (u != v)
-                    triplets.emplace_back(first + u, first + v, -1.0);
+                    triplets.push_back({first + u, first + v, -1.0});
         }
     };
     for (int c = 0; c < small_count; ++c)
         add_clique(c * small_size, small_size);
     add_clique(small_count * small_size, residual_size);
-    Eigen::SparseMatrix<double> L(n, n);
-    L.setFromTriplets(triplets.begin(), triplets.end());
-    L.makeCompressed();
+    const Sparse L = apxchol::test::from_triplets(n, n, triplets);
 
     apxchol::factor_options opts;
     opts.seed = 19;
@@ -769,7 +754,7 @@ TEST(VecPoolAos, IncrementalDegreeCacheDoesNotLeakIntoBkResidualLoop) {
     using degree_cache = apxchol::detail::factorization_controls::degree_cache;
     std::vector<double> baseline_degrees;
     auto run = [&](degree_cache mode, std::vector<double>* degrees = nullptr) {
-        return factorize_controlled(apxchol::detail::make_graph(apxchol::test::eigen_csc(L).ref()), opts,
+        return factorize_controlled(apxchol::detail::make_graph(apxchol::test::internal_csc(L).ref()), opts,
                                     {.incremental_degrees = mode,
                                      .round_average_degrees = degrees});
     };
@@ -856,10 +841,10 @@ TEST(PruneSkip, HubGridSolvesAtEveryFactorIncludingTheAggressiveOne) {
     const scoped_threads team(8);
     constexpr int side = 48, n_grid = side * side, hubs = 6, n = n_grid + hubs;
     std::mt19937_64 rng(20260917);
-    std::vector<Eigen::Triplet<double>> triplets;
+    std::vector<Triplet> triplets;
     std::vector<double> diagonal(n, 1e-3);
     auto edge = [&](int u, int v, double w) {
-        triplets.emplace_back(u, v, -w); triplets.emplace_back(v, u, -w);
+        triplets.push_back({u, v, -w}); triplets.push_back({v, u, -w});
         diagonal[u] += w; diagonal[v] += w;
     };
     for (int r = 0; r < side; ++r)
@@ -869,28 +854,26 @@ TEST(PruneSkip, HubGridSolvesAtEveryFactorIncludingTheAggressiveOne) {
         }
     for (int h = 0; h < hubs; ++h)
         for (int v = h; v < n_grid; v += 5 + h) edge(n_grid + h, v, 0.5);
-    for (int v = 0; v < n; ++v) triplets.emplace_back(v, v, diagonal[v]);
-    Eigen::SparseMatrix<double> A(n, n);
-    A.setFromTriplets(triplets.begin(), triplets.end());
-    A.makeCompressed();
-    Eigen::VectorXd b(n);
+    for (int v = 0; v < n; ++v) triplets.push_back({v, v, diagonal[v]});
+    const Sparse A = apxchol::test::from_triplets(n, n, triplets);
+    std::vector<double> b(n);
     for (int v = 0; v < n; ++v) b[v] = std::sin(0.31 * v) + 0.25;
 
     apxchol::solve_options opts;
     opts.factor_opts.seed = 7;
     opts.factor_opts.experimental.omp_threshold = 16;
     auto run = [&](double skip_factor) {
-        auto factor = factorize_controlled(apxchol::detail::make_graph(apxchol::test::eigen_csc(A).ref()), opts.factor_opts,
+        auto factor = factorize_controlled(apxchol::detail::make_graph(apxchol::test::internal_csc(A).ref()), opts.factor_opts,
                                            {.prune_skip_factor = skip_factor});
         apxchol::solver solver(csc(A), std::move(factor), opts);
-        return solver.solve(cspan(b), 1e-8, 500);
+        return solver.solve(b, 1e-8, 500);
     };
     const auto off = run(0);
     const auto standard = run(4);
     const auto aggressive = run(1);
     for (const auto* result : {&off, &standard, &aggressive}) {
         EXPECT_LT(result->residual, 1e-8);
-        EXPECT_LT((A * vec(result->x) - b).norm() / b.norm(), 1e-7);
+        EXPECT_LT(apxchol::test::relative_residual(A, result->x, b), 1e-7);
     }
     EXPECT_LE(standard.iterations, off.iterations + 3);
     EXPECT_LE(aggressive.iterations, 2 * off.iterations);
@@ -900,7 +883,7 @@ TEST(PruneSkip, HubGridSolvesAtEveryFactorIncludingTheAggressiveOne) {
     // larger than the exact one.
     auto round_degrees = [&](double skip_factor) {
         std::vector<double> avg;
-        factorize_controlled(apxchol::detail::make_graph(apxchol::test::eigen_csc(A).ref()), opts.factor_opts,
+        factorize_controlled(apxchol::detail::make_graph(apxchol::test::internal_csc(A).ref()), opts.factor_opts,
                              {.prune_skip_factor = skip_factor, .round_average_degrees = &avg});
         return avg;
     };
@@ -1038,10 +1021,10 @@ TEST_F(FactorizeTest, NnzPositive) {
 class SolveTest : public ::testing::Test {
 protected:
     apxchol::solve_result solve_with(
-        const Eigen::SparseMatrix<double>& L,
-        const Eigen::VectorXd& b,
+        const Sparse& L,
+        std::span<const double> b,
         double tol = 1e-6, int max_iter = 500) {
-        return apxchol::solve(csc(L), cspan(b), tol, max_iter, {}, {.factor_opts = {.seed = 42}});
+        return apxchol::solve(csc(L), b, tol, max_iter, {}, {.factor_opts = {.seed = 42}});
     }
 };
 
@@ -1093,11 +1076,9 @@ TEST_F(SolveTest, SolutionSatisfiesSystem) {
     auto b = apxchol::test::random_rhs(100);
     auto res = this->solve_with(L, b, 1e-8);
 
-    Eigen::VectorXd Lx = L * vec(res.x);
-    Lx.array() -= Lx.mean();
-    Eigen::VectorXd bc = b;
-    bc.array() -= bc.mean();
-    double rel_err = (Lx - bc).norm() / bc.norm();
+    const auto Lx = apxchol::test::centered(apxchol::test::multiply(L, res.x));
+    const auto bc = apxchol::test::centered(b);
+    double rel_err = apxchol::test::norm(apxchol::test::difference(Lx, bc)) / apxchol::test::norm(bc);
     EXPECT_LT(rel_err, 1e-5);
 }
 
@@ -1117,7 +1098,7 @@ TEST(Solve, TimingsReported) {
     auto L = grid_laplacian(10, 10);
     auto b = apxchol::test::random_rhs(100);
     apxchol::detail::checkpoint timings;
-    auto res = apxchol::test::with_timings(L, {}, timings).solve(cspan(b));
+    auto res = apxchol::test::with_timings(L, {}, timings).solve(b);
     EXPECT_GT(timings.total("setup"), 0.0);
     // CPU triangular solves are timed under pcg.solve; GPU-resident PCG
     // records one pcg.gpu_pcg_loop leaf.
@@ -1133,25 +1114,25 @@ TEST(Solve, TimingsReported) {
 // ── SDDM support tests ────────────────────────────────
 
 /// Build an SDDM matrix: grid Laplacian + positive diagonal perturbation.
-static Eigen::SparseMatrix<double> sddm_grid(int rows, int cols, double excess) {
+static Sparse sddm_grid(int rows, int cols, double excess) {
     auto L = grid_laplacian(rows, cols);
     const int n = rows * cols;
     // Add excess to diagonal (makes it strictly diagonally dominant).
     for (int i = 0; i < n; ++i)
-        L.coeffRef(i, i) += excess;
+        add_to_diagonal(L, i, excess);
     return L;
 }
 
 TEST_F(SolveTest, SDDMGridConverges) {
     auto M = sddm_grid(10, 10, 2.0);
-    Eigen::VectorXd b = Eigen::VectorXd::Random(100);
+    const std::vector<double> b = apxchol::test::random_vector(100);
     auto res = this->solve_with(M, b);
     EXPECT_LT(res.residual, 1e-5);
 }
 
 TEST_F(SolveTest, SDDMLargeExcessConverges) {
     auto M = sddm_grid(10, 10, 100.0);
-    Eigen::VectorXd b = Eigen::VectorXd::Random(100);
+    const std::vector<double> b = apxchol::test::random_vector(100);
     auto res = this->solve_with(M, b);
     EXPECT_LT(res.residual, 1e-5);
 }
@@ -1176,74 +1157,78 @@ TEST_F(FactorizeTest, LaplacianFlagNotSet) {
 // test process has. The fixtures are large enough to use several solve
 // workers when available (a reduction() clause or any completion-order sum
 // would fail this at T > 1).
-static void expect_repeated_solves_bit_identical(const Eigen::SparseMatrix<double>& A,
-                                                 const Eigen::VectorXd& b, bool laplacian) {
+static void expect_repeated_solves_bit_identical(const Sparse& A,
+                                                 std::span<const double> b, bool laplacian) {
     apxchol::solve_options opts;
     opts.factor_opts.seed = 42;
     opts.backend = apxchol::solve_backend::cpu;
     apxchol::solver slv(csc(A), opts);
-    auto r1 = slv.solve(cspan(b), 1e-8, 500);
-    auto r2 = slv.solve(cspan(b), 1e-8, 500);
+    auto r1 = slv.solve(b, 1e-8, 500);
+    auto r2 = slv.solve(b, 1e-8, 500);
     ASSERT_LT(r1.residual, 1e-8);
     EXPECT_EQ(r1.iterations, r2.iterations);
     EXPECT_EQ(r1.residual, r2.residual);                    // exact, not ULP-tolerant
-    EXPECT_TRUE((vec(r1.x).array() == vec(r2.x).array()).all());
+    EXPECT_TRUE(r1.x == r2.x);
     // Warm start (x0 path: r = b - A x0 in one fused pass) is deterministic too.
-    auto w1 = slv.solve(cspan(b), 1e-10, 500, r1.x);
-    auto w2 = slv.solve(cspan(b), 1e-10, 500, r1.x);
+    auto w1 = slv.solve(b, 1e-10, 500, r1.x);
+    auto w2 = slv.solve(b, 1e-10, 500, r1.x);
     EXPECT_EQ(w1.iterations, w2.iterations);
     EXPECT_EQ(w1.residual, w2.residual);
-    EXPECT_TRUE((vec(w1.x).array() == vec(w2.x).array()).all());
+    EXPECT_TRUE(w1.x == w2.x);
     // Public applications are independent of prior solve/apply calls.
-    Eigen::VectorXd z1 = vec(slv.apply(cspan(b)));
-    Eigen::VectorXd z2 = vec(slv.apply(cspan(b)));
-    EXPECT_TRUE((z1.array() == z2.array()).all());
+    const std::vector<double> z1 = slv.apply(b);
+    const std::vector<double> z2 = slv.apply(b);
+    EXPECT_TRUE(z1 == z2);
     if (laplacian) {
-        EXPECT_NEAR(z1.mean(), 0.0, 1e-13 * z1.cwiseAbs().maxCoeff());
+        EXPECT_NEAR(apxchol::test::mean(z1), 0.0, 1e-13 * apxchol::test::max_abs(z1));
         // The returned SOLUTION is min-norm regardless of the schedule
         // (the CPU solve centres x once at the end).
-        EXPECT_NEAR(vec(r1.x).mean(), 0.0, 1e-14 * vec(r1.x).cwiseAbs().maxCoeff());
-        EXPECT_NEAR(vec(w1.x).mean(), 0.0, 1e-14 * vec(w1.x).cwiseAbs().maxCoeff());
+        EXPECT_NEAR(apxchol::test::mean(r1.x), 0.0, 1e-14 * apxchol::test::max_abs(r1.x));
+        EXPECT_NEAR(apxchol::test::mean(w1.x), 0.0, 1e-14 * apxchol::test::max_abs(w1.x));
     }
 }
 
 TEST(Grounding, PublicApplyIsIndependentOfCallOrderAndPanelWidth) {
     const auto matrix = grid_laplacian(8, 8);
-    const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 64.0);
+    const std::vector<double> rhs = linspaced(matrix.rows, 1.0, 64.0);
     apxchol::solver owner(csc(matrix), {.backend = apxchol::solve_backend::cpu});
-    const Eigen::VectorXd expected = vec(owner.apply(cspan(rhs)));
-    ASSERT_GT(expected.norm(), 0.0);
-    const double tolerance = 1e-12 * expected.norm();
-    EXPECT_NEAR(expected.mean(), 0.0, tolerance);
+    const std::vector<double> expected = owner.apply(rhs);
+    ASSERT_GT(apxchol::test::norm(expected), 0.0);
+    const double tolerance = 1e-12 * apxchol::test::norm(expected);
+    EXPECT_NEAR(apxchol::test::mean(expected), 0.0, tolerance);
 
-    Eigen::MatrixXd panel(matrix.rows(), 3), output(matrix.rows(), 3);
-    panel.col(0) = rhs;
-    panel.col(1) = (2 * rhs.array() + 3).matrix();
-    panel.col(2) = (rhs.array() - 7).matrix();
+    apxchol::test::dense_matrix panel(matrix.rows, 3), output(matrix.rows, 3);
+    std::vector<double> twice_expected(expected.size());
+    for (std::size_t i = 0; i < rhs.size(); ++i) {
+        panel(i, 0) = rhs[i];
+        panel(i, 1) = 2 * rhs[i] + 3;
+        panel(i, 2) = rhs[i] - 7;
+        twice_expected[i] = 2 * expected[i];
+    }
     // Cross the internal PCG centering period while mixing public entry points.
     for (int repeat = 0; repeat < 12; ++repeat) {
         SCOPED_TRACE(repeat);
-        const Eigen::VectorXd scalar = vec(owner.apply(cspan(rhs)));
-        EXPECT_TRUE((scalar.array() == expected.array()).all());
-        EXPECT_GT(owner.solve(cspan(rhs), std::nullopt, 2).iterations, 0);
-        owner.apply(apxchol::test::cmat(panel), apxchol::test::mmat(output));
-        EXPECT_LE((output.col(0) - expected).norm(), tolerance);
-        EXPECT_LE((output.col(1) - 2 * expected).norm(), 2 * tolerance);
-        EXPECT_LE((output.col(2) - expected).norm(), tolerance);
-        for (int column = 0; column < panel.cols(); ++column)
-            EXPECT_NEAR(output.col(column).mean(), 0.0, tolerance);
+        const std::vector<double> scalar = owner.apply(rhs);
+        EXPECT_TRUE(scalar == expected);
+        EXPECT_GT(owner.solve(rhs, std::nullopt, 2).iterations, 0);
+        owner.apply(std::as_const(panel).view(), output.view());
+        EXPECT_LE(apxchol::test::norm(apxchol::test::difference(output.col(0), expected)), tolerance);
+        EXPECT_LE(apxchol::test::norm(apxchol::test::difference(output.col(1), twice_expected)), 2 * tolerance);
+        EXPECT_LE(apxchol::test::norm(apxchol::test::difference(output.col(2), expected)), tolerance);
+        for (int column = 0; column < panel.cols; ++column)
+            EXPECT_NEAR(apxchol::test::mean(output.col(column)), 0.0, tolerance);
     }
 }
 
 TEST(PcgFusion, RepeatedSolvesBitIdenticalLaplacian) {
     auto L = grid_laplacian(320, 320);
-    auto b = apxchol::test::random_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows);
     expect_repeated_solves_bit_identical(L, b, /*laplacian=*/true);
 }
 
 TEST(PcgFusion, RepeatedSolvesBitIdenticalSDDM) {
     auto M = sddm_grid(320, 320, 0.5);
-    Eigen::VectorXd b = Eigen::VectorXd::Random(M.rows());
+    const std::vector<double> b = apxchol::test::random_vector(M.rows);
     expect_repeated_solves_bit_identical(M, b, /*laplacian=*/false);
 }
 
@@ -1256,45 +1241,46 @@ TEST(PcgFusion, RepeatedSolvesBitIdenticalSDDM) {
 // into the answer.
 TEST(Grounding, LaplacianSolutionIsMinNorm) {
     auto L = grid_laplacian(60, 60);
-    auto b = apxchol::test::random_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows);
     apxchol::solve_options opts;
     opts.factor_opts.seed = 42;
     opts.backend = apxchol::solve_backend::cpu;
     apxchol::solver slv(csc(L), opts);
-    auto r = slv.solve(cspan(b), 1e-8, 500);
+    auto r = slv.solve(b, 1e-8, 500);
     ASSERT_LT(r.residual, 1e-8);
-    EXPECT_NEAR(vec(r.x).mean(), 0.0, 1e-14 * vec(r.x).cwiseAbs().maxCoeff());
-    EXPECT_LT((L * vec(r.x) - b).norm() / b.norm(), 1e-6);
+    EXPECT_NEAR(apxchol::test::mean(r.x), 0.0, 1e-14 * apxchol::test::max_abs(r.x));
+    EXPECT_LT(apxchol::test::relative_residual(L, r.x, b), 1e-6);
     // Warm start shifted by a constant, tightened tolerance -> PCG iterates
     // from x0; the answer is still mean-zero and still solves the system.
-    Eigen::VectorXd x0 = vec(r.x).array() + 5.0;
+    std::vector<double> x0 = r.x;
+    for (double& v : x0) v += 5.0;
     // Subtracting the offset incurs roundoff at the warm start's scale.
-    const double warm_centering_tol = 1e-14 * x0.cwiseAbs().maxCoeff();
-    auto w = slv.solve(cspan(b), 1e-10, 500, cspan(x0));
+    const double warm_centering_tol = 1e-14 * apxchol::test::max_abs(x0);
+    auto w = slv.solve(b, 1e-10, 500, x0);
     EXPECT_GT(w.iterations, 0);
-    EXPECT_NEAR(vec(w.x).mean(), 0.0, warm_centering_tol);
-    EXPECT_LT((L * vec(w.x) - b).norm() / b.norm(), 1e-8);
+    EXPECT_NEAR(apxchol::test::mean(w.x), 0.0, warm_centering_tol);
+    EXPECT_LT(apxchol::test::relative_residual(L, w.x, b), 1e-8);
     // Already-converged warm start (loose tolerance -> 0 iterations): the
     // early exit centres too.
-    auto e = slv.solve(cspan(b), 1e-6, 500, cspan(x0));
+    auto e = slv.solve(b, 1e-6, 500, x0);
     EXPECT_EQ(e.iterations, 0);
-    EXPECT_NEAR(vec(e.x).mean(), 0.0, warm_centering_tol);
-    EXPECT_LT((L * vec(e.x) - b).norm() / b.norm(), 1e-6);
+    EXPECT_NEAR(apxchol::test::mean(e.x), 0.0, warm_centering_tol);
+    EXPECT_LT(apxchol::test::relative_residual(L, e.x, b), 1e-6);
 }
 
 // Build a weighted grid Laplacian DIRECTLY from fp64 triplets. Deliberately
 // bypasses weighted_grid_laplacian/graph: the graph
 // edge pool stores weights in fp32, so routing the weights through graph
 // would silently quantize them and mask the regression tested below.
-static Eigen::SparseMatrix<double> fp64_weighted_grid_laplacian(
+static Sparse fp64_weighted_grid_laplacian(
         int rows, int cols, double w_horiz, double w_vert) {
     const int n = rows * cols;
     auto id = [cols](int r, int c) { return r * cols + c; };
-    std::vector<Eigen::Triplet<double>> trips;
+    std::vector<Triplet> trips;
     std::vector<double> deg(n, 0.0);
     auto edge = [&](int u, int v, double w) {
-        trips.emplace_back(u, v, -w);
-        trips.emplace_back(v, u, -w);
+        trips.push_back({u, v, -w});
+        trips.push_back({v, u, -w});
         deg[u] += w;
         deg[v] += w;
     };
@@ -1303,10 +1289,8 @@ static Eigen::SparseMatrix<double> fp64_weighted_grid_laplacian(
             if (r + 1 < rows) edge(id(r, c), id(r + 1, c), w_vert);
             if (c + 1 < cols) edge(id(r, c), id(r, c + 1), w_horiz);
         }
-    for (int i = 0; i < n; ++i) trips.emplace_back(i, i, deg[i]);
-    Eigen::SparseMatrix<double> L(n, n);
-    L.setFromTriplets(trips.begin(), trips.end());
-    return L;
+    for (int i = 0; i < n; ++i) trips.push_back({i, i, deg[i]});
+    return apxchol::test::from_triplets(n, n, trips);
 }
 
 // Regression (fp32-quantized wdeg vs exact diag): make_graph used to compute
@@ -1325,7 +1309,7 @@ TEST_F(FactorizeTest, NonFp32ExactWeightsLaplacianNotSDDM) {
 // weights, a genuinely SDDM matrix must still be detected.
 TEST_F(FactorizeTest, NonFp32ExactWeightsSDDMFlagStillSet) {
     auto L = fp64_weighted_grid_laplacian(10, 10, 0.01, 2.0 / 101.0);
-    L.coeffRef(0, 0) += 0.5;
+    add_to_diagonal(L, 0, 0.5);
     auto F = this->factorize_with(L);
     EXPECT_TRUE(F.sddm);
 }
@@ -1365,7 +1349,7 @@ TEST_P(StrategyConvergenceTest, GridConverges) {
     auto [is, name] = GetParam();
     auto L = grid_laplacian(15, 15);
     auto b = apxchol::test::random_rhs(225);
-    auto res = apxchol::solve(csc(L), cspan(b), 1e-6, 1000,
+    auto res = apxchol::solve(csc(L), b, 1e-6, 1000,
         {}, {.factor_opts = {.seed = 42, .partitioner = is}});
     EXPECT_LT(res.residual, 1e-4)
         << "strategy " << name << " failed: iters=" << res.iterations
@@ -1375,8 +1359,8 @@ TEST_P(StrategyConvergenceTest, GridConverges) {
 TEST_P(StrategyConvergenceTest, SDDMConverges) {
     auto [is, name] = GetParam();
     auto M = sddm_grid(10, 10, 2.0);
-    Eigen::VectorXd b = Eigen::VectorXd::Random(100);
-    auto res = apxchol::solve(csc(M), cspan(b), 1e-6, 1000,
+    const std::vector<double> b = apxchol::test::random_vector(100);
+    auto res = apxchol::solve(csc(M), b, 1e-6, 1000,
         {}, {.factor_opts = {.seed = 42, .partitioner = is}});
     EXPECT_LT(res.residual, 1e-4)
         << "strategy " << name << " failed on SDDM: iters=" << res.iterations
@@ -1406,18 +1390,20 @@ namespace f1_bounds {
 
 // Reconstruct A from F and compute ‖A − Pᵀ L Lᵀ P‖_F / ‖A‖_F.
 static double factor_residual(const apxchol::factorization& F,
-                              const Eigen::SparseMatrix<double>& A) {
-    Eigen::SparseMatrix<double> Lmat = factor_to_eigen(F.L);
-    auto P = perm_to_eigen(F.perm);
-    Eigen::SparseMatrix<double> LLt = Lmat * Lmat.transpose();
-    Eigen::SparseMatrix<double> reconstructed = P.transpose() * LLt * P;
-    Eigen::SparseMatrix<double> diff = A - reconstructed;
-    double a_norm = A.norm();
-    return a_norm == 0.0 ? 0.0 : diff.norm() / a_norm;
+                              const Sparse& A) {
+    // perm[v] is the position of original vertex v: (Pᵀ M P)(i, j) = M(perm[i], perm[j]).
+    const auto Lmat = factor_to_dense(F.L);
+    const auto LLt = apxchol::test::multiply(Lmat, apxchol::test::transpose(Lmat));
+    const auto Ad = apxchol::test::to_dense(A);
+    apxchol::test::dense_matrix reconstructed(A.rows, A.cols);
+    for (std::int64_t j = 0; j < A.cols; ++j)
+        for (std::int64_t i = 0; i < A.rows; ++i) reconstructed(i, j) = LLt(F.perm[i], F.perm[j]);
+    double a_norm = apxchol::test::norm(Ad.data);
+    return a_norm == 0.0 ? 0.0 : apxchol::test::norm(apxchol::test::difference(Ad.data, reconstructed.data)) / a_norm;
 }
 
 static apxchol::factorization factorize_tree(
-        const Eigen::SparseMatrix<double>& A, unsigned seed = 42) {
+        const Sparse& A, unsigned seed = 42) {
     apxchol::factor_options opts{.seed = seed};
     return apxchol::factorize(csc(A), opts);
 }
@@ -1437,13 +1423,13 @@ TEST(FactorQualityTest, SddmGrid20Tree) {
 // ─── Exact-clique-at-low-degree option ──────────────────────────────────────
 TEST(ExactCliqueOption, Grid40_FewerItersThanSampled) {
     auto L = grid_laplacian(40, 40);
-    auto b = apxchol::test::random_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows);
     apxchol::factor_options opts;
     opts.seed = 42;
     opts.partitioner = apxchol::partitioner_kind::block_greedy;
-    auto sampled = apxchol::solve(csc(L), cspan(b), 1e-8, 200, {}, {.factor_opts = opts});
+    auto sampled = apxchol::solve(csc(L), b, 1e-8, 200, {}, {.factor_opts = opts});
     opts.experimental.exact_clique_max_degree = 8;
-    auto exact = apxchol::solve(csc(L), cspan(b), 1e-8, 200, {}, {.factor_opts = opts});
+    auto exact = apxchol::solve(csc(L), b, 1e-8, 200, {}, {.factor_opts = opts});
     EXPECT_LT(exact.residual, 1e-6);
     EXPECT_LE(exact.iterations, sampled.iterations)
         << "exact low-degree cliques should not need more PCG iterations: "
@@ -1457,16 +1443,14 @@ TEST(ExactCliqueOption, Grid40_FewerItersThanSampled) {
 // first round and hands the whole graph to the residual path. That is the same
 // loop the social graphs enter at 70k-830k active.
 namespace {
-Eigen::SparseMatrix<double> clique_laplacian(int n) {
-    Eigen::SparseMatrix<double> L(n, n);
-    std::vector<Eigen::Triplet<double>> t;
+Sparse clique_laplacian(int n) {
+    std::vector<Triplet> t;
     for (int i = 0; i < n; ++i) {
         for (int j = 0; j < n; ++j)
-            if (i != j) t.emplace_back(i, j, -1.0);
-        t.emplace_back(i, i, static_cast<double>(n - 1));
+            if (i != j) t.push_back({i, j, -1.0});
+        t.push_back({i, i, static_cast<double>(n - 1)});
     }
-    L.setFromTriplets(t.begin(), t.end());
-    return L;
+    return apxchol::test::from_triplets(n, n, t);
 }
 }  // namespace
 
@@ -1544,7 +1528,7 @@ TEST(ResidualSparsifyGate, DuplicateHeavyIndexedGraphConvergesWithEitherSetting)
         for (apxchol::node_index v = u + 1; v < n; ++v)
             for (int duplicate = 0; duplicate < 4; ++duplicate)
                 graph.add_edge(u, v, 0.25 * (1 + (u + v + duplicate) % 7));
-    const auto L = apxchol::test::to_eigen(apxchol::detail::laplacian(graph).ref());
+    const auto L = apxchol::test::from_csc(apxchol::detail::laplacian(graph).ref());
     const auto b = apxchol::test::random_rhs(n);
     apxchol::factor_options options;
     options.experimental.parallel_residual_threshold = 5;
@@ -1556,8 +1540,8 @@ TEST(ResidualSparsifyGate, DuplicateHeavyIndexedGraphConvergesWithEitherSetting)
         EXPECT_EQ(timings.total("setup.sparsify_residual") > 0.0, sparsify)
             << "fixture must exercise the residual sparsification gate";
         apxchol::solver solver(csc(L), std::move(factor));
-        const auto result = solver.solve(cspan(b), 1e-8, 500);
-        EXPECT_LT((L * vec(result.x) - b).norm() / b.norm(), 1e-8);
+        const auto result = solver.solve(b, 1e-8, 500);
+        EXPECT_LT(apxchol::test::relative_residual(L, result.x, b), 1e-8);
     }
 }
 
@@ -1619,7 +1603,7 @@ TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
     constexpr int n = 60;
     constexpr size_t thresh = 5;
     const auto L = clique_laplacian(n);
-    const auto b = apxchol::test::random_rhs(L.rows());
+    const auto b = apxchol::test::random_rhs(L.rows);
 
     // Several seeds: the loop must reach the threshold under every one of them.
     // On a clique BK's sample is empty with probability (1-p)^n ~ 3% per round
@@ -1653,7 +1637,7 @@ TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
         if (::testing::Test::HasFatalFailure()) return;
 
         // And it is still a usable preconditioner.
-        const auto res = apxchol::solve(csc(L), cspan(b), 1e-8, 200, {}, {.factor_opts = with_loop});
+        const auto res = apxchol::solve(csc(L), b, 1e-8, 200, {}, {.factor_opts = with_loop});
         EXPECT_LT(res.residual, 1e-8) << "seed " << seed;
     }
 }
@@ -1676,7 +1660,7 @@ TEST(BaumannKyngSeeding, Round0UsesTheSeedInsteadOfTwoMOverActive) {
     std::iota(active.begin(), active.end(), apxchol::node_index{0});
 
     auto is_size = [&](double seed) {
-        auto G = apxchol::detail::make_graph(apxchol::test::eigen_csc(L).ref());
+        auto G = apxchol::detail::make_graph(apxchol::test::internal_csc(L).ref());
         apxchol::detail::baumann_kyng_partitioner bk;
         bk.est_avg_degree = seed;                   // 0 = "work it out yourself"
         apxchol::selection sel;
@@ -1698,7 +1682,7 @@ TEST(BaumannKyngSeeding, Round0UsesTheSeedInsteadOfTwoMOverActive) {
 
 TEST(BaumannKyngWorkHint, MatchesSelectedLiveDegreeSum) {
     const auto L = grid_laplacian(30, 30);
-    auto G = apxchol::detail::make_graph(apxchol::test::eigen_csc(L).ref());
+    auto G = apxchol::detail::make_graph(apxchol::test::internal_csc(L).ref());
     std::vector<apxchol::node_index> active(900);
     std::iota(active.begin(), active.end(), apxchol::node_index{0});
     apxchol::partition_context ctx{
@@ -1850,8 +1834,7 @@ TEST(FactorAdoption, RejectsMalformedArraysPermutationAndRounds) {
         {"oversized round", [](F& f) { f.rounds = {{3, 4}}; }},
         {"dependent round", [](F& f) { f.rounds = {{3, 2}}; }},
     };
-    Eigen::SparseMatrix<double> A(3, 3);
-    A.setIdentity();
+    const Sparse A = apxchol::test::identity(3);
     for (const auto& [name, mutate] : mutations) {
         SCOPED_TRACE(name);
         auto factor = custom_factor_for_adoption();
@@ -1866,24 +1849,24 @@ TEST(FactorAdoption, RejectsMalformedArraysPermutationAndRounds) {
 TEST(FactorAdoption, PreservesCustomEntriesAndRoundMetadata) {
     auto factor = custom_factor_for_adoption();
     factor.rounds = {{3, 0}, {3, 1}, {2, 1}};
-    Eigen::Matrix3d lower = Eigen::Matrix3d::Zero();
+    apxchol::test::dense_matrix lower(3, 3);
     for (int col = 0; col < 3; ++col)
         for (auto p = csc_access::outer(factor.L)[col]; p < csc_access::outer(factor.L)[col + 1]; ++p)
             lower(csc_access::inner(factor.L)[p], col) += csc_access::vals(factor.L)[p];
-    const Eigen::Matrix3d permuted = lower * lower.transpose();
-    Eigen::Matrix3d A;
+    const auto permuted = apxchol::test::multiply(lower, apxchol::test::transpose(lower));
+    apxchol::test::dense_matrix A(3, 3);
     for (int row = 0; row < 3; ++row)
         for (int col = 0; col < 3; ++col)
             A(row, col) = permuted(factor.perm[row], factor.perm[col]);
-    const Eigen::SparseMatrix<double> sparse = A.sparseView();
+    const Sparse sparse = apxchol::test::to_sparse(A);
     apxchol::solver owner(csc(sparse), factor, {
         .factor_opts = {.drop_tolerance = 0}, .backend = apxchol::solve_backend::cpu});
     EXPECT_EQ(csc_access::inner(owner.factor().L), csc_access::inner(factor.L));
     EXPECT_EQ(csc_access::vals(owner.factor().L), csc_access::vals(factor.L));
     EXPECT_EQ(owner.factor().rounds.size(), factor.rounds.size());
-    const Eigen::Vector3d b(1, 2, -3);
-    const Eigen::Vector3d x = vec(owner.apply(cspan(b)));
-    EXPECT_LT((A * x - b).norm(), 1e-12);
+    const std::vector<double> b{1, 2, -3};
+    const std::vector<double> x = owner.apply(b);
+    EXPECT_LT(apxchol::test::norm(apxchol::test::difference(apxchol::test::multiply(sparse, x), b)), 1e-12);
 }
 
 TEST(FactorAdoption, GroundedColumnMayBeEmptyOrZero) {
@@ -1893,12 +1876,12 @@ TEST(FactorAdoption, GroundedColumnMayBeEmptyOrZero) {
         csc_access::n(factor.L) = 1;
         csc_access::outer(factor.L) = {0, apxchol::edge_index(!empty)};
         if (!empty) { csc_access::inner(factor.L) = {0}; csc_access::vals(factor.L) = {0}; }
-        const Eigen::SparseMatrix<double> zero(1, 1);
+        const Sparse zero(1, 1);
         apxchol::solver owner(csc(zero), std::move(factor),
                               {.backend = apxchol::solve_backend::cpu});
-        const Eigen::VectorXd rhs = Eigen::VectorXd::Zero(1);
-        const Eigen::VectorXd result = vec(owner.apply(cspan(rhs)));
-        EXPECT_TRUE(result.isZero());
+        const std::vector<double> rhs(1, 0.0);
+        const std::vector<double> result = owner.apply(rhs);
+        EXPECT_LE(apxchol::test::max_abs(result), 1e-12);
     }
 }
 
@@ -2100,11 +2083,10 @@ TEST(GpuBoundedSelection, OwnedZeroDegreeCandidatesMakeProgress) {
     const scoped_omp_threads serial(1);
     for (const bounded_vertex n : {1u, 33u}) {
         SCOPED_TRACE(n);
-        Eigen::SparseMatrix<double> A(n, n);
-        std::vector<Eigen::Triplet<double>> diagonal;
-        for (bounded_vertex v = 0; v < n; ++v) diagonal.emplace_back(v, v, 0.0);
-        A.setFromTriplets(diagonal.begin(), diagonal.end());
-        const apxchol::test::eigen_csc input(A);
+        std::vector<Triplet> diagonal;
+        for (bounded_vertex v = 0; v < n; ++v) diagonal.push_back({std::int64_t(v), std::int64_t(v), 0.0});
+        const Sparse A = apxchol::test::from_triplets(n, n, diagonal);
+        const apxchol::test::internal_csc input(A);
         ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(input.ref()));
         apxchol::detail::gpu_round_shadow_session owner(true);
         std::unique_ptr<apxchol::detail::gpu_block_frontend> gpu;
@@ -2131,9 +2113,9 @@ TEST(GpuBoundedSelection, OwnedZeroDegreeCandidatesMakeProgress) {
 TEST(GpuBoundedSelection, ConsumingSolveChecksOriginalOperatorResidual) {
     const scoped_omp_threads serial(1);
     const auto A = grid_laplacian(9, 7);
-    Eigen::VectorXd exact(A.rows());
-    for (Eigen::Index i = 0; i < exact.size(); ++i) exact[i] = std::sin(double(i) + 0.25);
-    const Eigen::VectorXd b = A * exact;
+    std::vector<double> exact(A.rows);
+    for (std::size_t i = 0; i < exact.size(); ++i) exact[i] = std::sin(double(i) + 0.25);
+    const std::vector<double> b = apxchol::test::multiply(A, exact);
     for (const unsigned seed : {0u, 42u}) {
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::gpu;
@@ -2141,22 +2123,22 @@ TEST(GpuBoundedSelection, ConsumingSolveChecksOriginalOperatorResidual) {
         options.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
         options.factor_opts.drop_tolerance = 0;
         options.factor_opts.partition.degree_quantile = 0.5;
-        Eigen::VectorXd first_solution;
-        Eigen::Index first_iterations = 0;
+        std::vector<double> first_solution;
+        std::int64_t first_iterations = 0;
         for (unsigned repeat = 0; repeat < 2; ++repeat) {
             apxchol::detail::checkpoint timings;
-            const auto solved = apxchol::test::with_timings(A, options, timings).solve(cspan(b), 1e-8, 500);
+            const auto solved = apxchol::test::with_timings(A, options, timings).solve(b, 1e-8, 500);
             EXPECT_GT(timings.total("setup.gpu_owned_factorization"), 0.0);
-            const double rr = (A * vec(solved.x) - b).norm() / b.norm();
+            const double rr = apxchol::test::relative_residual(A, solved.x, b);
             EXPECT_TRUE(std::isfinite(rr)); EXPECT_LE(rr, 1e-8);
             std::ostringstream receipt;
             receipt.precision(std::numeric_limits<double>::max_digits10); receipt << rr;
             RecordProperty("bounded_original_rr_" + std::to_string(seed) + "_" +
                            std::to_string(repeat), receipt.str());
             if (repeat == 0) {
-                first_solution = vec(solved.x); first_iterations = solved.iterations;
+                first_solution = solved.x; first_iterations = solved.iterations;
                 std::string bytes = std::to_string(first_iterations);
-                for (Eigen::Index i = 0; i < first_solution.size(); ++i)
+                for (std::size_t i = 0; i < first_solution.size(); ++i)
                     bytes += ":" + std::to_string(std::bit_cast<std::uint64_t>(first_solution[i]));
                 RecordProperty("bounded_solution_" + std::to_string(seed), bytes);
             } else {
@@ -2164,7 +2146,7 @@ TEST(GpuBoundedSelection, ConsumingSolveChecksOriginalOperatorResidual) {
                 ASSERT_EQ(solved.x.size(), static_cast<std::size_t>(first_solution.size()));
                 for (std::size_t i = 0; i < solved.x.size(); ++i)
                     EXPECT_EQ(std::bit_cast<std::uint64_t>(solved.x[i]),
-                              std::bit_cast<std::uint64_t>(first_solution[static_cast<Eigen::Index>(i)]));
+                              std::bit_cast<std::uint64_t>(first_solution[i]));
             }
         }
         // The consuming solve exposes solution/iterations, not an exportable

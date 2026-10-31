@@ -40,7 +40,6 @@ for name in ("LD_LIBRARY_PATH", "LD_PRELOAD", "DYLD_LIBRARY_PATH", "DYLD_INSERT_
     env.pop(name, None)
 subprocess.run(["cmake", "-S", fixture, "-B", build, "-DCMAKE_BUILD_TYPE=Release",
                 f"-Dapxchol_DIR={prefix / 'lib/cmake/apxchol'}",
-                "-DCMAKE_DISABLE_FIND_PACKAGE_Eigen3=ON",
                 "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF",
                 "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF"],
                env=env, check=True, timeout=120)

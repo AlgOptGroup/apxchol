@@ -20,7 +20,6 @@ constexpr int kExactFactorMaxIters = 3;
 
 using apxchol::test::grid_laplacian;
 using apxchol::test::csc;
-using apxchol::test::cspan;
 
 // Exact Schur-complement clique: zero sampling variance, more fill.
 struct exact_clique_eliminator {
@@ -68,20 +67,20 @@ const apxchol::solve_options on_cpu{.backend = apxchol::solve_backend::cpu};
 
 TEST(CustomEliminator, ExactCliqueConverges) {
     auto L = grid_laplacian(20, 20);
-    auto b = apxchol::test::random_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows);
 
     // Matrix-level convenience overload (graph built internally).
     auto F = apxchol::factorize(csc(L), exact_clique_eliminator{});
     EXPECT_GT(F.L.nonZeros(), 0u);
 
     apxchol::solver slv(csc(L), std::move(F));
-    auto res = slv.solve(cspan(b), 1e-8, 500);
+    auto res = slv.solve(b, 1e-8, 500);
     EXPECT_LT(res.residual, 1e-8);
 }
 
 TEST(CustomEliminator, LambdaViaAsEliminator) {
     auto L = grid_laplacian(15, 15);
-    auto b = apxchol::test::random_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows);
 
     // Same exact-clique rule, expressed as a lambda.
     auto F = apxchol::factorize(csc(L), apxchol::as_eliminator(
@@ -95,7 +94,7 @@ TEST(CustomEliminator, LambdaViaAsEliminator) {
         }));
 
     apxchol::solver slv(csc(L), std::move(F));
-    auto res = slv.solve(cspan(b), 1e-8, 500);
+    auto res = slv.solve(b, 1e-8, 500);
     EXPECT_LE(res.iterations, kExactFactorMaxIters);   // exact factor
     EXPECT_LT(res.residual, 1e-8);
 }
@@ -132,13 +131,13 @@ TEST(CustomEliminator, ExactCliqueFactorIsExact) {
     // With the exact clique rule the factorization is exact Cholesky:
     // P^T L L^T P == A up to roundoff (no sampling at all).
     auto A = grid_laplacian(8, 8);
-    auto b = apxchol::test::random_rhs(A.rows());
+    auto b = apxchol::test::random_rhs(A.rows);
     auto solve_once = [&](apxchol::factor_storage_type storage) {
         auto F = apxchol::factorize(csc(A), exact_clique_eliminator{});
         apxchol::solve_options options;
         options.factor_opts.factor_storage = storage;
         apxchol::solver slv(csc(A), std::move(F), options);
-        return slv.solve(cspan(b), 1e-12, 50);
+        return slv.solve(b, 1e-12, 50);
     };
     for (bool fp16 : {false, true}) {
         if (fp16 && !apxchol::detail::omp_sptrsv::fp16_supported()) continue;
@@ -154,7 +153,7 @@ TEST(CustomEliminator, ExactCliqueFactorIsExact) {
 TEST(CustomPartitioner, StatefulInstanceConverges) {
     const int k = 20;
     auto L = grid_laplacian(k, k);
-    auto b = apxchol::test::random_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows);
 
     priority_partitioner part;
     part.priority.resize(size_t(k) * k);
@@ -167,13 +166,13 @@ TEST(CustomPartitioner, StatefulInstanceConverges) {
     EXPECT_FALSE(F.rounds.empty());
 
     apxchol::solver slv(csc(L), std::move(F));
-    auto res = slv.solve(cspan(b), 1e-8, 500);
+    auto res = slv.solve(b, 1e-8, 500);
     EXPECT_LT(res.residual, 1e-8);
 }
 
 TEST(CustomPartitioner, LambdaViaAsPartitioner) {
     auto L = grid_laplacian(15, 15);
-    auto b = apxchol::test::random_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows);
 
     // Trivial-but-valid rule: greedily select an independent set in the
     // natural active order (the selection answers membership queries).
@@ -191,7 +190,7 @@ TEST(CustomPartitioner, LambdaViaAsPartitioner) {
 
     auto F = apxchol::factorize(csc(L), std::move(part));
     apxchol::solver slv(csc(L), std::move(F));
-    auto res = slv.solve(cspan(b), 1e-8, 500);
+    auto res = slv.solve(b, 1e-8, 500);
     EXPECT_LT(res.residual, 1e-8);
 }
 
@@ -224,14 +223,14 @@ TEST(CustomPartitioner, GraphViewMatchesPrepassDegrees) {
 
 TEST(SetFactor, ExternalFactorizationInPreconditioner) {
     auto L = grid_laplacian(15, 15);
-    auto b = apxchol::test::random_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows);
 
     auto F = apxchol::factorize(csc(L));
 
     apxchol::solver M(csc(L), std::move(F), on_cpu);
-    Eigen::VectorXd z = apxchol::test::vec(M.apply(cspan(b)));
-    EXPECT_TRUE(z.allFinite());
-    EXPECT_GT(z.norm(), 0.0);
+    const std::vector<double> z = M.apply(b);
+    EXPECT_TRUE(apxchol::test::all_finite(z));
+    EXPECT_GT(apxchol::test::norm(z), 0.0);
 }
 
 TEST(FactorExport, InstalledFactorIsAlwaysAvailable) {
@@ -252,45 +251,45 @@ TEST(FactorExport, InstalledFactorIsAlwaysAvailable) {
 
 TEST(InitialGuess, ExactX0ConvergesImmediately) {
     auto L = grid_laplacian(15, 15);
-    auto b = apxchol::test::random_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows);
 
     apxchol::solver slv(csc(L), on_cpu);
-    auto ref = slv.solve(cspan(b), 1e-10, 1000);
+    auto ref = slv.solve(b, 1e-10, 1000);
     ASSERT_LT(ref.residual, 1e-10);
 
-    auto warm = slv.solve(cspan(b), 1e-8, 500, ref.x);
+    auto warm = slv.solve(b, 1e-8, 500, ref.x);
     EXPECT_EQ(warm.iterations, 0);
     EXPECT_LT(warm.residual, 1e-8);
 
     // A wrong-size x0 is rejected loudly (consistent with the adopting ctor).
-    Eigen::VectorXd bad = Eigen::VectorXd::Ones(3);
-    EXPECT_THROW(slv.solve(cspan(b), 1e-8, 500, cspan(bad)), std::invalid_argument);
+    const std::vector<double> bad(3, 1.0);
+    EXPECT_THROW(slv.solve(b, 1e-8, 500, bad), std::invalid_argument);
 }
 
 TEST(OutputMemory, SolveIntoCallerBuffer) {
     auto L = grid_laplacian(15, 15);
-    auto b = apxchol::test::random_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows);
     apxchol::solver slv(csc(L), on_cpu);
 
-    auto ref = slv.solve(cspan(b));
-    Eigen::VectorXd x(L.rows());
-    auto res = slv.solve(cspan(b), apxchol::test::mspan(x), 1e-8, 500);
+    auto ref = slv.solve(b);
+    std::vector<double> x(L.rows);
+    auto res = slv.solve(b, x, 1e-8, 500);
     EXPECT_EQ(res.x.size(), 0u);                 // solution lives in x, not res
     EXPECT_LT(res.residual, 1e-8);
-    EXPECT_LT((x - apxchol::test::vec(ref.x)).norm(), 1e-10 * apxchol::test::vec(ref.x).norm() + 1e-14);
+    EXPECT_LT(apxchol::test::norm(apxchol::test::difference(x, ref.x)), 1e-10 * apxchol::test::norm(ref.x) + 1e-14);
 
-    Eigen::VectorXd wrong(3);
-    EXPECT_THROW(slv.solve(cspan(b), apxchol::test::mspan(wrong)), std::invalid_argument);
+    std::vector<double> wrong(3);
+    EXPECT_THROW(slv.solve(b, std::span<double>(wrong)), std::invalid_argument);
 }
 
 TEST(SolveHonesty, ZeroIterationSolveDoesNotClaimConvergence) {
     auto L = grid_laplacian(10, 10);
-    auto b = apxchol::test::random_rhs(L.rows());
+    auto b = apxchol::test::random_rhs(L.rows);
     apxchol::solver slv(csc(L), on_cpu);
 
     // max_iter = 0: no PCG update ran, so the reported relative residual must
     // be the honest ||b - A*0|| / ||b|| = 1, never the field's 0.0 default.
-    auto res = slv.solve(cspan(b), 1e-8, 0);
+    auto res = slv.solve(b, 1e-8, 0);
     EXPECT_EQ(res.iterations, 0);
     EXPECT_GE(res.residual, 1.0);
 }
@@ -298,12 +297,12 @@ TEST(SolveHonesty, ZeroIterationSolveDoesNotClaimConvergence) {
 TEST(SolveHonesty, ZeroRhsReturnsZero) {
     const auto L = grid_laplacian(3, 3);
     apxchol::solver solver(csc(L), on_cpu);
-    const Eigen::VectorXd b = Eigen::VectorXd::Zero(L.rows());
+    const std::vector<double> b(L.rows, 0.0);
 
-    const auto result = solver.solve(cspan(b));
+    const auto result = solver.solve(b);
 
-    ASSERT_EQ(result.x.size(), static_cast<std::size_t>(L.rows()));
-    EXPECT_TRUE(apxchol::test::vec(result.x).isZero(0.0));
+    ASSERT_EQ(result.x.size(), static_cast<std::size_t>(L.rows));
+    EXPECT_EQ(apxchol::test::max_abs(result.x), 0.0);
     EXPECT_EQ(result.iterations, 0);
     EXPECT_EQ(result.residual, 0.0);
 }
@@ -311,13 +310,14 @@ TEST(SolveHonesty, ZeroRhsReturnsZero) {
 TEST(SolveHonesty, ZeroRhsReturnsZeroWithWarmStart) {
     const auto L = grid_laplacian(3, 3);
     apxchol::solver solver(csc(L), on_cpu);
-    const Eigen::VectorXd b = Eigen::VectorXd::Zero(L.rows());
-    const Eigen::VectorXd x0 = Eigen::VectorXd::LinSpaced(L.rows(), -2.0, 2.0);
+    const std::vector<double> b(L.rows, 0.0);
+    std::vector<double> x0(L.rows);
+    for (std::size_t i = 0; i < x0.size(); ++i) x0[i] = -2.0 + 4.0 * double(i) / double(x0.size() - 1);
 
-    const auto result = solver.solve(cspan(b), 1e-8, 200, cspan(x0));
+    const auto result = solver.solve(b, 1e-8, 200, x0);
 
-    ASSERT_EQ(result.x.size(), static_cast<std::size_t>(L.rows()));
-    EXPECT_TRUE(apxchol::test::vec(result.x).isZero(0.0));
+    ASSERT_EQ(result.x.size(), static_cast<std::size_t>(L.rows));
+    EXPECT_EQ(apxchol::test::max_abs(result.x), 0.0);
     EXPECT_EQ(result.iterations, 0);
     EXPECT_EQ(result.residual, 0.0);
 }

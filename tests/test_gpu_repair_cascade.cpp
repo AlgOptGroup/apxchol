@@ -39,18 +39,16 @@ cascade_fixture make_fixture(node_index n) {
     return fixture;
 }
 
-Eigen::SparseMatrix<double> owned_matrix(const cascade_fixture& fixture) {
+apxchol::test::sparse_matrix owned_matrix(const cascade_fixture& fixture) {
     const auto n = static_cast<int>(fixture.active.size());
-    std::vector<Eigen::Triplet<double>> entries;
+    std::vector<apxchol::test::triplet> entries;
     for (const auto& edge : fixture.edges) {
-        entries.emplace_back(edge.u, edge.v, -1.0);
-        entries.emplace_back(edge.v, edge.u, -1.0);
+        entries.push_back({std::int64_t(edge.u), std::int64_t(edge.v), -1.0});
+        entries.push_back({std::int64_t(edge.v), std::int64_t(edge.u), -1.0});
     }
     for (int v = 0; v < n; ++v)
-        entries.emplace_back(v, v, static_cast<double>(fixture.neighbors[v].size()) + 0.5);
-    Eigen::SparseMatrix<double> result(n, n);
-    result.setFromTriplets(entries.begin(), entries.end());
-    return result;
+        entries.push_back({v, v, static_cast<double>(fixture.neighbors[v].size()) + 0.5});
+    return apxchol::test::from_triplets(n, n, entries);
 }
 } // namespace
 #endif
@@ -64,14 +62,14 @@ TEST(GpuBlockFrontend, OwnedBoundedSelectionMakesIndependentProgress) {
         SCOPED_TRACE(n);
         const auto fixture = make_fixture(n);
         const auto matrix = owned_matrix(fixture);
-        ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(apxchol::test::eigen_csc(matrix)));
+        ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(apxchol::test::internal_csc(matrix)));
         for (const bool degree_tiebreak : {false, true}) {
             SCOPED_TRACE(degree_tiebreak);
             // Destruction is ordered: the borrowing frontend dies before its
             // numerical owner; both die before the input matrix's outer scope.
             apxchol::detail::gpu_round_shadow_session owner(true);
             std::unique_ptr<gpu_block_frontend> gpu;
-            owner.initialize_owned_csc(apxchol::detail::gpu_owned_csc_host_buffers(apxchol::test::eigen_csc(matrix)), gpu);
+            owner.initialize_owned_csc(apxchol::detail::gpu_owned_csc_host_buffers(apxchol::test::internal_csc(matrix)), gpu);
             ASSERT_TRUE(gpu);
             apxchol::partition_options options;
             options.degree_quantile = 0.0;
