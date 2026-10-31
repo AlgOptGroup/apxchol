@@ -572,13 +572,15 @@ TEST(GpuSolveHonesty, FinalResidualChecksReturnedScalarAndPairOnReuse) {
         EXPECT_EQ(iterations, 0);
         EXPECT_NEAR(reported, independent_residual(a, base, output), 2e-14);
 
-        // A breakdown after progress must not start another solve attempt.
+        // A breakdown after progress must not start another solve attempt: one
+        // attempt enqueues one batch, whose later iterations the device skips.
+        constexpr unsigned one_batch = apxchol::detail::gpu_pcg::kBatchIterations;
         preconditioner.breakdown = false;
         preconditioner.breakdown_after = 1;
         preconditioner.calls = 0;
         pcg_solve(solver, preconditioner, base, output, 1e-12, 100, iterations, reported, laplacian, &warm);
         EXPECT_EQ(iterations, 1);
-        EXPECT_EQ(preconditioner.calls, 2u);
+        EXPECT_EQ(preconditioner.calls, one_batch);
         EXPECT_GT(reported, 1e-12);
         EXPECT_NEAR(reported, independent_residual(a, base, output), 2e-14);
         Eigen::MatrixXd rhs(n, 4), panel(n, 4);
@@ -587,7 +589,7 @@ TEST(GpuSolveHonesty, FinalResidualChecksReturnedScalarAndPairOnReuse) {
         std::array<double, 4> residuals{};
         preconditioner.calls = 0;
         solver.solve_panel<4>(preconditioner, rhs, panel, 1e-12, 100, counts, residuals, laplacian);
-        EXPECT_EQ(preconditioner.calls, 2u);
+        EXPECT_EQ(preconditioner.calls, one_batch);
         EXPECT_EQ(counts, (std::array<int, 4>{1, 0, 1, 1}));
         for (unsigned q = 0; q < 4; ++q)
             EXPECT_NEAR(residuals[q], independent_residual(a, rhs.col(q), panel.col(q)), 2e-14);

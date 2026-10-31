@@ -1,7 +1,7 @@
 #pragma once
 // GPU-owned operator and reusable PCG workspace. Kernels use native FP64,
-// fixed reductions and the shared device recurrence; only the completed state
-// is read by the host each iteration. The core links cudart alone.
+// fixed reductions and the shared device recurrence; the host reads only the
+// completed state, once per batch of iterations. The core links cudart alone.
 
 #include <Eigen/Sparse>
 #include <Eigen/Core>
@@ -246,7 +246,7 @@ private:
             commands.step(detail::gpu_pcg::operation::residual);
             commands.finalize(detail::gpu_pcg::kFinalizeCheck, 0);
         }
-        detail::gpu_pcg::solve(commands, std::max(max_iter, 0), 1);
+        detail::gpu_pcg::solve(commands, std::max(max_iter, 0));
         cuda_pcg_kernels::finish<Columns>(stream_, n_, vectors_, op_->matrix, spmv_lanes_, laplacian, scales, bnorm);
         APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(h_state_, vectors_.state,
             Columns * sizeof(*vectors_.state), cudaMemcpyDeviceToHost, stream_));
