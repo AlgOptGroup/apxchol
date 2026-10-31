@@ -49,6 +49,7 @@
 #include <set>
 #include <thread>
 #include <utility>
+#include <optional>
 
 #if defined(__linux__)
 #include <sched.h>
@@ -98,42 +99,42 @@
 #ifdef HAVE_APXCHOL_V1
 struct V1Combo {
     const char* name;
-    std::string is;
+    apxchol::partitioner_kind partitioner;
     size_t exact_clique_max_degree = 0; // 0 = off; emit exact clique when deg <= this
     double degree_mult = 0.0;           // 0 = use fopts default (2.0); else override the IS cap
     apxchol::clique_sampler sampler = apxchol::clique_sampler::gks; // gks | trace_cycle
-    size_t exact_core_max_h = apxchol::exact_core_by_route;  // trace_cycle: exact clique on heavy cores with h <= this (sentinel = library default)
+    std::optional<size_t> exact_core_max_h;  // trace_cycle: exact clique on heavy cores with h <= this (unset = library default)
     size_t double_cycle_min_h = 0;      // trace_cycle: two cycles on heavy cores with h >= this
 };
 static const V1Combo v1_combos[] = {
-    {.name="bg+tree[vec_pool_aos]", .is="block_greedy"},
-    {.name="bk+tree[vec_pool_aos]", .is="baumann_kyng"},
-    {.name="greedy+tree[vec_pool_aos]", .is="priority_greedy"},
+    {.name="bg+tree[vec_pool_aos]", .partitioner=apxchol::partitioner_kind::block_greedy},
+    {.name="bk+tree[vec_pool_aos]", .partitioner=apxchol::partitioner_kind::baumann_kyng},
+    {.name="greedy+tree[vec_pool_aos]", .partitioner=apxchol::partitioner_kind::priority_greedy},
     // Cycle-core samplers on the headline storage (2026-09-18). /ec5 = exact
     // clique on heavy cores of <= 5 vertices; /dc32 = two cycles on cores of
     // >= 32 vertices; /ec5dc32 = both. See factor_options for the rationale.
-    {.name="bg+trace_cycle[vec_pool_aos]", .is="block_greedy",
+    {.name="bg+trace_cycle[vec_pool_aos]", .partitioner=apxchol::partitioner_kind::block_greedy,
      .sampler=apxchol::clique_sampler::trace_cycle},
-    {.name="bg+trace_cycle/ec5[vec_pool_aos]", .is="block_greedy",
+    {.name="bg+trace_cycle/ec5[vec_pool_aos]", .partitioner=apxchol::partitioner_kind::block_greedy,
      .sampler=apxchol::clique_sampler::trace_cycle, .exact_core_max_h=5},
-    {.name="bg+trace_cycle/dc32[vec_pool_aos]", .is="block_greedy",
+    {.name="bg+trace_cycle/dc32[vec_pool_aos]", .partitioner=apxchol::partitioner_kind::block_greedy,
      .sampler=apxchol::clique_sampler::trace_cycle, .double_cycle_min_h=32},
-    {.name="bg+trace_cycle/ec5dc32[vec_pool_aos]", .is="block_greedy",
+    {.name="bg+trace_cycle/ec5dc32[vec_pool_aos]", .partitioner=apxchol::partitioner_kind::block_greedy,
      .sampler=apxchol::clique_sampler::trace_cycle, .exact_core_max_h=5, .double_cycle_min_h=32},
     // Quality levers: exact full clique at low degree (xcN), relaxed IS degree cap (capN).
-    {.name="bg+tree/xc4[vec_pool_aos]",  .is="block_greedy", .exact_clique_max_degree=4},
-    {.name="bg+tree/xc8[vec_pool_aos]",  .is="block_greedy", .exact_clique_max_degree=8},
-    {.name="bg+tree/xc16[vec_pool_aos]", .is="block_greedy", .exact_clique_max_degree=16},
-    {.name="bg+tree/cap4[vec_pool_aos]", .is="block_greedy", .degree_mult=4.0},
+    {.name="bg+tree/xc4[vec_pool_aos]",  .partitioner=apxchol::partitioner_kind::block_greedy, .exact_clique_max_degree=4},
+    {.name="bg+tree/xc8[vec_pool_aos]",  .partitioner=apxchol::partitioner_kind::block_greedy, .exact_clique_max_degree=8},
+    {.name="bg+tree/xc16[vec_pool_aos]", .partitioner=apxchol::partitioner_kind::block_greedy, .exact_clique_max_degree=16},
+    {.name="bg+tree/cap4[vec_pool_aos]", .partitioner=apxchol::partitioner_kind::block_greedy, .degree_mult=4.0},
 };
 
 static apxchol::factor_options v1_factor_options(const V1Combo& combo,
                                                 apxchol::factor_options opts) {
-    opts.is_select = combo.is;
+    opts.partitioner = combo.partitioner;
     opts.sampler = combo.sampler;
-    opts.exact_clique_max_degree = combo.exact_clique_max_degree;
-    opts.exact_core_max_h = combo.exact_core_max_h;
-    opts.double_cycle_min_h = combo.double_cycle_min_h;
+    opts.experimental.exact_clique_max_degree = combo.exact_clique_max_degree;
+    opts.experimental.exact_core_max_h = combo.exact_core_max_h;
+    opts.experimental.double_cycle_min_h = combo.double_cycle_min_h;
     if (combo.degree_mult > 0) {
         opts.partition.degree_quantile = 0;
         opts.partition.degree_multiplier = combo.degree_mult;
@@ -1122,7 +1123,7 @@ static Args parse_args(int argc, char** argv) {
         else if (arg == "--factor-storage")
             a.v1_options.factor_opts.factor_storage = apxchol::detail::parse_factor_storage(next());
         else if (arg == "--cpu-schedule")
-            a.v1_options.factor_opts.cpu_schedule = apxchol::detail::parse_cpu_schedule(next());
+            a.v1_options.factor_opts.experimental.cpu_schedule = apxchol::detail::parse_cpu_schedule(next());
         else if (arg == "--factor-drop") a.v1_options.factor_opts.drop_tolerance = std::stod(next());
         else if (arg == "--regularization") a.v1_options.factor_opts.regularization = std::stod(next());
         else if (arg == "--lump-max-mass") a.v1_options.factor_opts.lump_max_mass = std::stod(next());

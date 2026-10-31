@@ -58,8 +58,11 @@ Unspecified fields use the C++ defaults. Unknown fields are rejected.
 |---|---|
 | `num_threads` | CPU thread ceiling; `0` inherits the caller's OpenMP setting |
 | `seed` | Sampling seed |
+| `partitioner` | `block_greedy` (default), `priority_greedy` or `baumann_kyng` |
+| `sampler` | Clique sampler: `gks` (default) or `trace_cycle` (CPU and CUDA only) |
 | `factor_storage` | `auto`, `float16` or `float32`; affects triangular-solve storage |
-| `cpu_schedule` | CPU triangular-solve scheduling: `auto` or `levels` |
+| `degree_quantile` | Degree cutoff quantile in `[0, 1)`; `0` selects the multiplier-based cutoff (Metal requires `(0, 1)`); omitted uses the default |
+| `degree_multiplier` | Positive degree multiplier, used only when `degree_quantile` is `0` |
 | `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
 | `regularization` | Minimum diagonal excess of the preconditioner, as a fraction of each diagonal after lumping; excess below 1e-12 of the diagonal counts as zero first; `A` is not modified; `0` disables it |
 | `lump_max_mass` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
@@ -67,7 +70,7 @@ Unspecified fields use the C++ defaults. Unknown fields are rejected.
 | `verbose` | Logical flag for setup diagnostics; off by default |
 
 See [precision](../docs/precision.md) and the [native option reference](../docs/reference/cpp.md)
-for storage behavior and advanced controls.
+for storage behavior and the meaning of each control.
 
 ## Save and load a solver
 

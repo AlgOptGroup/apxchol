@@ -68,13 +68,44 @@ and unique, and every stored off-diagonal `(i, j)` needs its matching `(j, i)`.
 GPU setup also requires 32-bit vertex indices.
 
 CPU setup supports custom partitioners and eliminators. CUDA setup supports
-`block_greedy`, natural residual peeling, and GKS or trace-cycle sampling;
-exact-clique, exact-core and double-cycle overrides require CPU construction.
+`block_greedy` and GKS or trace-cycle sampling; the experimental exact-clique,
+exact-core and double-cycle rules require CPU construction.
 Metal setup supports the default `block_greedy`/GKS options and FP32 graph
 weights. See [precision limits](precision.md#apple-metal-pcg) for Metal ranges.
 
 These construction restrictions do not prevent using an explicitly supplied
 host factor with a GPU solver. See [factor handoff](extending.md#reusing-a-custom-factor).
+
+## Option names
+
+Each interface spells the stable options as follows. Python and MATLAB/Octave
+take setup options as keywords or struct fields, and the solve tolerance and
+iteration budget as solve arguments.
+
+| C++ | CLI | Python | MATLAB/Octave |
+|---|---|---|---|
+| `solve_options::backend` | `--backend` | `backend` | CPU only |
+| `solve_options::num_threads` | `--threads` | `num_threads` | `num_threads` |
+| `solve_options::keep_factor_values` | | `keep_factor` | `keep_factor` |
+| `solve_options::tol` | `--tol` | `rtol` (solve argument) | `rtol` (solve argument) |
+| `solve_options::max_iter` | `--max-iter` | `maxiter` (solve argument) | `maxiter` (solve argument) |
+| `factor_options::seed` | `--seed` | `seed` | `seed` |
+| `factor_options::partitioner` | `--partitioner` | `partitioner` | `partitioner` |
+| `factor_options::sampler` | `--sampler` | `sampler` | `sampler` |
+| `factor_options::factor_storage` | `--factor-storage` | `factor_storage_dtype` | `factor_storage` |
+| `factor_options::drop_tolerance` | `--drop-tolerance` | `drop_tolerance` | `drop_tolerance` |
+| `factor_options::regularization` | `--regularization` | `regularization` | `regularization` |
+| `factor_options::lump_max_mass` | `--lump-max-mass` | `lump_max_mass` | `lump_max_mass` |
+| `partition_options::degree_quantile` | `--degree-quantile` | `degree_quantile` | `degree_quantile` |
+| `partition_options::degree_multiplier` | `--degree-multiplier` | `degree_multiplier` | `degree_multiplier` |
+| `factor_options::verbose` | `--verbose` | `verbose` | `verbose` |
+
+The partitioner (`block_greedy`, `priority_greedy` or `baumann_kyng`) and the
+sampler (`gks` or `trace_cycle`) take the same names everywhere. Factor storage
+is `auto`, `float16` or `float32` in the CLI and MATLAB/Octave, a NumPy dtype
+in Python's `factor_storage_dtype`, and `factor_storage_type::automatic`,
+`fp16` or `fp32` in C++. The research controls in `factor_options::experimental` are
+available only from C++; see the [API policy](api.md).
 
 ## Reuse, batches and initial guesses
 

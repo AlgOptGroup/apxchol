@@ -658,7 +658,7 @@ def test_iteration_limit_requires_integer(value):
         solver.solve(np.ones(2), maxiter=value)
 
 
-@pytest.mark.parametrize("name", ["seed", "num_threads", "exact_clique_max_degree"])
+@pytest.mark.parametrize("name", ["seed", "num_threads"])
 def test_integer_setup_options_do_not_truncate(name):
     with pytest.raises(TypeError):
         apxchol.factorize(sp.eye(2, format="csc"), **{name: 1.5})
@@ -676,7 +676,9 @@ def test_omitted_solver_defaults_match_compiled_defaults():
 
 
 @pytest.mark.parametrize("construct", [apxchol.Solver, apxchol.factorize])
-@pytest.mark.parametrize("options", [{}, {"seed": np.int64(7), "partitioner": "priority_greedy"}])
+@pytest.mark.parametrize("options", [{}, {"seed": np.int64(7), "partitioner": "priority_greedy"},
+                                     {"sampler": "trace_cycle", "degree_quantile": 0,
+                                      "degree_multiplier": 3}])
 def test_factor_settings_match_native_options(construct, options):
     A = grid2d_sddm(8).tocsc()
     solver = construct(A, backend="cpu", num_threads=1, **options)
@@ -688,11 +690,12 @@ def test_factor_settings_match_native_options(construct, options):
         np.testing.assert_array_equal(actual, expected)
 
 
-@pytest.mark.parametrize("cpu_schedule", ["auto", "levels"])
+@pytest.mark.parametrize("sampler", ["gks", "trace_cycle"])
 @pytest.mark.parametrize("drop_tolerance", [0, 1])
-def test_explicit_factor_settings(cpu_schedule, drop_tolerance):
+def test_explicit_factor_settings(sampler, drop_tolerance):
     A = grid2d_sddm(6)
-    solver = apxchol.factorize(A, backend="cpu", num_threads=1, cpu_schedule=cpu_schedule,
+    solver = apxchol.factorize(A, backend="cpu", num_threads=1, partitioner="baumann_kyng",
+                               sampler=sampler, degree_quantile=None, degree_multiplier=2,
                                drop_tolerance=drop_tolerance, regularization=0, lump_max_mass=0.25,
                                verbose=False)
     b = np.ones(A.shape[0])
@@ -701,7 +704,10 @@ def test_explicit_factor_settings(cpu_schedule, drop_tolerance):
     assert np.linalg.norm(A @ result.x - b) / np.linalg.norm(b) < 1e-8
 
 
-@pytest.mark.parametrize("option,value", [("cpu_schedule", "unknown"),
+@pytest.mark.parametrize("option,value", [("partitioner", "unknown"), ("sampler", "unknown"),
+                                         ("sampler", 1), ("degree_quantile", 1),
+                                         ("degree_quantile", -0.1), ("degree_multiplier", 0),
+                                         ("cpu_schedule", "auto"), ("residual_peel", "natural"),
                                          ("regularization", -1), ("lump_max_mass", -0.1),
                                          ("lump_max_mass", 1.1)] +
                          [("drop_tolerance", value) for value in
@@ -715,10 +721,10 @@ def test_factor_settings_are_per_instance():
     A = sp.csc_matrix([[1.0, -1.0], [-1.0, 1.0]])
     b = np.array([1.0, -1.0])
     plain = apxchol.factorize(A, backend="cpu", num_threads=1, regularization=0,
-                             lump_max_mass=0, cpu_schedule="auto")
+                             lump_max_mass=0)
     before = plain.solve(b)
     regularized = apxchol.factorize(A, backend="cpu", num_threads=1,
-                                   regularization=0.25, cpu_schedule="levels")
+                                   regularization=0.25)
     assert not plain.sddm and regularized.sddm
     assert regularized.solve(b).converged
     after = plain.solve(b)
