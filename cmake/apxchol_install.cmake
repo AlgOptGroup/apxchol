@@ -1,8 +1,8 @@
 include(CMakePackageConfigHelpers)
 
-function(apxchol_install_core)
+function(_apxchol_install_core)
     get_filename_component(root "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/.." ABSOLUTE)
-    apxchol_openmp_runtime(APXCHOL_OPENMP_RUNTIME)
+    _apxchol_openmp_runtime(APXCHOL_OPENMP_RUNTIME)
     get_target_property(APXCHOL_CORE_TYPE apxchol_core TYPE)
     set(package_dir "${CMAKE_INSTALL_LIBDIR}/cmake/apxchol")
     set(APXCHOL_BUNDLED_EIGEN OFF)
@@ -19,8 +19,15 @@ function(apxchol_install_core)
     configure_package_config_file("${root}/cmake/apxcholConfig.cmake.in"
         "${CMAKE_CURRENT_BINARY_DIR}/apxcholConfig.cmake"
         INSTALL_DESTINATION "${package_dir}")
+    # Source compatibility is promised within a major release from 1.0 on;
+    # 0.x minor releases may break it.
+    if (APXCHOL_VERSION VERSION_LESS 1)
+        set(compatibility SameMinorVersion)
+    else()
+        set(compatibility SameMajorVersion)
+    endif()
     write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/apxcholConfigVersion.cmake"
-        VERSION "${APXCHOL_VERSION}" COMPATIBILITY SameMinorVersion)
+        VERSION "${APXCHOL_VERSION}" COMPATIBILITY ${compatibility})
     install(TARGETS apxchol_core EXPORT apxcholTargets
         ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
         LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"

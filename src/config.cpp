@@ -1,13 +1,13 @@
 #include "config.h"
-#include "apxchol/solver/partitioner_list.h"
+#include "apxchol/solver/factor_options.h"
 #include "apxchol/version.h"
 #include <CLI/CLI.hpp>
 #include <spdlog/spdlog.h>
 #include <cstdio>
 #include <cstdlib>
+#include <array>
 #include <map>
-#include <tuple>
-#include <vector>
+#include <string>
 
 namespace apxchol {
 
@@ -17,10 +17,12 @@ static const std::map<std::string, solve_backend> solve_backend_map = {
     {"gpu", solve_backend::gpu},
 };
 
-static std::vector<std::string> partitioner_names() {
-    return []<typename... Ps>(std::tuple<Ps...>*) {
-        return std::vector<std::string>{std::string(Ps::name)...};
-    }(static_cast<detail::partitioner_list*>(nullptr));
+// CLI11 map for a shared option-name table; numeric spellings are rejected.
+template<class E, std::size_t N>
+static std::map<std::string, E> name_map(const std::array<detail::option_name<E>, N>& table) {
+    std::map<std::string, E> names;
+    for (const auto& entry : table) names.emplace(entry.name, entry.value);
+    return names;
 }
 
 static void setup_logging(bool quiet, bool verbose) {
@@ -86,19 +88,11 @@ run_config parse_args(int argc, char* argv[]) {
     app.add_option("-o,--output", output_str,
                    "Write the solution to a dense MatrixMarket file (n x k for an n x k RHS)");
 
+    const auto samplers = name_map(detail::clique_sampler_names);
     app.add_option("--sampler", cfg.solve_opts.factor_opts.sampler,
                    "Clique sampler: gks or trace_cycle")
-        ->transform(CLI::CheckedTransformer(std::map<std::string, clique_sampler>{
-            {"gks", clique_sampler::gks}, {"trace_cycle", clique_sampler::trace_cycle}}));
-
-    app.add_option("--exact-core-max-h", cfg.solve_opts.factor_opts.exact_core_max_h,
-                   "trace_cycle only: emit the exact clique on heavy cores of at most this "
-                   "many vertices (0 = off; default: 4 on host, 0 for GPU-owned setup)")
-        ->default_str("by route");
-    app.add_option("--double-cycle-min-h", cfg.solve_opts.factor_opts.double_cycle_min_h,
-                   "trace_cycle only: emit two independent cycles on heavy cores of at least "
-                   "this many vertices (0 = off; 20-32 targets hub-like stars)")
-        ->capture_default_str();
+        ->default_str("gks")
+        ->transform(CLI::IsMember(samplers) & CLI::Transformer(samplers));
 
     app.add_option("--backend", cfg.solve_opts.backend,
                    "Complete setup/solve route: auto, cpu or gpu (no runtime fallback)")
@@ -109,18 +103,12 @@ run_config parse_args(int argc, char* argv[]) {
     app.add_option("--threads", cfg.solve_opts.num_threads,
                    "CPU thread ceiling (0 = OpenMP default; small work may use fewer)")
         ->check(CLI::NonNegativeNumber)->capture_default_str();
+    const auto storages = name_map(detail::factor_storage_names);
     app.add_option("--factor-storage", cfg.solve_opts.factor_opts.factor_storage,
                    "Factor storage: auto, float16 or float32")
-        ->transform(CLI::CheckedTransformer(std::map<std::string, factor_storage_type>{
-            {"auto", factor_storage_type::automatic},
-            {"float16", factor_storage_type::fp16},
-            {"float32", factor_storage_type::fp32}}));
-    app.add_option("--cpu-schedule", cfg.solve_opts.factor_opts.cpu_schedule,
-                   "CPU triangular-solve schedule: auto or levels")
-        ->transform(CLI::CheckedTransformer(std::map<std::string, cpu_sptrsv_schedule>{
-            {"auto", cpu_sptrsv_schedule::automatic},
-            {"levels", cpu_sptrsv_schedule::levels}}));
-    app.add_option("--factor-drop", cfg.solve_opts.factor_opts.drop_tolerance,
+        ->default_str("auto")
+        ->transform(CLI::IsMember(storages) & CLI::Transformer(storages));
+    app.add_option("--drop-tolerance", cfg.solve_opts.factor_opts.drop_tolerance,
                    "Relative factor-entry dropping threshold in [0, 1] (0 disables dropping)")
         ->capture_default_str();
     app.add_option("--regularization", cfg.solve_opts.factor_opts.regularization,
@@ -133,31 +121,29 @@ run_config parse_args(int argc, char* argv[]) {
                           "Disable solver timing collection");
     app.add_option("--tol", cfg.solve_opts.tol, "Relative residual tolerance")
         ->capture_default_str();
-    app.add_option("--maxiter", cfg.solve_opts.max_iter, "Maximum PCG iterations")
+    app.add_option("--max-iter", cfg.solve_opts.max_iter, "Maximum PCG iterations")
         ->capture_default_str();
     app.add_option("--seed", cfg.solve_opts.factor_opts.seed,
                    "Random seed for factorization and test RHS")
         ->capture_default_str();
     app.add_option("--degree-quantile", cfg.solve_opts.factor_opts.partition.degree_quantile,
-                   "IS degree cap as a quantile of current degrees in (0,1); "
-                   "0 = use --degree-multiplier; -1 = pick by route "
-                   "(0.2 CPU/Metal, 0.5 CUDA; Metal requires (0,1))")
-        ->capture_default_str();
+                   "IS degree cap as a quantile of current degrees in [0, 1); "
+                   "0 = use --degree-multiplier; omitted = route default "
+                   "(0.2 CPU/Metal, 0.5 CUDA; Metal requires (0, 1))")
+        ->default_str("by route");
     app.add_option("--degree-multiplier", cfg.solve_opts.factor_opts.partition.degree_multiplier,
                    "IS degree threshold = multiplier × avg_degree "
                    "(fallback, used only when --degree-quantile is 0)")
         ->capture_default_str();
-    app.add_option("--omp-threshold", cfg.solve_opts.factor_opts.omp_threshold,
-                   "Min active vertices before engaging OpenMP")
-        ->capture_default_str();
-    const std::vector<std::string> partitioners = partitioner_names();
-    std::string partitioner_help = "Independent set strategy (";
-    for (std::size_t i = 0; i < partitioners.size(); ++i)
-        partitioner_help += (i ? ", " : "") + partitioners[i];
-    partitioner_help += ")";
-    app.add_option("--is", cfg.solve_opts.factor_opts.is_select, partitioner_help)
-        ->capture_default_str()
-        ->check(CLI::IsMember(partitioners));
+    const auto partitioners = name_map(detail::partitioner_names);
+    std::string partitioner_help = "Independent set strategy: ";
+    for (std::size_t i = 0; i < detail::partitioner_names.size(); ++i) {
+        if (i) partitioner_help += i + 1 == detail::partitioner_names.size() ? " or " : ", ";
+        partitioner_help += detail::partitioner_names[i].name;
+    }
+    app.add_option("--partitioner", cfg.solve_opts.factor_opts.partitioner, partitioner_help)
+        ->default_str("block_greedy")
+        ->transform(CLI::IsMember(partitioners) & CLI::Transformer(partitioners));
 
     // ── verbosity (mutually exclusive) ──
     auto* q_flag = app.add_flag("-q,--quiet", quiet, "Suppress non-error output");

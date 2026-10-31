@@ -29,7 +29,7 @@ endif()
 set(CMAKE_SYSTEM_PREFIX_PATH "${_apxchol_saved_system_prefix_path}")
 unset(_apxchol_saved_system_prefix_path)
 
-function(apxchol_openmp_runtime output)
+function(_apxchol_openmp_runtime output)
     set(runtimes)
     foreach(library IN LISTS OpenMP_CXX_LIBRARIES)
         get_filename_component(name "${library}" NAME)

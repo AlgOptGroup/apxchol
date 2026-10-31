@@ -247,6 +247,24 @@ operator_scan scan_operator(const Eigen::SparseMatrix<double>& A) {
     return s;
 }
 
+// Shared by the operator check and the input conversion.
+static std::string nonfinite_entries(const operator_scan& s) {
+    return count_of(s.nonfinite, s.stored_nnz, "stored entries") + " are NaN or infinite.";
+}
+
+static std::string asymmetry(const operator_scan& s) {
+    std::string msg = std::to_string(s.asymmetric) + " of " +
+        std::to_string(s.offdiag_nnz) +
+        " off-diagonal entries differ from their transpose partner by more "
+        "than " + num(kSymmetryRelTol) + " relative";
+    if (s.worst_asym_row >= 0)
+        msg += " (worst at (" + std::to_string(s.worst_asym_row) + ", " +
+               std::to_string(s.worst_asym_col) + "): " +
+               num(s.worst_asym_a) + " vs " + num(s.worst_asym_b) + ")";
+    return msg + ". If the file stores one triangle only, declare it `symmetric` "
+                 "in the MatrixMarket header so both triangles are read.";
+}
+
 // A symmetric matrix with no negative off-diagonal is read as a graph by the
 // conversion helpers; name them when the operator reading fails.
 static std::string adjacency_hint(const operator_scan& s) {
@@ -274,22 +292,10 @@ operator_scan require_operator(const Eigen::SparseMatrix<double>& A, double lump
 
     if (s.nonfinite > 0)
         throw std::invalid_argument(
-            kContract + "Condition FAILED: finite values. " +
-            count_of(s.nonfinite, s.stored_nnz, "stored entries") +
-            " are NaN or infinite.");
+            kContract + "Condition FAILED: finite values. " + nonfinite_entries(s));
 
     if (s.asymmetric > 0) {
-        std::string msg = kContract + "Condition FAILED: symmetry. " +
-            std::to_string(s.asymmetric) + " of " +
-            std::to_string(s.offdiag_nnz) +
-            " off-diagonal entries differ from their transpose partner by more "
-            "than " + num(kSymmetryRelTol) + " relative";
-        if (s.worst_asym_row >= 0)
-            msg += " (worst at (" + std::to_string(s.worst_asym_row) + ", " +
-                   std::to_string(s.worst_asym_col) + "): " +
-                   num(s.worst_asym_a) + " vs " + num(s.worst_asym_b) + ")";
-        msg += ". If the file stores one triangle only, declare it `symmetric` "
-               "in the MatrixMarket header so both triangles are read.";
+        std::string msg = kContract + "Condition FAILED: symmetry. " + asymmetry(s);
         throw std::invalid_argument(msg);
     }
 
@@ -402,17 +408,18 @@ std::string describe_operator(const operator_scan& s, Eigen::Index lumped) {
 }
 
 bool is_graph_adjacency(const Eigen::SparseMatrix<double>& M) {
-    try {
-        require_operator(M);
-        return false;
-    } catch (const std::invalid_argument& e) {
-        const operator_scan s = scan_operator(M);
-        const Eigen::Index negative = s.offdiag_nnz - s.offdiag_pos;
-        if (negative == 0 && s.square()) return true;
-        throw std::invalid_argument(
-            std::string(e.what()) + " It is not a graph adjacency matrix either: " +
-            count_of(negative, s.offdiag_nnz, "off-diagonal entries") + " are negative.");
-    }
+    const std::string kConversion = "Input conversion needs a square, finite, symmetric matrix. ";
+    if (M.rows() != M.cols())
+        throw std::invalid_argument(kConversion + "This matrix has " +
+            std::to_string(M.rows()) + " rows and " + std::to_string(M.cols()) + " columns.");
+    const operator_scan s = scan_operator(M);
+    if (s.nonfinite > 0)
+        throw std::invalid_argument(kConversion + nonfinite_entries(s));
+    if (s.asymmetric > 0)
+        throw std::invalid_argument(kConversion + asymmetry(s));
+    // Any negative off-diagonal marks an operator, which the solver validates.
+    // A matrix without off-diagonal entries is a diagonal operator, not a graph.
+    return s.offdiag_nnz > 0 && s.offdiag_pos == s.offdiag_nnz;
 }
 
 Eigen::SparseMatrix<double> adjacency_laplacian(const Eigen::SparseMatrix<double>& M) {

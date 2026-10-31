@@ -451,7 +451,7 @@ struct gpu_block_frontend::impl {
                                  static_cast<double>(active.size());
 
         double threshold = options.degree_multiplier * average;
-        const double q = degree_quantile_or_host_default(options.degree_quantile);
+        const double q = options.degree_quantile.value_or(degree_quantile_host_default);
         if (q > 0.0 && q < 1.0 && !active.empty()) {
             std::size_t rank = static_cast<std::size_t>(q * (active.size() - 1));
             if (rank >= active.size()) rank = active.size() - 1;
@@ -511,7 +511,7 @@ struct gpu_block_frontend::impl {
                 throw std::overflow_error("bounded selector launch size overflow");
             const int blocks = blocks_for(count * std::size_t{32});
             bounded_decide<<<blocks, kBlock>>>(current, count, owned_view,
-                status.get(), pick.get(), current_options.degree_tiebreak,
+                status.get(), pick.get(), degree_tiebreak,
                 bounded_seed, bounded_phase);
             cuda_check(cudaGetLastError(), "decide bounded independent set");
             bounded_commit<<<blocks, kBlock>>>(current, count, owned_view,
@@ -626,6 +626,7 @@ struct gpu_block_frontend::impl {
     mutable bool host_candidate_ids_valid = false;
     partition_result result;
     partition_options current_options;
+    bool degree_tiebreak = true;
     std::uint64_t bounded_seed = 42, bounded_phase = 0;
     unsigned bounded_passes = 0;
     std::uint64_t bounded_candidate_visits = 0;
@@ -721,10 +722,12 @@ gpu_block_frontend::operator=(gpu_block_frontend && other) noexcept {
 gpu_block_frontend::prepare_result
 gpu_block_frontend::prepare(std::span<const node_index> active,
                            const partition_options &options,
-                           std::uint64_t seed, std::uint64_t phase) {
+                           std::uint64_t seed, std::uint64_t phase,
+                           bool degree_tiebreak) {
     return p_->checked_operation([&] {
         p_->invalidate_selection();
         p_->current_options = options;
+        p_->degree_tiebreak = degree_tiebreak;
         p_->bounded_seed = seed;
         p_->bounded_phase = phase;
         return p_->prepare(active, options);

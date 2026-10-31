@@ -354,7 +354,7 @@ def test_positive_offdiagonals_on_a_positive_diagonal_are_lumped_not_rejected():
     assert (A.diagonal() > 0).all()
 
     s = apxchol.factorize(A)
-    assert s.lumped == 2         # both triangles of the one pair
+    assert s.lumped_offdiag == 2         # both triangles of the one pair
     # the caller's matrix is untouched
     assert (A != before).nnz == 0
 
@@ -367,7 +367,7 @@ def test_positive_offdiagonals_on_a_positive_diagonal_are_lumped_not_rejected():
 
 def test_a_pure_laplacian_reports_no_lumping():
     s = apxchol.factorize(grid2d_laplacian(10))
-    assert s.lumped == 0
+    assert s.lumped_offdiag == 0
 
 
 def test_mixed_sign_operator_with_positive_diagonal_still_solves():
@@ -436,13 +436,11 @@ def test_as_operator_converts_a_boolean_pattern():
     assert abs(apxchol.as_operator(A.astype(bool)) - degree_minus(A)).max() == 0.0
 
 
-def test_as_operator_raises_for_mixed_signs():
+def test_as_operator_leaves_negative_off_diagonals_to_the_solver():
     M = sp.csc_matrix(np.array([[0.0, 1.0, 0.0], [1.0, 0.0, -1.0], [0.0, -1.0, 0.0]]))
-    with pytest.raises(ValueError, match="not a graph adjacency matrix either"):
-        apxchol.as_operator(M)
-    negative = sp.csc_matrix(np.array([[0.0, -2.0], [-2.0, 0.0]]))
+    assert apxchol.as_operator(M) is M
     with pytest.raises(ValueError, match="Condition FAILED: positive diagonal"):
-        apxchol.as_operator(negative)
+        apxchol.factorize(apxchol.as_operator(M))
 
 
 def test_as_operator_keeps_isolated_vertices_as_zero_rows():
@@ -501,6 +499,10 @@ def test_as_operator_rejects_bad_input():
         apxchol.as_operator(sp.csc_matrix(np.ones((3, 4))))   # non-square
     with pytest.raises(ValueError):
         apxchol.as_operator(sp.csc_matrix(np.eye(3) * 1j))    # complex
+    with pytest.raises(ValueError, match="transpose partner"):
+        apxchol.as_operator(sp.csc_matrix(np.triu(np.ones((3, 3)), 1)))
+    with pytest.raises(ValueError, match="NaN or infinite"):
+        apxchol.as_operator(sp.csc_matrix([[0.0, np.nan], [np.nan, 0.0]]))
 
 
 def csc_with_duplicates(A):
@@ -538,7 +540,7 @@ def test_input_matrix_is_not_mutated():
 # ── factor export ────────────────────────────────────────────────────────────
 
 def test_factor_export_algebra_sddm():
-    """G G^T reproduces the permuted matrix; L D L^T reproduces G G^T exactly."""
+    """G G^T reproduces the permuted matrix."""
     A = grid2d_sddm(30)
     slv = apxchol.factorize(A, seed=7)
     assert slv.sddm
@@ -547,22 +549,17 @@ def test_factor_export_algebra_sddm():
     GGt = (slv.chol() @ slv.chol().T).tocsc()
     # G is an APPROXIMATE (sampled) factor — loose bound only.
     assert spnorm(A_perm - GGt) / spnorm(A_perm) < 0.5
-    # L D L^T == G G^T is an exact algebraic identity (up to fp round-off).
-    LDLt = (slv.L @ sp.diags(slv.D) @ slv.L.T).tocsc()
-    assert spnorm(LDLt - GGt) / spnorm(GGt) < 1e-6
 
 
 def test_factor_export_algebra_laplacian():
-    """Same identities for a singular Laplacian, plus the placeholder column."""
+    """Same identity for a singular Laplacian, plus the placeholder column."""
     A = grid2d_laplacian(20)
     n = A.shape[0]
     slv = apxchol.factorize(A, seed=7)
     assert not slv.sddm
     G = slv.chol()
     assert G.shape == (n, n)
-    assert G.dtype == slv.L.dtype == slv.D.dtype == np.float32
-    assert slv.L.shape == (n, n)
-    assert slv.D.shape == (n,)
+    assert G.dtype == np.float32
 
     # One connected component => exactly one placeholder column, the last one
     # eliminated: a bare diagonal 1.0 standing in for the dropped rank.
@@ -570,7 +567,6 @@ def test_factor_export_algebra_laplacian():
     single = np.flatnonzero(np.diff(Gc.indptr) == 1)
     assert single.tolist() == [n - 1]
     assert Gc[n - 1, n - 1] == 1.0
-    assert slv.D[n - 1] == 1.0
 
     # The G G^T identity holds on the rank-(n−1) subspace: check the leading
     # block, which excludes the placeholder's row/column.
@@ -580,9 +576,6 @@ def test_factor_export_algebra_laplacian():
     lead = slice(0, n - 1)
     assert (spnorm(A_perm[lead, lead] - GGt[lead, lead])
             / spnorm(A_perm[lead, lead])) < 0.5
-    # L D L^T == G G^T stays exact in the singular case too.
-    LDLt = (slv.L @ sp.diags(slv.D) @ slv.L.T).tocsc()
-    assert spnorm(LDLt - GGt) / spnorm(GGt) < 1e-6
 
 
 def test_export_supports_float32_triangular_solve():
@@ -656,7 +649,7 @@ def test_iteration_limit_requires_integer(value):
         solver.solve(np.ones(2), maxiter=value)
 
 
-@pytest.mark.parametrize("name", ["seed", "num_threads", "exact_clique_max_degree"])
+@pytest.mark.parametrize("name", ["seed", "num_threads"])
 def test_integer_setup_options_do_not_truncate(name):
     with pytest.raises(TypeError):
         apxchol.factorize(sp.eye(2, format="csc"), **{name: 1.5})
@@ -674,7 +667,9 @@ def test_omitted_solver_defaults_match_compiled_defaults():
 
 
 @pytest.mark.parametrize("construct", [apxchol.Solver, apxchol.factorize])
-@pytest.mark.parametrize("options", [{}, {"seed": np.int64(7), "partitioner": "priority_greedy"}])
+@pytest.mark.parametrize("options", [{}, {"seed": np.int64(7), "partitioner": "priority_greedy"},
+                                     {"sampler": "trace_cycle", "degree_quantile": 0,
+                                      "degree_multiplier": 3}])
 def test_factor_settings_match_native_options(construct, options):
     A = grid2d_sddm(8).tocsc()
     solver = construct(A, backend="cpu", num_threads=1, **options)
@@ -686,11 +681,12 @@ def test_factor_settings_match_native_options(construct, options):
         np.testing.assert_array_equal(actual, expected)
 
 
-@pytest.mark.parametrize("cpu_schedule", ["auto", "levels"])
+@pytest.mark.parametrize("sampler", ["gks", "trace_cycle"])
 @pytest.mark.parametrize("drop_tolerance", [0, 1])
-def test_explicit_factor_settings(cpu_schedule, drop_tolerance):
+def test_explicit_factor_settings(sampler, drop_tolerance):
     A = grid2d_sddm(6)
-    solver = apxchol.factorize(A, backend="cpu", num_threads=1, cpu_schedule=cpu_schedule,
+    solver = apxchol.factorize(A, backend="cpu", num_threads=1, partitioner="baumann_kyng",
+                               sampler=sampler, degree_quantile=None, degree_multiplier=2,
                                drop_tolerance=drop_tolerance, regularization=0, lump_max_mass=0.25,
                                verbose=False)
     b = np.ones(A.shape[0])
@@ -699,7 +695,10 @@ def test_explicit_factor_settings(cpu_schedule, drop_tolerance):
     assert np.linalg.norm(A @ result.x - b) / np.linalg.norm(b) < 1e-8
 
 
-@pytest.mark.parametrize("option,value", [("cpu_schedule", "unknown"),
+@pytest.mark.parametrize("option,value", [("partitioner", "unknown"), ("sampler", "unknown"),
+                                         ("sampler", 1), ("degree_quantile", 1),
+                                         ("degree_quantile", -0.1), ("degree_multiplier", 0),
+                                         ("cpu_schedule", "auto"), ("residual_peel", "natural"),
                                          ("regularization", -1), ("lump_max_mass", -0.1),
                                          ("lump_max_mass", 1.1)] +
                          [("drop_tolerance", value) for value in
@@ -713,10 +712,10 @@ def test_factor_settings_are_per_instance():
     A = sp.csc_matrix([[1.0, -1.0], [-1.0, 1.0]])
     b = np.array([1.0, -1.0])
     plain = apxchol.factorize(A, backend="cpu", num_threads=1, regularization=0,
-                             lump_max_mass=0, cpu_schedule="auto")
+                             lump_max_mass=0)
     before = plain.solve(b)
     regularized = apxchol.factorize(A, backend="cpu", num_threads=1,
-                                   regularization=0.25, cpu_schedule="levels")
+                                   regularization=0.25)
     assert not plain.sddm and regularized.sddm
     assert regularized.solve(b).converged
     after = plain.solve(b)
@@ -758,8 +757,6 @@ def test_keep_factor_false_disables_export():
     A = grid2d_sddm(15)
     slv = apxchol.factorize(A, keep_factor=False)
     with pytest.raises(RuntimeError):
-        slv.L
-    with pytest.raises(RuntimeError):
         slv.chol()
     assert slv.factor_nnz > 0            # column pointers survive the release
     # solving still works with the factor values released
@@ -767,10 +764,9 @@ def test_keep_factor_false_disables_export():
     assert slv.solve(b).converged
 
 
-def test_fill_ratio_and_version():
+def test_factor_nnz_and_version():
     A = grid2d_sddm(20)
     slv = apxchol.factorize(A)
-    assert slv.fill_ratio > 0.0
     assert slv.factor_nnz > A.shape[0]
     assert isinstance(apxchol.__version__, str) and apxchol.__version__
     assert "Solver" in repr(slv)

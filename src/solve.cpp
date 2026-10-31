@@ -89,11 +89,11 @@ void detail::check_matrix_views(const_matrix_view B, matrix_view X, Eigen::Index
         throw std::invalid_argument("solver: output must not overlap RHS or warm start");
 }
 
-void detail::resolve_solve_parameters(double& tol, int& max_iter, double default_tolerance,
-                              int default_iterations) {
-    if (std::isfinite(tol) && tol < 0) tol = default_tolerance;
-    if (max_iter < 0) max_iter = default_iterations;
-    detail::validate_solve_parameters(tol, max_iter);
+std::pair<double, int> detail::resolve_solve_parameters(std::optional<double> tol,
+    std::optional<int> max_iter, double default_tolerance, int default_iterations) {
+    const std::pair resolved{tol.value_or(default_tolerance), max_iter.value_or(default_iterations)};
+    detail::validate_solve_parameters(resolved.first, resolved.second);
+    return resolved;
 }
 
 namespace {
@@ -626,8 +626,7 @@ void detail::cpu_route::build_operator(const Eigen::SparseMatrix<double>& L,
                 [&](int nnz) {
                     op.Lrm.resizeNonZeros(nnz);
                     return std::pair{op.Lrm.innerIndexPtr(), op.Lrm.valuePtr()};
-                },
-                [](const auto& a, const auto& b) { return a.first < b.first; });
+                });
             op.Lrm.makeCompressed();
             fallback_needs_fp32_cast = op.fp32;
         }
@@ -665,11 +664,16 @@ detail::cpu_route& detail::cpu_route::operator=(const cpu_route& other) {
 }
 
 void detail::cpu_route::solve_impl(const Eigen::VectorXd &b, Eigen::Ref<Eigen::VectorXd> x,
-                                   solve_result &res, double tol, int max_iter,
-                                   const Eigen::VectorXd *x0) const {
+                            solve_result &res, std::optional<double> requested_tol,
+                            std::optional<int> requested_max_iter,
+                            const Eigen::VectorXd *x0) const {
     const auto scope = precond_.calls_.enter();
     const detail::thread_budget threads(opts_.num_threads);
-    detail::resolve_solve_parameters(tol, max_iter, opts_.tol, opts_.max_iter);
+    // Named variables: clang 18 cannot capture structured bindings in OpenMP.
+    const auto limits = detail::resolve_solve_parameters(
+        requested_tol, requested_max_iter, opts_.tol, opts_.max_iter);
+    const double tol = limits.first;
+    const int max_iter = limits.second;
     const const_matrix_view initial(x0 ? *x0 : b);
     detail::check_matrix_views(b, x, n_, x0 ? &initial : nullptr);
     solve_panel<1>(b.data(), x.data(), &res, res.timings, tol, max_iter,
@@ -763,7 +767,6 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
     const Eigen::Index n = n_;
     for (int c = 0; c < C; c++) {
         results[c].backend = solve_backend::cpu;
-        results[c].solve_vram_mb = -1;
         results[c].iterations = 0;
     }
     r_.resize(n * C);
@@ -992,8 +995,8 @@ Eigen::VectorXd detail::cpu_route::apply(const Eigen::VectorXd& r) const {
 }
 
 void detail::cpu_route::solve(const Eigen::VectorXd& b, solve_result& res,
-                              double tol, int max_iter,
-                              const Eigen::VectorXd* x0) const {
+                       std::optional<double> tol, std::optional<int> max_iter,
+                       const Eigen::VectorXd* x0) const {
     if (b.size() != n_)
         throw std::invalid_argument("solver::solve: RHS length mismatch");
     if (&b == &res.x || x0 == &res.x)
@@ -1002,16 +1005,17 @@ void detail::cpu_route::solve(const Eigen::VectorXd& b, solve_result& res,
     solve_impl(b, res.x, res, tol, max_iter, x0);
 }
 
-solve_result detail::cpu_route::solve(const Eigen::VectorXd& b, double tol, int max_iter,
-                                      const Eigen::VectorXd* x0) const {
+solve_result detail::cpu_route::solve(const Eigen::VectorXd& b, std::optional<double> tol,
+                               std::optional<int> max_iter,
+                               const Eigen::VectorXd* x0) const {
     solve_result res;
     solve(b, res, tol, max_iter, x0);
     return res;
 }
 
 solve_result detail::cpu_route::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
-                                      double tol, int max_iter,
-                                      const Eigen::VectorXd* x0) const {
+                               std::optional<double> tol, std::optional<int> max_iter,
+                               const Eigen::VectorXd* x0) const {
     if (x.size() != n_)
         throw std::invalid_argument("solver::solve: output x length mismatch");
     solve_result res;
@@ -1019,11 +1023,16 @@ solve_result detail::cpu_route::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen
     return res;
 }
 
-batch_solve_result detail::cpu_route::solve_batch(const_matrix_view B, matrix_view X, double tol,
-                                                  int max_iter, const const_matrix_view *X0) const {
+batch_solve_result detail::cpu_route::solve_batch(const_matrix_view B, matrix_view X,
+                                           std::optional<double> requested_tol,
+                                           std::optional<int> requested_max_iter,
+                                           const const_matrix_view *X0) const {
     const auto scope = precond_.calls_.enter();
     const detail::thread_budget threads(opts_.num_threads);
-    detail::resolve_solve_parameters(tol, max_iter, opts_.tol, opts_.max_iter);
+    const auto limits = detail::resolve_solve_parameters(
+        requested_tol, requested_max_iter, opts_.tol, opts_.max_iter);
+    const double tol = limits.first;
+    const int max_iter = limits.second;
     detail::check_matrix_views(B, X, n_, X0);
     batch_solve_result result;
     result.columns.resize(B.cols());
@@ -1072,12 +1081,11 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
     }
 #if defined(APXCHOL_USE_CUDA)
     bool compatible = sizeof(node_index) == sizeof(std::uint32_t) &&
-        opts.factor_opts.is_select == "block_greedy" &&
-        opts.factor_opts.cpu_schedule == cpu_sptrsv_schedule::automatic &&
-        opts.factor_opts.residual_peel == residual_peel_strategy::natural &&
-        opts.factor_opts.exact_clique_max_degree == 0 &&
-        exact_core_or_off(opts.factor_opts.exact_core_max_h) == 0 &&
-        opts.factor_opts.double_cycle_min_h == 0;
+        opts.factor_opts.partitioner == partitioner_kind::block_greedy &&
+        opts.factor_opts.experimental.cpu_schedule == cpu_sptrsv_schedule::automatic &&
+        opts.factor_opts.experimental.exact_clique_max_degree == 0 &&
+        opts.factor_opts.experimental.exact_core_max_h.value_or(0) == 0 &&
+        opts.factor_opts.experimental.double_cycle_min_h == 0;
     if (compatible && opts.backend == solve_backend::automatic && A) {
         std::size_t offdiagonals = 0;
         bool zeros = false;
@@ -1254,11 +1262,15 @@ solver& solver::operator=(const solver& other) {
     return *this;
 }
 
-void solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,
-                   int max_iter, const Eigen::VectorXd* x0) {
+void solver::solve(const Eigen::VectorXd& b, solve_result& result,
+                   std::optional<double> requested_tol, std::optional<int> requested_max_iter,
+                   const Eigen::VectorXd* x0) {
     const auto scope = impl_->enter();
     const detail::thread_budget threads(impl_->num_threads);
-    detail::resolve_solve_parameters(tol, max_iter, impl_->tol, impl_->max_iter);
+    const auto limits = detail::resolve_solve_parameters(
+        requested_tol, requested_max_iter, impl_->tol, impl_->max_iter);
+    const double tol = limits.first;
+    const int max_iter = limits.second;
     if (b.size() != rows()) throw std::invalid_argument("solver::solve: RHS length mismatch");
     if (&b == &result.x || x0 == &result.x)
         throw std::invalid_argument("solver: output must not overlap RHS or warm start");
@@ -1267,15 +1279,16 @@ void solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,
     }, impl_->owner);
 }
 
-solve_result solver::solve(const Eigen::VectorXd& b, double tol, int max_iter,
-                           const Eigen::VectorXd* x0) {
+solve_result solver::solve(const Eigen::VectorXd& b, std::optional<double> tol,
+                           std::optional<int> max_iter, const Eigen::VectorXd* x0) {
     solve_result result;
     solve(b, result, tol, max_iter, x0);
     return result;
 }
 
 solve_result solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
-                           double tol, int max_iter, const Eigen::VectorXd* x0) {
+                           std::optional<double> tol, std::optional<int> max_iter,
+                           const Eigen::VectorXd* x0) {
     const auto scope = impl_->enter();
     const const_matrix_view initial(x0 ? *x0 : b);
     detail::check_matrix_views(b, x, rows(), x0 ? &initial : nullptr);
@@ -1296,11 +1309,16 @@ Eigen::VectorXd solver::apply(const Eigen::VectorXd& r) {
         else return owner.preconditioner().solve(r);
     }, impl_->owner);
 }
-batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X, double tol, int max_iter,
+batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X,
+                                       std::optional<double> requested_tol,
+                                       std::optional<int> requested_max_iter,
                                        const const_matrix_view *X0) {
     const auto scope = impl_->enter();
     const detail::thread_budget threads(impl_->num_threads);
-    detail::resolve_solve_parameters(tol, max_iter, impl_->tol, impl_->max_iter);
+    const auto limits = detail::resolve_solve_parameters(
+        requested_tol, requested_max_iter, impl_->tol, impl_->max_iter);
+    const double tol = limits.first;
+    const int max_iter = limits.second;
     detail::check_matrix_views(B, X, rows(), X0);
     if (const auto *cpu = std::get_if<detail::cpu_route>(&impl_->owner))
         return cpu->solve(B, X, tol, max_iter, X0);
@@ -1385,6 +1403,8 @@ solve_result solve(const Eigen::SparseMatrix<double>& L, const Eigen::VectorXd& 
 }
 
 Eigen::VectorXd generate_test_rhs(Eigen::Index n) {
+    if (n < 0) throw std::invalid_argument("generate_test_rhs: length must be nonnegative");
+    if (n == 0) return {};
     Eigen::VectorXd b = Eigen::VectorXd::Random(n);
     b.array() -= b.mean();
     return b.normalized();

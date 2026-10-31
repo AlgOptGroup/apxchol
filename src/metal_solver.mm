@@ -448,7 +448,7 @@ struct metal_solver::impl {
         detail::validate_solve_options(opts);
         if (opts.backend == solve_backend::cpu)
             throw std::invalid_argument("metal_solver cannot execute an explicit CPU request");
-        if (opts.factor_opts.cpu_schedule != cpu_sptrsv_schedule::automatic)
+        if (opts.factor_opts.experimental.cpu_schedule != cpu_sptrsv_schedule::automatic)
             throw std::invalid_argument("Metal cannot use a CPU triangular-solve schedule");
         factor_fp16 = detail::resolve_fp16_storage(opts.factor_opts.factor_storage, false);
         if (!metal_solver::available())
@@ -555,7 +555,7 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     static_assert(std::is_same_v<Eigen::SparseMatrix<double>::StorageIndex, int>);
     laplacian = !F.sddm;
     const auto m = static_cast<std::uint32_t>(laplacian ? n - 1 : n);
-    if (F.L.outerIndexPtr()[m] > static_cast<edge_index>(std::numeric_limits<int>::max()))
+    if (F.L.col_ptrs()[m] > static_cast<edge_index>(std::numeric_limits<int>::max()))
         throw std::length_error("metal_solver: the factor exceeds the device's 32-bit offsets");
 
     if (cp) { cp->descend("setup"); cp->tick(); }
@@ -583,11 +583,11 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     } else {
         // Keep compensated dropping in the shared FP64 host implementation.
         // Both backends consume the CSR factor without a level-permuted value copy.
-        backward = detail::gpu_factor_prep::build_L11_csc_int<float>(F.L, m);
-        if (!opts.keep_factor) F.L.release_values();
-        scales = detail::gpu_factor_prep::column_scales(backward);
-        if (factor_fp16) detail::gpu_factor_prep::normalize_fp16_scales(backward, scales);
-        detail::gpu_factor_prep::apply_factor_drop(backward, scales, opts.factor_opts.drop_tolerance, factor_fp16);
+        backward = cuda_host::build_L11_csc_int<float>(F.L, m);
+        if (!opts.keep_factor) detail::sparse_csc_access::release_values(F.L);
+        scales = cuda_host::column_scales(backward);
+        if (factor_fp16) cuda_host::normalize_fp16_scales(backward, scales);
+        cuda_host::apply_factor_drop(backward, scales, opts.factor_opts.drop_tolerance, factor_fp16);
         if (cp) (*cp)("metal_factor_prep");
 
         Eigen::SparseMatrix<double> compressed;
@@ -782,8 +782,8 @@ const factorization& metal_solver::factor() const { return impl_->F; }
 metal_solver::statistics metal_solver::stats() const { return impl_->stats; }
 Eigen::Index metal_solver::rows() const { return static_cast<Eigen::Index>(impl_->n); }
 
-solve_result metal_solver::solve(const Eigen::VectorXd& b, double tol, int max_iter,
-                                 const Eigen::VectorXd* x0) const {
+solve_result metal_solver::solve(const Eigen::VectorXd& b, std::optional<double> tol,
+                                 std::optional<int> max_iter, const Eigen::VectorXd* x0) const {
     solve_result result;
     solve(b, result, tol, max_iter, x0);
     return result;
@@ -793,7 +793,7 @@ template<unsigned Columns>
 void metal_solver::impl::solve_columns(const_matrix_view B, matrix_view X,
                                        std::span<solve_result> results, checkpoint& cp,
                                        double tol, int max_iter, const const_matrix_view* X0) {
-    detail::resolve_solve_parameters(tol, max_iter, opts.tol, opts.max_iter);
+    detail::validate_solve_parameters(tol, max_iter);
     auto stopped = solve_columns_once<Columns>(B, X, results, cp, tol, max_iter, X0);
     for (unsigned q = 0; q < Columns; ++q) {
         auto& result = results[q];
@@ -922,8 +922,10 @@ std::array<bool, Columns> metal_solver::impl::solve_columns_once(
     return stopped;
 }
 
-void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,
-                         int max_iter, const Eigen::VectorXd* x0) const {
+void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result,
+                         std::optional<double> requested_tol,
+                         std::optional<int> requested_max_iter,
+                         const Eigen::VectorXd* x0) const {
     const detail::thread_budget threads(impl_->opts.num_threads);
     if (b.size() != rows()) throw std::invalid_argument("metal_solver::solve: RHS length mismatch");
     if (x0 != nullptr && x0->size() != rows())
@@ -932,7 +934,10 @@ void metal_solver::solve(const Eigen::VectorXd& b, solve_result& result, double 
         throw std::invalid_argument("solver: output must not overlap RHS or warm start");
     if (!b.allFinite() || (x0 != nullptr && !x0->allFinite()))
         throw std::invalid_argument("metal_solver::solve: non-finite RHS or initial guess");
-    detail::resolve_solve_parameters(tol, max_iter, impl_->opts.tol, impl_->opts.max_iter);
+    const auto limits = detail::resolve_solve_parameters(
+        requested_tol, requested_max_iter, impl_->opts.tol, impl_->opts.max_iter);
+    const double tol = limits.first;
+    const int max_iter = limits.second;
     result.x.resize(rows());
     const const_matrix_view initial(x0 ? *x0 : b);
     impl_->solve_columns<1>(b, result.x, {&result, 1}, result.timings,
