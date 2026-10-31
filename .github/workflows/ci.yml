@@ -105,12 +105,13 @@ jobs:
             cxx: clang++-18
             packages: clang-18 libomp-18-dev
             native_arch: 'OFF'
-          - name: Clang 22, portable
+          - name: Clang 22, portable, shared
             cc: clang-22
             cxx: clang++-22
             llvm: '22'
             packages: libomp-22-dev
             native_arch: 'OFF'
+            cmake_args: -DBUILD_SHARED_LIBS=ON
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}

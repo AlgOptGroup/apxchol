@@ -78,6 +78,14 @@ A source build needs CMake, GCC or Clang with C++23 and OpenMP, and Eigen.
 See [building and installation](docs/building.md) for dependencies, GPU builds
 and CMake integration.
 
+The `apxchol_c` target provides a [C API](include/apxchol/c_api.h) with reusable
+solver and factor handles, FP32 factor export, and status codes instead of exceptions.
+It uses the shared CPU, CUDA or Metal solver, including batched right-hand sides.
+Borrowed array views accept 32/64-bit CSC indices and strided dense arrays.
+Pass one column for a scalar solve and set tolerance and iteration budget per call;
+input and output arrays must not overlap.
+See the header for options, ownership and error handling.
+
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j6
