@@ -959,7 +959,7 @@ std::array<bool, Columns> detail::metal_route::impl::solve_columns_once(
     }
     if (active) {
         if (cp) (*cp)("pack");
-        detail::gpu_pcg::solve(*this, static_cast<std::uint32_t>(max_iter), 4);
+        detail::gpu_pcg::solve(*this, static_cast<std::uint32_t>(max_iter));
         if (cp) (*cp)("gpu_pcg_loop");
     }
     bool checked = false;

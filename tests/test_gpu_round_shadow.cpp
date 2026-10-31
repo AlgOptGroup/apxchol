@@ -636,12 +636,12 @@ std::size_t gpu_round_trace_size(const std::string& line,
 }
 
 #if defined(APXCHOL_USE_CUDA)
-const apxchol::detail::gpu_solve_session& gpu_session(const apxchol::solver& owner) {
-    return std::get<apxchol::detail::gpu_solve_session>(apxchol::detail::solver_access::route(owner));
+const apxchol::detail::cuda_route& gpu_session(const apxchol::solver& owner) {
+    return std::get<apxchol::detail::cuda_route>(apxchol::detail::solver_access::route(owner));
 }
 
 void expect_setup_api_receipt(const std::string& trace,
-                              const apxchol::detail::gpu_solve_session& solver, bool verbose) {
+                              const apxchol::detail::cuda_route& solver, bool verbose) {
     const auto begin = trace.find("[gpu-setup-receipt] ");
     if (verbose) {
         ASSERT_NE(begin, std::string::npos) << trace;

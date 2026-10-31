@@ -5,7 +5,7 @@
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/detail/cpu_route.h"
 #if defined(APXCHOL_USE_CUDA)
-#include "apxchol/solver/detail/gpu_solve_session.h"
+#include "apxchol/solver/detail/cuda_route.h"
 #elif defined(APXCHOL_USE_METAL)
 #include "apxchol/solver/detail/metal_route.h"
 #endif
@@ -20,7 +20,7 @@ namespace apxchol::detail {
 // installed_factor, factor_nnz, factor_storage and original_operator.
 using solver_route = std::variant<cpu_route
 #if defined(APXCHOL_USE_CUDA)
-    , gpu_solve_session
+    , cuda_route
 #elif defined(APXCHOL_USE_METAL)
     , metal_route
 #endif
