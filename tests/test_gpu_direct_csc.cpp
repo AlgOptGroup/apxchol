@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 
+using csc_access = apxchol::detail::sparse_csc_access;
+
 namespace {
 using apxchol::node_index;
 using matrix = Eigen::SparseMatrix<double>;
@@ -519,8 +521,8 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
         ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
         EXPECT_TRUE(preconditioner.trsv().fp16());
         EXPECT_GT(preconditioner.trsv().drop_stats().rel,0.0);
-        EXPECT_TRUE(preconditioner.factor().L.vals_.empty());
-        EXPECT_TRUE(preconditioner.factor().L.inner_.empty());
+        EXPECT_TRUE(csc_access::vals(preconditioner.factor().L).empty());
+        EXPECT_TRUE(csc_access::inner(preconditioner.factor().L).empty());
         EXPECT_GT(preconditioner.factor().rounds.size(),2u);
         apxchol::solve_options options; options.tol=1e-8; options.max_iter=1000;
         options.backend = apxchol::solve_backend::gpu;
