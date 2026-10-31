@@ -26,7 +26,7 @@ int main() {
         const std::vector<apxchol::node_index> degrees{1, 2, 20};
         const double average = 23.0 / 3;
         std::vector<apxchol::node_index> scratch;
-        for (double quantile : {-1.0, 0.0, 0.8}) {
+        for (std::optional<double> quantile : {std::optional<double>{}, {0.0}, {0.8}}) {
             apxchol::factor_options requested;
             requested.partition.degree_quantile = quantile;
             requested.partition.degree_multiplier = 3;
