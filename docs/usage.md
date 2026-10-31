@@ -48,6 +48,8 @@ view throws `std::invalid_argument`. Because `A` is symmetric, CSR arrays can
 be passed unchanged. Index arrays as wide as the build's indices are used in
 place; the others are converted once during setup. The solver copies what it
 needs, so the arrays only have to outlive the call that receives the view.
+[Input formats](input-formats.md) shows conversions from Eigen, CHOLMOD,
+SciPy, MATLAB/Octave and Matrix Market.
 
 ```cpp
 std::vector<std::int32_t> col_ptr, row_idx;   // filled by the caller

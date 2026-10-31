@@ -15,6 +15,8 @@ All three use a small grid Laplacian from
 [`example_grid.h`](../examples/example_grid.h).
 For Python and MATLAB/Octave, see the [Python guide](../python/README.md) and
 the [MATLAB/Octave guide](../octave/README.md).
+To pass matrices from Eigen, CHOLMOD, SciPy or Matrix Market files, see
+[input formats](input-formats.md).
 
 ## Basic solves
 
