@@ -62,6 +62,9 @@ __global__ void __launch_bounds__(kBlockThreads)
 step_kernel(std::int64_t n, workspace v, const int* ptr = nullptr,
             const int* col = nullptr, const Value* val = nullptr,
             const int* row_map = nullptr) {
+    // Iterations after every column stopped run only to fill the batch;
+    // finalize ignores their partials.
+    if (!any_active<Columns>(v.state)) return;
     constexpr int rows = kBlockThreads / Lanes;
     const pcg_work<std::int64_t> work{static_cast<std::int64_t>(blockIdx.x) * rows, n,
         static_cast<std::int64_t>(gridDim.x) * rows, threadIdx.x / Lanes, n};
@@ -90,6 +93,7 @@ template<unsigned Columns>
 __global__ void __launch_bounds__(kBlockThreads)
 finalize_kernel(const double* part, int blocks, solve_state* state, unsigned mode,
                 unsigned iteration, column_sums<double, Columns> bnorm) {
+    if (!any_active<Columns>(state)) return;
     __shared__ double scratch[Columns][kWarps];
     const pcg_work<int> work{0, blocks, kBlockThreads, static_cast<int>(threadIdx.x), blocks};
     const auto sums = sum_partials_columns<Columns>(pcg_math<>{}, part, work);
