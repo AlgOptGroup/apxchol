@@ -2,21 +2,18 @@ cmake_minimum_required(VERSION 3.20)
 project(laplacian_benchmarks LANGUAGES C CXX)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_device.cmake)
-if (APXCHOL_DEVICE STREQUAL "METAL")
-    message(FATAL_ERROR "The competitor benchmark supports CPU or CUDA; use the root project for Metal")
-endif()
 
 # The shipped core configuration: C++23, Eigen, OpenMP, the architecture flag,
 # index/pool options and, for CUDA, static cudart. apxchol_v1 below is built by
-# the same apxchol_configure_core() as the root library and Python module.
+# the same _apxchol_configure_core() as the root library and Python module.
 include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_core.cmake)
 set(CMAKE_CXX_STANDARD 17) # The apxchol targets request C++23 explicitly.
 
 # Competitors get the same machine-tuning flag as the core. It is recorded into
 # the binary as BUILD_META's arch_flags (see the benchmark target), so a stored
 # cell records the native tuning or portable baseline used by that build.
-add_compile_options(-Wall -Wextra -Wpedantic ${APXCHOL_ARCH_FLAG})
-set(APXCHOL_BENCH_ARCH_FLAGS "${APXCHOL_ARCH_FLAG}")
+add_compile_options(-Wall -Wextra -Wpedantic ${_APXCHOL_ARCH_FLAG})
+set(APXCHOL_BENCH_ARCH_FLAGS "${_APXCHOL_ARCH_FLAG}")
 
 include(FetchContent)
 
@@ -27,6 +24,15 @@ set(BENCH_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_library(bench_input STATIC ${BENCH_SRC}/graphs.cpp ${BENCH_SRC}/mmio.cpp)
 target_link_libraries(bench_input PUBLIC Eigen3::Eigen)
 target_include_directories(bench_input PUBLIC ${BENCH_SRC})
+# Per-process device memory for every GPU solver (src/gpu_memory.h), linked by
+# the benchmark and by the tests that include benchmark.cpp.
+set(BENCH_GPU_MEMORY "")
+if (APXCHOL_DEVICE STREQUAL "CUDA")
+    add_library(bench_gpu_memory STATIC ${BENCH_SRC}/gpu_memory.cpp)
+    # NVML is opened at run time (the driver provides it); only its header is needed.
+    target_link_libraries(bench_gpu_memory PUBLIC CUDA::cudart_static ${CMAKE_DL_LIBS})
+    set(BENCH_GPU_MEMORY bench_gpu_memory)
+endif()
 
 # ══════════════════════════════════════════════════════
 # External solver dependencies (all fetched at configure time)
@@ -212,6 +218,11 @@ set_target_properties(rchol_lib PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 target_compile_options(rchol_lib PRIVATE -w -O3)
+if (APPLE)
+    # rchol_lap.cpp pins threads with Linux-only calls; see the shim.
+    target_compile_options(rchol_lib PRIVATE
+        "SHELL:-include \"${CMAKE_CURRENT_SOURCE_DIR}/src/macos_affinity_shim.h\"")
+endif()
 if (HAVE_METIS)
     target_compile_definitions(rchol_lib PUBLIC HAVE_METIS)
     target_include_directories(rchol_lib PUBLIC ${METIS_INCLUDE})
@@ -466,7 +477,7 @@ endif()
 # ApxChol v1 (C++23 solver — multiple IS × elimination combos)
 # ══════════════════════════════════════════════════════
 add_library(apxchol_v1 STATIC)
-apxchol_configure_core(apxchol_v1)
+_apxchol_configure_core(apxchol_v1)
 
 # Boost headers are needed only by AMGCL (HAVE_AMGCL gate below); the apxchol
 # core itself is Boost-free.
@@ -476,7 +487,7 @@ find_package(Boost CONFIG QUIET)
 # Benchmark executable
 # ══════════════════════════════════════════════════════
 add_executable(benchmark src/benchmark.cpp)
-target_link_libraries(benchmark PRIVATE bench_input rchol_lib apxchol_v1)
+target_link_libraries(benchmark PRIVATE bench_input rchol_lib apxchol_v1 ${BENCH_GPU_MEMORY})
 target_include_directories(benchmark PRIVATE ${AMGCL_INCLUDE})
 target_compile_definitions(benchmark PRIVATE HAVE_RCHOL HAVE_APXCHOL_V1)
 target_compile_features(benchmark PRIVATE cxx_std_23)
@@ -591,6 +602,13 @@ endif()
 if (NOT APXCHOL_DEVICE STREQUAL "CUDA")
     test_solver_rejection(contract_rejects_unavailable_cuda amgcl_cuda)
 endif()
+if (APXCHOL_DEVICE STREQUAL "METAL")
+    add_test(NAME contract_v1_metal_route
+        COMMAND ${CMAKE_COMMAND} -DBENCHMARK=$<TARGET_FILE:benchmark>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_v1_metal_route.cmake)
+    set_tests_properties(contract_v1_metal_route PROPERTIES
+        SKIP_REGULAR_EXPRESSION "SKIP: no usable Metal device")
+endif()
 
 foreach(case requires_class rejects_wrong_class rejects_class_on_graph)
     add_test(NAME contract_${case}
@@ -605,13 +623,13 @@ add_test(NAME contract_original_stopping COMMAND original_stop_tests)
 
 add_executable(split_components_tests tests/test_split_components.cpp)
 target_compile_features(split_components_tests PRIVATE cxx_std_23)
-target_link_libraries(split_components_tests PRIVATE bench_input apxchol_v1 ${CMAKE_DL_LIBS})
+target_link_libraries(split_components_tests PRIVATE bench_input apxchol_v1 ${BENCH_GPU_MEMORY} ${CMAKE_DL_LIBS})
 add_test(NAME contract_split_components COMMAND split_components_tests)
 
 add_executable(v1_config_tests tests/test_v1_configs.cpp)
 target_compile_features(v1_config_tests PRIVATE cxx_std_23)
 target_compile_definitions(v1_config_tests PRIVATE HAVE_APXCHOL_V1)
-target_link_libraries(v1_config_tests PRIVATE bench_input apxchol_v1 ${CMAKE_DL_LIBS})
+target_link_libraries(v1_config_tests PRIVATE bench_input apxchol_v1 ${BENCH_GPU_MEMORY} ${CMAKE_DL_LIBS})
 add_test(NAME contract_v1_configs COMMAND v1_config_tests)
 
 # RCHOL's stdout silencing must tolerate the parallel variant's worker threads.

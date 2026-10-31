@@ -172,12 +172,13 @@ function test_apxchol()
   Li = apxchol_as_operator(Ai);
   assert(isequal(full(diag(Li))', [0 1 1 0 0]), 'as_operator: isolated vertices wrong');
   assert(max(abs(sum(Li, 2))) == 0, 'as_operator: rows do not sum to zero');
-  % mixed signs raise, saying why
+  % mixed signs are left to the solver; an asymmetric matrix raises, saying why
   Am = sparse([1 2 2 3], [2 1 3 2], [1 1 -1 -1], 3, 3);
+  assert(isequal(apxchol_as_operator(Am), Am), 'as_operator: mixed signs must pass unchanged');
   err = false;  msg = '';
-  try, apxchol_as_operator(Am); catch e, err = true; msg = e.message; end
-  assert(err, 'as_operator: mixed signs must error');
-  assert(~isempty(strfind(msg, 'not a graph adjacency matrix either')), 'as_operator: no reason');
+  try, apxchol_as_operator(sparse([1 2], [2 3], [1 1], 3, 3)); catch e, err = true; msg = e.message; end
+  assert(err, 'as_operator: an asymmetric matrix must error');
+  assert(~isempty(strfind(msg, 'transpose partner')), 'as_operator: no reason');
   % a weighted symmetric adjacency matrix, and the input is left alone
   Mw = sprand(40, 40, 0.1);  Aw = Mw + Mw';
   Aw = Aw - spdiags(diag(Aw), 0, 40, 40);
@@ -240,18 +241,13 @@ function test_apxchol()
     rejected = rejected + 1;
   end
   % Only numeric [] selects defaults; other empty types are invalid.
-  raw_handle = apxchol_mex('factorize', Aopts);
-  raw_cleanup = onCleanup(@() apxchol_mex('free', raw_handle));
-  raw_empty = {{}, ''};
-  for k = 1:numel(raw_empty)
-    value = raw_empty{k};
-    expect_bad_option(@() apxchol_mex('solve', raw_handle, bopts, value, 20), ...
-                      'tol', 'raw empty');
-    expect_bad_option(@() apxchol_mex('solve', raw_handle, bopts, 1e-8, value), ...
-                      'maxiter', 'raw empty');
+  typed_empty = {{}, ''};
+  for k = 1:numel(typed_empty)
+    value = typed_empty{k};
+    expect_bad_option(@() sopts.solve(bopts, value, 20), 'tol', 'typed empty');
+    expect_bad_option(@() sopts.solve(bopts, 1e-8, value), 'maxiter', 'typed empty');
     rejected = rejected + 2;
   end
-  clear raw_cleanup;
   assert(rejected == 48, 'malformed option case denominator changed');
   reused = sopts.solve(bopts);
   assert(reused.converged && norm(Aopts * reused.x - bopts) / norm(bopts) < 1e-8, ...
@@ -308,8 +304,9 @@ function test_apxchol()
   ok = ok + 1; fprintf('ok %d  shared defaults and convergence\n', ok);
 
   % ── 13. explicit setup controls and input shape ──
-  options = struct('num_threads', 1, 'seed', 7, 'factor_storage', 'float32', ...
-                   'cpu_schedule', 'levels', 'drop_tolerance', 0, ...
+  options = struct('num_threads', 1, 'seed', 7, 'partitioner', 'priority_greedy', ...
+                   'sampler', 'trace_cycle', 'factor_storage', 'float32', ...
+                   'degree_quantile', 0, 'degree_multiplier', 3, 'drop_tolerance', 0, ...
                    'regularization', 0, 'lump_max_mass', 0.25, 'verbose', false);
   for drop = [0 1]
     options.drop_tolerance = drop;
@@ -319,7 +316,9 @@ function test_apxchol()
     assert_same_solve(apxchol_solve(Aopts, bopts, [], [], options), r, 'one-shot setup options');
   end
   bad_options = {struct('num_threads', 1.5), struct('num_threads', -1), ...
-                 struct('seed', 1.5), struct('cpu_schedule', 'unknown'), ...
+                 struct('seed', 1.5), struct('partitioner', 'unknown'), ...
+                 struct('sampler', 'unknown'), struct('degree_quantile', 1), ...
+                 struct('degree_multiplier', 0), struct('cpu_schedule', 'levels'), ...
                  struct('factor_storage', 'float64'), struct('drop_tolerance', -1), ...
                  struct('drop_tolerance', 1 + eps(1)), struct('drop_tolerance', 2), ...
                  struct('drop_tolerance', NaN), struct('drop_tolerance', Inf), ...

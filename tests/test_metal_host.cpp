@@ -17,12 +17,12 @@ namespace mh = apxchol::detail::metal_host;
 TEST(MetalHost, DegreeQuantileOptions) {
     apxchol::factor_options options;
     const bool defaults = apxchol::detail::metal_setup_options_supported(options);
-    for (double quantile : {apxchol::degree_quantile_by_route, 0.1, 0.2, 0.3, 0.5, 0.8,
+    EXPECT_EQ(apxchol::detail::metal_degree_quantile(std::nullopt), 0.2);
+    for (double quantile : {0.1, 0.2, 0.3, 0.5, 0.8,
                             double(float(0.2)), std::nextafter(0.0, 1.0), std::nextafter(1.0, 0.0)}) {
         SCOPED_TRACE(quantile);
         options.partition.degree_quantile = quantile;
-        EXPECT_EQ(apxchol::detail::metal_degree_quantile(quantile),
-                  quantile == apxchol::degree_quantile_by_route ? 0.2 : quantile);
+        EXPECT_EQ(apxchol::detail::metal_degree_quantile(quantile), quantile);
         EXPECT_EQ(apxchol::detail::metal_setup_options_supported(options), defaults);
     }
     for (double quantile : {-2.0, -0.1, 0.0, 1.0, 2.0,
@@ -33,7 +33,7 @@ TEST(MetalHost, DegreeQuantileOptions) {
         options.partition.degree_quantile = quantile;
         EXPECT_FALSE(apxchol::detail::metal_setup_options_supported(options));
     }
-    EXPECT_EQ(apxchol::degree_quantile_device_default, 0.5);
+    EXPECT_EQ(apxchol::detail::degree_quantile_device_default, 0.5);
 }
 
 TEST(MetalHost, DegreeQuantileThresholdBounds) {

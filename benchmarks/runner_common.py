@@ -14,13 +14,11 @@ sweep_fair.py / parac_runner.py / thread_scaling.py:
                    status set as a PARAMETER (the per-runner sets deliberately
                    differ: parac_runner retries failed/timeout, sweep_fair doesn't).
   - parse_csv/classify  the benchmark-binary CSV row -> metrics dict + status.
-  - VramSampler    nvidia-smi peak-VRAM sidecar thread (GPU axis), parameterized
-                   by the compute-process name to match.
   - ParAC constants + the AMD-reorder cache path helper.
 
 All runners (sweep_fair, thread_scaling, parac_runner) import these helpers rather than carrying their own copies.
 """
-import functools, hashlib, json, math, os, re, shlex, signal, subprocess, tempfile, threading
+import functools, hashlib, json, math, os, re, shlex, signal, subprocess, sys, tempfile, threading
 from pathlib import Path
 
 try:
@@ -49,7 +47,12 @@ BIN = {
                           f"{ROOT}/benchmarks/build/benchmark"),
     "gpu": os.environ.get("APXCHOL_BENCH_GPU_BIN",
                           f"{ROOT}/benchmarks/build-cuda/benchmark"),
+    "metal": os.environ.get("APXCHOL_BENCH_METAL_BIN",
+                            f"{ROOT}/benchmarks/build-metal/benchmark"),
 }
+# Cell devices. A Metal build reports its device route as execution_route=metal,
+# so Metal cells never share a key or a route receipt with CUDA ("gpu") cells.
+DEVICES = ("cpu", "gpu", "metal")
 CELLS = f"{ROOT}/results/cells"
 APXCHOL_DEFAULT_CONFIG = "bg+tree[vec_pool_aos]"
 
@@ -89,13 +92,14 @@ def sh(cmd, timeout=1800, env=None, mem_cap_gb=None):
 
     mem_cap_gb > 0 prepends `ulimit -v` so a runaway solver dies with bad_alloc
     instead of OOM-killing the desktop (CPU only — CUDA reserves large host VM).
+    macOS does not enforce an address-space limit, so it gets no cap.
     Raises subprocess.TimeoutExpired (with captured output) on timeout.
     """
     effective_env = os.environ if env is None else env
     limits = []
     if effective_env.get("APXCHOL_BENCH_COREDUMP") != "1":
         limits.append("ulimit -c 0")
-    if mem_cap_gb and mem_cap_gb > 0:
+    if mem_cap_gb and mem_cap_gb > 0 and sys.platform != "darwin":
         limits.append(f"ulimit -v {int(mem_cap_gb * 1024 * 1024)}")
     if limits:
         cmd = "; ".join([*limits, cmd])
@@ -155,7 +159,7 @@ def cell_meets_contract(cell):
             return False
         identity = cell["cell"]
         if identity.get("solver") == "apxchol_v1":
-            if (identity.get("device") not in ("cpu", "gpu")
+            if (identity.get("device") not in DEVICES
                     or metrics.get("execution_route") != identity["device"]):
                 return False
     return True
@@ -202,6 +206,12 @@ def _parse_cpu_spec(spec):
     return cpus
 
 
+def affinity_supported():
+    """Whether benchmark processes can be pinned (Linux: sched_getaffinity and
+    taskset). macOS has neither, so its runs are unpinned."""
+    return hasattr(os, "sched_getaffinity")
+
+
 def affinity_cpus(threads):
     """Return the exact CPU ids assigned to one benchmark subprocess.
 
@@ -209,9 +219,17 @@ def affinity_cpus(threads):
     Hard-coding 0..threads-1 then either fails or targets another rank's CPUs.
     Select the first `threads` CPUs from sched_getaffinity instead.  A validated
     APXCHOL_BENCH_CPUSET override is available for reproducible manual layouts.
+    Returns None where processes cannot be pinned (see affinity_supported).
     """
     if threads < 1:
         raise ValueError(f"threads must be positive, got {threads}")
+    if not affinity_supported():
+        if os.environ.get("APXCHOL_BENCH_CPUSET"):
+            raise RuntimeError("APXCHOL_BENCH_CPUSET needs sched_getaffinity (Linux)")
+        if threads > (os.cpu_count() or 1):
+            raise RuntimeError(f"requested {threads} threads but only "
+                               f"{os.cpu_count()} CPUs are online")
+        return None
     override = os.environ.get("APXCHOL_BENCH_CPUSET")
     if override:
         allowed = _parse_cpu_spec(override)
@@ -239,11 +257,37 @@ def _compress_cpu_list(chosen):
 
 def affinity_spec(threads):
     """Return the selected CPUs in taskset's compact list syntax."""
-    return _compress_cpu_list(affinity_cpus(threads))
+    cpus = affinity_cpus(threads)
+    return _compress_cpu_list(cpus) if cpus is not None else None
 
 
 def taskset_prefix(threads):
-    return f"taskset -c {affinity_spec(threads)}"
+    spec = affinity_spec(threads)
+    return f"taskset -c {spec}" if spec is not None else ""
+
+
+def peak_rss_prefix():
+    """Prefix that makes a command report its peak RSS on stderr (see
+    parse_peak_rss_mb): GNU time's `APXRSS <kB>` line, or BSD time's -l report
+    on macOS."""
+    if sys.platform == "darwin":
+        return "/usr/bin/time -l"
+    return "/usr/bin/time -f 'APXRSS %M'"
+
+
+_BSD_RSS_RE = re.compile(r'^\s*(\d+)\s+maximum resident set size\s*$', re.M)
+
+
+def parse_peak_rss_mb(stderr):
+    """Peak RSS in MB from peak_rss_prefix()'s report, or None."""
+    for line in (stderr or "").splitlines():
+        if line.startswith("APXRSS "):
+            try:
+                return round(int(line.split()[1]) / 1024.0, 1)
+            except (IndexError, ValueError):
+                return None
+    match = _BSD_RSS_RE.search(stderr or "")   # BSD time -l reports bytes
+    return round(int(match.group(1)) / (1024.0 * 1024.0), 1) if match else None
 
 
 def benchmark_openmp_env(threads, base=None):
@@ -265,20 +309,26 @@ def benchmark_openmp_env(threads, base=None):
     """
     env = dict(os.environ if base is None else base)
     cpus = affinity_cpus(threads)
+    env.update({"OMP_NUM_THREADS": str(threads), "OMP_DYNAMIC": "FALSE"})
+    env.pop("GOMP_CPU_AFFINITY", None)
+    if cpus is None:   # unpinned (macOS): no places to bind to
+        # Inherited binding would otherwise pin a run recorded as unpinned.
+        for name in ("OMP_PLACES", "OMP_PROC_BIND", "KMP_AFFINITY"):
+            env.pop(name, None)
+        return env
     env.update({
-        "OMP_NUM_THREADS": str(threads),
-        "OMP_DYNAMIC": "FALSE",
         "OMP_PROC_BIND": "close",
         "OMP_PLACES": ",".join(f"{{{cpu}}}" for cpu in cpus),
         "KMP_AFFINITY": "norespect",
     })
-    env.pop("GOMP_CPU_AFFINITY", None)
     return env
 
 
 def benchmark_openmp_provenance(threads):
     """Cell metadata that makes the mixed-runtime affinity guard auditable."""
     cpus = affinity_cpus(threads)
+    if cpus is None:
+        return {"benchmark_cpuset": "unpinned"}
     return {
         "benchmark_cpuset": _compress_cpu_list(cpus),
         "benchmark_omp_places": ",".join(f"{{{cpu}}}" for cpu in cpus),
@@ -679,6 +729,9 @@ _BUILD_RE = re.compile(r'^BUILD_META\s+(.*)$', re.M)
 _CUDA_INIT_RE = re.compile(
     r'^\[bench\]\s+cuda_init\s+\(once, before any timed solver\):\s*'
     r'([0-9]+(?:\.[0-9]+)?)\s*ms\s*$', re.M)
+_METAL_INIT_RE = re.compile(
+    r'^\[bench\]\s+metal_init\s+\(once, before any timed solver\):\s*'
+    r'([0-9]+(?:\.[0-9]+)?)\s*ms\s*$', re.M)
 
 def parse_build_meta(stderr):
     """Lift the binary's `BUILD_META ...` line out of stderr into a dict.
@@ -703,6 +756,14 @@ def parse_build_meta(stderr):
     return out
 
 
+def parse_metal_init(stderr):
+    """Return the separately timed process-wide Metal initialization (device
+    creation and kernel compilation) in seconds; like parse_cuda_init, it is not
+    part of setup or total."""
+    match = _METAL_INIT_RE.search(stderr or "")
+    return float(match.group(1)) / 1000.0 if match else None
+
+
 def parse_cuda_init(stderr):
     """Return the separately timed process-wide CUDA initialization in seconds.
 
@@ -712,6 +773,43 @@ def parse_cuda_init(stderr):
     """
     match = _CUDA_INIT_RE.search(stderr or "")
     return float(match.group(1)) / 1000.0 if match else None
+
+
+_GPU_MEMORY_RE = re.compile(
+    r'^\[bench\]\s+gpu_memory\s+pid=(\d+)\s+bus_id=(\S+)\s+baseline_mib=(?:([0-9.]+)|'
+    r'unavailable reason=(.+?))\s+other_processes=(\d+|unknown)\s+other_mib=([0-9.]+|unknown)\s*$',
+    re.M)
+
+def _gpu_memory_receipt(stderr):
+    """The binary's per-process NVML baseline receipt, or None (no GPU route ran)."""
+    m = _GPU_MEMORY_RE.search(stderr or "")
+    if not m:
+        return None
+    pid, bus, baseline, reason, others, other_mib = m.groups()
+    return dict(pid=int(pid), bus_id=bus.upper(),
+                baseline=float(baseline) if baseline else None, unavailable=reason,
+                others=None if others == "unknown" else int(others),
+                other_mib=None if other_mib == "unknown" else float(other_mib))
+
+
+def parse_gpu_memory(stderr):
+    """Cell metrics from the binary's `[bench] gpu_memory` receipt.
+
+    `vram_baseline_mb` is this process's NVML device memory right after CUDA context
+    creation (None, with `vram_unavailable` naming why, when NVML cannot attribute
+    memory to the process). `gpu_shared` flags a device on which other compute
+    processes held memory when the run started; their count and MiB are kept too.
+    Returns {} when no GPU route ran.
+    """
+    r = _gpu_memory_receipt(stderr)
+    if r is None:
+        return {}
+    out = dict(vram_baseline_mb=r["baseline"], gpu_other_processes=r["others"],
+               gpu_other_mb=r["other_mib"],
+               gpu_shared=None if r["others"] is None else r["others"] > 0)
+    if r["unavailable"]:
+        out["vram_unavailable"] = r["unavailable"]
+    return out
 
 
 def _readelf(path, *args):
@@ -791,7 +889,7 @@ def parse_csv(out):
     route = None
     if len(f) >= 15 and f[-4].startswith("original-v"):
         route = f.pop()
-        if route not in ("", "cpu", "gpu"):
+        if route not in ("", *DEVICES):
             return None
     stopping = f[-3:] if len(f) >= 14 and f[-3].startswith("original-v") else None
     if stopping: f = f[:-3]
@@ -826,13 +924,18 @@ def parse_csv(out):
                 v = float(f[11])
                 if v >= 0: d["solve_rss_mb"] = v
             except ValueError: pass
-        # NOTE: the binary also emits solve_vram_mb (col 12), but per-process solve-phase
-        # VRAM can't be cleanly isolated (whole-device cudaMemGetInfo is desktop+context
-        # contaminated and doesn't span the separate amgcl TU), so we DON'T store it. The
-        # reliable VRAM metric is peak per-process from the nvidia-smi sidecar (max_vram_mb).
-        if len(f) >= 16:
-            d.update(retained_repeats=int(f[13]), representative_repeat=int(f[14]),
-                     max_repeat_rel_res=float(f[15]))
+        # solve_vram_mb / setup_vram_mb (cols 12/13): this process's NVML device memory
+        # above its post-context baseline; < 0 = unavailable, absent rather than zero.
+        # Binaries before setup_vram_mb emit 16 fields and a device-wide solve_vram_mb
+        # (cudaMemGetInfo total - free), which is not stored.
+        tail = 13
+        if len(f) >= 17:
+            for col, key in ((12, "solve_vram_mb"), (13, "setup_vram_mb")):
+                if float(f[col]) >= 0: d[key] = float(f[col])
+            tail = 14
+        if len(f) >= tail + 3:
+            d.update(retained_repeats=int(f[tail]), representative_repeat=int(f[tail + 1]),
+                     max_repeat_rel_res=float(f[tail + 2]))
         return d
     except (ValueError, IndexError):
         return None
@@ -990,54 +1093,6 @@ def cell_done(family, mid, solver, config, threads, device,
         return False
     status = cell["status"]
     return status in terminal and not (rerun_timeouts and status in ("timeout", "exceeded_cap"))
-
-
-# ── peak-VRAM sidecar (GPU axis) ────────────────────────────────────────────────
-class VramSampler:
-    """Background thread polling `nvidia-smi --query-compute-apps` for the device
-    memory of processes whose name contains `proc_match`, keeping the max -> the
-    whole-run PEAK VRAM (device analog of /usr/bin/time -%M peak RSS; the solver's
-    own cudaMemGetInfo emits the exact solve-phase VRAM). One heavy task runs at a
-    time, so the matched processes belong to this solver. enabled=False = no-op
-    (CPU axis). accounting.mode is Disabled on this box; live polling is the route.
-    """
-    def __init__(self, proc_match, enabled=True, period=0.05):
-        self.proc_match = proc_match; self.enabled = enabled; self.period = period
-        self.peak = 0.0; self._stop = threading.Event(); self._t = None
-
-    def _query(self):
-        try:
-            out = subprocess.run(
-                "nvidia-smi --query-compute-apps=process_name,used_memory --format=csv,noheader,nounits",
-                shell=True, capture_output=True, text=True, timeout=10).stdout
-        except Exception:
-            return None
-        total = 0.0; seen = False
-        for ln in out.splitlines():
-            parts = [x.strip() for x in ln.split(",")]
-            if len(parts) < 2: continue
-            if self.proc_match in parts[0]:
-                try: total += float(parts[1]); seen = True
-                except ValueError: pass
-        return total if seen else 0.0
-
-    def _loop(self):
-        while not self._stop.is_set():
-            v = self._query()
-            if v and v > self.peak: self.peak = v
-            self._stop.wait(self.period)
-
-    def __enter__(self):
-        if self.enabled:
-            self._t = threading.Thread(target=self._loop, daemon=True); self._t.start()
-        return self
-
-    def __exit__(self, *a):
-        self._stop.set()
-        if self._t: self._t.join(timeout=1.0)
-
-    def peak_mb(self):
-        return round(self.peak, 1) if (self.enabled and self.peak > 0) else None
 
 
 # ── ParAC (external checkout) constants ─────────────────────────────────────────

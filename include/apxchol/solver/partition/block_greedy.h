@@ -76,7 +76,7 @@ private:
                             const partition_context& ctx) {
         size_t nn = G.n();
         block_of.resize(nn);
-        const bool tiebreak  = ctx.options.degree_tiebreak;
+        const bool tiebreak  = ctx.degree_tiebreak;
         const auto degrees   = ctx.degrees;
         // u beats v (u survives the conflict, v drops) — low-degree wins, index
         // breaks ties. Falls back to plain index order when tiebreak is off.

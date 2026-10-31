@@ -61,6 +61,13 @@ if (APXCHOL_DEVICE STREQUAL "CUDA")
 else()
     target_link_libraries(unit_tests PRIVATE apxchol_core)
 endif()
+# The tests are built like the core: a wider default instruction set would
+# compile Eigen with AVX and trip GCC 14's false -Warray-bounds reports.
+if (_APXCHOL_ARCH_FLAG)
+    target_compile_options(unit_tests PRIVATE "${_APXCHOL_ARCH_FLAG}")
+endif()
+target_compile_definitions(unit_tests PRIVATE
+        APXCHOL_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 target_link_libraries(unit_tests PRIVATE
         apxchol_mtx_input
         GTest::gtest_main
@@ -136,9 +143,9 @@ if (APXCHOL_BUILD_CLI)
     apxchol_cli_test(cli_sddm_converges path5_sddm 0 "LAPLACIAN/SDDM operator")
     apxchol_cli_test(cli_nearly_sddm_converges path5_nearly_sddm 0 "LAPLACIAN/SDDM operator")
     apxchol_cli_test(cli_convert_keeps_laplacian path5_laplacian 0
-        "LAPLACIAN/SDDM operator.*already a valid operator" --convert-input)
+        "LAPLACIAN/SDDM operator.*not a graph adjacency matrix" --convert-input)
     apxchol_cli_test(cli_convert_keeps_sddm path5_sddm 0
-        "LAPLACIAN/SDDM operator.*already a valid operator" --convert-input)
+        "LAPLACIAN/SDDM operator.*not a graph adjacency matrix" --convert-input)
     apxchol_cli_test(cli_convert_adjacency path5_adjacency 0 "ADJACENCY graph" --convert-input)
     apxchol_cli_test(cli_convert_adjacency_with_self_loops path5_adjacency_loops 0
         "ADJACENCY graph" --convert-input)
@@ -146,7 +153,7 @@ if (APXCHOL_BUILD_CLI)
     apxchol_cli_test(cli_disconnected_adjacency_converges disconnected_paths_pattern 0
         "projected random RHS independently over 2 connected components" --convert-input)
     apxchol_cli_test(cli_convert_mixed_signs_is_rejected ambiguous 2
-        "not a graph adjacency matrix either" --convert-input)
+        "not a graph adjacency matrix.*Condition FAILED: positive diagonal" --convert-input)
     apxchol_cli_test(cli_input_kind_is_removed path5_laplacian 109 "--input-kind"
         --input-kind operator)
 
@@ -161,6 +168,16 @@ if (APXCHOL_BUILD_CLI)
     endif()
     apxchol_cli_test(cli_numeric_backend_is_rejected path5_sddm 105 "not in" --backend 0)
     apxchol_cli_test(cli_invalid_backend_is_rejected path5_sddm 105 "not in" --backend hybrid)
+    apxchol_cli_test(cli_numeric_sampler_is_rejected path5_sddm 105 "not in" --sampler 1)
+    apxchol_cli_test(cli_numeric_factor_storage_is_rejected path5_sddm 105 "not in"
+        --factor-storage 1)
+    apxchol_cli_test(cli_numeric_partitioner_is_rejected path5_sddm 105 "not in"
+        --partitioner 0)
+    apxchol_cli_test(cli_stable_factor_options path5_sddm 0 "backend: +cpu" --backend cpu
+        --partitioner priority_greedy --sampler trace_cycle --factor-storage float32
+        --drop-tolerance 0 --degree-quantile 0 --degree-multiplier 3)
+    apxchol_cli_test(cli_degree_quantile_range path5_sddm 2 "degree_quantile must be in"
+        --degree-quantile 1)
     if (APXCHOL_DEVICE STREQUAL "CPU")
         apxchol_cli_test(cli_unavailable_gpu_backend_is_rejected path5_sddm 2
             "GPU route requested but GPU support is not built" --backend gpu)
@@ -169,7 +186,7 @@ if (APXCHOL_BUILD_CLI)
     apxchol_cli_test(cli_thread_budget path5_sddm 0 "backend: +cpu" --backend cpu --threads 2)
     apxchol_cli_test(cli_negative_thread_budget path5_sddm 105 "not in range" --threads -1)
     apxchol_cli_test(cli_zero_iteration_budget path5_sddm 1
-        "did not reach tol .* in 0 iterations" --backend cpu --maxiter 0)
+        "did not reach tol .* in 0 iterations" --backend cpu --max-iter 0)
     apxchol_cli_test(cli_output_failure path5_sddm 2
         "cannot write solution to" --backend cpu -o "${CMAKE_CURRENT_BINARY_DIR}")
     apxchol_cli_test(cli_output_success path5_sddm 0
@@ -196,6 +213,19 @@ if (APXCHOL_BUILD_CLI)
         "array real general\n5 3\n")
     apxchol_cli_rhs_test(cli_single_column_rhs_file path5_rhs1 0
         "iterations: [0-9]+" "array real general\n5 1\n")
+    # Empty inputs are rejected before any solve.
+    function(apxchol_cli_rhs_error_test name rhs output)
+        add_test(NAME ${name} COMMAND "${CMAKE_COMMAND}"
+            "-DCLI=$<TARGET_FILE:apxchol>"
+            "-DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/path5_sddm.mtx"
+            "-DRHS=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${rhs}.mtx"
+            "-DEXPECT_STATUS=2" "-DEXPECT_OUTPUT=${output}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/check_cli.cmake")
+        set_tests_properties(${name} PROPERTIES TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=4")
+    endfunction()
+    apxchol_cli_rhs_error_test(cli_rhs_without_columns path5_rhs_no_columns "RHS file has no columns")
+    apxchol_cli_rhs_error_test(cli_rhs_without_rows rhs_no_rows "RHS length 0 does not match n = 5")
+    apxchol_cli_test(cli_empty_matrix empty 2 "matrix is empty")
     string(TOLOWER "${APXCHOL_DEVICE}" cli_device)
     apxchol_cli_test(cli_build_backend path5_sddm 0 "device: ${cli_device}" --version)
 endif()

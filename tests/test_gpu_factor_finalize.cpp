@@ -4,6 +4,8 @@
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/detail/solver_route.h"
 
+using csc_access = apxchol::detail::sparse_csc_access;
+
 #if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 #include "apxchol/solver/sptrsv/cuda.h"
@@ -158,13 +160,13 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
     complete_factor retained(n, edges, order, true);
     const auto& reference = fixture.reference;
     const auto& export_reference = retained.reference;
-    ASSERT_EQ(retained.exported.L.outer_, export_reference.L.outer_);
-    ASSERT_EQ(retained.exported.L.inner_, export_reference.L.inner_);
+    ASSERT_EQ(csc_access::outer(retained.exported.L), csc_access::outer(export_reference.L));
+    ASSERT_EQ(csc_access::inner(retained.exported.L), csc_access::inner(export_reference.L));
     ASSERT_EQ(retained.exported.perm, export_reference.perm);
-    ASSERT_EQ(retained.exported.L.vals_.size(), export_reference.L.vals_.size());
-    for (std::size_t i = 0; i < export_reference.L.vals_.size(); ++i)
-        ASSERT_EQ(std::bit_cast<std::uint32_t>(retained.exported.L.vals_[i]),
-                  std::bit_cast<std::uint32_t>(export_reference.L.vals_[i]));
+    ASSERT_EQ(csc_access::vals(retained.exported.L).size(), csc_access::vals(export_reference.L).size());
+    for (std::size_t i = 0; i < csc_access::vals(export_reference.L).size(); ++i)
+        ASSERT_EQ(std::bit_cast<std::uint32_t>(csc_access::vals(retained.exported.L)[i]),
+                  std::bit_cast<std::uint32_t>(csc_access::vals(export_reference.L)[i]));
     for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
         for (double rel : {0.0, 0.00001, 0.0001, 0.2, 1.0}) {
             const apxchol::factor_options options{.factor_storage = storage, .drop_tolerance = rel};
@@ -199,6 +201,7 @@ TEST(GpuFactorFinalize, DefaultStorageMatchesHostCompensationAndHalfBits) {
                     append(lt16.ptr.data(), m + 1); append(lt16.idx.get(), lt16.nnz); append(lt16.vals.get(), lt16.nnz);
                     append(h.diag.data(), m);
                     append(h.inv_scale2.data(), m);
+                    append(scale.data(), m);
                 } else {
                     auto l = apxchol::detail::gpu_factor_prep::transpose_csr(lt);
                     append(l.ptr.data(), m + 1); append(l.idx.get(), l.nnz); append(l.vals.get(), l.nnz);
@@ -304,7 +307,6 @@ TEST(GpuFactorFinalize, DeviceSolvesAndSessionsInstallOwnedCapsules) {
     for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
         apxchol::solve_options solve_options;
         solve_options.backend = apxchol::solve_backend::gpu;
-        solve_options.keep_factor = true;
         solve_options.factor_opts.factor_storage = storage;
         solve_options.factor_opts.drop_tolerance = 0;
         for (double shift : {0.0, 1.0}) {
@@ -312,13 +314,18 @@ TEST(GpuFactorFinalize, DeviceSolvesAndSessionsInstallOwnedCapsules) {
             const auto& preconditioner = std::get<apxchol::detail::cuda_route>(
                 apxchol::detail::solver_access::route(owner));
             ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
-            const auto& factor = preconditioner.factor();
-            ASSERT_EQ(factor.L.vals_.size(), factor.L.nonZeros());
-            ASSERT_EQ(factor.L.inner_.size(), factor.L.nonZeros());
+            // The resident factor downloads on demand; nothing stays on the host.
+            EXPECT_TRUE(csc_access::vals(preconditioner.factor().L).empty());
+            const auto factor = owner.factor();
+            ASSERT_EQ(csc_access::vals(factor.L).size(), factor.L.nonZeros());
+            ASSERT_EQ(csc_access::inner(factor.L).size(), factor.L.nonZeros());
             ASSERT_EQ(factor.L.rows(), 64);
+            EXPECT_EQ(factor.L.nonZeros(), preconditioner.trsv().stored_nnz());
+            EXPECT_EQ(factor.storage, storage);
+            EXPECT_EQ(factor.scale.size(), storage == apxchol::factor_storage_type::fp16 ? 64u : 0u);
             EXPECT_EQ(preconditioner.trsv().fp16(), storage == apxchol::factor_storage_type::fp16);
             if (!factor.sddm) {
-                EXPECT_EQ(factor.L.vals_[factor.L.outer_[63]], 1.0f);
+                EXPECT_EQ(csc_access::outer(factor.L)[63], csc_access::outer(factor.L)[64]);
             }
         }
     }
@@ -388,8 +395,8 @@ TEST(GpuFactorFinalize, SharedCapsulesAndExplicitHostImportsPreserveOwnership) {
         EXPECT_FALSE(apxchol::detail::factorization_access::device_factor(reference)->empty());
         const auto A = solve_matrix(64, sddm ? 1.0 : 0.0);
         const auto exported = apxchol::factorize(A);
-        EXPECT_EQ(exported.L.vals_.size(), exported.L.nonZeros());
-        EXPECT_EQ(exported.L.inner_.size(), exported.L.nonZeros());
+        EXPECT_EQ(csc_access::vals(exported.L).size(), exported.L.nonZeros());
+        EXPECT_EQ(csc_access::inner(exported.L).size(), exported.L.nonZeros());
         EXPECT_FALSE(apxchol::detail::factorization_access::device_factor(exported));
         apxchol::detail::cuda_sptrsv host_import;
         host_import.setup(exported.L, sddm ? 64 : 63, options);
@@ -398,3 +405,4 @@ TEST(GpuFactorFinalize, SharedCapsulesAndExplicitHostImportsPreserveOwnership) {
     }
 }
 #endif
+

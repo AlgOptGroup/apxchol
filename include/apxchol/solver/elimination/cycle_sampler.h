@@ -169,11 +169,7 @@ inline void sample_trace_cycle(std::span<weighted_neighbor> n, double pivot,
         sample_cycle_gks_fallback(n, pivot, seed, out);
         return;
     }
-    // Reject the by-route sentinel defensively: it is SIZE_MAX, so an
-    // unresolved value would make `h <= exact_core_max_h` true for every core
-    // and switch the exact clique on everywhere.
-    const bool exact_core = exact_core_max_h > 0 &&
-        exact_core_max_h != exact_core_by_route && h <= exact_core_max_h;
+    const bool exact_core = exact_core_max_h > 0 && h <= exact_core_max_h;
     const size_t cycles = (double_cycle_min_h > 0 && h >= double_cycle_min_h) ? 2 : 1;
     // Reserve the actual core edges plus light attachments. Divide the exact
     // pair count before multiplying, and check against the vector's limit.

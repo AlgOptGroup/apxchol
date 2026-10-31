@@ -82,6 +82,33 @@ jobs:
         if: always()
         run: ccache --show-log-stats
 
+  benchmark-macos:
+    name: benchmark (macOS, Apple Clang, Metal, native contracts)
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      OMP_NUM_THREADS: '2'
+      OMP_DYNAMIC: 'FALSE'
+      CMAKE_BUILD_PARALLEL_LEVEL: '3'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: brew install libomp ninja ccache
+      - uses: ./.github/actions/ccache
+        with:
+          key: benchmark-mac-metal
+      # OpenMP_ROOT lets Hypre's own FindOpenMP see Homebrew's keg-only libomp.
+      # AMGCL is skipped (no Boost); CUDA competitors and ParAC do not build here.
+      - name: Configure + build native benchmark
+        run: |
+          cmake -S benchmarks -B build-benchmark -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DAPXCHOL_DEVICE=METAL -DAPXCHOL_NATIVE_ARCH=OFF -DBUILD_GPU_RCHOL=OFF \
+                -DOpenMP_ROOT="$(brew --prefix libomp)" -DCMAKE_DISABLE_FIND_PACKAGE_Boost=ON
+          cmake --build build-benchmark --target benchmark original_stop_tests split_components_tests v1_config_tests discard_streambuf_tests
+      - name: Run native benchmark contracts and a tiny Metal cell
+        run: ctest --test-dir build-benchmark --no-tests=error --output-on-failure --timeout 120
+      - *ccache-stats
+
   linux:
     name: Linux (${{ matrix.name }}, build + ctest)
     runs-on: ubuntu-latest
@@ -152,6 +179,20 @@ jobs:
                 -DAPXCHOL_BUILD_TESTS=ON -DAPXCHOL_BUILD_CLI=OFF
           cmake --build build-subdirectory-tests --parallel 2
           ctest --test-dir build-subdirectory-tests --no-tests=error --output-on-failure
+          cmake -S tests/cmake_subdirectory -B build-subdirectory-march -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
+                -DCMAKE_CXX_FLAGS=-march=x86-64-v3 | tee subdirectory-march.log
+          grep -q "using the -march/-mcpu flag from CMAKE_CXX_FLAGS" subdirectory-march.log
+          grep -q "exporting EIGEN_MAX_ALIGN_BYTES=32" subdirectory-march.log
+          cmake --build build-subdirectory-march --parallel 2
+          ctest --test-dir build-subdirectory-march --no-tests=error --output-on-failure
+          # A portable core with a consumer built for a wider instruction set.
+          cmake -S tests/cmake_subdirectory -B build-subdirectory-avx2 -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
+                -DAPXCHOL_TEST_CONSUMER_FLAGS=-mavx2 | tee subdirectory-avx2.log
+          grep -q "exporting EIGEN_MAX_ALIGN_BYTES=16" subdirectory-avx2.log
+          cmake --build build-subdirectory-avx2 --parallel 2
+          ctest --test-dir build-subdirectory-avx2 --no-tests=error --output-on-failure
       - name: Test relocated SDK with fetched Eigen
         if: matrix.cxx == 'clang++-18'
         run: |

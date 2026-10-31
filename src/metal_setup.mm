@@ -79,10 +79,12 @@ pipelines& pipelines_for(id<MTLDevice> device) {
 
 } // namespace
 
-void prepare_lane_plans(id<MTLDevice> device, const factorization& factor,
-                        triangle& forward, triangle& backward) {
+namespace {
+template<unsigned Lanes>
+void prepare_plans_from_rounds(id<MTLDevice> device, const factorization& factor,
+                               triangle& forward, triangle& backward) {
     const unsigned n = factor.perm.size();
-    auto rounds = buffer(device, (factor.rounds.size() + 1) * sizeof(unsigned));
+    auto rounds = buffer(device, (factor.rounds.size() + 2) * sizeof(unsigned));
     auto* bounds = static_cast<unsigned*>(rounds.contents);
     bounds[0] = 0;
     for (std::size_t r = 0; r < factor.rounds.size(); ++r) {
@@ -91,11 +93,47 @@ void prepare_lane_plans(id<MTLDevice> device, const factorization& factor,
                 "invalid resident Metal round boundaries");
         bounds[r + 1] = bounds[r] + unsigned(round.is_size);
     }
-    require(bounds[factor.rounds.size()] == n, "incomplete resident Metal rounds");
+    // Vertices no round eliminated (the final pivot) form one last round.
+    unsigned count = unsigned(factor.rounds.size());
+    if (bounds[count] < n) bounds[++count] = n;
     auto status = buffer(device, sizeof(unsigned));
     *static_cast<unsigned*>(status.contents) = 0;
-    pipelines_for(device).finalizer.prepare_plans<8>(forward, backward, n - !factor.sddm,
-        rounds, 0, unsigned(factor.rounds.size()), status);
+    pipelines_for(device).finalizer.prepare_plans<Lanes>(forward, backward, n - !factor.sddm,
+        rounds, 0, count, status);
+}
+} // namespace
+
+void prepare_lane_plans(id<MTLDevice> device, const factorization& factor,
+                        triangle& forward, triangle& backward) {
+    prepare_plans_from_rounds<8>(device, factor, forward, backward);
+}
+
+void prepare_round_plans(id<MTLDevice> device, const factorization& factor,
+                         triangle& forward, triangle& backward) {
+    prepare_plans_from_rounds<detail::gpu_dataflow::lanes>(device, factor, forward, backward);
+}
+
+std::optional<resident_factor> prepare_input_operator(id<MTLDevice> device,
+    const Eigen::SparseMatrix<double>& A, const std::vector<node_index>& perm,
+    double lump_max_mass) {
+    @autoreleasepool {
+        std::size_t offdiagonals = 0;
+        if (!gpu_owned_csc_layout_supported(A, offdiagonals) || !gpu_owned_csc_paired(A))
+            return std::nullopt;
+        const operator_view validated(A, lump_max_mass);
+        const auto input = upload(device, A);
+        const unsigned n = unsigned(A.rows());
+        resident_factor out;
+        out.operator_exact = input.operator_exact;
+        out.max_operator_row = input.max_operator_row;
+        out.preconditioner_scale = input.preconditioner_scale;
+        out.operator_triangles_identical = validated.scan().triangles_bit_identical;
+        auto permutation = buffer(device, std::size_t(n) * sizeof(unsigned));
+        std::copy(perm.begin(), perm.end(), static_cast<unsigned*>(permutation.contents));
+        pipelines_for(device).finalizer.prepare_operator(input.ptr, input.idx, input.values,
+                                                         permutation, n, unsigned(A.nonZeros()), out);
+        return out;
+    }
 }
 
 resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double> &A,
@@ -136,9 +174,8 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
             unsigned(validated.scan().offdiag_nnz - validated.lumped()), options.factor_opts.seed,
             graph.ptr, graph.idx, graph.values, regularization,
             unsigned(unchanged && validated.scan().triangles_bit_identical), options.factor_opts,
-            options.factor_opts.parallel_residual_threshold == std::numeric_limits<std::size_t>::max()
-                ? block_greedy_partitioner::residual_handoff_threshold
-                : options.factor_opts.parallel_residual_threshold);
+            options.factor_opts.experimental.parallel_residual_threshold.value_or(
+                block_greedy_partitioner::residual_handoff_threshold));
         if (cp)
             (*cp)("metal_factorize");
         const bool laplacian = !raw.data().state->has_excess;
@@ -148,17 +185,6 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         F.lumped_offdiag = validated.lumped();
         const auto data = raw.data();
         const unsigned n = data.state->nodes;
-        if (options.keep_factor) {
-            std::vector<factor_entry> entries(data.state->entries);
-            for (unsigned p = 0; p < data.state->entries; ++p)
-                entries[p] = {data.factors[p].node, data.factors[p].value};
-            std::vector<factor_col> columns(n);
-            for (unsigned row = 0; row < n; ++row) {
-                const auto col = data.columns[row];
-                columns[row] = {col.node, col.diagonal, entries.data() + col.begin, col.count};
-            }
-            build_csc(F, columns, n, nullptr);
-        }
         const bool half = resolve_fp16_storage(options.factor_opts.factor_storage, false);
         auto finalized = cached.finalizer.run(raw, laplacian, half, options.factor_opts.drop_tolerance);
         if (cp)
@@ -171,14 +197,14 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         out.backward = std::move(finalized.backward);
         out.metadata = finalized.metadata;
         out.half = half;
-        if (!options.keep_factor) {
-            F.perm.assign(static_cast<unsigned *>(finalized.permutation.contents),
-                          static_cast<unsigned *>(finalized.permutation.contents) + n);
-            F.L.resize(n, n);
-            for (unsigned row = 0; row < n; ++row)
-                F.L.outer_[row] = data.columns[row].begin + row;
-            F.L.outer_[n] = data.state->entries + n;
-        }
+        out.drop = finalized.drop;
+        F.perm.assign(static_cast<unsigned *>(finalized.permutation.contents),
+                      static_cast<unsigned *>(finalized.permutation.contents) + n);
+        detail::sparse_csc_access::resize(F.L, n);
+        auto& outer = detail::sparse_csc_access::outer(F.L);
+        for (unsigned row = 0; row < n; ++row)
+            outer[row] = data.columns[row].begin + row;
+        outer[n] = data.state->entries + n;
         F.rounds.reserve(data.state->round);
         for (unsigned r = 0; r < data.state->round; ++r) {
             const unsigned first = data.round_ptr[r], last = data.round_ptr[r + 1];
