@@ -961,8 +961,8 @@ TEST(Solver, GpuCopiesShareTheDeviceFactorAndSolveConcurrently) {
             solved.push_back(original->solve(rhs.back()).x);
             applied.push_back(original->apply(rhs.back()));
         }
-        // Five columns run a four-column panel, whose lane plan the copies
-        // build on first use, then a scalar solve.
+        // Five columns run a four-column panel, then a scalar solve. On Metal
+        // the copies build the shared lane plans on first use.
         Eigen::MatrixXd panel(matrix.rows(), 5);
         for (int q = 0; q < panel.cols(); ++q)
             panel.col(q) = Eigen::VectorXd::LinSpaced(matrix.rows(), q - 2.0, 1.0 + q);

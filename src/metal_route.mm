@@ -337,9 +337,8 @@ void print_banner(const detail::metal_route::statistics& st, bool factor_fp16) {
 
 }  // namespace
 
-// The factor, plans and operator: read-only after setup and shared by copies.
-// The four-column lane plans are built once, by the first four-column solve
-// of any copy.
+// The factor, plans and operator: built by setup, then shared by copies
+// through a pointer to const. The lane plans are the one exception.
 struct detail::metal_route::device_state {
     solve_options opts;
     factorization F;
@@ -357,8 +356,15 @@ struct detail::metal_route::device_state {
     id<MTLBuffer> factor_metadata = nil;
     id<MTLBuffer> device_op_ptr = nil, device_op_col = nil, op_hi = nil, op_lo = nil;
     id<MTLBuffer> operator_row_map = nil;
-    prepared_tri fwd, bwd, lane_fwd, lane_bwd;
-    std::once_flag lane_once;
+    prepared_tri fwd, bwd;
+    // The only state built after setup: the four-column panels' lane plans,
+    // built once by the first four-column solve of any copy. Building them
+    // at setup measured 2-8% of setup time (7-19 ms on 1M-4M rows).
+    struct lane_plans {
+        std::once_flag once;
+        prepared_tri forward, backward;
+    };
+    mutable lane_plans lanes;
 
     explicit device_state(const solve_options& options) : opts(options) {
         factor_fp16 = detail::resolve_fp16_storage(opts.factor_opts.factor_storage, false);
@@ -370,7 +376,11 @@ struct detail::metal_route::device_state {
                         const std::vector<float>& scales,
                         const std::vector<float>& hi, const std::vector<float>& lo, unsigned m,
                         detail::metal_setup::resident_factor* resident = nullptr);
-    void prepare_lane_plans();
+    const lane_plans& built_lanes() const {
+        std::call_once(lanes.once, [&] { prepare_lane_plans(); });
+        return lanes;
+    }
+    void prepare_lane_plans() const;
 
     // x follows the retained operator's ordering; y is factor-permuted.
     template<class Vector>
@@ -401,7 +411,7 @@ struct detail::metal_route::device_state {
 
 // One copy's command queue and PCG workspace over the shared device state.
 struct detail::metal_route::impl {
-    std::shared_ptr<device_state> state;
+    std::shared_ptr<const device_state> state;
     const device_state& d;
     const pipelines* pipes = nullptr;
     unsigned columns = 1, workspace_columns = 0;
@@ -409,7 +419,7 @@ struct detail::metal_route::impl {
     id<MTLBuffer> x = nil, r = nil, ap = nil, p = nil, z = nil, partial = nil, state_buffer = nil;
     id<MTLBuffer> tags = nil;
 
-    explicit impl(std::shared_ptr<device_state> shared_state)
+    explicit impl(std::shared_ptr<const device_state> shared_state)
         : state(std::move(shared_state)), d(*state) {
         with_pool([&] {
             queue = [d.ctx->device newCommandQueue];
@@ -461,8 +471,8 @@ struct detail::metal_route::impl {
     }
 
     void precondition() const {
-        encode_tri(columns == 4 ? d.lane_fwd : d.fwd, true);
-        encode_tri(columns == 4 ? d.lane_bwd : d.bwd, false);
+        encode_tri(columns == 4 ? d.lanes.forward : d.fwd, true);
+        encode_tri(columns == 4 ? d.lanes.backward : d.bwd, false);
     }
 
     void step(operation op) const {
@@ -513,7 +523,7 @@ struct detail::metal_route::impl {
                 with_pool([&] { d.ctx->pipes[index] = make_pipelines(d.ctx->device, d.ctx->library, count); });
             });
         }
-        if (count == 4) std::call_once(state->lane_once, [&] { state->prepare_lane_plans(); });
+        if (count == 4) d.built_lanes();
         if (count > workspace_columns) allocate_workspace(count);
         columns = count;
         pipes = &d.ctx->pipes[index];
@@ -699,7 +709,7 @@ void detail::metal_route::device_state::prepare_device(detail::gpu_factor_prep::
     }
 }
 
-void detail::metal_route::device_state::prepare_lane_plans() {
+void detail::metal_route::device_state::prepare_lane_plans() const {
     prepared_tri next_fwd, next_bwd;
     if (fwd.resident_round_plan) {
         next_fwd = {.ptr = fwd.ptr, .idx = fwd.idx, .val = fwd.val};
@@ -720,8 +730,8 @@ void detail::metal_route::device_state::prepare_lane_plans() {
         next_fwd = prepare(fwd, true);
         next_bwd = prepare(bwd, false);
     }
-    lane_fwd = std::move(next_fwd);
-    lane_bwd = std::move(next_bwd);
+    lanes.forward = std::move(next_fwd);
+    lanes.backward = std::move(next_bwd);
 }
 
 void detail::metal_route::impl::allocate_workspace(unsigned count) {
@@ -730,8 +740,8 @@ void detail::metal_route::impl::allocate_workspace(unsigned count) {
     const bool lanes = count == 4;
     const auto n = d.n;
     const auto tag_rows = std::max({n, std::size_t(d.fwd.tag_count), std::size_t(d.bwd.tag_count),
-                                   std::size_t(lanes ? d.lane_fwd.tag_count : 0),
-                                   std::size_t(lanes ? d.lane_bwd.tag_count : 0)});
+                                   std::size_t(lanes ? d.lanes.forward.tag_count : 0),
+                                   std::size_t(lanes ? d.lanes.backward.tag_count : 0)});
     if (tag_rows > std::numeric_limits<unsigned>::max() / count)
         throw std::overflow_error("Metal RHS panel exceeds packed index range");
     with_pool([&] {
