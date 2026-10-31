@@ -75,8 +75,7 @@ TEST(GpuBlockFrontend, OwnedBoundedSelectionMakesIndependentProgress) {
             apxchol::partition_options options;
             options.degree_quantile = 0.0;
             options.degree_multiplier = static_cast<double>(n);
-            options.degree_tiebreak = degree_tiebreak;
-            const auto prepared = gpu->prepare(fixture.active, options);
+            const auto prepared = gpu->prepare(fixture.active, options, 42, 0, degree_tiebreak);
             ASSERT_EQ(prepared.candidate_count, fixture.active.size());
             const auto candidates = gpu->host_candidates();
             EXPECT_EQ(std::vector<node_index>(candidates.begin(), candidates.end()), fixture.active);

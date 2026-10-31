@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
@@ -105,8 +106,9 @@ public:
         return own<storage::fp32>(cuda_device, m, nnz, L, LT, stats);
     }
 
-    /// FP16_SCALED form of the same handoff. `diag` and `inv_scale2` are
-    /// separate cudaMalloc base allocations of m floats / m doubles. The two
+    /// FP16_SCALED form of the same handoff. `diag`, `inv_scale2` and
+    /// `scale` are separate cudaMalloc base allocations of m floats / m
+    /// doubles / m floats; `scale` holds s_j for factor export. The two
     /// counters are the narrowing diagnostics reported by the upload path.
     static cuda_sptrsv_device_factor own_fp16_scaled(
             int cuda_device, std::int64_t m, std::int64_t nnz,
@@ -114,10 +116,11 @@ public:
             cuda_sptrsv_device_csr_fp16 LT,
             cuda_sptrsv_device_allocation<float> diag,
             cuda_sptrsv_device_allocation<double> inv_scale2,
+            cuda_sptrsv_device_allocation<float> scale,
             factor_drop_stats stats,
             std::uint64_t flushed, std::uint64_t subnormal) {
         return own<storage::fp16_scaled>(cuda_device, m, nnz, L, LT, stats,
-                                        diag, inv_scale2, flushed, subnormal);
+                                        diag, inv_scale2, scale, flushed, subnormal);
     }
 
     bool empty() const noexcept { return data_.L_row_ptr == nullptr; }
@@ -141,6 +144,7 @@ private:
             Csr L, Csr LT, factor_drop_stats stats,
             cuda_sptrsv_device_allocation<float> diag = {},
             cuda_sptrsv_device_allocation<double> inv_scale2 = {},
+            cuda_sptrsv_device_allocation<float> scale = {},
             std::uint64_t flushed = 0, std::uint64_t subnormal = 0) {
         const std::size_t rows = static_cast<std::size_t>(m);
         const std::size_t entries = static_cast<std::size_t>(nnz);
@@ -152,9 +156,10 @@ private:
             {LT.col_idx.data, LT.col_idx.bytes, entries * sizeof(int)},
             {LT.values.data, LT.values.bytes, entries * sizeof(*LT.values.data)},
             {diag.data, diag.bytes, rows * sizeof(float)},
-            {inv_scale2.data, inv_scale2.bytes, rows * sizeof(double)}};
+            {inv_scale2.data, inv_scale2.bytes, rows * sizeof(double)},
+            {scale.data, scale.bytes, rows * sizeof(float)}};
         validate_metadata(cuda_device, m, nnz, stats,
-                          std::span(allocations).first(Format == storage::fp32 ? 6 : 8));
+                          std::span(allocations).first(Format == storage::fp32 ? 6 : 9));
         cuda_sptrsv_device_factor out;
         out.data_.cuda_device = cuda_device;
         out.data_.m = m;
@@ -171,9 +176,10 @@ private:
         out.data_.LT_values = LT.values.data;
         out.data_.diag = diag.data;
         out.data_.inv_scale2 = inv_scale2.data;
+        out.data_.scale = scale.data;
         out.data_.allocation_bytes = {L.row_ptr.bytes, L.col_idx.bytes, L.values.bytes,
                                      LT.row_ptr.bytes, LT.col_idx.bytes, LT.values.bytes,
-                                     diag.bytes, inv_scale2.bytes};
+                                     diag.bytes, inv_scale2.bytes, scale.bytes};
         return out;
     }
 
@@ -237,10 +243,11 @@ private:
         void* LT_values = nullptr;
         float* diag = nullptr;
         double* inv_scale2 = nullptr;
+        float* scale = nullptr;
 
         void reset_factor() noexcept {
             void* const allocations[] = {L_row_ptr, L_col_idx, L_values,
-                                         LT_row_ptr, LT_col_idx, LT_values, diag, inv_scale2};
+                                         LT_row_ptr, LT_col_idx, LT_values, diag, inv_scale2, scale};
             for (void* allocation : allocations)
                 if (allocation) (void)cudaFree(allocation);
             *this = {};
@@ -251,7 +258,7 @@ private:
         int cuda_device = -1;
         storage format = storage::fp32;
         bool finalized_sorted_triangular = false;
-        std::array<std::size_t, 8> allocation_bytes{};
+        std::array<std::size_t, 9> allocation_bytes{};
     } data_;
 };
 
@@ -304,7 +311,8 @@ private:
 /// otherwise: a factor the fp16 storage cannot represent must fail loudly,
 /// never dissolve into NaN.
 /// Device factor bytes per stored entry: 4 (colidx) + 2 (value), times two
-/// CSRs, plus 12 B/row -- vs 4 + 4 with the fp32 storage.
+/// CSRs, plus 16 B/row (diag, inv_scale^2 and scale) -- vs 4 + 4 with the
+/// fp32 storage.
 /// fp16 subnormals are always flushed to zero at storage and the drop's keep
 /// predicate also drops what fp16 flushes, exactly as on the CPU.
 class cuda_sptrsv {
@@ -340,8 +348,58 @@ public:
     /// verbose reports setup stages; the caller establishes the CUDA context.
     void setup(const sparse_csc& L, node_index m,
                const factor_options& options = {}) {
+        setup_host(L, m, options, fp16_resolved(options.factor_storage), false, nullptr);
+    }
+
+    /// Upload an exported installed factor (factorization::storage fp32 or
+    /// fp16) exactly as given: no drop, no rescaling and no rounding. fp16
+    /// off-diagonals must be binary16 values, L's diagonal holds d_j and
+    /// scale holds s_j for columns [0, m). options.drop_tolerance and
+    /// factor_storage are ignored.
+    void install_exact(const sparse_csc& L, node_index m, bool fp16, const float* scale,
+                       const factor_options& options = {}) {
+        setup_host(L, m, options, fp16, true, scale);
+    }
+
+    /// Download the installed factor in factorization's form (solve.h):
+    /// columns [0, m) of the n x n L from CSR(L^T), fp16 off-diagonals widened
+    /// exactly and diagonal d_j; columns [m, n) are empty. fp16 storage also
+    /// returns s_j in scale (one per column; 1 beyond m).
+    void export_installed(sparse_csc& L, node_index n, std::vector<float>& scale) const {
+        const detail::cuda_device_scope device(shared().cuda_device, detail::cuda_device_scope::checked{});
+        const auto m = static_cast<std::size_t>(shared().m), nnz = static_cast<std::size_t>(shared().nnz);
+        std::vector<int> ptr(m + 1), idx(nnz);
+        APXCHOL_CUDA_CHECK(cudaMemcpy(ptr.data(), shared().LT_row_ptr, ptr.size() * sizeof(int), cudaMemcpyDeviceToHost));
+        APXCHOL_CUDA_CHECK(cudaMemcpy(idx.data(), shared().LT_col_idx, idx.size() * sizeof(int), cudaMemcpyDeviceToHost));
+        detail::sparse_csc_access::resize(L, n);
+        detail::sparse_csc_access::resize_nonzeros(L, static_cast<edge_index>(nnz));
+        for (std::size_t j = 0; j <= m; ++j) detail::sparse_csc_access::outer(L)[j] = static_cast<edge_index>(ptr[j]);
+        std::fill(detail::sparse_csc_access::outer(L).begin() + m + 1, detail::sparse_csc_access::outer(L).end(), static_cast<edge_index>(nnz));
+        std::copy(idx.begin(), idx.end(), detail::sparse_csc_access::inner(L).begin());
+        scale.clear();
+        if (!shared().fp16) {
+            APXCHOL_CUDA_CHECK(cudaMemcpy(detail::sparse_csc_access::vals(L).data(), shared().LT_values, nnz * sizeof(float), cudaMemcpyDeviceToHost));
+            return;
+        }
+        // unique_ptr rather than vector: nvcc rejects std::vector<_Float16>.
+        const auto half = std::make_unique_for_overwrite<_Float16[]>(nnz);
+        std::vector<float> diag(m);
+        scale.assign(n, 1.0f);
+        APXCHOL_CUDA_CHECK(cudaMemcpy(half.get(), shared().LT_values, nnz * sizeof(_Float16), cudaMemcpyDeviceToHost));
+        APXCHOL_CUDA_CHECK(cudaMemcpy(diag.data(), shared().diag, m * sizeof(float), cudaMemcpyDeviceToHost));
+        APXCHOL_CUDA_CHECK(cudaMemcpy(scale.data(), shared().scale, m * sizeof(float), cudaMemcpyDeviceToHost));
+        for (std::size_t j = 0; j < m; ++j)
+            for (int p = ptr[j]; p < ptr[j + 1]; ++p)
+                detail::sparse_csc_access::vals(L)[p] = p == ptr[j] ? diag[j] : static_cast<float>(half[p]);
+    }
+
+private:
+    // exact == false builds the storage from a construction factor;
+    // otherwise L is an installed factor with fp16 column scales exact_scale
+    // (ignored for fp32), uploaded without change.
+    void setup_host(const sparse_csc& L, node_index m, const factor_options& options,
+                    bool fp16, bool exact, const float* exact_scale) {
         validate_options(options);
-        const bool fp16 = fp16_resolved(options.factor_storage);
         destroy();
         data_ = std::make_shared<state>();
         data_->verbose = options.verbose;
@@ -361,7 +419,7 @@ public:
         if (data_->verbose)
             std::fprintf(stderr, "[apxchol] GPU SpTRSV backend: %s (%s storage)\n",
                          backend_name(), data_->fp16 ? "fp16" : "fp32");
-        const double factor_drop_rel = options.drop_tolerance;
+        const double factor_drop_rel = exact ? 0.0 : options.drop_tolerance;
 
         // Build L11 = top-left m×m block of the factor in CSC, with checked
         // 32-bit indices for the dataflow kernels.
@@ -369,14 +427,20 @@ public:
         gpu_factor_prep::csr_int<sptrsv_value_t> LT = gpu_factor_prep::build_L11_csc_int<sptrsv_value_t>(L, data_->m);
         mark("build_L11");
 
-        // Per-column scales (the drop's threshold reference; the fp16 storage's
-        // scale), from the factor BEFORE the drop.
         std::vector<float> col_scale;
-        if (factor_drop_rel > 0.0 || data_->fp16) col_scale = gpu_factor_prep::column_scales(LT);
-        if (data_->fp16) gpu_factor_prep::normalize_fp16_scales(LT, col_scale);
+        if (exact) {
+            if (data_->fp16) col_scale.assign(exact_scale, exact_scale + data_->m);
+            data_->stats = {};
+            data_->stats.nnz_factor = data_->stats.nnz_stored = static_cast<std::uint64_t>(LT.nnz);
+        } else {
+            // Per-column scales (the drop's threshold reference; the fp16
+            // storage's scale), from the factor BEFORE the drop.
+            if (factor_drop_rel > 0.0 || data_->fp16) col_scale = gpu_factor_prep::column_scales(LT);
+            if (data_->fp16) gpu_factor_prep::normalize_fp16_scales(LT, col_scale);
 
-        // ── Compacting drop (factor_drop.h; see the class comment) ──
-        data_->stats = gpu_factor_prep::apply_factor_drop(LT, col_scale, factor_drop_rel, data_->fp16);
+            // ── Compacting drop (factor_drop.h; see the class comment) ──
+            data_->stats = gpu_factor_prep::apply_factor_drop(LT, col_scale, factor_drop_rel, data_->fp16);
+        }
         data_->nnz = LT.nnz;
         mark("col_scale+drop");
 
@@ -407,7 +471,9 @@ public:
             // FP16 per-column-scaled storage (gpu_factor_prep.h contract): values of
             // CSR(L^T) narrowed on the host, fp32 diagonal and fp64 inverse squares alongside,
             // then the transpose (carrying the same 16-bit patterns) for CSR(L).
-            gpu_factor_prep::fp16_scaled_arrays h16 = gpu_factor_prep::narrow_fp16_scaled(LT, col_scale);
+            gpu_factor_prep::fp16_scaled_arrays h16 = exact
+                ? gpu_factor_prep::installed_fp16_arrays(LT, col_scale)
+                : gpu_factor_prep::narrow_fp16_scaled(LT, col_scale);
             mark("  fp16_narrow");
             data_->fp16_flushed = h16.flushed; data_->fp16_subnormal = h16.subnormal;
             // Fail LOUDLY on a factor the fp16 storage cannot represent
@@ -423,6 +489,7 @@ public:
             upload_factor(data_->LT_values, h16.vals.get(), data_->nnz);
             upload_factor(data_->diag, h16.diag.data(), data_->m);
             upload_factor(data_->inv_scale2, h16.inv_scale2.data(), data_->m);
+            upload_factor(data_->scale, col_scale.data(), data_->m);
             // CSR of L for the forward solve: transpose of (structure of LT,
             // fp16 values).
             gpu_factor_prep::csr_int<_Float16> LT16;
@@ -472,6 +539,7 @@ public:
         data_->ready = true;
     }
 
+public:
     /// Install final CSR(L) and CSR(L^T) storage on the active CUDA device.
     /// Production uses the private resident finalizer; diagnostic callers may
     /// supply generic ownership capsules, which receive full validation.
@@ -553,6 +621,7 @@ public:
         if (factor_fp16) {
             account(factor.data_.diag, rows * sizeof(float), "fp16 scaled diagonal");
             account(factor.data_.inv_scale2, rows * sizeof(double), "fp16 inverse scale squared");
+            account(factor.data_.scale, rows * sizeof(float), "fp16 column scale");
         }
 
         const bool trace = data_->verbose;
@@ -717,8 +786,8 @@ public:
     /// Bytes per stored off-diagonal value on the device (2 under fp16).
     std::size_t value_bytes_effective() const { return shared().fp16 ? 2 : value_bytes; }
     /// Device bytes of the factor arrays cudaMalloc'd by the last setup()
-    /// (structure + values of every CSR copy, fp16's diag / inv_scale^2 and the
-    /// dataflow batch tables), which copies share; NOT the per-copy workspace.
+    /// (structure + values of every CSR copy, fp16's diag / inv_scale^2 / scale
+    /// and the dataflow batch tables), which copies share; NOT the per-copy workspace.
     std::size_t factor_device_bytes() const { return shared().factor_bytes; }
     /// True for device-factor adoption; false for host preprocessing/upload.
     bool adopted_device_factor() const { return shared().adopted_device_factor; }
@@ -732,7 +801,7 @@ public:
 private:
     static void validate_options(const factor_options& options) {
         detail::validate_factor_options(options);
-        if (options.cpu_schedule != cpu_sptrsv_schedule::automatic)
+        if (options.experimental.cpu_schedule != cpu_sptrsv_schedule::automatic)
             throw std::invalid_argument("CPU triangular-solve schedules are unavailable on CUDA");
     }
 

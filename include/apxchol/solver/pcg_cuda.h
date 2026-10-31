@@ -127,12 +127,6 @@ public:
     }
     /// Threads per row of the SpMV resolved from the average row length.
     int spmv_lanes() const { return spmv_lanes_; }
-    double device_memory_used_mb() const {
-        const detail::cuda_device_scope device(device_, detail::cuda_device_scope::checked{});
-        size_t free = 0, total = 0;
-        return cudaMemGetInfo(&free, &total) == cudaSuccess && total >= free
-            ? (total - free) / (1024.0 * 1024.0) : -1;
-    }
 
 private:
     template<unsigned Columns, class Precond, class Input, class Output>
@@ -214,8 +208,11 @@ private:
             scales[q] = detail::gpu_scaling::fp32_scale(std::max(max_b[q], max_x0[q]));
             // packed stays unchanged until the stream syncs: the upload above
             // may still read it. Fold the scaled column's norm contiguously.
-            const Eigen::VectorXd rhs_column = packed.col(q) * scales[q];
-            bnorm[q] = detail::gpu_scaling::norm(rhs_column);
+            if (Columns == 1 && scales[q] == 1) bnorm[q] = detail::gpu_scaling::norm(packed);
+            else {
+                const Eigen::VectorXd rhs_column = packed.col(q) * scales[q];
+                bnorm[q] = detail::gpu_scaling::norm(rhs_column);
+            }
             if (!std::isnormal(bnorm[q] * bnorm[q]))
                 throw std::invalid_argument("CUDA solve: RHS and initial guess exceed the common scaling range");
             auto& st = h_state_[q];

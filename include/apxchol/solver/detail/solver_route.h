@@ -16,8 +16,8 @@
 namespace apxchol::detail {
 
 // Every route is constructed from (A, opts, cp, F) and provides solve_widths,
-// apply_widths, solve_columns, apply_columns, factor, factor_storage and
-// original_operator.
+// apply_widths, solve_columns, apply_columns, factor (metadata),
+// installed_factor, factor_nnz, factor_storage and original_operator.
 using solver_route = std::variant<cpu_route
 #if defined(APXCHOL_USE_CUDA)
     , cuda_route

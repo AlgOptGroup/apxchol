@@ -1,6 +1,7 @@
 #pragma once
 #include "apxchol/types.h"
 #include "apxchol/lowprec.h"
+#include <span>
 #include <vector>
 #include <cstddef>
 #include <limits>
@@ -15,7 +16,7 @@ namespace apxchol {
 // extra PCG iterations: the outer PCG (vectors, dots, SpMV/residual) stays
 // fp64 and still converges to 1e-8.
 //
-//   - factor_value_t : what the FACTOR (sparse_csc::vals_, the assembler's
+//   - factor_value_t : what the FACTOR (sparse_csc::values(), the assembler's
 //     output) stores. The SpTRSV's setup reads the exact fp32 diagonal and
 //     the per-column scales off it, and the factor is released right after
 //     setup on the consuming path.
@@ -27,25 +28,42 @@ namespace apxchol {
 using factor_value_t = float;
 namespace detail { using sptrsv_value_t = float; }
 
+namespace detail { struct sparse_csc_access; }
+
 /// Owning Compressed-Sparse-Column matrix that replaces Eigen::SparseMatrix for
 /// the factor L. We own the storage so the index width is OURS, not forced
 /// signed-`int` by Eigen's StorageIndex static_assert.
 ///
 /// Two index roles, deliberately different (see types.h) -- BOTH unsigned:
-///   - column pointers (`outer_`)  -> edge_index : a cumulative NON-NEGATIVE
+///   - column pointers (`col_ptrs()`)    -> edge_index : a cumulative NON-NEGATIVE
 ///     offset that can reach billions, so it is the widenable one.
-///   - row indices     (`inner_`)  -> node_index : a vertex id, < 2^32 by default,
-///     so it stays 32-bit with APXCHOL_INDEX_WIDTH=64_EDGES.
+///   - row indices     (`row_indices()`) -> node_index : a vertex id, < 2^32 by
+///     default, so it stays 32-bit with APXCHOL_INDEX_WIDTH=64_EDGES.
 ///
-/// Overflow safety: the only place a value can exceed its type is the cumulative
-/// column pointer; `set_outer`/`finish` assert it stays <= edge_index max. We
-/// never form `(a+b)/2` or `a-b` on offsets where the result could be negative.
-///
-/// The accessor names mirror the subset of the Eigen::SparseMatrix interface the
-/// factor consumers (sptrsv, cuda pcg, assembler) actually use, so their bodies
-/// stay intact -- only the pointer *types* change (int* -> edge_index*/node_index*).
-struct sparse_csc {
+/// The public surface is a read-only view. The assembler, archive and GPU
+/// finalize code build and release the storage through detail::sparse_csc_access.
+class sparse_csc {
+public:
     static constexpr edge_index kEdgeMax = std::numeric_limits<edge_index>::max();
+
+    sparse_csc() = default;
+
+    node_index rows() const { return n_; }
+    node_index cols() const { return n_; }
+    edge_index nonZeros() const { return outer_.empty() ? edge_index(0) : outer_.back(); }
+    /// False once a solver released the row indices and values after its
+    /// SpTRSV setup; the column pointers stay.
+    bool has_values() const { return !vals_.empty(); }
+
+    /// rows()+1 cumulative column pointers.
+    std::span<const edge_index>     col_ptrs() const { return outer_; }
+    /// nonZeros() row indices; each column lists its diagonal first.
+    std::span<const node_index>     row_indices() const { return inner_; }
+    /// nonZeros() values, parallel to row_indices().
+    std::span<const factor_value_t> values() const { return vals_; }
+
+private:
+    friend struct detail::sparse_csc_access;
 
     node_index                  n_ = 0; // rows == cols (square factor)
     std::vector<edge_index>     outer_; // n_+1 column pointers (cumulative nnz)
@@ -59,34 +77,30 @@ struct sparse_csc {
     // like fp64 (verified on IPM/social/grid; the GPU backend has always stored
     // the diagonal in fp32 too).
     std::vector<factor_value_t> vals_;
+};
 
-    sparse_csc() = default;
+namespace detail {
 
-    // Eigen-compatible surface ---------------------------------------------
-    node_index rows() const { return n_; }
-    node_index cols() const { return n_; }
-    node_index outerSize() const { return n_; }
-    edge_index nonZeros() const { return outer_.empty() ? edge_index(0) : outer_.back(); }
+/// Write access to sparse_csc storage for code that builds, loads or releases a
+/// factor. Not part of the public API.
+struct sparse_csc_access {
+    static node_index& n(sparse_csc& L) { return L.n_; }
+    static std::vector<edge_index>&     outer(sparse_csc& L) { return L.outer_; }
+    static std::vector<node_index>&     inner(sparse_csc& L) { return L.inner_; }
+    static std::vector<factor_value_t>& vals(sparse_csc& L) { return L.vals_; }
+    static const std::vector<edge_index>&     outer(const sparse_csc& L) { return L.outer_; }
+    static const std::vector<node_index>&     inner(const sparse_csc& L) { return L.inner_; }
+    static const std::vector<factor_value_t>& vals(const sparse_csc& L) { return L.vals_; }
 
-    edge_index*       outerIndexPtr()       { return outer_.data(); }
-    const edge_index* outerIndexPtr() const { return outer_.data(); }
-    node_index*       innerIndexPtr()       { return inner_.data(); }
-    const node_index* innerIndexPtr() const { return inner_.data(); }
-    factor_value_t*       valuePtr()            { return vals_.data(); }
-    const factor_value_t* valuePtr()      const { return vals_.data(); }
-
-    // Build surface (mirrors the resize/reserve/resizeNonZeros/makeCompressed
-    // sequence assemble_csc used on the Eigen matrix) ----------------------
-    void resize(node_index rows, node_index /*cols*/) {
-        n_ = rows;
-        outer_.assign(static_cast<std::size_t>(rows) + 1, edge_index(0));
+    /// Size an n x n factor with zeroed column pointers.
+    static void resize(sparse_csc& L, node_index n) {
+        L.n_ = n;
+        L.outer_.assign(static_cast<std::size_t>(n) + 1, edge_index(0));
     }
-    void reserve(edge_index /*nnz*/) {}             // outer_ already sized; no-op
-    void resizeNonZeros(edge_index nnz) {
-        inner_.resize(static_cast<std::size_t>(nnz));
-        vals_.resize(static_cast<std::size_t>(nnz));
+    static void resize_nonzeros(sparse_csc& L, edge_index nnz) {
+        L.inner_.resize(static_cast<std::size_t>(nnz));
+        L.vals_.resize(static_cast<std::size_t>(nnz));
     }
-    void makeCompressed() {}                        // compressed by construction
 
     /// Free the large row-index + value arrays, keeping the column pointers so
     /// nonZeros()/rows()/cols() still work. Called once the factor has been
@@ -94,10 +108,12 @@ struct sparse_csc {
     /// PCG loop never touches F_.L afterwards, so this drops one full copy of the
     /// factor: nnz * (sizeof(node_index) + sizeof(factor_value_t)) bytes.
     /// swap-with-empty releases the arrays' allocations.
-    void release_values() {
-        std::vector<node_index>().swap(inner_);
-        std::vector<factor_value_t>().swap(vals_);
+    static void release_values(sparse_csc& L) {
+        std::vector<node_index>().swap(L.inner_);
+        std::vector<factor_value_t>().swap(L.vals_);
     }
 };
+
+} // namespace detail
 
 } // namespace apxchol

@@ -780,9 +780,7 @@ struct normal_weight_less {
     __device__ bool operator()(const normal_record& a,
                                const normal_record& b) const {
         if (a.pivot != b.pivot) return a.pivot < b.pivot;
-        const auto ka = a.value == 0.0 ? 0ULL : double_bits(a.value);
-        const auto kb = b.value == 0.0 ? 0ULL : double_bits(b.value);
-        if (ka != kb) return ka < kb;
+        if (a.value != b.value) return a.value < b.value;
         return a.neighbor < b.neighbor;
     }
 };
@@ -1267,6 +1265,7 @@ __global__ void count_residual_degrees(
     if (i < count) atomicAdd(degrees + residual[i].owner, 1U);
 }
 
+#if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 __global__ void hash_ordered_residual_incidences(
         const gpu_round_shadow_incidence* residual,
         std::size_t count, const std::uint32_t* owner_offsets,
@@ -1282,6 +1281,7 @@ __global__ void hash_ordered_residual_incidences(
     __shared__ device_digest warp_values[kBlock / 32];
     digest_add_block<kBlock>({item, item}, &semantics->ordered_residual, warp_values);
 }
+#endif
 
 template<bool Audit>
 __global__ void hash_residual_state(
@@ -3116,17 +3116,16 @@ gpu_owned_sparsify_stats gpu_round_shadow_device_state::sparsify_owned_residual(
     device_buffer<device_semantics> semantics(impl_->tracker);
     semantics.allocate(1, "allocate sparse semantic receipt");
     cuda_check(cudaMemset(semantics.get(), 0, sizeof(device_semantics)), "clear sparse semantic receipt");
+    // Only the active set and topology are checked and published; weighted
+    // audit digests are computed at test handback.
     if (after) {
-        hash_residual_incidences<true><<<blocks_for(after), kBlock>>>(
+        hash_residual_incidences<false><<<blocks_for(after), kBlock>>>(
             impl_->residual(spare).get(), after, semantics.get());
-        cuda_check(cudaGetLastError(), "hash sparse weighted topology");
-        hash_ordered_residual_incidences<<<blocks_for(after), kBlock>>>(
-            impl_->residual(spare).get(), after, impl_->owner_offsets(spare).get(), semantics.get());
-        cuda_check(cudaGetLastError(), "hash sparse ordered incidences");
+        cuda_check(cudaGetLastError(), "hash sparse topology");
     }
     if (n) {
-        hash_residual_state<true><<<blocks_for(n), kBlock>>>(n, impl_->active.get(),
-            impl_->owned_degrees.get(), impl_->excess.get(), semantics.get());
+        hash_residual_state<false><<<blocks_for(n), kBlock>>>(n, impl_->active.get(),
+            nullptr, nullptr, semantics.get());
         cuda_check(cudaGetLastError(), "hash sparse vertex state");
     }
     device_semantics content{};
@@ -3368,8 +3367,9 @@ gpu_round_shadow_device_state::finalize_device_factor(
         *result = cuda_sptrsv_device_factor::own_fp16_scaled(impl_->cuda_device, m, nnz,
             {{lp.get(), (m + 1) * sizeof(int)}, {li.get(), std::size_t(nnz) * sizeof(int)}, {lh.get(), std::size_t(nnz) * sizeof(__half)}},
             {{column_ptr, (m + 1) * sizeof(int)}, {lti.get(), std::size_t(nnz) * sizeof(int)}, {lth.get(), std::size_t(nnz) * sizeof(__half)}},
-            {diag.get(), m * sizeof(float)}, {inv_scale2.get(), m * sizeof(double)}, stats, counts[2], 0);
-        lh.release(); lth.release(); diag.release(); inv_scale2.release();
+            {diag.get(), m * sizeof(float)}, {inv_scale2.get(), m * sizeof(double)},
+            {col_scale.get(), m * sizeof(float)}, stats, counts[2], 0);
+        lh.release(); lth.release(); diag.release(); inv_scale2.release(); col_scale.release();
     } else {
         *result = cuda_sptrsv_device_factor::own_fp32(impl_->cuda_device, m, nnz,
             {{lp.get(), (m + 1) * sizeof(int)}, {li.get(), std::size_t(nnz) * sizeof(int)}, {lv.get(), std::size_t(nnz) * sizeof(float)}},
@@ -3415,6 +3415,7 @@ std::vector<std::byte> gpu_round_shadow_device_state::encode_finalized_factor_fo
     if (half) {
         append(factor.data_.diag, m * sizeof(float));
         append(factor.data_.inv_scale2, m * sizeof(double));
+        append(factor.data_.scale, m * sizeof(float));
     }
     return encoded;
 }

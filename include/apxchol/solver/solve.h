@@ -4,6 +4,8 @@
 #include <Eigen/Sparse>
 #include <array>
 #include <filesystem>
+#include <optional>
+#include <utility>
 #include <vector>
 #include <memory>
 
@@ -24,10 +26,6 @@ struct solve_options {
     double tol       = default_tol;
     /// Nonnegative default iteration budget; zero only checks the initial guess.
     int    max_iter  = default_max_iter;
-    /// Retain FP32 host factor values for export or adoption by another solver.
-    /// Costs an additional host copy; false keeps the permutation but releases
-    /// row/value arrays. Python factorize() enables retention by default.
-    bool keep_factor = false;
     /// Factor construction and triangular-solve storage controls.
     factor_options factor_opts{};
     /// Select a complete setup/solve route; execution errors never change it.
@@ -41,6 +39,9 @@ struct solve_options {
 namespace detail {
 void validate_solve_parameters(double tol, int max_iter);
 void validate_solve_options(const solve_options& opts);
+/// Omitted values take the owner's defaults; explicit values must be valid.
+std::pair<double, int> resolve_solve_parameters(std::optional<double> tol,
+    std::optional<int> max_iter, double default_tolerance, int default_iterations);
 }
 
 struct solve_result {
@@ -53,9 +54,6 @@ struct solve_result {
     /// Wall-clock seconds spent in the solve call. Zero in batch columns,
     /// which share the batch total.
     double solve_seconds = 0.0;
-    // Device-wide VRAM usage (MB), sampled at solve end via cudaMemGetInfo.
-    // -1 = unmeasured (CPU build / host PCG).
-    double solve_vram_mb = -1.0;
     solve_backend backend = solve_backend::cpu;
 };
 
@@ -86,7 +84,9 @@ class solver {
 public:
     explicit solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts = {});
     /// Adopt F without rebuilding or regularizing it. lump_max_mass still bounds
-    /// operator validation; factor storage, dropping and solve options apply.
+    /// operator validation and solve options apply. Factor storage and
+    /// dropping apply to a construction factor from factorize(); an installed
+    /// factor from factor() is adopted exactly (factorization.h).
     solver(const Eigen::SparseMatrix<double>& A, factorization F, const solve_options& opts = {});
     ~solver();
     solver(solver&&) noexcept;
@@ -94,14 +94,17 @@ public:
     solver(const solver& other);
     solver& operator=(const solver& other);
 
-    /// Solve Ax=b. Negative tol/max_iter use constructor defaults. x0 supplies
-    /// an optional initial guess; nullptr starts from zero. Inspect converged
-    /// in the result even when the iteration budget is exhausted.
-    solve_result solve(const Eigen::VectorXd& b, double tol = -1.0,
-                       int max_iter = -1, const Eigen::VectorXd* x0 = nullptr);
+    /// Solve Ax=b. Omitted tol/max_iter use the constructor's solve_options;
+    /// explicit values must be valid. x0 supplies an optional initial guess;
+    /// nullptr starts from zero. Inspect converged in the result even when
+    /// the iteration budget is exhausted.
+    solve_result solve(const Eigen::VectorXd& b, std::optional<double> tol = std::nullopt,
+                       std::optional<int> max_iter = std::nullopt,
+                       const Eigen::VectorXd* x0 = nullptr);
     /// Write into caller storage; the returned result leaves x empty.
     solve_result solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
-                       double tol = -1.0, int max_iter = -1,
+                       std::optional<double> tol = std::nullopt,
+                       std::optional<int> max_iter = std::nullopt,
                        const Eigen::VectorXd* x0 = nullptr);
     /// Apply the preconditioner to finite scalar or matrix input.
     Eigen::VectorXd apply(const Eigen::VectorXd& r);
@@ -112,7 +115,8 @@ public:
             && (Input::Flags & Eigen::DirectAccessBit) != 0
             && (Output::Flags & Eigen::DirectAccessBit) != 0)
     batch_solve_result solve(const Eigen::MatrixBase<Input>& B, Eigen::MatrixBase<Output>& X,
-                             double tol = -1, int max_iter = -1,
+                             std::optional<double> tol = std::nullopt,
+                             std::optional<int> max_iter = std::nullopt,
                              const const_matrix_view* X0 = nullptr) {
         using Stride = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
         const Eigen::Map<const Eigen::MatrixXd, 0, Stride> rhs(B.derived().data(),
@@ -123,9 +127,11 @@ public:
     }
     void apply(const_matrix_view R, matrix_view Z);
 
-    /// Factor metadata; L's row/value arrays require keep_factor=true.
-    /// The returned reference is owned by this solver.
-    const factorization& factor() const;
+    /// The installed preconditioner, the factor the solves actually use
+    /// (factorization.h): after dropping and storage rounding, in the
+    /// solver's storage. Built on demand from the triangular-solve arrays; a
+    /// GPU solver downloads them.
+    factorization factor() const;
     /// Operator dimension.
     Eigen::Index rows() const;
     /// Stored entries in the original operator, after input canonicalization
@@ -139,19 +145,21 @@ public:
     /// including reading the file. Copies keep the original's value.
     double setup_seconds() const;
 
-    /// Save the original operator and retained FP32 factor in a portable binary
-    /// file. Creates a new file; an existing destination is an error. Requires
-    /// keep_factor=true at construction.
+    /// Save the original operator and the installed factor (factor()) in a
+    /// portable binary file (docs/serialization.md). Creates a new file; an
+    /// existing destination is an error.
     void save(const std::filesystem::path& path) const;
-    /// Restore a saved solver without factorizing again. Backend, storage and
-    /// solve options apply as with solver(A, F, opts); automatic adoption uses CPU.
+    /// Restore a saved solver without factorizing again. Storage and dropping
+    /// come from the file; backend, threads, lump_max_mass and solve options
+    /// apply as with solver(A, F, opts). Automatic adoption uses CPU.
     static solver load(const std::filesystem::path& path, const solve_options& opts = {});
 
 private:
     solver(const Eigen::SparseMatrix<double>& A, factorization* F,
            const solve_options& opts, detail::checkpoint* timings);
-    batch_solve_result solve_batch(const_matrix_view B, matrix_view X, double tol,
-                                   int max_iter, const const_matrix_view* X0);
+    batch_solve_result solve_batch(const_matrix_view B, matrix_view X,
+                                   std::optional<double> tol, std::optional<int> max_iter,
+                                   const const_matrix_view* X0);
     struct impl;
     std::unique_ptr<impl> impl_;
 };

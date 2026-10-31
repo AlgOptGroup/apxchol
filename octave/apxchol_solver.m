@@ -5,7 +5,7 @@ classdef apxchol_solver < handle
   %   res = s.solve(b);                   % res.x, res.iters, res.residual, res.converged,
   %                                       % res.solve_seconds
   %   res = s.solve(b2, 1e-10, 1000);     % per-solve tol / maxiter
-  %   s.save('system.apxchol');            % requires options.keep_factor = true
+  %   s.save('system.apxchol');            % the installed factor and A
   %   s   = apxchol_solver.load('system.apxchol', options);
   %   z   = s.apply(r);                   % one preconditioner application, z = M\r
   %
@@ -22,8 +22,9 @@ classdef apxchol_solver < handle
   %
   % Omitted or [] solve options use the C++ defaults. rtol must be finite
   % and positive; maxiter must be an integer in [0, 2^31-1].
-  % Setup options: num_threads, seed, factor_storage, cpu_schedule,
-  % drop_tolerance, regularization, lump_max_mass, keep_factor, verbose. See README.md.
+  % Setup options: num_threads, seed, partitioner, sampler, factor_storage,
+  % degree_quantile, degree_multiplier, drop_tolerance, regularization,
+  % lump_max_mass, verbose. See README.md.
 
   properties (SetAccess = private)
     setup_seconds = 0
@@ -59,7 +60,7 @@ classdef apxchol_solver < handle
     end
 
     function save(obj, path)
-      % Save the original matrix and retained factor to a new portable file.
+      % Save the original matrix and installed factor to a new portable file.
       apxchol_mex('save', obj.h, path);
     end
 
