@@ -10,7 +10,7 @@ release = re.search(r"APXCHOL_VERSION ([0-9.]+)",
 version = release
 extensions = ["myst_parser", "breathe", "sphinx.ext.autodoc", "sphinx.ext.napoleon"]
 source_suffix = {".md": "markdown"}
-exclude_patterns = ["_readme.md"]
+exclude_patterns = ["_readme.md", "docs/performance/*.md"]  # generated tables, included by pages
 html_theme = "furo"
 release_tag = os.environ.get("APXCHOL_DOCS_RELEASE", "")
 if release_tag:

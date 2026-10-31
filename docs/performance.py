@@ -127,6 +127,9 @@ def campaign(data, platform, output):
         rows = sorted({s for s, _ in table}, key=lambda s: (not s.startswith("apxchol"), s))
         matrices = list(dict.fromkeys(c["matrix"] for c in data["cells"] if c["device"] == device))
         competitors = [s for s in rows if not s.startswith("apxchol")]
+        if not competitors:
+            absolute(data, platform, device, output)
+            continue
         fig, ax = plt.subplots(figsize=(7.5, .45 * len(competitors) + 1.2), layout="constrained")
         for y, s in enumerate(competitors):
             values = [v for (r, _), v in table.items() if r == s and not isinstance(v, str)]
@@ -162,6 +165,34 @@ def campaign(data, platform, output):
         ax.set_yticks(range(len(rows)), rows, fontsize=7)
         ax.set_title(f"{platform} {device.upper()}: one-RHS time relative to the best apxchol series", fontsize=10)
         save(fig, output / f"{platform.lower()}-{device}-cells.svg")
+
+
+def absolute(data, platform, device, output):
+    """apxchol alone on a device: absolute setup and solve times, chart and table."""
+    cells = [c for c in data["cells"] if c["device"] == device]
+    if any(not c["meets_tolerance"] for c in cells) or data["missing"]:
+        raise ValueError("absolute charts expect every cell to meet the tolerance")
+    fig, ax = plt.subplots(figsize=(7.5, .28 * len(cells) + 1.2), layout="constrained")
+    y = np.arange(len(cells))
+    setup = np.array([c["setup_s"] for c in cells])
+    solve = np.array([c["solve_s"] for c in cells])
+    ax.barh(y, setup + solve, color="#dddddd", label="total")
+    ax.plot(setup, y, "o", color=COLORS[0], markersize=4, label="setup")
+    ax.plot(solve, y, "s", color=COLORS[1], markersize=4, label="solve")
+    ax.set_yticks(y, [c["matrix"] for c in cells], fontsize=8)
+    ax.invert_yaxis()
+    ax.set_xscale("log")
+    ax.set_xlabel("seconds (log scale)")
+    ax.grid(axis="x", alpha=.15)
+    ax.legend(fontsize=8, loc="lower right")
+    ax.set_title(f"{platform} {device.capitalize()}: apxchol one-RHS time", fontsize=10)
+    save(fig, output / f"{platform.lower()}-{device}.svg")
+    lines = ["| Matrix | Rows | Nonzeros | Setup (s) | Solve (s) | Total (s) | Iterations | Peak memory (MB) |",
+             "|---|---:|---:|---:|---:|---:|---:|---:|"]
+    for c in cells:
+        lines.append(f"| {c['matrix']} | {c['n']:,} | {c['nnz']:,} | {c['setup_s']:.3g} | {c['solve_s']:.3g} | "
+                     f"{c['total_s']:.3g} | {c['iters']} | {c['max_rss_mb']:,.0f} |")
+    (output / f"{platform.lower()}-{device}-table.md").write_text("\n".join(lines) + "\n")
 
 
 def render(report_paths, output, revision=None):
