@@ -258,7 +258,7 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
     // Transfer the temporary graph into factorization without copying it.
     auto do_factorize = [&](auto&& G) {
         if (cp) { (*cp)("make_graph"); cp->ascend(); }
-        factorization F = dispatch_partitioner<factorization>(opts.is_select,
+        factorization F = dispatch_partitioner<factorization>(opts.partitioner,
             [&]<typename P>() -> factorization {
                 P partitioner;
                 return factorize_impl(make_tree_elim(opts, route), partitioner,
@@ -271,9 +271,10 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
     const Eigen::SparseMatrix<double>& A = op.matrix();
     if (route == setup_route::gpu) {
 #if defined(APXCHOL_USE_CUDA)
-        if (opts.is_select != "block_greedy" ||
-            opts.exact_clique_max_degree != 0 || exact_core_or_off(opts.exact_core_max_h) != 0 ||
-            opts.double_cycle_min_h != 0)
+        if (opts.partitioner != partitioner_kind::block_greedy ||
+            opts.experimental.exact_clique_max_degree != 0 ||
+            opts.experimental.exact_core_max_h.value_or(0) != 0 ||
+            opts.experimental.double_cycle_min_h != 0)
             throw std::invalid_argument("GPU setup requires block_greedy and a bounded sampler");
         if (!detail::gpu_owned_csc_supported(op))
             throw std::invalid_argument("GPU route requires a supported compressed, sorted, "
