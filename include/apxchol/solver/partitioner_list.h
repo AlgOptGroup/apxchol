@@ -17,6 +17,7 @@
 
 namespace apxchol {
 
+namespace detail {
 using partitioner_list = std::tuple<
     block_greedy_partitioner,
     priority_greedy_partitioner,
@@ -25,7 +26,6 @@ using partitioner_list = std::tuple<
 
 /// Concept check: every entry in partitioner_list satisfies `partitioner`,
 /// and the list matches partitioner_kind and its frontend names.
-namespace detail {
 template<typename... Ts>
 constexpr bool all_partitioners(std::tuple<Ts...>*) {
     return (... && partitioner<Ts>);
@@ -41,9 +41,9 @@ constexpr bool partitioners_match_kinds(std::tuple<Ts...>*) {
     return true;
 }
 }
-static_assert(detail::all_partitioners(static_cast<partitioner_list*>(nullptr)),
+static_assert(detail::all_partitioners(static_cast<detail::partitioner_list*>(nullptr)),
               "every entry in partitioner_list must satisfy `partitioner`");
-static_assert(detail::partitioners_match_kinds(static_cast<partitioner_list*>(nullptr)),
+static_assert(detail::partitioners_match_kinds(static_cast<detail::partitioner_list*>(nullptr)),
               "partitioner_list must match partitioner_kind and detail::partitioner_names");
 
 /// Dispatch by kind.  `fn` is a generic lambda
@@ -56,7 +56,7 @@ Result dispatch_partitioner(partitioner_kind kind, Fn&& fn) {
         std::size_t i = 0;
         (void)(... || (i++ == static_cast<std::size_t>(std::to_underlying(kind)) &&
                        (result.emplace(fn.template operator()<Ts>()), true)));
-    }(static_cast<partitioner_list*>(nullptr));
+    }(static_cast<detail::partitioner_list*>(nullptr));
     if (!result) throw std::invalid_argument("invalid partitioner");
     return std::move(*result);
 }

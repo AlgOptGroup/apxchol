@@ -224,18 +224,13 @@ function test_apxchol()
     rejected = rejected + 1;
   end
   % Only numeric [] selects defaults; other empty types are invalid.
-  raw_handle = apxchol_mex('factorize', Aopts);
-  raw_cleanup = onCleanup(@() apxchol_mex('free', raw_handle));
-  raw_empty = {{}, ''};
-  for k = 1:numel(raw_empty)
-    value = raw_empty{k};
-    expect_bad_option(@() apxchol_mex('solve', raw_handle, bopts, value, 20), ...
-                      'tol', 'raw empty');
-    expect_bad_option(@() apxchol_mex('solve', raw_handle, bopts, 1e-8, value), ...
-                      'maxiter', 'raw empty');
+  typed_empty = {{}, ''};
+  for k = 1:numel(typed_empty)
+    value = typed_empty{k};
+    expect_bad_option(@() sopts.solve(bopts, value, 20), 'tol', 'typed empty');
+    expect_bad_option(@() sopts.solve(bopts, 1e-8, value), 'maxiter', 'typed empty');
     rejected = rejected + 2;
   end
-  clear raw_cleanup;
   assert(rejected == 48, 'malformed option case denominator changed');
   reused = sopts.solve(bopts);
   assert(reused.converged && norm(Aopts * reused.x - bopts) / norm(bopts) < 1e-8, ...

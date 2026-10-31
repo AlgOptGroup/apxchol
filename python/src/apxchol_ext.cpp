@@ -83,7 +83,7 @@ apxchol::solve_options parse_options(const py::dict& d) {
         // solve_options
         if      (key == "backend")           so.backend = parse_backend(v.cast<std::string>());
         else if (key == "num_threads")       so.num_threads = v.cast<int>();
-        else if (key == "keep_factor")       so.keep_factor_values = v.cast<bool>();
+        else if (key == "keep_factor")       so.keep_factor = v.cast<bool>();
         // factor_options
         else if (key == "seed")               so.factor_opts.seed = v.cast<unsigned>();
         else if (key == "partitioner")

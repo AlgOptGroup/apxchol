@@ -59,14 +59,14 @@ std::vector<apxchol::solve_options> host_only_options() {
 } // namespace
 
 TEST(SolveRoutes, CpuPreconditionerTypeIsIndependentOfCudaBuild) {
-    static_assert(std::is_same_v<decltype(std::declval<apxchol::apx_cholesky&>().trsv()),
-                                 const apxchol::omp_sptrsv&>);
+    static_assert(std::is_same_v<decltype(std::declval<apxchol::detail::cpu_preconditioner&>().trsv()),
+                                 const apxchol::detail::omp_sptrsv&>);
     SUCCEED();
 }
 
 TEST(SolveRoutes, ExplicitCpuDoesNotPrewarm) {
 #if defined(APXCHOL_USE_CUDA)
-    const bool started = apxchol::cuda_ctx::detail::state().started;
+    const bool started = apxchol::detail::cuda_context::state().started;
     if (const char* visible = std::getenv("CUDA_VISIBLE_DEVICES");
         visible && std::string(visible) == "-1") {
         // The dedicated CTest runs this before any device test, in a fresh process.
@@ -81,24 +81,22 @@ TEST(SolveRoutes, ExplicitCpuDoesNotPrewarm) {
     const auto result = apxchol::solve(matrix, rhs, options);
     EXPECT_EQ(result.backend, apxchol::solve_backend::cpu);
     expect_solution(matrix, rhs, result);
-    // A reusable solver on the CPU route stays on CPU as well.
+    // A reusable solver on the CPU route stays on CPU as well, including
+    // preconditioner applications for an external Krylov solver.
     apxchol::solver reusable(matrix, options);
     const auto reused = reusable.solve(rhs, 1e-10);
     EXPECT_EQ(reused.backend, apxchol::solve_backend::cpu);
     expect_solution(matrix, rhs, reused);
+    EXPECT_TRUE(reusable.apply(rhs).allFinite());
     const auto factor = apxchol::factorize(matrix);
     EXPECT_EQ(csc_access::vals(factor.L).size(), factor.L.nonZeros());
     EXPECT_EQ(csc_access::inner(factor.L).size(), factor.L.nonZeros());
     EXPECT_EQ(factor.perm.size(), static_cast<std::size_t>(matrix.rows()));
 #if defined(APXCHOL_USE_CUDA)
-    EXPECT_FALSE(factor.research_device_factor);
+    EXPECT_FALSE(apxchol::detail::factorization_access::device_factor(factor));
 #endif
-    apxchol::apx_cholesky eigen_preconditioner;
-    eigen_preconditioner.compute(matrix);
-    const Eigen::VectorXd applied = eigen_preconditioner.solve(rhs);
-    EXPECT_TRUE(applied.allFinite());
 #if defined(APXCHOL_USE_CUDA)
-    EXPECT_EQ(apxchol::cuda_ctx::detail::state().started, started);
+    EXPECT_EQ(apxchol::detail::cuda_context::state().started, started);
 #endif
 }
 
@@ -119,7 +117,7 @@ TEST(SolveRoutes, AutomaticSelectionRespectsConfigurationAndAvailability) {
 
 TEST(SolveRoutes, ScalarAutomaticUsesCpuWithoutPrewarming) {
 #if defined(APXCHOL_USE_CUDA)
-    const bool started = apxchol::cuda_ctx::detail::state().started;
+    const bool started = apxchol::detail::cuda_context::state().started;
 #endif
     const auto matrix = operator_matrix(1);
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(1);
@@ -130,7 +128,7 @@ TEST(SolveRoutes, ScalarAutomaticUsesCpuWithoutPrewarming) {
     EXPECT_EQ(owner.backend(), apxchol::solve_backend::cpu);
     EXPECT_EQ(owner.factor_storage(), apxchol::factor_storage_type::fp32);
     expect_solution(matrix, rhs, owner.solve(rhs));
-    if (apxchol::omp_sptrsv::fp16_supported()) {
+    if (apxchol::detail::omp_sptrsv::fp16_supported()) {
         options.factor_opts.factor_storage = apxchol::factor_storage_type::fp16;
         apxchol::solver half(matrix, options);
         EXPECT_EQ(half.backend(), apxchol::solve_backend::cpu);
@@ -138,7 +136,7 @@ TEST(SolveRoutes, ScalarAutomaticUsesCpuWithoutPrewarming) {
         expect_solution(matrix, rhs, half.solve(rhs));
     }
 #if defined(APXCHOL_USE_CUDA)
-    EXPECT_EQ(apxchol::cuda_ctx::detail::state().started, started);
+    EXPECT_EQ(apxchol::detail::cuda_context::state().started, started);
 #endif
 }
 
@@ -173,7 +171,7 @@ TEST(SolveRoutes, MetalGpuSupportsFp32AndFp16Storage) {
 #endif
 TEST(SolveRoutes, ExplicitGpuRejectsUnsupportedConfigurationsBeforeSetup) {
 #if defined(APXCHOL_USE_CUDA)
-    const bool started = apxchol::cuda_ctx::detail::state().started;
+    const bool started = apxchol::detail::cuda_context::state().started;
 #endif
     const auto matrix = operator_matrix();
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(matrix.rows());
@@ -185,7 +183,7 @@ TEST(SolveRoutes, ExplicitGpuRejectsUnsupportedConfigurationsBeforeSetup) {
         EXPECT_THROW(apxchol::solve(matrix, rhs, options), std::invalid_argument);
     }
 #if defined(APXCHOL_USE_CUDA)
-    EXPECT_EQ(apxchol::cuda_ctx::detail::state().started, started);
+    EXPECT_EQ(apxchol::detail::cuda_context::state().started, started);
 #endif
 }
 
@@ -203,7 +201,7 @@ TEST(SolveRoutes, CpuFactorReuseAndExportRemainAvailable) {
     const auto matrix = operator_matrix();
     apxchol::solve_options options;
     options.backend = apxchol::solve_backend::cpu;
-    options.keep_factor_values = true;
+    options.keep_factor = true;
     apxchol::solver solver(matrix, options);
     ASSERT_FALSE(csc_access::vals(solver.factor().L).empty());
     auto factor = solver.factor();
@@ -222,19 +220,19 @@ TEST(SolveRoutes, FactorStorageAppliesToNewAndAdoptedFactors) {
     for (bool fp16 : {false, true}) {
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::cpu;
-        options.keep_factor_values = true;
+        options.keep_factor = true;
         options.factor_opts.factor_storage = fp16
             ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32;
 #if defined(APXCHOL_USE_CUDA)
-        EXPECT_EQ(apxchol::cuda_sptrsv::fp16_resolved(options.factor_opts.factor_storage), fp16);
+        EXPECT_EQ(apxchol::detail::cuda_sptrsv::fp16_resolved(options.factor_opts.factor_storage), fp16);
 #endif
-        if (fp16 && !apxchol::omp_sptrsv::fp16_supported()) {
+        if (fp16 && !apxchol::detail::omp_sptrsv::fp16_supported()) {
             EXPECT_THROW(apxchol::solver(matrix, options), std::runtime_error);
             continue;
         }
         apxchol::solver original(matrix, options);
         auto factor = original.factor();
-        options.keep_factor_values = false;
+        options.keep_factor = false;
         apxchol::solver adopted(matrix, std::move(factor), options);
         const auto storage = fp16 ? apxchol::factor_storage_type::fp16
                                   : apxchol::factor_storage_type::fp32;
@@ -249,10 +247,10 @@ TEST(SolveRoutes, RequiredGpuPreconditionerValidatesHostFactorsBeforeCuda) {
 #if !defined(APXCHOL_USE_CUDA)
     GTEST_SKIP() << "CUDA preconditioner type required";
 #else
-    const bool started = apxchol::cuda_ctx::detail::state().started;
+    const bool started = apxchol::detail::cuda_context::state().started;
     const auto matrix = operator_matrix();
     const auto valid = apxchol::factorize(matrix);
-    ASSERT_FALSE(valid.research_device_factor);
+    ASSERT_FALSE(apxchol::detail::factorization_access::device_factor(valid));
     auto options = apxchol::solve_options{};
     options.backend = apxchol::solve_backend::gpu;
     for (int defect = 0; defect < 6; ++defect) {
@@ -282,7 +280,7 @@ TEST(SolveRoutes, RequiredGpuPreconditionerValidatesHostFactorsBeforeCuda) {
     } catch (const std::invalid_argument& error) {
         EXPECT_NE(std::string(error.what()).find("scalar Laplacian"), std::string::npos);
     }
-    EXPECT_EQ(apxchol::cuda_ctx::detail::state().started, started);
+    EXPECT_EQ(apxchol::detail::cuda_context::state().started, started);
 #endif
 }
 
@@ -387,7 +385,7 @@ TEST(SolveRoutes, IncompatibleBuildRejectsExplicitGpuAndAutoSelectsCpu) {
     apxchol::solve_options options;
     EXPECT_EQ(apxchol::detail::select_solve_backend(options), apxchol::solve_backend::cpu);
 #if defined(APXCHOL_USE_CUDA)
-    const bool started = apxchol::cuda_ctx::detail::state().started;
+    const bool started = apxchol::detail::cuda_context::state().started;
 #endif
     const auto matrix = operator_matrix();
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(matrix.rows());
@@ -397,7 +395,7 @@ TEST(SolveRoutes, IncompatibleBuildRejectsExplicitGpuAndAutoSelectsCpu) {
     options.backend = apxchol::solve_backend::gpu;
     EXPECT_THROW(apxchol::solve(matrix, rhs, options), std::invalid_argument);
 #if defined(APXCHOL_USE_CUDA)
-    EXPECT_EQ(apxchol::cuda_ctx::detail::state().started, started);
+    EXPECT_EQ(apxchol::detail::cuda_context::state().started, started);
 #endif
 #endif
 }

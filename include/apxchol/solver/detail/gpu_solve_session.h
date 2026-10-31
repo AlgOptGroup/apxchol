@@ -13,9 +13,7 @@ class gpu_solve_session {
 public:
     gpu_solve_session(const Eigen::SparseMatrix<double>& L,
                       const solve_options& opts, solve_result& res)
-        : gpu_solve_session(L, opts, &res.timings) {
-        res.lumped_offdiag = precond.factor().lumped_offdiag;
-    }
+        : gpu_solve_session(L, opts, &res.timings) {}
     gpu_solve_session(const Eigen::SparseMatrix<double>& L,
                       const solve_options& opts, checkpoint* cp, factorization* F = nullptr)
         : use_cp(opts.collect_timings) {
@@ -23,10 +21,10 @@ public:
         if (opts.backend == solve_backend::cpu)
             throw std::invalid_argument("GPU session cannot execute an explicit CPU request");
         precond.set_options(opts.factor_opts);
-        precond.set_keep_factor(opts.keep_factor_values);
+        precond.set_keep_factor(opts.keep_factor);
         if (use_cp) precond.set_checkpoint(cp);
         if (F) {
-            if (F->research_device_factor)
+            if (factorization_access::device_factor(*F))
                 throw std::invalid_argument("GPU solver: supply a host factor without a device capsule");
             if (L.rows() != L.cols() || static_cast<Eigen::Index>(F->L.rows()) != L.rows())
                 throw std::invalid_argument("GPU solver: factorization dimension mismatch");
@@ -66,7 +64,6 @@ public:
         if (x0 && (x0->size() != b.size() || !x0->allFinite()))
             throw std::invalid_argument("GPU solve: x0 must be finite and match the RHS length");
         res.backend = solve_backend::gpu;
-        res.lumped_offdiag = precond.factor().lumped_offdiag;
         if (use_cp) { res.timings.descend("pcg"); res.timings.tick(); }
         int iters = 0;
         double rnorm = 1.0;
@@ -106,7 +103,6 @@ public:
         if (use_cp) { result.timings("gpu_pcg_loop"); result.timings.ascend(); }
         for (auto& column : result.columns) {
             column.backend = solve_backend::gpu;
-            column.lumped_offdiag = precond.factor().lumped_offdiag;
         }
         return result;
     }

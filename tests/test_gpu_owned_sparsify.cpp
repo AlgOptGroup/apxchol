@@ -20,7 +20,7 @@
 #if defined(APXCHOL_USE_CUDA)
 namespace {
 using apxchol::node_index;
-using apxchol::pool_value_t;
+using apxchol::detail::pool_value_t;
 using apxchol::detail::gpu_round_shadow_incidence;
 using apxchol::detail::gpu_round_shadow_input;
 using edge = gpu_round_shadow_incidence;

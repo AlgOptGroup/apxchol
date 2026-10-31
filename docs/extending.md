@@ -85,8 +85,8 @@ See the header for optional `sample_bounded` and
 `residual_handoff_threshold` traits.
 
 `ctx.options` contains selection settings, `ctx.seed` supplies randomness,
-`ctx.omp_threshold` gates parallel work, `ctx.degree_tiebreak` asks the rule to
-prefer lower-degree vertices in conflicts, and `ctx.cp` is optional profiling.
+`ctx.omp_threshold` gates parallel work, and `ctx.degree_tiebreak` asks the rule
+to prefer lower-degree vertices in conflicts.
 The rule is called once per round and may parallelize internally. This is the
 opposite of the eliminator, whose individual calls are already parallelized.
 
@@ -128,20 +128,20 @@ factorizing again. Automatic adoption stays on CPU. The original matrix `A`
 is still needed for PCG and residual checks.
 
 The factor may come from CPU construction or from a GPU solver created with
-`keep_factor_values=true`: pass its `solver.factor()` to the constructor above.
+`keep_factor=true`: pass its `solver.factor()` to the constructor above.
 The destination rebuilds its own triangular-solve storage. This handoff is in
 memory; to reuse a factor across processes, [save the solver](serialization.md).
 
-`apxchol::apx_cholesky::set_factor` also accepts a factor for use with an
-Eigen iterative solver. That adapter always applies it on CPU.
+To precondition another iterative solver with the factor, construct
+`solver(A, std::move(F), opts)` and call its `apply`; see
+[using another iterative solver](usage.md#using-another-iterative-solver).
 
 A `factorization` holds CSC factor columns
 (diagonal first), permutation with `perm[original] = elimination_position`,
 operator kind, and round metadata. Preserve these conventions. The factor `L`
 is a read-only view; build factors with `factorize` or load them from an
-archive. Enable `set_keep_factor(true)` before installation if the
-preconditioner must retain exportable factor arrays; consuming solver paths
-may release them.
+archive. Set `keep_factor=true` if the solver must retain exportable
+factor arrays; otherwise it releases them after preparation.
 
 Graph storage is the directed AoS pool. Custom partitioners and eliminators
 operate on the same graph. The PCG recurrence, factor-column formula, and triangular-solve

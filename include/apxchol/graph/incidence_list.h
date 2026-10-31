@@ -24,9 +24,8 @@
 #include <omp.h>
 #endif
 
-namespace apxchol {
+namespace apxchol::detail {
 
-namespace detail {
 #ifdef __linux__
     // Lazy reservations benefit from the measured 2 MiB THP granularity,
     // but a 512 MiB PMD page can populate almost an entire unused segment.
@@ -51,7 +50,6 @@ namespace detail {
         return bytes > 0 && bytes <= 2 * 1024 * 1024;
     }
 #endif
-}
 
 // ── vec_pool storage ──
 //
@@ -622,5 +620,4 @@ private:
 using directed_vec_pool_incidence =
     basic_vec_pool_incidence<directed_pool_edge>;
 
-
-} // namespace apxchol
+} // namespace apxchol::detail

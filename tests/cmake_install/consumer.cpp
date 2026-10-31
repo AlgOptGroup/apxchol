@@ -12,7 +12,7 @@ int main(int argc, char** argv) {
     if (argc > 2 || (route != "cpu" && route != "gpu")) return 2;
     apxchol::solve_options options;
     options.backend = route == "cpu" ? apxchol::solve_backend::cpu : apxchol::solve_backend::gpu;
-    options.keep_factor_values = true;
+    options.keep_factor = true;
     options.num_threads = 2;
     options.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
     constexpr int n = 17;

@@ -355,7 +355,7 @@ def benchmark_openmp_provenance(threads):
 #     iter0040  1.116573e-11  -> LAPLACIAN  WRONG
 #     ecology1  8.881784e-17  -> LAPLACIAN  (correct, 6 orders of margin)
 # The declared class below is asserted against the binary's own structural scan
-# (apxchol::scan_operator, per-row and per-row-scaled rather than global), and a
+# (apxchol::detail::scan_operator, per-row and per-row-scaled rather than global), and a
 # mismatch is a hard error — see the `--class` handling in benchmark.cpp.
 #
 # Declared classes, and the structural scan that must agree with them

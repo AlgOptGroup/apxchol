@@ -15,7 +15,7 @@
 
 #include <omp.h>
 
-namespace apxchol {
+namespace apxchol::detail {
 
 struct baumann_kyng_partitioner {
     static constexpr std::string_view name = "baumann_kyng";
@@ -191,4 +191,4 @@ struct baumann_kyng_partitioner {
     }
 };
 
-} // namespace apxchol
+} // namespace apxchol::detail

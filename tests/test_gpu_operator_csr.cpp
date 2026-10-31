@@ -23,8 +23,8 @@
 #include "apxchol/solver/detail/gpu_solve_session.h"
 #include <cuda_runtime.h>
 namespace {
-using apxchol::pcg_cuda::operator_csr;
-using apxchol::pcg_cuda::try_build_permuted_operator_csr;
+using apxchol::detail::cuda_pcg_kernels::operator_csr;
+using apxchol::detail::cuda_pcg_kernels::try_build_permuted_operator_csr;
 struct HostCsc {
     int n = 0;
     std::vector<int> outer{0}, inner;
@@ -413,7 +413,7 @@ TEST(GpuOperatorCsr, ConsumingSolveKeepsDefaultStorageAndOriginalResidual) {
         ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
         EXPECT_TRUE(preconditioner.trsv().fp16());
         EXPECT_GT(preconditioner.trsv().drop_stats().rel,0.0);
-        apxchol::cuda_pcg solver;
+        apxchol::detail::cuda_pcg solver;
         solver.setup(A,preconditioner.factor().perm);
         EXPECT_TRUE(solver.fp32_operator());
         Eigen::VectorXd result;int iterations=0;double reported=0;
@@ -445,7 +445,7 @@ TEST(GpuSolveHonesty, ScalarAndBatchContinueAfterSlowProgress) {
     matrix.setFromTriplets(entries.begin(), entries.end());
     std::vector<apxchol::node_index> permutation(n);
     std::iota(permutation.begin(), permutation.end(), 0);
-    apxchol::cuda_pcg solver;
+    apxchol::detail::cuda_pcg solver;
     solver.setup(matrix, permutation);
     const TestPreconditioner identity{n};
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(n);
@@ -505,7 +505,7 @@ TEST(GpuSolveHonesty, FinalResidualChecksReturnedScalarAndPairOnReuse) {
         a.setFromTriplets(entries.begin(), entries.end());
         std::vector<apxchol::node_index> perm(n);
         for (int i = 0; i < n; ++i) perm[i] = n - 1 - i;
-        apxchol::cuda_pcg solver;
+        apxchol::detail::cuda_pcg solver;
         solver.setup(a, perm);
         EXPECT_EQ(solver.fp32_operator(), fp32);
         TestPreconditioner preconditioner{n};
@@ -587,7 +587,7 @@ TEST(GpuSolveHonesty, ResidualIncludesRoundingWhenRestoringSubnormalSolutions) {
     for (int i = 0; i < n; ++i) a.insert(i, i) = 3.25;
     a.makeCompressed();
     const std::vector<apxchol::node_index> perm{2, 0, 1};
-    apxchol::cuda_pcg solver;
+    apxchol::detail::cuda_pcg solver;
     solver.setup(a, perm);
     TestPreconditioner preconditioner{n};
     const double tiny = std::numeric_limits<double>::denorm_min();
@@ -634,7 +634,7 @@ TEST(GpuSolveHonesty, FinalResidualDoesNotSquareAwayTinyErrors) {
         a.setIdentity();
         std::vector<apxchol::node_index> perm(n);
         std::iota(perm.begin(), perm.end(), 0);
-        apxchol::cuda_pcg solver;
+        apxchol::detail::cuda_pcg solver;
         solver.setup(a, perm);
         TestPreconditioner preconditioner{n};
         const double expected = test.residual;
@@ -675,7 +675,7 @@ TEST(GpuSolveHonesty, FinalResidualDoesNotOverflowBeforeNormalization) {
     Eigen::SparseMatrix<double> a(n, n);
     for (int i = 0; i < n; ++i) a.insert(i, i) = coefficient;
     a.makeCompressed();
-    apxchol::cuda_pcg solver;
+    apxchol::detail::cuda_pcg solver;
     solver.setup(a, {0, 1, 2, 3, 4});
     TestPreconditioner preconditioner{n};
     const Eigen::VectorXd b = Eigen::VectorXd::Constant(n, 2);
@@ -720,7 +720,7 @@ TEST(GpuOperatorCsr, DeviceSetupRejectsUnsupportedStorage) {
     apxchol::detail::gpu_preconditioner preconditioner;
     preconditioner.compute(A);
     ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
-    apxchol::cuda_pcg solver;
+    apxchol::detail::cuda_pcg solver;
     testing::internal::CaptureStderr();
     solver.setup(A, preconditioner.factor().perm, true);
     const auto diagnostic = testing::internal::GetCapturedStderr();
@@ -745,12 +745,12 @@ TEST(GpuOperatorCsr, DeviceSetupRejectsUnsupportedStorage) {
     auto uncompressed = A;
     uncompressed.uncompress();
     for (const auto* bad : {&lower, &upper, &uncompressed}) {
-        apxchol::cuda_pcg rejected;
+        apxchol::detail::cuda_pcg rejected;
         EXPECT_THROW(rejected.setup(*bad, preconditioner.factor().perm),
                      std::invalid_argument);
     }
     Eigen::SparseMatrix<double> nonsquare(n, n + 1);
-    apxchol::cuda_pcg rejected;
+    apxchol::detail::cuda_pcg rejected;
     EXPECT_THROW(rejected.setup(nonsquare, preconditioner.factor().perm),
                  std::invalid_argument);
     auto short_perm = preconditioner.factor().perm;
@@ -854,7 +854,7 @@ TEST(GpuOperatorCsr, ReusableOwnersFollowTheirSetupDeviceAcrossThreads) {
     options.backend = apxchol::solve_backend::gpu;
     options.num_threads = 1;
     options.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
-    options.keep_factor_values = true;
+    options.keep_factor = true;
     options.collect_timings = false;
     const auto host_factor = apxchol::factorize(A);
     for (const bool adopt : {false, true}) {

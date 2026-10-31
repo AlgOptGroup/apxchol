@@ -38,7 +38,7 @@ solve_options options() {
     solve_options result;
     result.backend = solve_backend::cpu;
     result.num_threads = 2;
-    result.keep_factor_values = true;
+    result.keep_factor = true;
     result.factor_opts.factor_storage = factor_storage_type::fp32;
     return result;
 }
@@ -343,7 +343,7 @@ TEST_F(SolverArchive, LeftoverTemporaryFileIsReportedAndKept) {
 }
 
 TEST_F(SolverArchive, ReleasedFactorsAreRejected) {
-    auto opts = options(); opts.keep_factor_values = false;
+    auto opts = options(); opts.keep_factor = false;
     solver released(A, opts);
     EXPECT_THROW(released.save(directory / "released.apxchol"), std::invalid_argument);
     EXPECT_FALSE(std::filesystem::exists(directory / "released.apxchol"));
@@ -567,7 +567,6 @@ TEST_F(SolverArchive, PreservesLumpingAndRegularizationWithoutReapplyingThem) {
     const Eigen::VectorXd b = Eigen::VectorXd::Ones(2);
     const auto result = restored.solve(b, 1e-10);
     EXPECT_TRUE(result.converged);
-    EXPECT_EQ(result.lumped_offdiag, 2);
     EXPECT_LT((positive * result.x - b).norm() / b.norm(), 1e-10);
 }
 

@@ -40,6 +40,31 @@ static_assert(std::is_copy_constructible_v<apxchol::solver>);
 static_assert(std::is_copy_assignable_v<apxchol::solver>);
 static_assert(noexcept(apxchol::backend_available(apxchol::solve_backend::gpu)));
 
+// The Eigen adapter from docs/usage.md#using-another-iterative-solver.
+class eigen_preconditioner : public Eigen::SparseSolverBase<eigen_preconditioner> {
+public:
+    using Scalar = double;
+    using StorageIndex = int;
+    enum { ColsAtCompileTime = Eigen::Dynamic, MaxColsAtCompileTime = Eigen::Dynamic };
+
+    void attach(apxchol::solver& s) { solver_ = &s; m_isInitialized = true; }
+
+    // The attached solver already holds the factor.
+    template<class Matrix> eigen_preconditioner& analyzePattern(const Matrix&) { return *this; }
+    template<class Matrix> eigen_preconditioner& factorize(const Matrix&) { return *this; }
+    template<class Matrix> eigen_preconditioner& compute(const Matrix&) { return *this; }
+
+    Eigen::Index rows() const { return solver_->rows(); }
+    Eigen::Index cols() const { return solver_->rows(); }
+    Eigen::ComputationInfo info() const { return Eigen::Success; }
+
+    template<class Rhs, class Dest>
+    void _solve_impl(const Rhs& b, Dest& x) const { x = solver_->apply(b); }
+
+private:
+    apxchol::solver* solver_ = nullptr;
+};
+
 Sparse operator_matrix(int n = 64) {
     std::vector<Eigen::Triplet<double>> entries;
     for (int i = 0; i < n; ++i) {
@@ -80,14 +105,14 @@ void expect_solution(const Sparse& matrix, const Eigen::VectorXd& rhs,
 
 TEST(Solver, BackendAvailabilityKeepsHostQueriesOnHost) {
 #if defined(APXCHOL_USE_CUDA)
-    const bool started = apxchol::cuda_ctx::detail::state().started;
+    const bool started = apxchol::detail::cuda_context::state().started;
 #endif
     EXPECT_TRUE(apxchol::backend_available(apxchol::solve_backend::cpu));
     EXPECT_TRUE(apxchol::backend_available(apxchol::solve_backend::automatic));
     EXPECT_FALSE(apxchol::backend_available(static_cast<apxchol::solve_backend>(-1)));
     EXPECT_FALSE(apxchol::backend_available(static_cast<apxchol::solve_backend>(99)));
 #if defined(APXCHOL_USE_CUDA)
-    EXPECT_EQ(apxchol::cuda_ctx::detail::state().started, started);
+    EXPECT_EQ(apxchol::detail::cuda_context::state().started, started);
     if (const char* visible = std::getenv("CUDA_VISIBLE_DEVICES");
         visible && (std::string(visible).empty() || std::string(visible) == "-1")) {
         EXPECT_FALSE(apxchol::backend_available(apxchol::solve_backend::gpu));
@@ -103,7 +128,7 @@ TEST(Solver, BackendAvailabilityKeepsHostQueriesOnHost) {
 TEST(Solver, CpuInterfacesRejectEmptyOperator) {
     const Sparse empty(0, 0);
     EXPECT_THROW(apxchol::solver(empty, cpu_options()), std::invalid_argument);
-    apxchol::apx_cholesky preconditioner;
+    apxchol::detail::cpu_preconditioner preconditioner;
     EXPECT_THROW(preconditioner.compute(empty), std::invalid_argument);
 }
 
@@ -123,8 +148,9 @@ TEST(Solver, EigenConjugateGradientUsesPreconditioner) {
         Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
         if (laplacian) rhs.array() -= rhs.mean();
 
-        Eigen::ConjugateGradient<Sparse, Eigen::Lower, apxchol::apx_cholesky> cg;
-        cg.preconditioner().set_options(options.factor_opts);
+        apxchol::solver owner(matrix, options);
+        Eigen::ConjugateGradient<Sparse, Eigen::Lower, eigen_preconditioner> cg;
+        cg.preconditioner().attach(owner);
         cg.setTolerance(options.tol);
         cg.setMaxIterations(options.max_iter);
         cg.compute(matrix);
@@ -310,9 +336,9 @@ TEST(Solver, OverlappingCallsOnOneOwnerThrow) {
 TEST(Solver, RefactoringOneCopyKeepsTheOthersAndFailuresKeepTheOldFactor) {
     const scoped_omp_threads threads(1);
     const Sparse small = operator_matrix(64), large = operator_matrix(200);
-    apxchol::apx_cholesky original;
+    apxchol::detail::cpu_preconditioner original;
     original.compute(small);
-    apxchol::apx_cholesky copy = original;
+    apxchol::detail::cpu_preconditioner copy = original;
     const Eigen::VectorXd r = Eigen::VectorXd::LinSpaced(small.rows(), 1.0, 2.0);
     const Eigen::VectorXd expected = original.solve(r);
     const auto* shared = &original.factor();
@@ -342,7 +368,7 @@ TEST(Solver, CopiesShareTheFactorAndSolveInParallel) {
     auto options = cpu_options();
     options.num_threads = 2;
     std::optional<apxchol::solver> original(std::in_place, matrix, options);
-    apxchol::apx_cholesky preconditioner;
+    apxchol::detail::cpu_preconditioner preconditioner;
     preconditioner.set_options(options.factor_opts);
     preconditioner.compute(matrix);
     constexpr int callers = 4;
@@ -360,7 +386,7 @@ TEST(Solver, CopiesShareTheFactorAndSolveInParallel) {
     original->solve(panel, expected_panel);
 
     std::vector<apxchol::solver> owners(callers, *original);
-    std::vector<apxchol::apx_cholesky> preconditioners(callers, preconditioner);
+    std::vector<apxchol::detail::cpu_preconditioner> preconditioners(callers, preconditioner);
     for (int t = 0; t < callers; ++t) {
         EXPECT_EQ(&owners[t].factor(), &original->factor());
         EXPECT_EQ(&preconditioners[t].trsv(), &preconditioner.trsv());
@@ -407,7 +433,7 @@ TEST(Solver, CpuOwnerAdoptsAnIndependentFactorAndAppliesIt) {
     const scoped_omp_threads threads(1);
     const Sparse matrix = operator_matrix();
     auto options = cpu_options();
-    options.keep_factor_values = true;
+    options.keep_factor = true;
     const auto expected = apxchol::factorize(matrix, options.factor_opts);
     std::unique_ptr<apxchol::solver> owner;
     {
@@ -432,7 +458,7 @@ TEST(Solver, CpuOwnerAdoptsAnIndependentFactorAndAppliesIt) {
     expect_solution(matrix, rhs, owner->solve(rhs).x);
 
     options.backend = apxchol::solve_backend::automatic;
-    options.keep_factor_values = false;
+    options.keep_factor = false;
     apxchol::solver automatic_owner(matrix, expected, options);
     EXPECT_EQ(automatic_owner.backend(), apxchol::solve_backend::cpu);
     EXPECT_TRUE(same_bytes(automatic_owner.apply(rhs).data(),
@@ -515,7 +541,7 @@ TEST(Solver, CpuCallerOutputAndWarmStartsUseEachOwnersStorage) {
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 0.5, 2.0);
     for (const auto storage : {apxchol::factor_storage_type::fp32,
                                apxchol::factor_storage_type::fp16}) {
-        if (storage == apxchol::factor_storage_type::fp16 && !apxchol::omp_sptrsv::fp16_supported())
+        if (storage == apxchol::factor_storage_type::fp16 && !apxchol::detail::omp_sptrsv::fp16_supported())
             continue;
         SCOPED_TRACE(static_cast<int>(storage));
         auto options = cpu_options();
@@ -586,7 +612,7 @@ TEST(Solver, CpuScalesExtremeRhsAndWarmStarts) {
     const Eigen::VectorXd unit = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     for (const auto storage : {apxchol::factor_storage_type::fp32,
                                apxchol::factor_storage_type::fp16}) {
-        if (storage == apxchol::factor_storage_type::fp16 && !apxchol::omp_sptrsv::fp16_supported())
+        if (storage == apxchol::factor_storage_type::fp16 && !apxchol::detail::omp_sptrsv::fp16_supported())
             continue;
         auto options = cpu_options();
         options.factor_opts.factor_storage = storage;
@@ -637,7 +663,7 @@ TEST(Solver, CpuPanelsScaleExceptionalColumnsIndependently) {
     const apxchol::const_matrix_view initial(guess);
     for (const auto storage : {apxchol::factor_storage_type::fp32,
                                apxchol::factor_storage_type::fp16}) {
-        if (storage == apxchol::factor_storage_type::fp16 && !apxchol::omp_sptrsv::fp16_supported())
+        if (storage == apxchol::factor_storage_type::fp16 && !apxchol::detail::omp_sptrsv::fp16_supported())
             continue;
         auto options = cpu_options();
         options.factor_opts.factor_storage = storage;
@@ -1220,7 +1246,7 @@ TEST(Solver, GpuOwnerPreservesStorageAndAdoptsItsFactor) {
         auto options = cpu_options();
         options.backend = apxchol::solve_backend::gpu;
         options.factor_opts.factor_storage = storage;
-        options.keep_factor_values = true;
+        options.keep_factor = true;
         std::unique_ptr<apxchol::solver> owner;
         {
             Sparse temporary = matrix;
@@ -1643,7 +1669,7 @@ void check_thread_budget(const Sparse& matrix, int ambient, int budget,
     auto options = cpu_options();
     options.backend = backend;
     options.num_threads = budget;
-    options.keep_factor_values = true;
+    options.keep_factor = true;
     Owner owner(matrix, options);
     EXPECT_EQ(omp_get_max_threads(), ambient);
     Owner adopted(matrix, owner.factor(), options);

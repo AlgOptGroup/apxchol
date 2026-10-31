@@ -10,7 +10,7 @@
 #include "apxchol/solver/detail/pcg_restart.h"
 #include "apxchol/solver/detail/metal_schedule.h"
 #include "apxchol/solver/detail/permuted_operator.h"
-#include "apxchol/solver/sptrsv/cuda_host.h"
+#include "apxchol/solver/sptrsv/gpu_factor_prep.h"
 #include "metal_device.h"
 #include "metal_compile.h"
 #include "metal_setup.h"
@@ -252,7 +252,7 @@ void install_schedule(context& ctx, prepared_tri& out, metal_schedule::schedule 
 }
 
 template<class Value>
-prepared_tri prepare_tri(context &ctx, const cuda_host::csr_int<Value>& a, bool forward,
+prepared_tri prepare_tri(context &ctx, const gpu_factor_prep::csr_int<Value>& a, bool forward,
                          std::span<const float> diagonals = {}) {
     prepared_tri out;
     const auto m = static_cast<unsigned>(a.m);
@@ -458,7 +458,7 @@ struct metal_solver::impl {
 
     void setup(const Eigen::SparseMatrix<double>& A, checkpoint* cp,
                detail::metal_setup::resident_factor* resident = nullptr);
-    void prepare_device(cuda_host::csr_int<float> backward,
+    void prepare_device(detail::gpu_factor_prep::csr_int<float> backward,
                         const std::vector<float>& scales,
                         const std::vector<float>& hi, const std::vector<float>& lo, unsigned m,
                         detail::metal_setup::resident_factor* resident = nullptr);
@@ -559,7 +559,7 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
         throw std::length_error("metal_solver: the factor exceeds the device's 32-bit offsets");
 
     if (cp) { cp->descend("setup"); cp->tick(); }
-    cuda_host::csr_int<float> backward;
+    detail::gpu_factor_prep::csr_int<float> backward;
     std::vector<float> scales, hi, lo;
     bool exact;
     if (resident) {
@@ -583,11 +583,11 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     } else {
         // Keep compensated dropping in the shared FP64 host implementation.
         // Both backends consume the CSR factor without a level-permuted value copy.
-        backward = cuda_host::build_L11_csc_int<float>(F.L, m);
-        if (!opts.keep_factor_values) detail::sparse_csc_access::release_values(F.L);
-        scales = cuda_host::column_scales(backward);
-        if (factor_fp16) cuda_host::normalize_fp16_scales(backward, scales);
-        cuda_host::apply_factor_drop(backward, scales, opts.factor_opts.drop_tolerance, factor_fp16);
+        backward = detail::gpu_factor_prep::build_L11_csc_int<float>(F.L, m);
+        if (!opts.keep_factor) detail::sparse_csc_access::release_values(F.L);
+        scales = detail::gpu_factor_prep::column_scales(backward);
+        if (factor_fp16) detail::gpu_factor_prep::normalize_fp16_scales(backward, scales);
+        detail::gpu_factor_prep::apply_factor_drop(backward, scales, opts.factor_opts.drop_tolerance, factor_fp16);
         if (cp) (*cp)("metal_factor_prep");
 
         Eigen::SparseMatrix<double> compressed;
@@ -654,7 +654,7 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     if (opts.factor_opts.verbose) print_banner(stats, factor_fp16);
 }
 
-void metal_solver::impl::prepare_device(cuda_host::csr_int<float> backward,
+void metal_solver::impl::prepare_device(detail::gpu_factor_prep::csr_int<float> backward,
                                        const std::vector<float>& scales,
                                        const std::vector<float>& hi, const std::vector<float>& lo,
                                        unsigned m, detail::metal_setup::resident_factor* resident) {
@@ -689,13 +689,13 @@ void metal_solver::impl::prepare_device(cuda_host::csr_int<float> backward,
         bwd = std::move(resident->backward);
         factor_metadata = resident->metadata;
     } else {
-    auto install = [&]<class Value>(const cuda_host::csr_int<Value>& bt, std::span<const float> diag = {}) {
-        const auto ft = cuda_host::transpose_csr(bt);
+    auto install = [&]<class Value>(const detail::gpu_factor_prep::csr_int<Value>& bt, std::span<const float> diag = {}) {
+        const auto ft = detail::gpu_factor_prep::transpose_csr(bt);
         fwd = prepare_tri(ctx, ft, true, diag);
         bwd = prepare_tri(ctx, bt, false, diag);
     };
     if (factor_fp16) {
-        auto narrow = cuda_host::narrow_fp16_scaled(backward, scales);
+        auto narrow = detail::gpu_factor_prep::narrow_fp16_scaled(backward, scales);
         std::vector<mh::factor_metadata> metadata(m);
         for (unsigned j = 0; j < m; ++j) {
             metadata[j] = mh::pack_factor_metadata(scales[j], narrow.diag[j]);
@@ -704,7 +704,7 @@ void metal_solver::impl::prepare_device(cuda_host::csr_int<float> backward,
         with_pool([&] {
             factor_metadata = upload(ctx.device, metadata.data(), metadata.size() * sizeof(metadata[0]), "factor scales");
         });
-        cuda_host::csr_int<_Float16> half{backward.m, backward.nnz, std::move(backward.ptr),
+        detail::gpu_factor_prep::csr_int<_Float16> half{backward.m, backward.nnz, std::move(backward.ptr),
                                         std::move(backward.idx), std::move(narrow.vals)};
         backward.vals.reset();
         install(half, narrow.diag);
@@ -841,7 +841,6 @@ std::array<bool, Columns> metal_solver::impl::solve_columns_once(
         result.iterations = 0;
         result.residual = 0.0;
         result.backend = solve_backend::gpu;
-        result.lumped_offdiag = F.lumped_offdiag;
         bnorm[q] = mh::norm_reference(B.col(q));
         if (bnorm[q].value == 0.0) continue;
         if (max_iter == 0 && (X0 == nullptr || X0->col(q).isZero(0.0))) {

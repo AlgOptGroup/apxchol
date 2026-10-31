@@ -108,15 +108,14 @@ TEST(CustomEliminator, ExactCliqueFactorIsExact) {
     auto A = grid_laplacian(8, 8);
     auto b = apxchol::generate_test_rhs(A.rows());
     auto solve_once = [&](apxchol::factor_storage_type storage) {
-        auto G = apxchol::make_graph(A);
-        auto F = apxchol::factorize(std::move(G), exact_clique_eliminator{});
+        auto F = apxchol::factorize(A, exact_clique_eliminator{});
         apxchol::solve_options options;
         options.factor_opts.factor_storage = storage;
         apxchol::solver slv(A, std::move(F), options);
         return slv.solve(b, 1e-12, 50);
     };
     for (bool fp16 : {false, true}) {
-        if (fp16 && !apxchol::omp_sptrsv::fp16_supported()) continue;
+        if (fp16 && !apxchol::detail::omp_sptrsv::fp16_supported()) continue;
         SCOPED_TRACE(fp16 ? "fp16 storage" : "fp32 storage");
         const auto storage = fp16 ? apxchol::factor_storage_type::fp16
                                   : apxchol::factor_storage_type::fp32;
@@ -175,12 +174,10 @@ TEST(SetFactor, ExternalFactorizationInPreconditioner) {
     auto L = grid_laplacian(15, 15);
     auto b = apxchol::generate_test_rhs(L.rows());
 
-    auto G = apxchol::make_graph(L);
-    auto F = apxchol::factorize(std::move(G));
+    auto F = apxchol::factorize(L);
 
-    apxchol::apx_cholesky M;
-    M.set_factor(std::move(F));
-    Eigen::VectorXd z = M.solve(b);
+    apxchol::solver M(L, std::move(F), on_cpu);
+    Eigen::VectorXd z = M.apply(b);
     EXPECT_TRUE(z.allFinite());
     EXPECT_GT(z.norm(), 0.0);
 }
@@ -193,7 +190,7 @@ TEST(KeepFactor, ValuesSurviveWhenRequested) {
     apxchol::solver released(L, opts);
     EXPECT_TRUE(csc_access::vals(released.factor().L).empty());
 
-    opts.keep_factor_values = true;
+    opts.keep_factor = true;
     apxchol::solver kept(L, opts);
     const auto& FL = kept.factor().L;
     EXPECT_EQ(csc_access::vals(FL).size(), size_t(FL.nonZeros()));
@@ -283,8 +280,7 @@ TEST(SetFactor, ReleasedFactorIsRejected) {
     auto L = grid_laplacian(10, 10);
     apxchol::solver slv(L, on_cpu);  // default: factor values released after setup
 
-    apxchol::apx_cholesky M;
-    EXPECT_THROW(M.set_factor(slv.factor()),
+    EXPECT_THROW(apxchol::solver(L, slv.factor(), on_cpu),
                  std::invalid_argument);
 }
 

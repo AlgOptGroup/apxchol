@@ -44,9 +44,9 @@
 #include <utility>
 #include <vector>
 
-namespace apxchol { class cuda_sptrsv_device_factor; }
 
 namespace apxchol::detail {
+class cuda_sptrsv_device_factor;
 
 inline constexpr std::uint64_t gpu_round_shadow_pivot_seed(
         std::uint64_t run_seed, node_index pivot) noexcept {

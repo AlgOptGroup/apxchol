@@ -147,7 +147,7 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         F.lumped_offdiag = validated.lumped();
         const auto data = raw.data();
         const unsigned n = data.state->nodes;
-        if (options.keep_factor_values) {
+        if (options.keep_factor) {
             std::vector<factor_entry> entries(data.state->entries);
             for (unsigned p = 0; p < data.state->entries; ++p)
                 entries[p] = {data.factors[p].node, data.factors[p].value};
@@ -170,7 +170,7 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         out.backward = std::move(finalized.backward);
         out.metadata = finalized.metadata;
         out.half = half;
-        if (!options.keep_factor_values) {
+        if (!options.keep_factor) {
             F.perm.assign(static_cast<unsigned *>(finalized.permutation.contents),
                           static_cast<unsigned *>(finalized.permutation.contents) + n);
             detail::sparse_csc_access::resize(F.L, n);
@@ -182,8 +182,7 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         F.rounds.reserve(data.state->round);
         for (unsigned r = 0; r < data.state->round; ++r) {
             const unsigned first = data.round_ptr[r], last = data.round_ptr[r + 1];
-            F.rounds.push_back({n - first, last - first, std::numeric_limits<double>::quiet_NaN(),
-                F.L.col_ptrs()[last] - F.L.col_ptrs()[first], F.L.col_ptrs()[last]});
+            F.rounds.push_back({n - first, last - first});
         }
         raw = {};
         cached.finalizer.prepare_operator(input.ptr, input.idx, input.values, finalized.permutation,

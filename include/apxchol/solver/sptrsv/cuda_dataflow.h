@@ -3,9 +3,8 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
-namespace apxchol {
+namespace apxchol::detail {
 
-using sptrsv_gpu_value_t = float;
 inline constexpr int kDataflowBlock = 256;
 int dataflow_grid_size();
 
@@ -42,7 +41,6 @@ inline void dataflow_solve(cudaStream_t stream, int m, bool reverse,
                      batches, tags, tag_count, ticket, grid, rhs, out, active, rhs64, out64, 1);
 }
 
-namespace detail {
 // Returned allocations transfer to the caller. Only fixed-size statistics and
 // counts cross to the host; trusted device-owned factors remain on the device.
 struct dataflow_device_plan {
@@ -59,5 +57,4 @@ struct dataflow_device_plan {
 dataflow_device_plan build_dataflow_device_plan(
     int m, bool reverse, int nnz, const int* rowptr, int split_min,
     const float* diag = nullptr, const double* inv_scale2 = nullptr, unsigned plan_lanes = 32);
-} // namespace detail
-} // namespace apxchol
+} // namespace apxchol::detail
