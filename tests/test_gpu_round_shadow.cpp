@@ -240,7 +240,7 @@ checked_cpu_round run_authoritative_cpu_round(
     }
     // Multi-pivot cases enter the real directed-AoS OpenMP apply path. A
     // one-pivot round correctly stays on the production serial path.
-    options.omp_threshold = 0;
+    options.experimental.omp_threshold = 0;
     std::size_t work_hint = 0;
     for (node_index pivot : input.pivots) {
         for (std::size_t i = input.owner_offsets[pivot];
@@ -515,7 +515,7 @@ parallel_cpu_round_result run_parallel_cpu_round(
          0x9E3779B97F4A7C15ULL);
     // Stay on the fine-grained production schedule while adjacency work, not
     // an unconditional vertex threshold, selects the two-worker team.
-    options.omp_threshold = input.pivots.size();
+    options.experimental.omp_threshold = input.pivots.size();
     std::size_t work_hint = 0;
     for (node_index pivot : input.pivots) {
         for (std::size_t i = input.owner_offsets[pivot];
@@ -523,12 +523,12 @@ parallel_cpu_round_result run_parallel_cpu_round(
             if (input.active[input.incidences[i].neighbor]) ++work_hint;
     }
     if (apxchol::detail::elimination_round_team_size(
-            input.pivots.size(), work_hint, options.omp_threshold,
+            input.pivots.size(), work_hint, options.experimental.omp_threshold,
             workspace.threads.size()) != workers)
         throw std::logic_error("test did not select the parallel CPU apply path");
     if (input.pivots.size() < workers ||
         apxchol::detail::elimination_compute_chunk(
-            input.pivots.size(), options.omp_threshold) != 1)
+            input.pivots.size(), options.experimental.omp_threshold) != 1)
         throw std::logic_error("parallel CPU apply test needs one-pivot chunks per worker");
 
 #ifdef _OPENMP
@@ -1652,6 +1652,7 @@ struct owned_selector_view_fixture {
         apxchol::test::initialize_owned_selector(*session, graph);
     apxchol::detail::gpu_block_frontend& selector = *selector_owner;
     apxchol::partition_options options;
+    bool degree_tiebreak = true;
 
     owned_selector_view_fixture() : active(graph.n()) {
         std::iota(active.begin(), active.end(), node_index{0});
@@ -1659,7 +1660,7 @@ struct owned_selector_view_fixture {
     }
 
     std::vector<node_index> select() {
-        selector.prepare(active, options);
+        selector.prepare(active, options, 42, 0, degree_tiebreak);
         auto selected = selector.select_block_greedy().data;
         if (selected.empty()) throw std::logic_error("owned selector fixture exhausted too soon");
         return selected;
@@ -1685,7 +1686,7 @@ struct owned_selector_view_fixture {
 
     void compare_reference(const apxchol::graph& oracle) {
         ASSERT_GT(selector.transfers().owned_residual_binds, 0u);
-        const auto prepared = selector.prepare(active, options);
+        const auto prepared = selector.prepare(active, options, 42, 0, degree_tiebreak);
         const auto actual_degrees = selector.host_active_degrees();
         ASSERT_EQ(actual_degrees.size(), active.size());
         std::vector<node_index> expected_degrees;
@@ -1697,9 +1698,11 @@ struct owned_selector_view_fixture {
         }
         EXPECT_EQ(std::vector<node_index>(actual_degrees.begin(), actual_degrees.end()), expected_degrees);
         double threshold = options.degree_multiplier * double(sum) / active.size();
-        if (options.degree_quantile > 0.0 && options.degree_quantile < 1.0) {
+        const double quantile =
+            options.degree_quantile.value_or(apxchol::detail::degree_quantile_host_default);
+        if (quantile > 0.0 && quantile < 1.0) {
             auto sorted = expected_degrees; std::sort(sorted.begin(), sorted.end());
-            threshold = sorted[static_cast<std::size_t>(options.degree_quantile * (sorted.size()-1))];
+            threshold = sorted[static_cast<std::size_t>(quantile * (sorted.size()-1))];
         }
         std::vector<node_index> expected_candidates;
         for (std::size_t i = 0; i < active.size(); ++i)
@@ -2160,7 +2163,7 @@ TEST(GpuOwnedPrefix, SharedResidualViewPreservesCandidatesAndIndependentProgress
         SCOPED_TRACE(quantile);
         owned_selector_view_fixture f;
         f.options.degree_quantile = quantile;
-        f.options.degree_tiebreak = degree_tiebreak;
+        f.degree_tiebreak = degree_tiebreak;
         auto oracle = make_owned_order_fixture();
         for (std::size_t round = 0; round < 3; ++round) {
             SCOPED_TRACE(round);
@@ -2209,7 +2212,7 @@ TEST(GpuOwnedPrefix, SharedResidualViewRejectsPublicReadsAfterNextRound) {
         ASSERT_FALSE(f.active.empty());
         expect_exception_contains([&] {
             switch (operation) {
-            case 0: (void)f.selector.prepare(f.active, f.options); break;
+            case 0: (void)f.selector.prepare(f.active, f.options, 42, 0, f.degree_tiebreak); break;
             case 1: (void)f.selector.select_block_greedy(); break;
             case 2: (void)f.selector.host_candidates(); break;
             case 3: (void)f.selector.host_active_degrees(); break;
@@ -2706,8 +2709,7 @@ TEST(GpuOwnedPrefix, FactorEntryWritesMatchSerialFactorOnEveryBasis) {
         std::iota(wanted.begin(), wanted.end(), node_index{0});
         apxchol::partition_options options;
         options.degree_quantile = 0.0; options.degree_multiplier = 1024.0;
-        options.degree_tiebreak = false;
-        selector.prepare(active, options);
+        selector.prepare(active, options, 42, 0, false);
         const auto selected = selector.select_for_test(wanted).data;
         ASSERT_EQ(selected, wanted);
         const auto input = apxchol::detail::make_gpu_round_shadow_input(graph, selected, kOwnedSeed);
@@ -2787,8 +2789,7 @@ TEST(GpuOwnedPrefix, NormalBatchesMatchSerialHandbackAndFactorAction) {
             apxchol::partition_options options;
             options.degree_quantile = 0.0;
             options.degree_multiplier = 1024.0;
-            options.degree_tiebreak = false;
-            selector.prepare(active, options);
+            selector.prepare(active, options, 42, 0, false);
             const auto selected = selector.select_for_test(wanted).data;
             ASSERT_EQ(selected, wanted);
             const auto input = apxchol::detail::make_gpu_round_shadow_input(graph, selected, seed);
@@ -2950,12 +2951,11 @@ TEST(GpuOwnedPrefix, OversizedImportRejectionAndCompactContinuationMatchOracle) 
     apxchol::partition_options options;
     options.degree_quantile = 0.0;
     options.degree_multiplier = 1024.0;
-    options.degree_tiebreak = false;
     apxchol::detail::gpu_round_shadow_factor_log expected_log;
     std::ostringstream receipt;
     for (unsigned round = 0; round < 2; ++round) {
         SCOPED_TRACE(round);
-        selector.prepare(active, options);
+        selector.prepare(active, options, 42, 0, false);
         const auto selected = round == 0 ? selector.select_for_test(std::vector<node_index>{0}).data
             : selector.select_block_greedy().data;
         ASSERT_EQ(selected.size(), 1u);
@@ -3186,7 +3186,7 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
     factor_options.verbose = true;
     factor_options.partition.degree_quantile = 0.0;
     factor_options.partition.degree_multiplier = 100.0;
-    factor_options.min_is_fraction = 0.0;
+    factor_options.experimental.min_is_fraction = 0.0;
     for (double shift : {0.0, 1.0}) {
         SCOPED_TRACE(shift);
         auto A = owned_solve_matrix(n, shift);
@@ -3357,8 +3357,8 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
                 std::iota(active.begin(),active.end(),node_index{0});
                 std::iota(wanted.begin(),wanted.end(),node_index{0});
                 apxchol::partition_options options;
-                options.degree_quantile=0;options.degree_multiplier=16384;options.degree_tiebreak=false;
-                selector.prepare(active,options);
+                options.degree_quantile=0;options.degree_multiplier=16384;
+                selector.prepare(active,options,42,0,false);
                 const auto selected=selector.select_for_test(wanted).data;
                 ASSERT_EQ(selected,wanted);
                 const auto report=session.run_owned_prefix_round(selector.device_selection(),run_seed);

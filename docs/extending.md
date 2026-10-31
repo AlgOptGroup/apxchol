@@ -85,7 +85,8 @@ See the header for optional `sample_bounded` and
 `residual_handoff_threshold` traits.
 
 `ctx.options` contains selection settings, `ctx.seed` supplies randomness,
-`ctx.omp_threshold` gates parallel work, and `ctx.cp` is optional profiling.
+`ctx.omp_threshold` gates parallel work, `ctx.degree_tiebreak` asks the rule to
+prefer lower-degree vertices in conflicts, and `ctx.cp` is optional profiling.
 The rule is called once per round and may parallelize internally. This is the
 opposite of the eliminator, whose individual calls are already parallelized.
 
@@ -108,8 +109,9 @@ edges, not current live edges.
 
 Partitioner instances are passed by value. Callable adapters are
 `as_partitioner` and `as_prepass_partitioner`. Direct template use requires no
-registry change; by-name CLI/binding dispatch requires adding the type to
-`partitioner_list`. [custom_order.cpp](../examples/custom_order.cpp) shows
+registry change; dispatch through `factor_options::partitioner`, the CLI and
+bindings requires adding the type to `partitioner_list` and a matching
+`partitioner_kind` value and name. [custom_order.cpp](../examples/custom_order.cpp) shows
 complete integration.
 
 ## Reusing a custom factor
@@ -127,8 +129,8 @@ is still needed for PCG and residual checks.
 
 The factor may come from CPU construction or from a GPU solver created with
 `keep_factor_values=true`: pass its `solver.factor()` to the constructor above.
-The destination rebuilds its own triangular-solve storage. There is no built-in
-save/load format; this handoff is in memory.
+The destination rebuilds its own triangular-solve storage. This handoff is in
+memory; to reuse a factor across processes, [save the solver](serialization.md).
 
 `apxchol::apx_cholesky::set_factor` also accepts a factor for use with an
 Eigen iterative solver. That adapter always applies it on CPU.

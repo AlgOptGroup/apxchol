@@ -685,7 +685,7 @@ private:
         if constexpr (kScaled)
             transpose(csc_col_ptr_.data(), csc_row_idx_.data(), csc_vals.data());
 
-        build_schedule(options.cpu_schedule, mark);
+        build_schedule(options.experimental.cpu_schedule, mark);
         ready_ = true;
     }
 
@@ -1060,8 +1060,8 @@ public:
     /// (L L^T)^-1 either way. See the file header, storage contract.
     /// Valid in place (x_in == y_out).
     template<int Columns = 1>
-    void forward_solve(const double* x_in, double* y_out) const {
-        solve_dispatch<fwd_dir, Columns>(x_in, y_out);
+    void forward_solve(const double* x_in, double* y_out) {
+        solve_dispatch<fwd_dir, Columns>(x_in, y_out, critical_barrier_);
     }
 
     /// Back solve: L^T * z = y.  Under the fp16 storage the input is the
@@ -1069,24 +1069,43 @@ public:
     /// scaled once per column by inv_scale_[j]^2), i.e. z = L^-T y as before;
     /// D = I on the fp32 storage. Valid in place (x_in == y_out).
     template<int Columns = 1>
-    void transpose_solve(const double* x_in, double* y_out) const {
-        solve_dispatch<bck_dir, Columns>(x_in, y_out);
+    void transpose_solve(const double* x_in, double* y_out) {
+        solve_dispatch<bck_dir, Columns>(x_in, y_out, critical_barrier_);
+    }
+
+    /// Mutable synchronization state of one caller's solves. The non-const
+    /// overloads above use this object's own; callers sharing a const
+    /// omp_sptrsv, such as solver copies, pass a workspace each from
+    /// make_workspace().
+    using solve_workspace = detail::critical_weak_barrier;
+    solve_workspace make_workspace() const {
+        solve_workspace workspace;
+        if (hybrid_active_) workspace.setup(critical_plan_.processors);
+        return workspace;
+    }
+    template<int Columns = 1>
+    void forward_solve(const double* x_in, double* y_out, const solve_workspace& workspace) const {
+        solve_dispatch<fwd_dir, Columns>(x_in, y_out, workspace);
+    }
+    template<int Columns = 1>
+    void transpose_solve(const double* x_in, double* y_out, const solve_workspace& workspace) const {
+        solve_dispatch<bck_dir, Columns>(x_in, y_out, workspace);
     }
 
 private:
     // One storage branch per solve; FP16 kernels are only entered after the
     // setup-time CPU capability check.
     template <class Dir, int Columns>
-    void solve_dispatch(const double* x_in, double* y_out) const {
+    void solve_dispatch(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
         if (fp16_) {
-            solve_selected<Dir, _Float16, Columns>(x_in, y_out);
+            solve_selected<Dir, _Float16, Columns>(x_in, y_out, barrier);
             return;
         }
-        solve_selected<Dir, float, Columns>(x_in, y_out);
+        solve_selected<Dir, float, Columns>(x_in, y_out, barrier);
     }
 
     template <class Dir, class V, int Columns = 1>
-    void solve_selected(const double* x_in, double* y_out) const {
+    void solve_selected(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
         const unsigned processors = detail::cpu_solve_threads(team_rows_);
         if (processors == 1)
             return solve_levelset_range_serial<Dir, V, Columns>(
@@ -1094,13 +1113,13 @@ private:
         // A critical plan fixes its lane count at setup. Respect a caller's
         // changed thread limit through the base levels instead of that plan.
         if (hybrid_active_ && processors == critical_plan_.processors)
-            solve_hybrid<Dir, V, Columns>(x_in, y_out);
+            solve_hybrid<Dir, V, Columns>(x_in, y_out, barrier);
         else
             solve_levelset<Dir, V, Columns>(x_in, y_out, processors);
     }
 
     template <class Dir, class V, int Columns = 1>
-    void solve_hybrid(const double* x_in, double* y_out) const {
+    void solve_hybrid(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
         const unsigned processors = critical_plan_.processors;
         bool team_ok = true;
         // Keep both phases in one team. The last level-set workshare already
@@ -1116,9 +1135,9 @@ private:
                 if constexpr (Dir::forward) {
                     solve_levelset_range_team<Dir, V, Columns>(
                         x_in, y_out, 0, hybrid_fwd_level_end_);
-                    solve_critical_team<Dir, V, Columns>(x_in, y_out);
+                    solve_critical_team<Dir, V, Columns>(x_in, y_out, barrier);
                 } else {
-                    solve_critical_team<Dir, V, Columns>(x_in, y_out);
+                    solve_critical_team<Dir, V, Columns>(x_in, y_out, barrier);
                     #pragma omp barrier
                     solve_levelset_range_team<Dir, V, Columns>(
                         x_in, y_out, hybrid_bck_level_begin_,
@@ -1162,32 +1181,32 @@ private:
 #ifdef __x86_64__
     template <class Dir, class V, int Columns>
     [[gnu::target("avx2,f16c,fma"), gnu::flatten]]
-    void solve_critical_fma(const double* x_in, double* y_out) const {
-        solve_critical_team_impl<Dir, V, Columns>(x_in, y_out);
+    void solve_critical_fma(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
+        solve_critical_team_impl<Dir, V, Columns>(x_in, y_out, barrier);
     }
 
     template <class Dir, int Columns>
     [[gnu::target("f16c"), gnu::flatten]]
-    void solve_critical_fp16(const double* x_in, double* y_out) const {
-        solve_critical_team_impl<Dir, _Float16, Columns>(x_in, y_out);
+    void solve_critical_fp16(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
+        solve_critical_team_impl<Dir, _Float16, Columns>(x_in, y_out, barrier);
     }
 #endif
 
     template <class Dir, class V, int Columns = 1>
-    void solve_critical_team(const double* x_in, double* y_out) const {
+    void solve_critical_team(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
 #if defined(__x86_64__) && !(defined(__AVX2__) && defined(__F16C__) && defined(__FMA__))
         if constexpr (std::is_same_v<V, _Float16> || Columns > 1) {
             if (simd_fp16_kernel())
-                return solve_critical_fma<Dir, V, Columns>(x_in, y_out);
+                return solve_critical_fma<Dir, V, Columns>(x_in, y_out, barrier);
             if constexpr (std::is_same_v<V, _Float16>)
-                return solve_critical_fp16<Dir, Columns>(x_in, y_out);
+                return solve_critical_fp16<Dir, Columns>(x_in, y_out, barrier);
         }
 #endif
-        solve_critical_team_impl<Dir, V, Columns>(x_in, y_out);
+        solve_critical_team_impl<Dir, V, Columns>(x_in, y_out, barrier);
     }
 
     template <class Dir, class V, int Columns = 1>
-    void solve_critical_team_impl(const double* x_in, double* y_out) const {
+    void solve_critical_team_impl(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
         const unsigned processor =
             static_cast<unsigned>(omp_get_thread_num());
         const std::size_t steps = critical_plan_.steps;
@@ -1200,7 +1219,7 @@ private:
             const std::size_t begin = ptr[slot];
             const std::size_t end = ptr[slot + 1];
             if (begin != end)
-                critical_barrier_.wait(processor, 1);
+                barrier.wait(processor, 1);
             if constexpr (Dir::forward) {
                 for (std::size_t i = begin; i < end; ++i)
                     solve_row<Dir, V, Columns, /*Fat=*/false>(rows[i], x_in, y_out);
@@ -1208,7 +1227,7 @@ private:
                 for (std::size_t i = end; i-- > begin;)
                     solve_row<Dir, V, Columns, /*Fat=*/false>(rows[i], x_in, y_out);
             }
-            critical_barrier_.arrive(processor);
+            barrier.arrive(processor);
         }
     }
 
