@@ -1,8 +1,8 @@
 include(CMakePackageConfigHelpers)
 
-function(apxchol_install_core)
+function(_apxchol_install_core)
     get_filename_component(root "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/.." ABSOLUTE)
-    apxchol_openmp_runtime(APXCHOL_OPENMP_RUNTIME)
+    _apxchol_openmp_runtime(APXCHOL_OPENMP_RUNTIME)
     get_target_property(APXCHOL_CORE_TYPE apxchol_core TYPE)
     set(package_dir "${CMAKE_INSTALL_LIBDIR}/cmake/apxchol")
     set(APXCHOL_BUNDLED_EIGEN OFF)
