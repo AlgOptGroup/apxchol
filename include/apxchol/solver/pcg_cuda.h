@@ -214,8 +214,11 @@ private:
             scales[q] = detail::gpu_scaling::fp32_scale(std::max(max_b[q], max_x0[q]));
             // packed stays unchanged until the stream syncs: the upload above
             // may still read it. Fold the scaled column's norm contiguously.
-            const Eigen::VectorXd rhs_column = packed.col(q) * scales[q];
-            bnorm[q] = detail::gpu_scaling::norm(rhs_column);
+            if (Columns == 1 && scales[q] == 1) bnorm[q] = detail::gpu_scaling::norm(packed);
+            else {
+                const Eigen::VectorXd rhs_column = packed.col(q) * scales[q];
+                bnorm[q] = detail::gpu_scaling::norm(rhs_column);
+            }
             if (!std::isnormal(bnorm[q] * bnorm[q]))
                 throw std::invalid_argument("CUDA solve: RHS and initial guess exceed the common scaling range");
             auto& st = h_state_[q];
