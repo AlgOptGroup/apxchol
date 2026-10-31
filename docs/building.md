@@ -3,7 +3,6 @@
 ## Dependencies
 
 CPU builds require CMake 3.20+, GCC or Clang with C++23 and OpenMP, and zlib headers.
-CMake uses an installed Eigen package when available and fetches it otherwise.
 Windows builds with MSVC or `clang-cl` are not supported.
 On x86-64, the minimum target is x86-64-v2.
 
@@ -69,8 +68,6 @@ Standard CMake controls also apply: `CMAKE_BUILD_TYPE`, `BUILD_SHARED_LIBS`,
 
 Portable x86 builds use x86-64-v2 and dispatch supported FP16/SIMD kernels at
 runtime. Native tuning can require a newer CPU than this baseline.
-`apxchol::core` propagates C++23 and two Eigen settings to consumers, because
-Eigen objects cross the library boundary: `EIGEN_MAX_ALIGN_BYTES`, the
-alignment the core's flags give Eigen, and `EIGEN_MALLOC_ALREADY_ALIGNED=0`,
-so both sides allocate and free through Eigen's own aligned allocator. A
-consumer can then target a narrower or wider instruction set than the core.
+The architecture flag stays private to the library: `apxchol::core`
+propagates C++23 but no instruction-set or alignment settings, so a consumer
+can target a narrower or wider instruction set than the core.

@@ -49,12 +49,4 @@ print(license)
         COMMAND_ERROR_IS_FATAL ANY)
     install(FILES "${pybind11_license}"
         DESTINATION "${SKBUILD_METADATA_DIR}/licenses/pybind11" RENAME LICENSE)
-
-    configure_file(Eigen-NOTICE.txt.in Eigen-NOTICE.txt @ONLY)
-    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/Eigen-NOTICE.txt"
-        DESTINATION "${SKBUILD_METADATA_DIR}/licenses/eigen" RENAME NOTICE)
-    if (TARGET apxchol_eigen)
-        file(GLOB eigen_licenses "${eigen_SOURCE_DIR}/COPYING.*")
-        install(FILES ${eigen_licenses} DESTINATION "${SKBUILD_METADATA_DIR}/licenses/eigen")
-    endif()
 endif()

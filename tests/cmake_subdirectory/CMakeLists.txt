@@ -36,8 +36,7 @@ if (NOT APXCHOL_BUILD_TESTS AND TARGET apxchol_mtx_input)
     message(FATAL_ERROR "Library-only embedding built the CLI input helper")
 endif()
 
-# apxchol's architecture flag must not reach consumers; only the Eigen
-# alignment it implies does.
+# apxchol's architecture flag must not reach consumers.
 foreach (_target apxchol::core apxchol_mtx_input)
     if (TARGET ${_target})
         get_target_property(_options ${_target} INTERFACE_COMPILE_OPTIONS)
@@ -53,8 +52,7 @@ if (CMAKE_CXX_FLAGS MATCHES "-m(arch|cpu)=")
     endif()
 endif()
 
-# Reuse the existing real consumer's alignment and original-residual checks.
-target_sources(apxchol_core PRIVATE ../cmake_consumer/core_alignment.cpp)
+# Reuse the existing real consumer's original-residual checks.
 add_executable(apxchol_subdirectory_consumer ../cmake_consumer/consumer.cpp)
 target_link_libraries(apxchol_subdirectory_consumer PRIVATE apxchol::core)
 # A consumer may target a wider instruction set than the core, e.g. -mavx2.

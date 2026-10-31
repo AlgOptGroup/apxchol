@@ -91,19 +91,17 @@ struct complete_factor {
     }
 };
 
-Eigen::SparseMatrix<double> solve_matrix(int n, double shift) {
-    std::vector<Eigen::Triplet<double>> entries;
+apxchol::test::sparse_matrix solve_matrix(int n, double shift) {
+    std::vector<apxchol::test::triplet> entries;
     for (int i = 0; i < n; ++i) {
-        entries.emplace_back(i, i, 4.0 + shift);
+        entries.push_back({i, i, 4.0 + shift});
         for (int offset : {1, 8}) {
             const int j = (i + offset) % n;
-            entries.emplace_back(i, j, -1.0);
-            entries.emplace_back(j, i, -1.0);
+            entries.push_back({i, j, -1.0});
+            entries.push_back({j, i, -1.0});
         }
     }
-    Eigen::SparseMatrix<double> A(n, n);
-    A.setFromTriplets(entries.begin(), entries.end());
-    return A;
+    return apxchol::test::from_triplets(n, n, entries);
 }
 
 #define REQUIRE_FINALIZER_DEVICE() \
@@ -235,14 +233,14 @@ TEST(GpuFactorFinalize, ConsumingSolveAcceptsDefaultFp16AndCompensatedDrop) {
     scoped_omp_threads serial(1);
     for (double shift : {0.0, 1.0}) {
         auto A = solve_matrix(1025, shift);
-        Eigen::VectorXd exact(A.rows());
-        for (int i = 0; i < exact.size(); ++i) exact[i] = std::sin(i + 0.25);
-        Eigen::VectorXd b = A * exact;
+        std::vector<double> exact(A.rows);
+        for (std::size_t i = 0; i < exact.size(); ++i) exact[i] = std::sin(double(i) + 0.25);
+        const std::vector<double> b = apxchol::test::multiply(A, exact);
         apxchol::solve_options opts;
         opts.backend = apxchol::solve_backend::gpu;
-        const auto solved = apxchol::solve(apxchol::test::csc(A), apxchol::test::cspan(b), 1e-8, 1000, {}, opts);
+        const auto solved = apxchol::solve(apxchol::test::csc(A), b, 1e-8, 1000, {}, opts);
         EXPECT_EQ(solved.backend, apxchol::solve_backend::gpu);
-        EXPECT_LE((A * apxchol::test::vec(solved.x) - b).norm() / b.norm(), 1e-8);
+        EXPECT_LE(apxchol::test::relative_residual(A, solved.x, b), 1e-8);
     }
 }
 
@@ -294,7 +292,7 @@ TEST(GpuFactorFinalize, DeviceSolvesAndSessionsInstallOwnedCapsules) {
         apxchol::detail::cuda_sptrsv trsv;
         trsv.setup_adopting_device_factor(std::move(*capsule), options);
         ASSERT_TRUE(trsv.adopted_device_factor());
-        Eigen::VectorXd b(4), expected(4), tmp(4), work(4), solved(4), observed(4);
+        std::vector<double> b(4), expected(4), tmp(4), work(4), solved(4), observed(4);
         for (int i = 0; i < 4; ++i) { b[i] = std::cos(i + 0.5); work[reference.perm[i]] = b[i]; }
         trsv.solve_LLt(work.data(), solved.data());
         cpu.forward_solve(work.data(), tmp.data()); cpu.transpose_solve(tmp.data(), work.data());
@@ -302,7 +300,8 @@ TEST(GpuFactorFinalize, DeviceSolvesAndSessionsInstallOwnedCapsules) {
             expected[i] = work[reference.perm[i]];
             observed[i] = solved[reference.perm[i]];
         }
-        EXPECT_LT((observed - expected).norm() / expected.norm(), 2e-6);
+        EXPECT_LT(apxchol::test::norm(apxchol::test::difference(observed, expected)) /
+                      apxchol::test::norm(expected), 2e-6);
     }
     for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
         apxchol::solve_options solve_options;
