@@ -812,7 +812,10 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
     apply_count_ = 0;
     rz = apply_fused<C>(r, rs, z, timings);
     if constexpr (C == 1) {
-        std::copy_n(z, n, p);
+        // The split panel_update_p uses, so its threads touch p's pages first.
+        const int workers = detail::cpu_solve_threads(n);
+#pragma omp parallel for schedule(static) if (workers > 1) num_threads(workers)
+        for (std::int64_t i = 0; i < n; i++) p[i] = z[i];
     } else {
         for (std::int64_t i = 0; i < n; i++)
             for (int c = 0; c < C; c++)
