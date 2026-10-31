@@ -76,11 +76,12 @@ struct baumann_kyng_partitioner {
 
         const int nt = omp_get_max_threads();
 
-        // Resolve the by-route sentinel here too: this partitioner can be driven
+        // Resolve an unset quantile here too: this partitioner can be driven
         // directly, without factorize() having normalised the options first.
-        const double q_cap  = degree_quantile_or_host_default(ctx.options.degree_quantile);
+        const double q_cap  = ctx.options.degree_quantile.value_or(
+            detail::degree_quantile_host_default);
         const bool use_q    = q_cap > 0.0 && q_cap < 1.0;
-        const bool tiebreak = ctx.options.degree_tiebreak;
+        const bool tiebreak = ctx.degree_tiebreak;
         if ((use_q || tiebreak) && deg_by_vertex_.size() < static_cast<size_t>(G.n()))
             deg_by_vertex_.resize(G.n());
         if (local_sampled_.size() < static_cast<size_t>(nt)) local_sampled_.resize(nt);

@@ -64,6 +64,13 @@ void detail::validate_solve_options(const solve_options& opts) {
     validate_factor_options(opts.factor_opts);
 }
 
+std::pair<double, int> detail::resolve_solve_parameters(std::optional<double> tol,
+    std::optional<int> max_iter, double default_tolerance, int default_iterations) {
+    const std::pair resolved{tol.value_or(default_tolerance), max_iter.value_or(default_iterations)};
+    detail::validate_solve_parameters(resolved.first, resolved.second);
+    return resolved;
+}
+
 namespace {
 
 void check_matrix_views(const_matrix_view B, matrix_view X, Eigen::Index rows,
@@ -99,13 +106,6 @@ bool all_finite(const_matrix_view M) {
         if (!Eigen::Map<const Eigen::VectorXd>(M.col(c).data(), M.rows()).allFinite())
             return false;
     return true;
-}
-
-void resolve_solve_parameters(double& tol, int& max_iter, double default_tolerance,
-                              int default_iterations) {
-    if (std::isfinite(tol) && tol < 0) tol = default_tolerance;
-    if (max_iter < 0) max_iter = default_iterations;
-    detail::validate_solve_parameters(tol, max_iter);
 }
 
 // Eigen's parallel SpMV requires Eigen::initParallel() to be called
@@ -541,7 +541,7 @@ void detail::cpu_route::install_factor(factorization F, checkpoint* cp) {
     if (cp) { (*cp)("sptrsv_setup"); cp->ascend(); }
     // The PCG loop only uses trsv, never F.L. Release whatever row/value
     // arrays setup_consuming left (idempotent); column pointers remain.
-    if (!opts_.keep_factor) factor.L.release_values();
+    if (!opts_.keep_factor) detail::sparse_csc_access::release_values(factor.L);
     scratch_.resize(n_);
     scratch2_.resize(n_);
     installed_ = std::move(next);
@@ -603,8 +603,7 @@ void detail::cpu_route::build_operator(const Eigen::SparseMatrix<double>& L,
                 [&](int nnz) {
                     op.Lrm.resizeNonZeros(nnz);
                     return std::pair{op.Lrm.innerIndexPtr(), op.Lrm.valuePtr()};
-                },
-                [](const auto& a, const auto& b) { return a.first < b.first; });
+                });
             op.Lrm.makeCompressed();
             fallback_needs_fp32_cast = op.fp32;
         }
@@ -720,7 +719,6 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
     const Eigen::Index n = n_;
     for (int c = 0; c < C; c++) {
         results[c].backend = solve_backend::cpu;
-        results[c].solve_vram_mb = -1;
         results[c].iterations = 0;
     }
     r_.resize(n * C);
@@ -1123,12 +1121,11 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
     }
 #if defined(APXCHOL_USE_CUDA)
     bool compatible = sizeof(node_index) == sizeof(std::uint32_t) &&
-        opts.factor_opts.is_select == "block_greedy" &&
-        opts.factor_opts.cpu_schedule == cpu_sptrsv_schedule::automatic &&
-        opts.factor_opts.residual_peel == residual_peel_strategy::natural &&
-        opts.factor_opts.exact_clique_max_degree == 0 &&
-        exact_core_or_off(opts.factor_opts.exact_core_max_h) == 0 &&
-        opts.factor_opts.double_cycle_min_h == 0;
+        opts.factor_opts.partitioner == partitioner_kind::block_greedy &&
+        opts.factor_opts.experimental.cpu_schedule == cpu_sptrsv_schedule::automatic &&
+        opts.factor_opts.experimental.exact_clique_max_degree == 0 &&
+        opts.factor_opts.experimental.exact_core_max_h.value_or(0) == 0 &&
+        opts.factor_opts.experimental.double_cycle_min_h == 0;
     if (compatible && opts.backend == solve_backend::automatic && A) {
         std::size_t offdiagonals = 0;
         bool zeros = false;
@@ -1227,7 +1224,7 @@ struct solver::impl {
             const auto& device = detail::metal::status();
             if (!device.ok)
                 throw std::runtime_error("apxchol: the Metal backend is unavailable: " + device.error);
-            if (F && opts.factor_opts.cpu_schedule != cpu_sptrsv_schedule::automatic)
+            if (F && opts.factor_opts.experimental.cpu_schedule != cpu_sptrsv_schedule::automatic)
                 throw std::invalid_argument("Metal cannot use a CPU triangular-solve schedule");
             return detail::solver_route(std::in_place_type<detail::metal_route>, A, opts, cp, F);
         }
@@ -1261,8 +1258,9 @@ struct solver::impl {
 
     // Negative values select the construction defaults; each public solve
     // resolves them before touching its output.
-    void resolve(double& requested_tol, int& requested_max_iter) const {
-        resolve_solve_parameters(requested_tol, requested_max_iter, tol, max_iter);
+    std::pair<double, int> resolve(std::optional<double> requested_tol,
+                                   std::optional<int> requested_max_iter) const {
+        return detail::resolve_solve_parameters(requested_tol, requested_max_iter, tol, max_iter);
     }
 
     // The only argument checks and panel loop of every solve: the routes
@@ -1365,9 +1363,10 @@ solver& solver::operator=(const solver& other) {
     return *this;
 }
 
-void solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,
-                   int max_iter, const Eigen::VectorXd* x0) {
-    impl_->resolve(tol, max_iter);
+void solver::solve(const Eigen::VectorXd& b, solve_result& result,
+                   std::optional<double> requested_tol, std::optional<int> requested_max_iter,
+                   const Eigen::VectorXd* x0) {
+    const auto [tol, max_iter] = impl_->resolve(requested_tol, requested_max_iter);
     if (b.size() != rows()) throw std::invalid_argument("solver::solve: RHS length mismatch");
     if (&b == &result.x || x0 == &result.x)
         throw std::invalid_argument("solver: output must not overlap RHS or warm start");
@@ -1377,25 +1376,28 @@ void solver::solve(const Eigen::VectorXd& b, solve_result& result, double tol,
                  tol, max_iter);
 }
 
-solve_result solver::solve(const Eigen::VectorXd& b, double tol, int max_iter,
-                           const Eigen::VectorXd* x0) {
+solve_result solver::solve(const Eigen::VectorXd& b, std::optional<double> tol,
+                           std::optional<int> max_iter, const Eigen::VectorXd* x0) {
     solve_result result;
     solve(b, result, tol, max_iter, x0);
     return result;
 }
 
 solve_result solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
-                           double tol, int max_iter, const Eigen::VectorXd* x0) {
-    impl_->resolve(tol, max_iter);
+                           std::optional<double> requested_tol, std::optional<int> requested_max_iter,
+                           const Eigen::VectorXd* x0) {
+    const auto [tol, max_iter] = impl_->resolve(requested_tol, requested_max_iter);
     solve_result result;
     const const_matrix_view initial(x0 ? *x0 : b);
     impl_->solve(b, x, x0 ? &initial : nullptr, {&result, 1}, result.timings, tol, max_iter);
     return result;
 }
 
-batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X, double tol, int max_iter,
+batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X,
+                                       std::optional<double> requested_tol,
+                                       std::optional<int> requested_max_iter,
                                        const const_matrix_view *X0) {
-    impl_->resolve(tol, max_iter);
+    const auto [tol, max_iter] = impl_->resolve(requested_tol, requested_max_iter);
     batch_solve_result result;
     result.columns.resize(B.cols());
     result.timings.tick();

@@ -92,8 +92,8 @@
 /// Use a custom partitioner as a configured instance
 /// (factorize(A, my_partitioner{...}, opts)), as a template argument with a
 /// custom eliminator (factorize<my_partitioner>(A, my_eliminator{}, opts)), or
-/// add it to the built-in list in partitioner_list.h for by-name dispatch
-/// (factor_options::is_select / CLI / bindings).
+/// add it to partitioner_list for dispatch through factor_options::partitioner,
+/// the CLI and bindings.
 /// Lambdas: as_partitioner(fn) or as_prepass_partitioner(fn) — identical
 /// callable signature, differing only in the trait they declare;
 /// zero-overhead template wrappers, no type erasure.
@@ -136,9 +136,7 @@ struct partition_context {
     /// degree_multiplier) depends on the degree_prepass trait: with the
     /// pre-pass the orchestrator has already applied them when building the
     /// candidate list; without it nothing has been applied and the rule
-    /// honors them itself. degree_tiebreak (prefer the lower-degree vertex
-    /// when adjacent candidates compete) is never applied by the
-    /// orchestrator — honoring it is always the rule's job.
+    /// honors them itself.
     partition_options options;
     /// Determinism source. Derive all randomness as pure functions of
     /// (seed, round, vertex) — hash priorities as the shipped rules do, or
@@ -146,6 +144,10 @@ struct partition_context {
     /// because draws from a shared stream would depend on thread scheduling.
     unsigned seed = 42;
     std::size_t omp_threshold = 2000;  ///< min work size before OpenMP engages
+    /// Prefer the lower-degree vertex when adjacent candidates compete
+    /// (factor_options::experimental.degree_tiebreak). Never applied by the
+    /// orchestrator — honoring it is always the rule's job.
+    bool degree_tiebreak = true;
     /// Degree counts indexed by vertex ID, valid for every active vertex.
     /// Audited prune skipping may supply conservative counts; otherwise they
     /// are exact. Non-empty when this partitioner declares degree_prepass.

@@ -41,5 +41,5 @@ export CC CXX
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release "$@"
 cmake --build build --target apxchol_mex --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
 
-echo "built: $(pwd)/apxchol_mex.mex"
+echo "built: $(pwd)/private/apxchol_mex.mex"
 echo "use:   addpath $(pwd)   then   s = apxchol_solver(A); res = s.solve(b);"

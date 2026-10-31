@@ -376,29 +376,21 @@ private:
         std::vector<std::size_t> order(items.size());
         std::iota(order.begin(), order.end(), std::size_t{0});
         std::vector<std::size_t> scratch(order.size());
-        auto weight_key = [&](std::size_t index) -> std::uint64_t {
-            return (~static_cast<std::uint64_t>(
-                std::bit_cast<std::uint32_t>(static_cast<float>(
-                    items[index].weight)))) & 0xffffffffULL;
+        // Heaviest first by the inverted exponent and top three mantissa
+        // bits of the FP32 weight, as in residual_sparsify::bucket.
+        auto bucket = [&](std::size_t index) -> std::size_t {
+            return ~std::bit_cast<std::uint32_t>(
+                static_cast<float>(items[index].weight)) >> 20;
         };
-        constexpr unsigned key_bits = 8 * sizeof(float);
-        constexpr unsigned pass_bits = 12;
-        constexpr unsigned shift = key_bits - pass_bits;
-        std::array<std::size_t, std::size_t{1} << pass_bits> counts{};
-        for (std::size_t index : order) {
-            const std::uint64_t key = weight_key(index);
-            ++counts[(key >> shift) & (counts.size() - 1)];
-        }
+        std::array<std::size_t, std::size_t{1} << 12> counts{};
+        for (std::size_t index : order) ++counts[bucket(index)];
         std::size_t offset = 0;
         for (std::size_t& count : counts) {
             const std::size_t next = offset + count;
             count = offset;
             offset = next;
         }
-        for (std::size_t index : order) {
-            const std::uint64_t key = weight_key(index);
-            scratch[counts[(key >> shift) & (counts.size() - 1)]++] = index;
-        }
+        for (std::size_t index : order) scratch[counts[bucket(index)]++] = index;
         order.swap(scratch);
         // The radix scratch now contains only the discarded iota order.
         // Release it before allocating an equally wide double cache so the

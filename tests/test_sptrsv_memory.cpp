@@ -33,6 +33,8 @@
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/sptrsv/omp.h"
 
+using csc_access = apxchol::detail::sparse_csc_access;
+
 using apxchol::edge_index;
 using apxchol::node_index;
 using apxchol::sparse_csc;
@@ -196,10 +198,10 @@ TEST(SpTRSVSetupMemory, SetupConsumingReleasesTheFactorAndSolvesIdentically) {
     apxchol::detail::omp_sptrsv a, b;
     a.setup(F1.L, m);
     b.setup_consuming(F2.L, m);
-    EXPECT_EQ(F2.L.inner_.capacity(), 0u);
-    EXPECT_EQ(F2.L.vals_.capacity(), 0u);
+    EXPECT_EQ(csc_access::inner(F2.L).capacity(), 0u);
+    EXPECT_EQ(csc_access::vals(F2.L).capacity(), 0u);
     EXPECT_EQ(F2.L.nonZeros(), nnz);            // column pointers stay
-    EXPECT_EQ(F1.L.inner_.size(), static_cast<std::size_t>(nnz));  // const& setup keeps it
+    EXPECT_EQ(csc_access::inner(F1.L).size(), static_cast<std::size_t>(nnz));  // const& setup keeps it
 
     std::vector<double> x(m), ya(m), yb(m), za(m), zb(m);
     for (node_index i = 0; i < m; ++i) x[i] = std::sin(0.37 * i) + 1.5;

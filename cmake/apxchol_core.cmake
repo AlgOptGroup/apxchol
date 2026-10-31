@@ -31,7 +31,7 @@ elseif (APXCHOL_DEVICE STREQUAL "CUDA")
     find_package(CUDAToolkit 13.3 REQUIRED)
 endif()
 
-function(apxchol_configure_core target)
+function(_apxchol_configure_core target)
     get_filename_component(root "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/.." ABSOLUTE)
     target_sources(${target} PRIVATE
         ${root}/src/factorization.cpp
@@ -44,8 +44,8 @@ function(apxchol_configure_core target)
     set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
     target_compile_options(${target} PRIVATE
         -Wall -Wextra "$<$<COMPILE_LANGUAGE:C,CXX,OBJCXX>:-Wpedantic>")
-    if (APXCHOL_ARCH_FLAG)
-        target_compile_options(${target} PUBLIC "${APXCHOL_ARCH_FLAG}")
+    if (_APXCHOL_ARCH_FLAG)
+        target_compile_options(${target} PUBLIC "${_APXCHOL_ARCH_FLAG}")
     endif()
 
     set(APXCHOL_GIT_SHA "unknown")
@@ -112,8 +112,11 @@ function(apxchol_add_core)
     endif()
     add_library(apxchol_core)
     add_library(apxchol::core ALIAS apxchol_core)
-    set_target_properties(apxchol_core PROPERTIES EXPORT_NAME core POSITION_INDEPENDENT_CODE ON)
-    apxchol_configure_core(apxchol_core)
+    # Shared builds get a major.minor soname: there is no stable ABI across minors.
+    string(REGEX MATCH "^[0-9]+\\.[0-9]+" soversion "${APXCHOL_VERSION}")
+    set_target_properties(apxchol_core PROPERTIES EXPORT_NAME core POSITION_INDEPENDENT_CODE ON
+        VERSION "${APXCHOL_VERSION}" SOVERSION "${soversion}")
+    _apxchol_configure_core(apxchol_core)
     include(${CMAKE_CURRENT_FUNCTION_LIST_DIR}/apxchol_install.cmake)
-    apxchol_install_core()
+    _apxchol_install_core()
 endfunction()

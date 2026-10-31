@@ -76,13 +76,7 @@ public:
         else if (B.cols() == 2) run.template operator()<2>();
         else run.template operator()<1>();
         if (timings) { (*timings)("gpu_pcg_loop"); timings->ascend(); }
-        // Solve-held device VRAM (the operator, vectors and factor are still
-        // resident here; everything is freed when the session destructs).
-        const double vram_mb = gpcg_.device_memory_used_mb();
-        for (auto& result : results) {
-            result.backend = solve_backend::gpu;
-            result.solve_vram_mb = vram_mb;
-        }
+        for (auto& result : results) result.backend = solve_backend::gpu;
     }
 
     /// z = M^{-1} r for one column, through host-side permutation and centering:
@@ -154,7 +148,7 @@ private:
                 F_.rounds.size(), static_cast<std::size_t>(F_.L.nonZeros()),
                 static_cast<unsigned long long>(trsv_.stored_nnz()),
                 trsv_.adopted_device_factor() ? 1 : 0, trsv_.fp16() ? 1 : 0,
-                F_.L.inner_.size() * sizeof(node_index) + F_.L.vals_.size() * sizeof(factor_value_t),
+                F_.L.row_indices().size() * sizeof(node_index) + F_.L.values().size() * sizeof(factor_value_t),
                 trsv_.adoption_host_download_bytes(), drop.rel,
                 static_cast<unsigned long long>(drop.dropped_threshold),
                 static_cast<unsigned long long>(drop.dropped_flush));
@@ -187,7 +181,7 @@ private:
         if (cp) { (*cp)("sptrsv_setup"); cp->ascend(); }
         // The device holds its own copy; keep_factor=true keeps the host
         // row/value arrays for callers that export or adopt L.
-        if (!keep_factor_) F_.L.release_values();
+        if (!keep_factor_) detail::sparse_csc_access::release_values(F_.L);
     }
 
     factor_options opts_;
