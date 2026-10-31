@@ -110,16 +110,16 @@ static void assemble_csc(
                     block_base[static_cast<std::size_t>(team)] =
                         static_cast<edge_index>(total);
                     nnz = static_cast<edge_index>(total);
-                    L.resize(n, n);
-                    L.reserve(nnz);
-                    outer_ptr = L.outerIndexPtr();
+                    using access = detail::sparse_csc_access;
+                    access::resize(L, n);
+                    outer_ptr = access::outer(L).data();
                     outer_ptr[n] = nnz;
                     // sparse_csc owns independent vectors for the outer,
                     // inner, and value arrays, so all storage can be acquired
                     // in this one handoff before any worker writes it.
-                    L.resizeNonZeros(nnz);
-                    inner_idx = L.innerIndexPtr();
-                    values = L.valuePtr();
+                    access::resize_nonzeros(L, nnz);
+                    inner_idx = access::inner(L).data();
+                    values = access::vals(L).data();
                 }
             } catch (...) {
                 error = std::current_exception();
@@ -197,7 +197,6 @@ static void assemble_csc(
     // been destroyed and the OpenMP team has joined before assembly ends.
     // These calls are outside an OpenMP structured block, so exceptions retain
     // their ordinary propagation semantics.
-    L.makeCompressed();
     if (cp) (*cp)("assembly");
 }
 
@@ -218,8 +217,8 @@ void build_csc(factorization& result,
         for (node_index i = 0; i < n; ++i)
             result.perm[factor_cols[i].vertex] = i;
         if (cp) (*cp)("permutation");
-        result.L.resize(n, n);
-        auto* outer = result.L.outerIndexPtr();
+        detail::sparse_csc_access::resize(result.L, n);
+        auto* outer = detail::sparse_csc_access::outer(result.L).data();
         for (node_index i = 0; i < n; ++i) {
             const edge_index offdiag = factor_cols[i].entry_count;
             if (offdiag == sparse_csc::kEdgeMax ||

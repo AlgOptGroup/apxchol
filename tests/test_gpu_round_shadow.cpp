@@ -44,6 +44,8 @@
 #include <omp.h>
 #endif
 
+using csc_access = apxchol::detail::sparse_csc_access;
+
 namespace {
 
 using apxchol::node_index;
@@ -411,7 +413,7 @@ std::uint64_t check_complete_factor_action(
     apxchol::detail::build_csc(reference, columns, n, nullptr);
     session.complete_owned_factorization(metadata.perm, metadata.L);
     EXPECT_EQ(metadata.perm, reference.perm);
-    EXPECT_EQ(metadata.L.outer_, reference.L.outer_);
+    EXPECT_EQ(csc_access::outer(metadata.L), csc_access::outer(reference.L));
     const apxchol::factor_options factor_options{
         .factor_storage = apxchol::factor_storage_type::fp32, .drop_tolerance = 0};
     apxchol::cuda_sptrsv expected_trsv, actual_trsv;
@@ -652,8 +654,8 @@ void expect_setup_api_receipt(const std::string& trace,
         EXPECT_EQ(gpu_round_trace_size(line, "adopted="), solver.trsv().adopted_device_factor());
         EXPECT_EQ(gpu_round_trace_size(line, "fp16="), solver.trsv().fp16());
         EXPECT_EQ(gpu_round_trace_size(line, "host_factor_array_bytes="),
-                  factor.L.inner_.size() * sizeof(node_index) +
-                  factor.L.vals_.size() * sizeof(apxchol::factor_value_t));
+                  csc_access::inner(factor.L).size() * sizeof(node_index) +
+                  csc_access::vals(factor.L).size() * sizeof(apxchol::factor_value_t));
         EXPECT_EQ(gpu_round_trace_size(line, "adoption_download_bytes="),
                   solver.trsv().adoption_host_download_bytes());
         EXPECT_EQ(std::stod(gpu_round_trace_field(line, "factor_drop_rel=")),
@@ -1985,8 +1987,8 @@ TEST(GpuOwnedPrefix, ResidualFillCollisionsPreserveLaterRoundAssociation) {
         // so it needs values, unlike the device-owned completion metadata.
         apxchol::detail::build_csc(reference_factor, reference_columns, 4, nullptr);
         ASSERT_GT(reference_factor.L.nonZeros(), 0u);
-        ASSERT_EQ(reference_factor.L.inner_.size(), reference_factor.L.nonZeros());
-        ASSERT_EQ(reference_factor.L.vals_.size(), reference_factor.L.nonZeros());
+        ASSERT_EQ(csc_access::inner(reference_factor.L).size(), reference_factor.L.nonZeros());
+        ASSERT_EQ(csc_access::vals(reference_factor.L).size(), reference_factor.L.nonZeros());
         const apxchol::factor_options factor_options{
             .factor_storage = apxchol::factor_storage_type::fp32, .drop_tolerance = 0};
         apxchol::cuda_sptrsv reference_trsv, actual_trsv;
@@ -2308,13 +2310,13 @@ TEST(GpuOwnedMetadataHost, MatchesOriginalConstructionIncludingEmptyAndIrregular
         apxchol::factorization expected, actual;
         const auto n = static_cast<node_index>(headers.size());
         apxchol::detail::build_csc(expected, old_columns, n, nullptr, false);
-        actual.perm.resize(n); actual.L.resize(n, n);
-        apxchol::detail::validate_owned_factor_columns(headers, entries, actual.perm, actual.L.outer_);
+        actual.perm.resize(n); csc_access::resize(actual.L, n);
+        apxchol::detail::validate_owned_factor_columns(headers, entries, actual.perm, csc_access::outer(actual.L));
         EXPECT_EQ(actual.perm, expected.perm);
-        EXPECT_EQ(actual.L.outer_, expected.L.outer_);
+        EXPECT_EQ(csc_access::outer(actual.L), csc_access::outer(expected.L));
         EXPECT_EQ(actual.L.rows(), expected.L.rows());
         EXPECT_EQ(actual.L.nonZeros(), expected.L.nonZeros());
-        EXPECT_TRUE(actual.L.inner_.empty()); EXPECT_TRUE(actual.L.vals_.empty());
+        EXPECT_TRUE(csc_access::inner(actual.L).empty()); EXPECT_TRUE(csc_access::vals(actual.L).empty());
     }
 }
 
@@ -2359,7 +2361,7 @@ TEST(GpuOwnedMetadataHost, RawOffsetCapacityMatchesOriginalConstruction) {
         std::vector<node_index> permutation(2);
         std::vector<apxchol::edge_index> offsets(3);
         apxchol::detail::validate_owned_factor_columns(headers, maximum - 2, permutation, offsets);
-        EXPECT_EQ(permutation, expected.perm); EXPECT_EQ(offsets, expected.L.outer_);
+        EXPECT_EQ(permutation, expected.perm); EXPECT_EQ(offsets, csc_access::outer(expected.L));
         EXPECT_EQ(offsets.back(), maximum);
         // Only two headers are allocated: the large count is metadata, never
         // a request for factor-entry storage.
@@ -2402,8 +2404,8 @@ TEST(GpuOwnedPrefix, CompleteMetadataMatchesHeaderConstruction) {
         if (direct) {
             session.complete_owned_factorization(actual.perm, actual.L);
             EXPECT_EQ(actual.perm, expected.perm);
-            EXPECT_EQ(actual.L.outer_, expected.L.outer_);
-            EXPECT_TRUE(actual.L.inner_.empty()); EXPECT_TRUE(actual.L.vals_.empty());
+            EXPECT_EQ(csc_access::outer(actual.L), csc_access::outer(expected.L));
+            EXPECT_TRUE(csc_access::inner(actual.L).empty()); EXPECT_TRUE(csc_access::vals(actual.L).empty());
             // Empty host columns represent a full device log, not a CPU tail.
             EXPECT_NO_THROW(session.finalize_device_factor(actual.perm, graph.n()));
             EXPECT_THROW(session.complete_owned_factorization(actual.perm, actual.L), std::logic_error);
@@ -3218,7 +3220,7 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
         std::sort(permutation.begin(), permutation.end());
         for (std::size_t i = 0; i < permutation.size(); ++i) EXPECT_EQ(permutation[i], i);
         EXPECT_EQ(factor.sddm, shift != 0.0);
-        EXPECT_TRUE(factor.L.vals_.empty()); EXPECT_TRUE(factor.L.inner_.empty());
+        EXPECT_TRUE(csc_access::vals(factor.L).empty()); EXPECT_TRUE(csc_access::inner(factor.L).empty());
         ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
         Eigen::VectorXd exact(A.rows());
         for (int i = 0; i < exact.size(); ++i) exact[i] = std::sin(i + 0.25);
@@ -3247,17 +3249,17 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     small.compute(tiny);
     EXPECT_EQ(small.factor().perm.size(), 2u);
     EXPECT_TRUE(small.trsv().adopted_device_factor());
-    EXPECT_TRUE(small.factor().L.vals_.empty());
+    EXPECT_TRUE(csc_access::vals(small.factor().L).empty());
     auto A = owned_solve_matrix(64, 1.0);
     auto exported = apxchol::factorize(A, factor_options);
-    EXPECT_EQ(exported.L.vals_.size(), exported.L.nonZeros());
+    EXPECT_EQ(csc_access::vals(exported.L).size(), exported.L.nonZeros());
     EXPECT_FALSE(exported.research_device_factor);
     apxchol::detail::gpu_preconditioner owner;
     owner.set_options(factor_options);
     ASSERT_NO_THROW(owner.set_factor(exported));
     EXPECT_FALSE(owner.trsv().adopted_device_factor());
-    EXPECT_TRUE(owner.factor().L.vals_.empty());
-    EXPECT_EQ(exported.L.vals_.size(), exported.L.nonZeros());
+    EXPECT_TRUE(csc_access::vals(owner.factor().L).empty());
+    EXPECT_EQ(csc_access::vals(exported.L).size(), exported.L.nonZeros());
     apxchol::apx_cholesky host;
     host.set_options(factor_options);
     ASSERT_NO_THROW(host.set_factor(exported));
