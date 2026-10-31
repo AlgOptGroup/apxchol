@@ -26,10 +26,11 @@ public:
     static constexpr std::array<int, 1> apply_widths{1};
 
     /// Factorizes A on the device, or uploads the host factor F when it is
-    /// not null. cp receives setup timings and is not retained.
+    /// not null (exactly, if F is an installed factor). cp receives setup
+    /// timings and is not retained.
     gpu_solve_session(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
                       checkpoint* cp, factorization* F)
-        : opts_(opts.factor_opts), keep_factor_(opts.keep_factor) {
+        : opts_(opts.factor_opts) {
         if (F) {
             if (factorization_access::device_factor(*F))
                 throw std::invalid_argument("GPU solver: supply a host factor without a device capsule");
@@ -78,13 +79,7 @@ public:
         else if (B.cols() == 2) run.template operator()<2>();
         else run.template operator()<1>();
         if (timings) { (*timings)("gpu_pcg_loop"); timings->ascend(); }
-        // Solve-held device VRAM (the operator, vectors and factor are still
-        // resident here; shared arrays are freed with the last copy).
-        const double vram_mb = gpcg_.device_memory_used_mb();
-        for (auto& result : results) {
-            result.backend = solve_backend::gpu;
-            result.solve_vram_mb = vram_mb;
-        }
+        for (auto& result : results) result.backend = solve_backend::gpu;
     }
 
     /// z = M^{-1} r for one column, through host-side permutation and centering:
@@ -118,10 +113,24 @@ public:
     /// Shares the factor, the device triangular-solve storage and the device
     /// operator; allocates this copy's device workspace and stream.
     gpu_solve_session(const gpu_solve_session& other)
-        : opts_(other.opts_), keep_factor_(other.keep_factor_), F_(other.F_),
-          trsv_(other.trsv_), gpcg_(other.gpcg_) {}
+        : opts_(other.opts_), F_(other.F_), trsv_(other.trsv_), gpcg_(other.gpcg_) {}
 
+    /// Permutation, rounds and flags; L keeps only its column pointers.
     const factorization& factor() const { return *F_; }
+    /// The installed preconditioner (factorization.h), downloaded from the
+    /// device triangular solves on each call.
+    factorization installed_factor() const {
+        factorization F;
+        F.perm = F_->perm;
+        F.sddm = F_->sddm;
+        F.lumped_offdiag = F_->lumped_offdiag;
+        F.rounds = F_->rounds;
+        F.storage = factor_storage();
+        trsv_.export_installed(F.L, static_cast<node_index>(F_->perm.size()), F.scale);
+        return F;
+    }
+    /// Entries of installed_factor().L.
+    std::uint64_t factor_nnz() const { return trsv_.stored_nnz(); }
     factor_storage_type factor_storage() const {
         return trsv_.fp16() ? factor_storage_type::fp16 : factor_storage_type::fp32;
     }
@@ -136,7 +145,7 @@ private:
         [[maybe_unused]] const auto factorize_install_begin =
             gpu_setup_diagnostic_clock::now(opts_.verbose);
         cuda_context::prewarm();
-        *F_ = factorize_for_solver(A, opts_, cp, setup_route::gpu, keep_factor_);
+        *F_ = factorize_for_solver(A, opts_, cp, setup_route::gpu);
         // Reject inadmissible factors before installation can initialize
         // CUDA or upload host arrays.
         const auto& device = factorization_access::device_factor(*F_);
@@ -163,7 +172,7 @@ private:
                 F_->rounds.size(), static_cast<std::size_t>(F_->L.nonZeros()),
                 static_cast<unsigned long long>(trsv_.stored_nnz()),
                 trsv_.adopted_device_factor() ? 1 : 0, trsv_.fp16() ? 1 : 0,
-                F_->L.inner_.size() * sizeof(node_index) + F_->L.vals_.size() * sizeof(factor_value_t),
+                F_->L.row_indices().size() * sizeof(node_index) + F_->L.values().size() * sizeof(factor_value_t),
                 trsv_.adoption_host_download_bytes(), drop.rel,
                 static_cast<unsigned long long>(drop.dropped_threshold),
                 static_cast<unsigned long long>(drop.dropped_flush));
@@ -191,16 +200,20 @@ private:
             device.reset();
         } else {
             const auto n = static_cast<node_index>(F_->L.rows());
-            trsv_.setup(F_->L, F_->sddm ? n : n - 1, opts_);
+            const node_index m = F_->sddm ? n : n - 1;
+            if (F_->storage == factor_storage_type::automatic)
+                trsv_.setup(F_->L, m, opts_);
+            else
+                trsv_.install_exact(F_->L, m, F_->storage == factor_storage_type::fp16,
+                                    F_->scale.data(), opts_);
         }
         if (cp) { (*cp)("sptrsv_setup"); cp->ascend(); }
-        // The device holds its own copy; keep_factor=true keeps the host
-        // row/value arrays for callers that export or adopt L.
-        if (!keep_factor_) F_->L.release_values();
+        // The device holds its own copy; installed_factor() downloads it.
+        detail::sparse_csc_access::release_values(F_->L);
+        std::vector<float>().swap(F_->scale);
     }
 
     factor_options opts_;
-    bool keep_factor_ = false;
     // Shared by copies; written only during construction.
     std::shared_ptr<factorization> F_ = std::make_shared<factorization>();
     cuda_sptrsv trsv_;

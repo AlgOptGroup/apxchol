@@ -110,16 +110,16 @@ static void assemble_csc(
                     block_base[static_cast<std::size_t>(team)] =
                         static_cast<edge_index>(total);
                     nnz = static_cast<edge_index>(total);
-                    L.resize(n, n);
-                    L.reserve(nnz);
-                    outer_ptr = L.outerIndexPtr();
+                    using access = detail::sparse_csc_access;
+                    access::resize(L, n);
+                    outer_ptr = access::outer(L).data();
                     outer_ptr[n] = nnz;
                     // sparse_csc owns independent vectors for the outer,
                     // inner, and value arrays, so all storage can be acquired
                     // in this one handoff before any worker writes it.
-                    L.resizeNonZeros(nnz);
-                    inner_idx = L.innerIndexPtr();
-                    values = L.valuePtr();
+                    access::resize_nonzeros(L, nnz);
+                    inner_idx = access::inner(L).data();
+                    values = access::vals(L).data();
                 }
             } catch (...) {
                 error = std::current_exception();
@@ -197,7 +197,6 @@ static void assemble_csc(
     // been destroyed and the OpenMP team has joined before assembly ends.
     // These calls are outside an OpenMP structured block, so exceptions retain
     // their ordinary propagation semantics.
-    L.makeCompressed();
     if (cp) (*cp)("assembly");
 }
 
@@ -218,8 +217,8 @@ void build_csc(factorization& result,
         for (node_index i = 0; i < n; ++i)
             result.perm[factor_cols[i].vertex] = i;
         if (cp) (*cp)("permutation");
-        result.L.resize(n, n);
-        auto* outer = result.L.outerIndexPtr();
+        detail::sparse_csc_access::resize(result.L, n);
+        auto* outer = detail::sparse_csc_access::outer(result.L).data();
         for (node_index i = 0; i < n; ++i) {
             const edge_index offdiag = factor_cols[i].entry_count;
             if (offdiag == sparse_csc::kEdgeMax ||
@@ -236,8 +235,7 @@ void build_csc(factorization& result,
 factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
                                           const factor_options& opts_in,
                                           checkpoint* cp,
-                                          setup_route route,
-                                          [[maybe_unused]] bool keep_factor) {
+                                          setup_route route) {
     // Assert the operator contract and lump positive off-diagonals if the
     // matrix needs it. Same `operator_view` the header's factorize() overloads
     // use — one implementation, so the CLI, the C++ API and both bindings
@@ -258,7 +256,7 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
     // Transfer the temporary graph into factorization without copying it.
     auto do_factorize = [&](auto&& G) {
         if (cp) { (*cp)("make_graph"); cp->ascend(); }
-        factorization F = dispatch_partitioner<factorization>(opts.is_select,
+        factorization F = dispatch_partitioner<factorization>(opts.partitioner,
             [&]<typename P>() -> factorization {
                 P partitioner;
                 return factorize_impl(make_tree_elim(opts, route), partitioner,
@@ -271,9 +269,10 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
     const Eigen::SparseMatrix<double>& A = op.matrix();
     if (route == setup_route::gpu) {
 #if defined(APXCHOL_USE_CUDA)
-        if (opts.is_select != "block_greedy" ||
-            opts.exact_clique_max_degree != 0 || exact_core_or_off(opts.exact_core_max_h) != 0 ||
-            opts.double_cycle_min_h != 0)
+        if (opts.partitioner != partitioner_kind::block_greedy ||
+            opts.experimental.exact_clique_max_degree != 0 ||
+            opts.experimental.exact_core_max_h.value_or(0) != 0 ||
+            opts.experimental.double_cycle_min_h != 0)
             throw std::invalid_argument("GPU setup requires block_greedy and a bounded sampler");
         if (!detail::gpu_owned_csc_supported(op))
             throw std::invalid_argument("GPU route requires a supported compressed, sorted, "
@@ -281,7 +280,7 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
         if (cp) { (*cp)("gpu_csc_eligibility"); cp->ascend(); }
         block_greedy_partitioner partitioner;
         auto F = factorize_impl(make_tree_elim(opts, route), partitioner,
-            graph{}, opts, cp, &A, route, keep_factor);
+            graph{}, opts, cp, &A, route);
         F.lumped_offdiag = op.lumped();
         return F;
 #else

@@ -17,7 +17,6 @@ endif()
 option(APXCHOL_BUILD_CLI "Build the command-line solver" ${_apxchol_top_level})
 option(APXCHOL_BUILD_EXAMPLES "Build the examples/ programs" ${_apxchol_top_level})
 option(APXCHOL_BUILD_TESTS "Build the unit tests (fetches GoogleTest)" ${_apxchol_top_level})
-option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)" ${_apxchol_top_level})
 # A parent's link dependencies also require the GPU language in its scope.
 if (NOT _apxchol_top_level)
     if ((APXCHOL_DEVICE STREQUAL "CUDA" AND NOT CMAKE_CUDA_COMPILER_LOADED) OR
@@ -65,7 +64,7 @@ apxchol_add_core()
 if (APXCHOL_BUILD_TESTS AND APXCHOL_DEVICE STREQUAL "CUDA")
     # Test-only declarations must agree across the whole core and its consumers.
     add_library(apxchol_test_core STATIC)
-    apxchol_configure_core(apxchol_test_core)
+    _apxchol_configure_core(apxchol_test_core)
     target_compile_definitions(apxchol_test_core PUBLIC APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 endif()
 
@@ -85,8 +84,8 @@ if (APXCHOL_BUILD_CLI OR APXCHOL_BUILD_TESTS)
     target_include_directories(apxchol_mtx_input PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
     target_compile_features(apxchol_mtx_input PUBLIC cxx_std_23)
-    if (APXCHOL_ARCH_FLAG)
-        target_compile_options(apxchol_mtx_input PUBLIC "${APXCHOL_ARCH_FLAG}")
+    if (_APXCHOL_ARCH_FLAG)
+        target_compile_options(apxchol_mtx_input PRIVATE "${_APXCHOL_ARCH_FLAG}")
     endif()
 endif()
 

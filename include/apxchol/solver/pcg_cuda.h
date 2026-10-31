@@ -127,12 +127,6 @@ public:
     }
     /// Threads per row of the SpMV resolved from the average row length.
     int spmv_lanes() const { return spmv_lanes_; }
-    double device_memory_used_mb() const {
-        const detail::cuda_device_scope device(device_, detail::cuda_device_scope::checked{});
-        size_t free = 0, total = 0;
-        return cudaMemGetInfo(&free, &total) == cudaSuccess && total >= free
-            ? (total - free) / (1024.0 * 1024.0) : -1;
-    }
 
 private:
     template<unsigned Columns, class Precond, class Input, class Output>

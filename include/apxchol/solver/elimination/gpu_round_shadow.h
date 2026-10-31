@@ -1192,8 +1192,7 @@ gpu_round_shadow_cpu_comparison compare_gpu_round_shadow_with_cpu(
             mismatch("non-finite or negative excess at vertex " +
                      std::to_string(vertex));
         if (bound.additions <= 1) {
-            if (std::bit_cast<std::uint64_t>(actual) !=
-                std::bit_cast<std::uint64_t>(bound.expected))
+            if (actual != bound.expected)
                 mismatch("exact excess at vertex " +
                          std::to_string(vertex));
             continue;
@@ -1472,14 +1471,14 @@ public:
             std::vector<node_index>& permutation, sparse_csc& metadata,
             std::vector<factor_entry>* entries = nullptr) {
         if (!active_ || !owned_rounds_ || owned_materialized_ ||
-            !permutation.empty() || !metadata.outer_.empty())
+            !permutation.empty() || !metadata.col_ptrs().empty())
             throw std::logic_error("GPU-owned factorization completion is out of order");
         try {
             permutation.resize(factor_log_columns_);
-            metadata.resize(static_cast<node_index>(factor_log_columns_),
-                            static_cast<node_index>(factor_log_columns_));
+            detail::sparse_csc_access::resize(
+                metadata, static_cast<node_index>(factor_log_columns_));
             auto headers = device_state_->download_owned_factor_columns(
-                permutation, metadata.outer_, entries);
+                permutation, detail::sparse_csc_access::outer(metadata), entries);
             owned_download_bytes_ = headers.size() * sizeof(gpu_round_shadow_factor_column);
             owned_entry_download_bytes_ = entries ? entries->size() * sizeof(factor_entry) : 0;
             owned_materialized_ = true;

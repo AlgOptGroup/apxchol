@@ -20,9 +20,8 @@ __device__ __forceinline__ float dataflow_accumulate(__half *values, float *x, f
     float a = 0, b = 0;
 #pragma unroll
     for (unsigned k = 0; k < 8; k += 2) {
-        const float2 v = __half22float2(__halves2half2(values[k], values[k + 1]));
-        a = fmaf(v.x, x[k], a);
-        b = fmaf(v.y, x[k + 1], b);
+        a = fmaf(__half2float(values[k]), x[k], a);
+        b = fmaf(__half2float(values[k + 1]), x[k + 1], b);
     }
     return sum + (a + b);
 }

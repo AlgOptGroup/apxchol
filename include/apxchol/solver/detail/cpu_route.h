@@ -21,7 +21,8 @@ public:
 
     /// Factorizes A, or installs F when it is not null. Construction options
     /// (including regularization/lumping) are not reapplied to F; factor
-    /// storage, dropping, scheduling and solve options still apply. A is the
+    /// storage and dropping apply only to a construction factor (automatic
+    /// storage), and scheduling and solve options always apply. A is the
     /// PCG operator, read through its lower triangle. cp receives setup
     /// timings and is not retained.
     cpu_route(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
@@ -40,7 +41,13 @@ public:
     /// Z = M^{-1} R for a panel of one of apply_widths.
     void apply_columns(const_matrix_view R, matrix_view Z) const;
 
+    /// Permutation, rounds and flags; L keeps only its construction column
+    /// pointers once installed.
     const factorization& factor() const { return installed_->F; }
+    /// The installed preconditioner (factorization.h), exported from trsv().
+    factorization installed_factor() const;
+    /// Entries of installed_factor().L.
+    std::uint64_t factor_nnz() const { return trsv().stored_nnz(); }
     factor_storage_type factor_storage() const;
     const omp_sptrsv& trsv() const { return installed_->trsv; }
     /// The original operator in FP64 CSC, rebuilt from the owned SpMV operator.

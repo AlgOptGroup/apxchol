@@ -6,6 +6,7 @@ Noisy controls are inconclusive; a signal is not a statistical significance test
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -42,9 +43,12 @@ def digest(*arrays):
 def owner(side, route):
     import apxchol
 
+    # Revisions before keep_factor's removal retained an extra factor copy by default.
+    legacy = {"keep_factor": False} if "keep_factor" in inspect.signature(apxchol.factorize).parameters else {}
+
     def factor(A):
         solver = apxchol.factorize(A, backend=route, num_threads=THREADS, seed=SEED,
-                                  factor_storage_dtype=np.float32, keep_factor=False)
+                                  factor_storage_dtype=np.float32, **legacy)
         if solver.backend != route:
             raise ValueError(f"requested {route}, selected {solver.backend}")
         return solver
@@ -141,7 +145,7 @@ def campaign(args):
               "base_revision": args.base_revision, "head_revision": args.head_revision,
               "hardware": hardware(args.route == "gpu"), "route": args.route,
               "threads": THREADS, "cpu_affinity": cpus, "seed": SEED, "rtol": RTOL,
-              "factor_storage": "float32", "keep_factor": False, "maxiter": 2000,
+              "factor_storage": "float32", "maxiter": 2000,
               "warmup": {"side": 16, "owners_per_process": 1},
               "noise_limit": NOISE_LIMIT, "slowdown_ratio": SLOWDOWN,
               "harness_sha256": {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()

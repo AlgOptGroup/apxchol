@@ -26,6 +26,8 @@
 #include "apxchol/sparse_csc.h"
 #include "apxchol/solver/sptrsv/omp.h"
 
+using csc_access = apxchol::detail::sparse_csc_access;
+
 using apxchol::edge_index;
 using apxchol::node_index;
 using apxchol::sparse_csc;
@@ -46,8 +48,8 @@ sparse_csc make_random_lower(node_index m, double avg_offdiag, unsigned seed,
     std::uniform_real_distribution<double> udiag(1.0, 3.0);
     std::poisson_distribution<int> pcount(avg_offdiag);
     sparse_csc L;
-    L.n_ = m;
-    L.outer_.assign(static_cast<size_t>(m) + 1, 0);
+    csc_access::n(L) = m;
+    csc_access::outer(L).assign(static_cast<size_t>(m) + 1, 0);
     std::vector<std::vector<node_index>> col_rows(m);
     for (node_index j = 0; j < m; ++j) {
         int k = pcount(rng);
@@ -62,14 +64,14 @@ sparse_csc make_random_lower(node_index m, double avg_offdiag, unsigned seed,
         rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
     }
     for (node_index j = 0; j < m; ++j)
-        L.outer_[j + 1] = L.outer_[j] + static_cast<edge_index>(col_rows[j].size());
-    L.inner_.resize(static_cast<size_t>(L.outer_[m]));
-    L.vals_.resize(static_cast<size_t>(L.outer_[m]));
+        csc_access::outer(L)[j + 1] = csc_access::outer(L)[j] + static_cast<edge_index>(col_rows[j].size());
+    csc_access::inner(L).resize(static_cast<size_t>(csc_access::outer(L)[m]));
+    csc_access::vals(L).resize(static_cast<size_t>(csc_access::outer(L)[m]));
     for (node_index j = 0; j < m; ++j) {
-        edge_index out = L.outer_[j];
+        edge_index out = csc_access::outer(L)[j];
         for (node_index r : col_rows[j]) {
-            L.inner_[out] = r;
-            L.vals_[out]  = static_cast<factor_value_t>(r == j ? udiag(rng) : -uval(rng));
+            csc_access::inner(L)[out] = r;
+            csc_access::vals(L)[out]  = static_cast<factor_value_t>(r == j ? udiag(rng) : -uval(rng));
             ++out;
         }
     }
@@ -84,8 +86,8 @@ std::vector<double> reference_scales_L11(const sparse_csc& L, node_index m) {
     std::vector<double> s(m, 1.0);
     for (node_index j = 0; j < m; ++j) {
         double mx = 0.0;
-        for (edge_index p = L.outer_[j] + 1; p < L.outer_[j + 1]; ++p)
-            if (L.inner_[p] < m) mx = std::max(mx, std::fabs(static_cast<double>(L.vals_[p])));
+        for (edge_index p = csc_access::outer(L)[j] + 1; p < csc_access::outer(L)[j + 1]; ++p)
+            if (csc_access::inner(L)[p] < m) mx = std::max(mx, std::fabs(static_cast<double>(csc_access::vals(L)[p])));
         s[j] = mx > 0.0 ? mx : 1.0;
     }
     return s;
@@ -110,23 +112,23 @@ dense_drop reference_dense_drop(const sparse_csc& L, node_index m, double rel) {
     const std::vector<double> s = reference_scales_L11(L, m);
     for (node_index j = 0; j < m; ++j) {
         double dropped_sum = 0.0, kept_abs = 0.0;
-        for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) {
-            if (L.inner_[p] >= m) continue;                    // outside L11 (Laplacian last row)
-            if (L.inner_[p] == j) { ++d.kept; continue; }
-            const double v = static_cast<double>(L.vals_[p]);
+        for (edge_index p = csc_access::outer(L)[j]; p < csc_access::outer(L)[j + 1]; ++p) {
+            if (csc_access::inner(L)[p] >= m) continue;                    // outside L11 (Laplacian last row)
+            if (csc_access::inner(L)[p] == j) { ++d.kept; continue; }
+            const double v = static_cast<double>(csc_access::vals(L)[p]);
             const bool keep = std::fabs(v) >= rel * s[j];
             if (keep) { ++d.kept; kept_abs += std::fabs(v); }
-            else      { ++d.zeroed; dropped_sum += v; d.Lz.vals_[p] = 0; }
+            else      { ++d.zeroed; dropped_sum += v; csc_access::vals(d.Lz)[p] = 0; }
         }
         // (Same double arithmetic order as setup -- per_abs first -- so the
         // compacted values are bit-identical to these, which the 1e-12 solve
         // comparison below relies on.)
         if (dropped_sum != 0.0 && kept_abs > 0.0) {
             const double per_abs = dropped_sum / kept_abs;
-            for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) {
-                if (L.inner_[p] >= m || L.inner_[p] == j || d.Lz.vals_[p] == 0) continue;
-                const double v = static_cast<double>(d.Lz.vals_[p]);
-                d.Lz.vals_[p] = static_cast<factor_value_t>(v + per_abs * std::fabs(v));
+            for (edge_index p = csc_access::outer(L)[j]; p < csc_access::outer(L)[j + 1]; ++p) {
+                if (csc_access::inner(L)[p] >= m || csc_access::inner(L)[p] == j || csc_access::vals(d.Lz)[p] == 0) continue;
+                const double v = static_cast<double>(csc_access::vals(d.Lz)[p]);
+                csc_access::vals(d.Lz)[p] = static_cast<factor_value_t>(v + per_abs * std::fabs(v));
             }
         }
     }
@@ -137,8 +139,8 @@ dense_drop reference_dense_drop(const sparse_csc& L, node_index m, double rel) {
 std::vector<double> column_sums_L11(const sparse_csc& L, node_index m) {
     std::vector<double> cs(m, 0.0);
     for (node_index j = 0; j < m; ++j)
-        for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p)
-            if (L.inner_[p] < m) cs[j] += static_cast<double>(L.vals_[p]);
+        for (edge_index p = csc_access::outer(L)[j]; p < csc_access::outer(L)[j + 1]; ++p)
+            if (csc_access::inner(L)[p] < m) cs[j] += static_cast<double>(csc_access::vals(L)[p]);
     return cs;
 }
 
@@ -156,7 +158,7 @@ double effective(sptrsv_value_t w, double s_pre) { return apxchol::widen(w) * pa
 std::uint64_t L11_nnz_of(const sparse_csc& L, node_index m) {
     std::uint64_t n = 0;
     for (node_index j = 0; j < m; ++j)
-        for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) n += L.inner_[p] < m;
+        for (edge_index p = csc_access::outer(L)[j]; p < csc_access::outer(L)[j + 1]; ++p) n += csc_access::inner(L)[p] < m;
     return n;
 }
 
@@ -167,9 +169,9 @@ sparse_csc make_wide_magnitude_lower(node_index n) {
     std::mt19937 rng(77 + n);
     std::uniform_real_distribution<double> uexp(-7.0, 2.0);
     for (node_index j = 0; j < n; ++j)
-        for (edge_index p = L.outer_[j] + 1; p < L.outer_[j + 1]; ++p) {
-            L.vals_[p] = static_cast<factor_value_t>(-std::pow(10.0, uexp(rng)));
-            if ((p % 101) == 5) L.vals_[p] = 0;   // explicit zeros: always dropped
+        for (edge_index p = csc_access::outer(L)[j] + 1; p < csc_access::outer(L)[j + 1]; ++p) {
+            csc_access::vals(L)[p] = static_cast<factor_value_t>(-std::pow(10.0, uexp(rng)));
+            if ((p % 101) == 5) csc_access::vals(L)[p] = 0;   // explicit zeros: always dropped
         }
     return L;
 }
@@ -229,7 +231,7 @@ TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
                 // The diagonal the kernels divide by (fp32 L_jj / s_j under
                 // *_SCALED, the fp32 diag_ elsewhere on lowprec, the stored
                 // value itself on fp32/fp64), back in the factor's units.
-                double sum = apxchol::detail::omp_sptrsv::stored_diag(L.vals_[L.outer_[j]], static_cast<float>(pair_scale(s[j])))
+                double sum = apxchol::detail::omp_sptrsv::stored_diag(csc_access::vals(L)[csc_access::outer(L)[j]], static_cast<float>(pair_scale(s[j])))
                            * pair_scale(s[j]);
                 double abs = std::fabs(sum);
                 for (edge_index p = trsv.csc_col_ptr()[j] + 1; p < trsv.csc_col_ptr()[j + 1]; ++p) {
@@ -256,13 +258,13 @@ TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
             std::uint64_t mismatches = 0;
             for (node_index j = 0; j < m; ++j) {
                 edge_index q = trsv.csc_col_ptr()[j] + 1;
-                for (edge_index p = L.outer_[j] + 1; p < L.outer_[j + 1]; ++p) {
-                    if (L.inner_[p] >= m) continue;
-                    if (std::fabs(static_cast<double>(L.vals_[p])) < rel * s[j]) continue;   // dropped
+                for (edge_index p = csc_access::outer(L)[j] + 1; p < csc_access::outer(L)[j + 1]; ++p) {
+                    if (csc_access::inner(L)[p] >= m) continue;
+                    if (std::fabs(static_cast<double>(csc_access::vals(L)[p])) < rel * s[j]) continue;   // dropped
                     ASSERT_LT(q, trsv.csc_col_ptr()[j + 1]);
-                    ASSERT_EQ(trsv.csc_row_idx()[q], L.inner_[p]);
+                    ASSERT_EQ(trsv.csc_row_idx()[q], csc_access::inner(L)[p]);
                     const sptrsv_value_t expect = apxchol::detail::omp_sptrsv::narrow_value(
-                        ref.Lz.vals_[p], static_cast<float>(pair_scale(s[j])));
+                        csc_access::vals(ref.Lz)[p], static_cast<float>(pair_scale(s[j])));
                     mismatches += !(trsv.csc_vals()[q] == expect);
                     ++q;
                 }
@@ -312,7 +314,7 @@ TEST(SpTRSVDrop, CompactsToKeptEntriesAndSolvesLikeTheZeroedReference) {
                 for (edge_index q = trsv.csr_row_ptr()[i]; q < trsv.csr_row_ptr()[i + 1]; ++q) {
                     const node_index j = trsv.csr_col_idx()[q];
                     const double v = (j == i)
-                        ? apxchol::detail::omp_sptrsv::stored_diag(L.vals_[L.outer_[i]], static_cast<float>(pair_scale(s[i])))
+                        ? apxchol::detail::omp_sptrsv::stored_diag(csc_access::vals(L)[csc_access::outer(L)[i]], static_cast<float>(pair_scale(s[i])))
                         : apxchol::widen(trsv.csr_vals()[q]);
                     const double t = v * y1[j];
                     r -= t; sc += std::fabs(t);
@@ -362,7 +364,7 @@ TEST(SpTRSVDrop, EdgeCases) {
     const node_index m = 2000;
     sparse_csc L = make_random_lower(m, 4.0, 31, 0.0, 1.0);
     for (edge_index p = 0; p < L.nonZeros(); ++p)
-        if ((p % 5) == 2) L.vals_[p] = static_cast<factor_value_t>(L.vals_[p] * 1e-9);   // far below 1e-4 * s_j
+        if ((p % 5) == 2) csc_access::vals(L)[p] = static_cast<factor_value_t>(csc_access::vals(L)[p] * 1e-9);   // far below 1e-4 * s_j
     const std::uint64_t nnz = static_cast<std::uint64_t>(L.nonZeros());
     ASSERT_GT(reference_dense_drop(L, m, 1e-4).zeroed, 100u);   // the default would remove plenty here
     // No value here is zero in fp32, so format_flushes must remove nothing
@@ -370,8 +372,8 @@ TEST(SpTRSVDrop, EdgeCases) {
     const std::vector<double> s_pre = reference_scales_L11(L, m);
     std::uint64_t fmt_zero = 0;
     for (node_index j = 0; j < m; ++j)
-        for (edge_index p = L.outer_[j] + 1; p < L.outer_[j + 1]; ++p)
-            fmt_zero += apxchol::detail::omp_sptrsv::format_flushes(L.vals_[p], static_cast<float>(s_pre[j]));
+        for (edge_index p = csc_access::outer(L)[j] + 1; p < csc_access::outer(L)[j + 1]; ++p)
+            fmt_zero += apxchol::detail::omp_sptrsv::format_flushes(csc_access::vals(L)[p], static_cast<float>(s_pre[j]));
     ASSERT_EQ(fmt_zero, 0u);
     {
         apxchol::detail::omp_sptrsv t;
@@ -393,12 +395,12 @@ TEST(SpTRSVDrop, EdgeCases) {
         if (fmt_zero == 0) {
             // Nothing dropped, so nothing compensated: the CSC IS the factor
             // (through the storage contract: a plain cast on fp32/fp64).
-            EXPECT_EQ(0, std::memcmp(t.csc_row_idx().data(), L.inner_.data(), nnz * sizeof(node_index)));
+            EXPECT_EQ(0, std::memcmp(t.csc_row_idx().data(), csc_access::inner(L).data(), nnz * sizeof(node_index)));
             std::uint64_t mismatches = 0;
             for (node_index j = 0; j < m; ++j)
-                for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p)
+                for (edge_index p = csc_access::outer(L)[j]; p < csc_access::outer(L)[j + 1]; ++p)
                     mismatches += !(t.csc_vals()[p] == apxchol::detail::omp_sptrsv::narrow_value(
-                        L.vals_[p], static_cast<float>(pair_scale(s_pre[j]))));
+                        csc_access::vals(L)[p], static_cast<float>(pair_scale(s_pre[j]))));
             EXPECT_EQ(mismatches, 0u);
         }
     }
@@ -406,10 +408,10 @@ TEST(SpTRSVDrop, EdgeCases) {
 
 TEST(SpTRSVDrop, DiagonalFactorsWorkAtRangeEndpoints) {
     sparse_csc L;
-    L.n_ = 3;
-    L.outer_ = {0, 1, 2, 3};
-    L.inner_ = {0, 1, 2};
-    L.vals_ = {1, 2, 4};
+    csc_access::n(L) = 3;
+    csc_access::outer(L) = {0, 1, 2, 3};
+    csc_access::inner(L) = {0, 1, 2};
+    csc_access::vals(L) = {1, 2, 4};
     for (double rel : {0.0, 1.0}) {
         apxchol::detail::omp_sptrsv trsv;
         trsv.setup(L, 3, {.drop_tolerance = rel});
@@ -857,21 +859,21 @@ static sparse_csc make_hub_tail_lower(node_index n) {
         for (node_index t = 0; t < hub_len && r > 0; ++t) col_rows[ucol(rng)].push_back(r);
     }
     sparse_csc L;
-    L.n_ = n;
-    L.outer_.assign(static_cast<size_t>(n) + 1, 0);
+    csc_access::n(L) = n;
+    csc_access::outer(L).assign(static_cast<size_t>(n) + 1, 0);
     for (node_index j = 0; j < n; ++j) {
         auto& rows = col_rows[j];
         std::sort(rows.begin(), rows.end());
         rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
-        L.outer_[j + 1] = L.outer_[j] + static_cast<edge_index>(rows.size());
+        csc_access::outer(L)[j + 1] = csc_access::outer(L)[j] + static_cast<edge_index>(rows.size());
     }
-    L.inner_.resize(static_cast<size_t>(L.outer_[n]));
-    L.vals_.resize(static_cast<size_t>(L.outer_[n]));
+    csc_access::inner(L).resize(static_cast<size_t>(csc_access::outer(L)[n]));
+    csc_access::vals(L).resize(static_cast<size_t>(csc_access::outer(L)[n]));
     for (node_index j = 0; j < n; ++j) {
-        edge_index out = L.outer_[j];
+        edge_index out = csc_access::outer(L)[j];
         for (node_index r : col_rows[j]) {
-            L.inner_[out] = r;
-            L.vals_[out] = static_cast<factor_value_t>(
+            csc_access::inner(L)[out] = r;
+            csc_access::vals(L)[out] = static_cast<factor_value_t>(
                 r == j ? udiag(rng) : -((hub_col[j] || hub_row[r]) ? uhub(rng) : ubase(rng)));
             ++out;
         }
@@ -1083,6 +1085,7 @@ prepared_adoption prepare_adoption(
         narrowed.diag.data(), static_cast<std::size_t>(m));
     auto* d_inv_scale2 = allocations.upload(
         inv_scale2.data(), static_cast<std::size_t>(m));
+    auto* d_scale = allocations.upload(scales.data(), static_cast<std::size_t>(m));
     if (corrupt_L_extent) {
         const int bad = L16.ptr.back() - 1;
         apxchol::detail::check_cuda(
@@ -1099,6 +1102,7 @@ prepared_adoption prepare_adoption(
          {d_LT_val, static_cast<std::size_t>(LT16.nnz) * sizeof(__half)}},
         {d_diag, static_cast<std::size_t>(m) * sizeof(float)},
         {d_inv_scale2, static_cast<std::size_t>(m) * sizeof(double)},
+        {d_scale, static_cast<std::size_t>(m) * sizeof(float)},
         stats,
         narrowed.flushed, narrowed.subnormal);
     allocations.relinquish();

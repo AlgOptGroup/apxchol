@@ -76,7 +76,7 @@ def owner(side, route, threads, seed, reverse):
     reference_seconds = reference() if not reverse else None
     solver, setup = timed(lambda: apxchol.factorize(
         A, backend=route, num_threads=threads, seed=seed,
-        factor_storage_dtype=np.float32, keep_factor=False))
+        factor_storage_dtype=np.float32))
     if solver.backend != route:
         raise ValueError(f"requested {route}, selected {solver.backend}")
 

@@ -24,8 +24,29 @@ struct factorization_access;
 #endif
 }
 
-/// Approximate Cholesky preconditioner: P^T L L^T P approximates the operator
-/// used for construction, including any lumping or regularization.
+/// Approximate Cholesky preconditioner. With S = diag(scale), or S = I when
+/// scale is empty, it is
+///
+///     M = P^T L S^2 L^T P,
+///
+/// which approximates the operator used for construction, including any
+/// lumping or regularization. P is the permutation matrix of perm. For a
+/// Laplacian, the solve uses only the leading (n-1) x (n-1) blocks of L and S
+/// and centers its input and output.
+///
+/// `storage` says which of two forms L is in:
+///   - automatic: a construction factor from factorize(). S = I, and for a
+///     Laplacian L's last column holds a placeholder diagonal. A solver that
+///     adopts it applies its own drop_tolerance and factor_storage.
+///   - fp32 or fp16: the installed preconditioner, as solver::factor()
+///     returns it after dropping and storage rounding. For a Laplacian, L's
+///     last row and column are empty. A solver adopts it exactly and ignores
+///     its drop_tolerance and factor_storage options.
+/// fp32: L holds the FP32 values the triangular solves use, and scale is
+/// empty. fp16: every off-diagonal of L is a binary16 value (widened exactly
+/// to FP32), the diagonal L_jj = d_j is FP32 and scale holds the positive FP32
+/// column scales s_j. CPU and CUDA apply S^{-2} as fp32(1 / s_j)^2; Metal
+/// forms fp32(L_ij s_j) and fp32(d_j s_j).
 struct factorization {
     sparse_csc L;                                           // lower-triangular factor (owned CSC)
     // Elimination-order permutation: perm[original_vertex] = new_position.
@@ -47,6 +68,13 @@ struct factorization {
         size_t is_size;    // vertices eliminated this round
     };
     std::vector<round_stats> rounds;
+
+    /// Form of L: automatic for a construction factor, otherwise the
+    /// installed triangular-solve storage (see above).
+    factor_storage_type storage = factor_storage_type::automatic;
+    /// fp16 storage only: column scales s_j, one per column of L (1 for an
+    /// empty Laplacian last column). Empty otherwise.
+    std::vector<float> scale;
 
 #if defined(APXCHOL_USE_CUDA)
 private:
@@ -124,12 +152,11 @@ factorization factorize(const Eigen::SparseMatrix<double>& L,
 namespace detail {
 
 // Internal consuming route used only by the solver routes. Public factorize()
-// always retains exportable host arrays; the resident solve may omit them.
+// always retains exportable host arrays; the device-resident route omits them.
 factorization factorize_for_solver(const Eigen::SparseMatrix<double>& L,
                                   const factor_options& opts,
                                   checkpoint* cp,
-                                  setup_route route = setup_route::cpu,
-                                  bool keep_factor = false);
+                                  setup_route route = setup_route::cpu);
 
 struct factor_col {
     node_index vertex;

@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
 #include "apxchol/solver/solve.h"
 #include "apxchol/detail/csc_import.h"
+#include "apxchol/solver/sptrsv/omp.h"
 #include "../src/solver_archive_internal.h"
 #include <zlib.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -15,6 +17,9 @@
 #include <system_error>
 #include <vector>
 #include <barrier>
+#include <sys/stat.h>
+
+using csc_access = apxchol::detail::sparse_csc_access;
 
 namespace {
 using namespace apxchol;
@@ -35,15 +40,15 @@ solve_options options() {
     solve_options result;
     result.backend = solve_backend::cpu;
     result.num_threads = 2;
-    result.keep_factor = true;
     result.factor_opts.factor_storage = factor_storage_type::fp32;
     return result;
 }
 
 // Independent test fixture encoder for the documented binary layout.
 using Bytes = std::vector<unsigned char>;
-constexpr std::size_t prefix_size = 64 + 9 * 40;
-enum ArrayId : std::size_t { metadata, a_outer, a_inner, a_values, l_outer, l_inner, l_values, permutation, round_sizes };
+constexpr std::size_t prefix_size = 64 + 11 * 40;
+enum ArrayId : std::size_t { metadata, a_outer, a_inner, a_values, l_outer, l_inner, l_values, permutation, round_sizes,
+                             l_diagonal, l_scales };
 std::uint64_t number(const Bytes& bytes, std::size_t at, unsigned width, bool little = true) {
     std::uint64_t result = 0;
     for (unsigned i = 0; i < width; ++i)
@@ -78,7 +83,7 @@ struct FixtureArray {
     std::uint64_t value(std::size_t index) const { return number(data, index * width, width, endian == '<'); }
     void value(std::size_t index, std::uint64_t bits) { put_number(data, index * width, width, bits, endian == '<'); }
 };
-using Fixture = std::array<FixtureArray, 9>;
+using Fixture = std::array<FixtureArray, 11>;
 Fixture read_fixture(const std::filesystem::path& path) {
     const auto bytes = read_bytes(path);
     Fixture arrays{};
@@ -122,9 +127,14 @@ protected:
     Sparse A = matrix();
     solver original{A, options()};
     void SetUp() override {
-        directory = std::filesystem::temp_directory_path() /
-            ("apxchol-archive-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        ASSERT_TRUE(std::filesystem::create_directory(directory));
+        // Parallel test processes can read the same clock tick, so retry until
+        // create_directory claims a fresh directory.
+        const auto stem = "apxchol-archive-" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-";
+        int attempt = 0;
+        do directory = std::filesystem::temp_directory_path() / (stem + std::to_string(attempt));
+        while (!std::filesystem::create_directory(directory) && ++attempt < 1000);
+        ASSERT_LT(attempt, 1000);
         original.save(directory / "original.apxchol");
     }
     void TearDown() override { std::filesystem::remove_all(directory); }
@@ -196,12 +206,14 @@ TEST_F(SolverArchive, ExactFactorAndScalarBatchWarmSolves) {
     auto restored = solver::load(directory / "original.apxchol", options());
     EXPECT_EQ(restored.operator_nnz(), A.nonZeros());
     EXPECT_EQ(original.operator_nnz(), A.nonZeros());
-    const auto& before = original.factor();
-    const auto& after = restored.factor();
-    EXPECT_EQ(before.L.outer_, after.L.outer_);
-    EXPECT_EQ(before.L.inner_, after.L.inner_);
-    ASSERT_EQ(before.L.vals_.size(), after.L.vals_.size());
-    EXPECT_EQ(std::memcmp(before.L.vals_.data(), after.L.vals_.data(), before.L.vals_.size() * sizeof(float)), 0);
+    const auto before = original.factor();
+    const auto after = restored.factor();
+    EXPECT_EQ(after.storage, factor_storage_type::fp32);
+    EXPECT_TRUE(after.scale.empty());
+    EXPECT_EQ(csc_access::outer(before.L), csc_access::outer(after.L));
+    EXPECT_EQ(csc_access::inner(before.L), csc_access::inner(after.L));
+    ASSERT_EQ(csc_access::vals(before.L).size(), csc_access::vals(after.L).size());
+    EXPECT_EQ(std::memcmp(csc_access::vals(before.L).data(), csc_access::vals(after.L).data(), csc_access::vals(before.L).size() * sizeof(float)), 0);
     EXPECT_EQ(before.perm, after.perm);
     EXPECT_EQ(before.sddm, after.sddm);
     EXPECT_EQ(before.lumped_offdiag, after.lumped_offdiag);
@@ -236,9 +248,9 @@ TEST_F(SolverArchive, LaplacianFactorAndCenteredSolves) {
     before.save(path);
     auto restored = solver::load(path, options());
     EXPECT_FALSE(restored.factor().sddm);
-    EXPECT_EQ(restored.factor().L.outer_, before.factor().L.outer_);
-    EXPECT_EQ(restored.factor().L.inner_, before.factor().L.inner_);
-    EXPECT_EQ(restored.factor().L.vals_, before.factor().L.vals_);
+    EXPECT_EQ(csc_access::outer(restored.factor().L), csc_access::outer(before.factor().L));
+    EXPECT_EQ(csc_access::inner(restored.factor().L), csc_access::inner(before.factor().L));
+    EXPECT_EQ(csc_access::vals(restored.factor().L), csc_access::vals(before.factor().L));
     EXPECT_EQ(restored.factor().perm, before.factor().perm);
     const Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(L.rows(), -1.0, 1.0);
     const auto scalar = restored.solve(b, 1e-9);
@@ -317,14 +329,116 @@ TEST_F(SolverArchive, AutomaticAdoptionUsesCpu) {
     EXPECT_EQ(restored.factor_storage(), factor_storage_type::fp32);
 }
 
-TEST_F(SolverArchive, ExistingFilesAndReleasedFactorsAreRejected) {
-    const auto before = read_bytes(directory / "original.apxchol");
-    EXPECT_THROW(original.save(directory / "original.apxchol"), std::runtime_error);
-    EXPECT_EQ(read_bytes(directory / "original.apxchol"), before);
-    auto opts = options(); opts.keep_factor = false;
-    solver released(A, opts);
-    EXPECT_THROW(released.save(directory / "released.apxchol"), std::invalid_argument);
-    EXPECT_FALSE(std::filesystem::exists(directory / "released.apxchol"));
+TEST_F(SolverArchive, SavingReplacesAnExistingFile) {
+    const auto path = directory / "replaced.apxchol";
+    write_bytes(path, Bytes{'o', 'l', 'd'});
+    original.save(path);
+    EXPECT_EQ(read_bytes(path), read_bytes(directory / "original.apxchol"));
+    EXPECT_FALSE(std::filesystem::exists(path.string() + ".tmp"));
+}
+
+TEST_F(SolverArchive, LeftoverTemporaryFileIsReportedAndKept) {
+    const auto path = directory / "busy.apxchol";
+    const auto temporary = path.string() + ".tmp";
+    write_bytes(temporary, Bytes{'x'});
+    try {
+        original.save(path);
+        FAIL() << "expected the leftover temporary file to block the save";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find(temporary), std::string::npos) << e.what();
+    }
+    EXPECT_TRUE(std::filesystem::exists(temporary));
+    EXPECT_FALSE(std::filesystem::exists(path));
+}
+
+// Saving and loading reinstalls the installed factor exactly, whatever the
+// load options say about storage and dropping: solves are bit-identical at a
+// fixed thread count.
+TEST_F(SolverArchive, ReinstallsInstalledFactorExactly) {
+    if (!detail::omp_sptrsv::fp16_supported()) GTEST_SKIP() << "no FP16 conversion on this CPU";
+    Sparse W = matrix(400);
+    for (int k = 0; k < W.outerSize(); ++k)
+        for (Sparse::InnerIterator e(W, k); e; ++e)
+            if (e.row() != e.col()) e.valueRef() = -std::pow(10.0, ((e.row() + e.col()) % 7) / 2.0);
+    for (int i = 0; i < W.rows(); ++i) W.coeffRef(i, i) = 0;
+    for (int k = 0; k < W.outerSize(); ++k)
+        for (Sparse::InnerIterator e(W, k); e; ++e)
+            if (e.row() != e.col()) W.coeffRef(e.col(), e.col()) -= e.value();
+    for (bool laplacian : {false, true})
+        for (auto storage : {factor_storage_type::fp32, factor_storage_type::fp16})
+            for (double drop : {0.0, 1e-2}) {
+                SCOPED_TRACE(testing::Message() << laplacian << ' ' << int(storage) << ' ' << drop);
+                Sparse input = W;
+                if (!laplacian) input.diagonal().array() += 1e-3;
+                auto opts = options();
+                opts.factor_opts.factor_storage = storage;
+                opts.factor_opts.drop_tolerance = drop;
+                solver saver(input, opts);
+                const auto F = saver.factor();
+                EXPECT_EQ(F.storage, storage);
+                EXPECT_EQ(F.scale.size(), storage == factor_storage_type::fp16 ? input.rows() : 0);
+                EXPECT_EQ(F.L.nonZeros(), csc_access::vals(F.L).size());
+                if (laplacian) { EXPECT_EQ(csc_access::outer(F.L)[input.rows() - 1], csc_access::outer(F.L)[input.rows()]); }
+                const auto path = directory / ("exact-" + std::to_string(laplacian) +
+                    std::to_string(int(storage)) + std::to_string(drop > 0) + ".apxchol");
+                saver.save(path);
+                auto other = options();
+                other.factor_opts.factor_storage = storage == factor_storage_type::fp16
+                    ? factor_storage_type::fp32 : factor_storage_type::fp16;
+                other.factor_opts.drop_tolerance = drop > 0 ? 0.0 : 0.5;
+                auto loaded = solver::load(path, other);
+                EXPECT_EQ(loaded.factor_storage(), storage);
+                const auto G = loaded.factor();
+                EXPECT_EQ(csc_access::outer(G.L), csc_access::outer(F.L));
+                EXPECT_EQ(csc_access::inner(G.L), csc_access::inner(F.L));
+                EXPECT_EQ(std::memcmp(csc_access::vals(G.L).data(), csc_access::vals(F.L).data(), csc_access::vals(F.L).size() * sizeof(float)), 0);
+                EXPECT_EQ(G.scale, F.scale);
+                // Adopting the exported factor directly is exact too.
+                solver adopted(input, F, other);
+                Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(input.rows(), -1.0, 2.0);
+                if (laplacian) b.array() -= b.mean();
+                const auto x = saver.solve(b, 1e-9, 2000), y = loaded.solve(b, 1e-9, 2000),
+                           z = adopted.solve(b, 1e-9, 2000);
+                EXPECT_TRUE(x.converged);
+                EXPECT_EQ(x.iterations, y.iterations);
+                EXPECT_EQ(x.x, y.x);
+                EXPECT_EQ(x.x, z.x);
+                EXPECT_EQ(saver.apply(b), loaded.apply(b));
+            }
+}
+
+TEST_F(SolverArchive, RejectsInvalidInstalledFactors) {
+    auto F = original.factor();
+    for (std::size_t col = 0; col < F.L.rows(); ++col)
+        for (auto p = csc_access::outer(F.L)[col] + 1; p < csc_access::outer(F.L)[col + 1]; ++p) csc_access::vals(F.L)[p] = -0.25f;
+    F.storage = factor_storage_type::fp16;
+    EXPECT_THROW((void)solver(A, F, options()), std::invalid_argument);  // no scales
+    F.scale.assign(A.rows(), 1.0f);
+    csc_access::vals(F.L)[1] = 0.1f;  // not a binary16 value
+    EXPECT_THROW((void)solver(A, F, options()), std::invalid_argument);
+    csc_access::vals(F.L)[1] = -0.25f;
+    F.scale[0] = 0.0f;
+    EXPECT_THROW((void)solver(A, F, options()), std::invalid_argument);
+    F.scale[0] = 1.0f;
+    EXPECT_NO_THROW((void)solver(A, F, options()));
+    auto G = original.factor();
+    G.scale.assign(A.rows(), 1.0f);  // scales only belong to fp16 storage
+    EXPECT_THROW((void)solver(A, G, options()), std::invalid_argument);
+}
+
+TEST_F(SolverArchive, NewArchivesFollowTheUmask) {
+    struct umask_guard {
+        mode_t previous = umask(022);
+        ~umask_guard() { umask(previous); }
+    };
+    {
+        const umask_guard guard;
+        original.save(directory / "shared.apxchol");
+    }
+    struct stat info {};
+    ASSERT_EQ(stat((directory / "shared.apxchol").c_str(), &info), 0);
+    EXPECT_EQ(info.st_mode & 0777, 0644);
+    EXPECT_FALSE(std::filesystem::exists((directory / "shared.apxchol").string() + ".tmp"));
 }
 
 TEST_F(SolverArchive, RejectsNullCharactersInPaths) {
@@ -347,8 +461,9 @@ TEST_F(SolverArchive, ReportsDirectoryReadError) {
 }
 
 TEST_F(SolverArchive, RejectsMetadataAndIndexOverflow) {
-    for (const auto& item : std::array<std::pair<std::size_t, std::uint64_t>, 6>{{
-        {0, 99}, {1, UINT64_MAX}, {2, 2}, {3, UINT64_MAX}, {4, UINT64_MAX}, {6, UINT64_MAX}}}) {
+    for (const auto& item : std::array<std::pair<std::size_t, std::uint64_t>, 7>{{
+        {0, 99}, {1, UINT64_MAX}, {2, 2}, {3, UINT64_MAX}, {4, UINT64_MAX}, {6, UINT64_MAX},
+        {7, 2}}}) {
         const auto path = change(("meta-" + std::to_string(item.first)).c_str(), metadata,
                                  [&](auto& a) { a.value(item.first, item.second); });
         EXPECT_THROW(solver::load(path), std::invalid_argument);
@@ -382,6 +497,40 @@ TEST_F(SolverArchive, RejectsMalformedHeaderAndTruncation) {
     EXPECT_THROW(solver::load(trailing), std::invalid_argument);
 }
 
+TEST_F(SolverArchive, RejectsNewerFormatVersion) {
+    const auto path = change_file("version-2", [](auto& bytes) { put_number(bytes, 8, 4, 2); });
+    try {
+        solver::load(path);
+        FAIL() << "a version 2 archive loaded";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_STREQ(error.what(),
+            "solver archive: written by a newer apxchol (format 2); upgrade to read it");
+    }
+}
+
+// The committed fixture is tests/fixtures/path5_sddm.mtx saved with default CPU
+// options (FP32 storage). Every 1.x release must keep loading it.
+TEST(SolverArchiveFormat, LoadsCommittedVersion1Fixture) {
+    Sparse A(5, 5);
+    std::vector<Eigen::Triplet<double>> entries;
+    for (int i = 0; i < 5; ++i) {
+        entries.emplace_back(i, i, i == 0 || i == 4 ? 1.5 : 2.5);
+        if (i) { entries.emplace_back(i, i - 1, -1.0); entries.emplace_back(i - 1, i, -1.0); }
+    }
+    A.setFromTriplets(entries.begin(), entries.end());
+    solve_options opts;
+    opts.backend = solve_backend::cpu;
+    auto restored = solver::load(std::filesystem::path(APXCHOL_TEST_FIXTURES) / "path5_sddm_v1.apxchol", opts);
+    EXPECT_EQ(restored.rows(), 5);
+    EXPECT_EQ(restored.operator_nnz(), 13);
+    EXPECT_TRUE(restored.factor().sddm);
+    EXPECT_EQ(restored.factor_storage(), factor_storage_type::fp32);
+    const Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(5, 1.0, 5.0);
+    const auto result = restored.solve(b, 1e-10);
+    EXPECT_TRUE(result.converged);
+    EXPECT_LT((A * result.x - b).norm() / b.norm(), 1e-10);
+}
+
 TEST_F(SolverArchive, ReadsOppositeEndianArrays) {
     auto arrays = read_fixture(directory / "original.apxchol");
     for (auto& a : arrays) {
@@ -392,7 +541,7 @@ TEST_F(SolverArchive, ReadsOppositeEndianArrays) {
     const auto path = directory / "opposite-endian.apxchol";
     write_bytes(path, encode_fixture(arrays));
     auto restored = solver::load(path, options());
-    EXPECT_EQ(restored.factor().L.vals_, original.factor().L.vals_);
+    EXPECT_EQ(csc_access::vals(restored.factor().L), csc_access::vals(original.factor().L));
     EXPECT_EQ(restored.factor().perm, original.factor().perm);
     const Eigen::VectorXd b = Eigen::VectorXd::Ones(A.rows());
     auto result = restored.solve(b, 1e-9);
@@ -406,9 +555,9 @@ TEST_F(SolverArchive, ReadsWideIntegerArrays) {
     const auto path = directory / "wide.apxchol";
     write_bytes(path, encode_fixture(arrays));
     auto restored = solver::load(path, options());
-    EXPECT_EQ(restored.factor().L.outer_, original.factor().L.outer_);
-    EXPECT_EQ(restored.factor().L.inner_, original.factor().L.inner_);
-    EXPECT_EQ(restored.factor().L.vals_, original.factor().L.vals_);
+    EXPECT_EQ(csc_access::outer(restored.factor().L), csc_access::outer(original.factor().L));
+    EXPECT_EQ(csc_access::inner(restored.factor().L), csc_access::inner(original.factor().L));
+    EXPECT_EQ(csc_access::vals(restored.factor().L), csc_access::vals(original.factor().L));
     EXPECT_EQ(restored.factor().perm, original.factor().perm);
 }
 
@@ -432,7 +581,7 @@ TEST_F(SolverArchive, AcceptsUnicodeAndExtensionlessPaths) {
         const auto path = directory / name;
         original.save(path);
         auto restored = solver::load(path, options());
-        EXPECT_EQ(restored.factor().L.vals_, original.factor().L.vals_);
+        EXPECT_EQ(csc_access::vals(restored.factor().L), csc_access::vals(original.factor().L));
         EXPECT_EQ(restored.factor().perm, original.factor().perm);
     }
 }
@@ -468,7 +617,7 @@ TEST_F(SolverArchive, CpuAndGpuFactorsCrossAdopt) {
                 const auto path = directory / ("source-" + std::to_string(source_owners++) + ".apxchol");
                 resident.save(path);
                 expect_operator(path, input);
-                const auto& F = resident.factor();
+                const auto F = resident.factor();
                 for (std::size_t i = 0; i < F.perm.size(); ++i)
                     if (F.perm[i] != i) { ++nontrivial_permutations; break; }
                 for (auto target : {solve_backend::cpu, solve_backend::gpu}) {
@@ -477,16 +626,39 @@ TEST_F(SolverArchive, CpuAndGpuFactorsCrossAdopt) {
                     auto restored = solver::load(path, opts); ++loaded_owners;
                     EXPECT_EQ(restored.backend(), target);
                     EXPECT_EQ(restored.operator_nnz(), input.nonZeros());
-                    EXPECT_EQ(restored.factor().L.outer_, F.L.outer_);
-                    EXPECT_EQ(restored.factor().L.inner_, F.L.inner_);
-                    ASSERT_EQ(restored.factor().L.vals_.size(), F.L.vals_.size());
-                    EXPECT_EQ(std::memcmp(restored.factor().L.vals_.data(), F.L.vals_.data(), F.L.vals_.size() * sizeof(float)), 0);
+                    EXPECT_EQ(csc_access::outer(restored.factor().L), csc_access::outer(F.L));
+                    EXPECT_EQ(csc_access::inner(restored.factor().L), csc_access::inner(F.L));
+                    ASSERT_EQ(csc_access::vals(restored.factor().L).size(), csc_access::vals(F.L).size());
+                    EXPECT_EQ(std::memcmp(csc_access::vals(restored.factor().L).data(), csc_access::vals(F.L).data(), csc_access::vals(F.L).size() * sizeof(float)), 0);
+                    EXPECT_EQ(restored.factor_storage(), F.storage);
+                    EXPECT_EQ(restored.factor().scale, F.scale);
                     EXPECT_EQ(restored.factor().perm, F.perm);
                     EXPECT_EQ(restored.factor().sddm, F.sddm);
                     ASSERT_EQ(restored.factor().rounds.size(), F.rounds.size());
                     for (std::size_t i = 0; i < F.rounds.size(); ++i)
                         EXPECT_EQ(restored.factor().rounds[i].is_size, F.rounds[i].is_size);
                     check_solve_modes(input, restored, laplacian, checked_rhs);
+                    if (origin == target) {
+                        // A reloaded factor is the same preconditioner: bit for bit on
+                        // CPU and CUDA. Metal's resident setup orders each forward row by
+                        // thread timing, so a reload agrees to FP32 rounding and solves in
+                        // the same number of iterations.
+                        Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(input.rows(), -1.0, 2.0);
+                        if (laplacian) b.array() -= b.mean();
+                        const Eigen::VectorXd za = resident.apply(b), zb = restored.apply(b);
+                        const auto xa = resident.solve(b, 1e-9, 500), xb = restored.solve(b, 1e-9, 500);
+#if defined(APXCHOL_USE_METAL)
+                        if (target == solve_backend::gpu) {
+                            EXPECT_LT((za - zb).norm() / za.norm(), 1e-6);
+                            EXPECT_EQ(xa.iterations, xb.iterations);
+                            EXPECT_LT((xa.x - xb.x).norm() / xa.x.norm(), 1e-8);
+                        } else
+#endif
+                        {
+                            EXPECT_EQ(za, zb);
+                            EXPECT_EQ(xa.x, xb.x);
+                        }
+                    }
                     if (target == solve_backend::gpu) {
                         const auto adopted = directory / ("adopted-" + std::to_string(resaves++) + ".apxchol");
                         restored.save(adopted); expect_operator(adopted, input);
@@ -524,33 +696,39 @@ TEST_F(SolverArchive, PreservesLumpingAndRegularizationWithoutReapplyingThem) {
     auto restored = solver::load(path, admission);
     EXPECT_EQ(restored.factor().lumped_offdiag, 2);
     EXPECT_EQ(restored.operator_nnz(), 4);
-    ASSERT_EQ(restored.factor().L.vals_.size(), before.factor().L.vals_.size());
-    EXPECT_EQ(std::memcmp(restored.factor().L.vals_.data(), before.factor().L.vals_.data(),
-        before.factor().L.vals_.size() * sizeof(float)), 0);
+    ASSERT_EQ(csc_access::vals(restored.factor().L).size(), csc_access::vals(before.factor().L).size());
+    EXPECT_EQ(std::memcmp(csc_access::vals(restored.factor().L).data(), csc_access::vals(before.factor().L).data(),
+        csc_access::vals(before.factor().L).size() * sizeof(float)), 0);
     const Eigen::VectorXd b = Eigen::VectorXd::Ones(2);
     const auto result = restored.solve(b, 1e-10);
     EXPECT_TRUE(result.converged);
     EXPECT_LT((positive * result.x - b).norm() / b.norm(), 1e-10);
 }
 
-TEST_F(SolverArchive, DoesNotReplaceSymlinksOrConcurrentWriters) {
+TEST_F(SolverArchive, ReplacesSymlinksAndSerializesConcurrentWriters) {
+    // A symlink destination is replaced by the archive; its target is untouched.
     const auto link = directory / "dangling.apxchol";
     std::filesystem::create_symlink(directory / "missing", link);
-    EXPECT_THROW(original.save(link), std::runtime_error);
-    EXPECT_TRUE(std::filesystem::is_symlink(link));
+    original.save(link);
+    EXPECT_FALSE(std::filesystem::is_symlink(link));
     EXPECT_FALSE(std::filesystem::exists(directory / "missing"));
+    EXPECT_EQ(solver::load(link).rows(), A.rows());
+    // Overlapping saves to one path never interleave: a save that finds the
+    // other's temporary file fails and names it.
     const auto path = directory / "concurrent.apxchol";
     std::barrier start(2);
     auto write = [&] {
         start.arrive_and_wait();
         try { original.save(path); return 1; }
-        catch (const std::runtime_error&) { return 0; }
+        catch (const std::runtime_error& e) {
+            EXPECT_NE(std::string(e.what()).find(".tmp"), std::string::npos) << e.what();
+            return 0;
+        }
     };
     auto first = std::async(std::launch::async, write);
     auto second = std::async(std::launch::async, write);
-    EXPECT_EQ(first.get() + second.get(), 1);
+    EXPECT_GE(first.get() + second.get(), 1);
     EXPECT_EQ(solver::load(path).rows(), A.rows());
-    for (const auto& entry : std::filesystem::directory_iterator(directory))
-        EXPECT_FALSE(entry.path().filename().string().starts_with(".apxchol-"));
+    EXPECT_FALSE(std::filesystem::exists(path.string() + ".tmp"));
 }
 } // namespace

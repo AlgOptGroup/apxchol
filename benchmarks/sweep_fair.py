@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Single fair runner for ALL matrix families (grids + SuiteSparse + IPM), on
-either device (--device cpu | gpu). Both write the SAME per-cell JSON store
+any device (--device cpu | gpu | metal). All write the SAME per-cell JSON store
 (results/cells/<family>/<mid>__<solver>__<cfg>__t16__<device>.json) and are
 RESUME-SAFE: a terminal cell from this revision under the current contract is
 skipped; any other cell is re-run and replaced only after its runner finishes
@@ -37,6 +37,8 @@ the reason, never a silent gap.
   systemd-inhibit --what=sleep:idle --mode=block python3 benchmarks/sweep_fair.py
   # GPU axis (needs the CUDA build; apxchol uses the GPU-resident PCG):
   python3 benchmarks/sweep_fair.py --device gpu
+  # Metal axis (macOS Metal build; apxchol only, no Metal competitors):
+  python3 benchmarks/sweep_fair.py --device metal
 
 ParAC runs IN-PROCESS via parac_runner.py (graph+physics on both axes), emitting
 into the same store. Shared harness (hardened sh, matrix registry, cell store,
@@ -75,9 +77,11 @@ CAP_STARTUP_S = 300    # per-process allowance for startup and input parsing, ou
 # headroom on the 124GB box. NOT applied on GPU (CUDA reserves large host VM; breaks runs).
 MEM_CAP_GB = float(os.environ.get("APXCHOL_BENCH_MEM_CAP_GB", "100"))
 DEVICE = "cpu"   # set in main() from --device
-# CPU PCG caps iters at 500; the GPU axis allows more (cheap per-iter), matching
+# CPU PCG caps iters at 500; the GPU axes allow more (cheap per-iter), matching
 # the retired gpu_chart_sweep.sh (2000, or 1000 for IPM).
-MAXITER = {"cpu": 500, "gpu": 2000, "gpu_ipm": 1000}
+MAXITER = {"cpu": 500, "gpu": 2000, "metal": 2000, "gpu_ipm": 1000}
+# The benchmark's --v1-backend for each device; a Metal build's gpu route is Metal.
+V1_BACKEND = {"cpu": "cpu", "gpu": "gpu", "metal": "gpu"}
 
 PROV = {"boost":"on","boost_expected":"on","git_sha":rc.git_sha(),
         "source_id": os.environ.get("APXCHOL_BENCH_SOURCE_ID", ""),
@@ -221,15 +225,26 @@ def emit(family, mid, solver, config, status, metrics, extra_meta=None,
                         matrix_meta=meta or None,
                         timeout_cap_s=timeout_cap_s if status in ("timeout", "exceeded_cap") else None)
 
+def device_init(stderr):
+    """The process-wide CUDA or Metal initialization the binary timed outside
+    every solver's setup, as cell fields."""
+    out = {}
+    for key, parse in (("cuda_init_s", rc.parse_cuda_init), ("metal_init_s", rc.parse_metal_init)):
+        value = parse(stderr)
+        if value is not None:
+            out[key] = value
+    return out
+
 def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout=None, ground=None,
             mid=None):
-    cfg = f"--v1-configs '{config}' --v1-backend {DEVICE}" if solver=="apxchol_v1" else ""
+    cfg = (f"--v1-configs '{config}' --v1-backend {V1_BACKEND[DEVICE]}"
+           if solver=="apxchol_v1" else "")
     # AMGCL de-singularization series: ground=coarse charts the relaxed-coarse cell
     # (--decompose stays auto, so whole+coarse on connected / split+coarse on
     # disconnected). The headline AMGCL series passes no --ground (auto = pin).
     gflag = f"--ground {ground}" if ground else ""
     regflag = f"--reg-rel {reg}" if reg else ""   # IPM is native SDDM: no shift
-    mi = MAXITER["gpu_ipm"] if (DEVICE=="gpu" and family=="ipm") else MAXITER[DEVICE]
+    mi = MAXITER["gpu_ipm"] if (DEVICE!="cpu" and family=="ipm") else MAXITER[DEVICE]
     # env vars passed via `env VAR=...` so /usr/bin/time wraps the whole call.
     #   BOOMERAMG_CFG=cut : CoarsenCutFactor variant (hub->F-point; fixes mega-hub blowup).
     base_envs = []
@@ -250,10 +265,10 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
             run_env[key] = value
         inner=(f"{rc.taskset_prefix(THREADS)} {BIN[DEVICE]} {margs} --solver {solver} {cfg} "
                f"{gflag} {regflag} --threads {THREADS} --tol {TOL} --maxiter {mi} --repeat {REPS} --warmup {WARMUP} --csv")
-        # /usr/bin/time -f '%M': peak RSS (kbytes) -> stderr 'APXRSS <kb>'; the max over
+        # /usr/bin/time: peak RSS on stderr (rc.peak_rss_prefix); the max over
         # all reps (setup-phase peak dominates). solve_rss_mb (held during solve) comes
         # from the binary's CSV; peak - solve_rss = the setup transient.
-        cmd=f"/usr/bin/time -f 'APXRSS %M' {inner}"
+        cmd=f"{rc.peak_rss_prefix()} {inner}"
         # CPU only: rc.sh's mem_cap ceils the address space so a memory-bomb solver
         # dies with bad_alloc (-> 'oom') instead of OOM-killing the box.
         cap = MEM_CAP_GB if DEVICE == "cpu" else None
@@ -265,9 +280,8 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
             # 'timeout' cell it is about to write.
             BUILD.update(rc.parse_build_meta(e.stderr))
             diag = _diag(None, e.output, e.stderr)
-            cuda_init_s = rc.parse_cuda_init(e.stderr)
-            if cuda_init_s is not None:
-                diag["cuda_init_s"] = cuda_init_s
+            diag.update(device_init(e.stderr))
+            diag.update(rc.parse_gpu_memory(e.stderr))
             return "timeout", diag
         BUILD.update(rc.parse_build_meta(p.stderr))   # what built the binary that just ran
         st,m = classify(rc.parse_csv(p.stdout))
@@ -292,13 +306,11 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
         if m is not None:
             m["warmup_repeats"] = WARMUP
             m["repeat_receipts"] = [line for line in p.stderr.splitlines() if line.startswith("BENCH_REPEAT ")]
-            cuda_init_s = rc.parse_cuda_init(p.stderr)
-            if cuda_init_s is not None:
-                m["cuda_init_s"] = cuda_init_s
-            for ln in p.stderr.splitlines():
-                if ln.startswith("APXRSS "):
-                    try: m["max_rss_mb"]=round(int(ln.split()[1])/1024.0,1)
-                    except: pass
+            m.update(device_init(p.stderr))
+            m.update(rc.parse_gpu_memory(p.stderr))
+            rss = rc.parse_peak_rss_mb(p.stderr)
+            if rss is not None:
+                m["max_rss_mb"] = rss
             m["gpu_memory_polling"] = False
         # How the binary read this matrix, straight from its own report.
         meta = rc.parse_matrix_meta(p.stderr)
@@ -462,12 +474,17 @@ NOCAP_TIMEOUT = int(os.environ.get("NOCAP_TIMEOUT_S", str(4 * 3600)))
 APX_GPU = [("apxchol_v1", APX_DEFAULT_CONFIG)]
 COMP_GPU = ["hypre_boomeramg_gpu","amgcl_cuda"]
 
+# --- Metal axis: apxchol only (no competitor has a Metal backend) ---
+APX_METAL = [("apxchol_v1", APX_DEFAULT_CONFIG)]
+
 
 def planned_cell_count(matrices, device):
     """Return the exact cell denominator for the selected fair-sweep axis."""
     matrices = list(matrices)
     if PARAC_ONLY:
         return 2 * len(matrices)
+    if device == "metal":
+        return len(APX_METAL) * len(matrices)
     if device == "gpu":
         per_matrix = len(APX_GPU) + len(COMP_GPU)
         per_matrix += int("hypre_boomeramg_gpu" in COMP_GPU)  # cut variant
@@ -562,6 +579,10 @@ def do_matrix(mid, family, source, spec, is2d, n, reg):
     # once all its repetitions could have used the cap plus a startup allowance.
     def process_timeout(cap, runs):
         return int(runs * cap + CAP_STARTUP_S) if not NO_CAP else NOCAP_TIMEOUT
+    if DEVICE == "metal":
+        for solver,config in APX_METAL:
+            step(family,mid,solver,config, lambda s=solver,c=config: run_cpp(margs,s,c,reg,family,mid=mid), config)
+        return
     if DEVICE == "gpu":
         apx_totals = []
         for solver,config in APX_GPU:
@@ -632,8 +653,9 @@ def main():
     ap = argparse.ArgumentParser(
         description="Run or resume the fair benchmark sweep; reusable terminal cells "
                     "skip, while stale terminal cells are replaced after their rerun.")
-    ap.add_argument("--device", choices=["cpu","gpu"], default="cpu",
-                    help="cpu (build/) or gpu (build-cuda/, apxchol GPU-resident PCG)")
+    ap.add_argument("--device", choices=list(rc.DEVICES), default="cpu",
+                    help="cpu (build/), gpu (build-cuda/, apxchol GPU-resident PCG) "
+                         "or metal (build-metal/, apxchol only)")
     ap.add_argument("--threads", type=int, default=THREADS,
                     help="threads and recorded cell thread count (default: 16)")
     ap.add_argument("--repeat", type=int, default=REPS,
@@ -692,7 +714,11 @@ def main():
     if a.parac_only: PARAC_ONLY = True
     if a.no_cap: NO_CAP = True
     # CMG is serial MATLAB: it has no GPU axis, so its cells are device=cpu only.
-    if a.no_cmg or DEVICE == "gpu": RUN_CMG = False
+    if a.no_cmg or DEVICE != "cpu": RUN_CMG = False
+    if DEVICE == "metal":
+        if a.parac_only:
+            ap.error("--parac-only has no Metal axis")
+        RUN_PARAC = False   # ParAC has no Metal driver
     if RUN_CMG:
         cmg_preflight()
     if DEVICE == "cpu" and JULIA:
@@ -704,13 +730,16 @@ def main():
         COMP = [c for c in COMP if c not in ("rchol","rchol_par")]
     if DEVICE == "gpu" and not os.path.exists(BIN["gpu"]):
         sys.exit(f"GPU build not found: {BIN['gpu']} (configure with -DAPXCHOL_DEVICE=CUDA)")
+    if DEVICE == "metal" and not os.path.exists(BIN["metal"]):
+        sys.exit(f"Metal build not found: {BIN['metal']} (configure with -DAPXCHOL_DEVICE=METAL)")
     PROV["note"] = f"FAIR {DEVICE} run, singular L, multi-component Dirichlet pin (per-solver grounding)"
     print(f"=== fair sweep: device={DEVICE}, families={sorted(fams)}, "
           f"store={CELLS} "
           f"(stale-aware resume) ===", flush=True)
+    julia_on = bool(JULIA) and DEVICE == "cpu"   # Julia has only a CPU axis
     print(f"    external solvers: parac={'on' if RUN_PARAC else 'off'} "
-          f"ac/ac2={'on' if JULIA else 'off'} cmg={'on' if RUN_CMG else 'off'}", flush=True)
-    if not JULIA:
+          f"ac/ac2={'on' if julia_on else 'off'} cmg={'on' if RUN_CMG else 'off'}", flush=True)
+    if DEVICE == "cpu" and not JULIA:
         print("    NOTE: AC/AC2 are OFF -> their cells stay empty. Fill them with "
               "`python3 benchmarks/sweep_fair.py` without --no-julia/--headline-only "
               "(needs: julia --project=benchmarks/julia -e 'using Pkg; Pkg.instantiate()').",

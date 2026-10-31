@@ -63,9 +63,9 @@ struct csr_int {
 /// a factor exceeding int32 cannot use the dataflow kernels' index type.
 template <class Val>
 inline csr_int<Val> build_L11_csc_int(const sparse_csc& L, std::int64_t m) {
-    const edge_index* Lo = L.outerIndexPtr();
-    const node_index* Li = L.innerIndexPtr();
-    const auto*       Lv = L.valuePtr();   // factor_value_t*
+    const edge_index* Lo = L.col_ptrs().data();
+    const node_index* Li = L.row_indices().data();
+    const auto*       Lv = L.values().data();   // const factor_value_t*
     const std::int64_t n = static_cast<std::int64_t>(L.rows());
     csr_int<Val> out;
     if (m > static_cast<std::int64_t>(std::numeric_limits<int>::max()) ||
@@ -194,7 +194,7 @@ struct fp16_scaled_arrays {
     std::vector<float>               diag;       // m
     std::vector<double>              inv_scale2; // m; squaring in fp32 can overflow
     std::uint64_t flushed   = 0;   // stored off-diagonals with v != 0 stored as zero
-    std::uint64_t subnormal = 0;   // stored off-diagonals that are fp16 subnormals (0: they are always flushed)
+    std::uint64_t subnormal = 0;   // stored fp16-subnormal off-diagonals: 0 when narrowing, which flushes them; an exact install keeps them
 };
 
 template <class Val>
@@ -228,6 +228,33 @@ inline fp16_scaled_arrays narrow_fp16_scaled(const csr_int<Val>& L11, const std:
     }
     }
     out.flushed = n_flush;
+    return out;
+}
+
+/// The fp16 arrays of an installed factor (factorization::storage fp16),
+/// taken as they are: vals = the binary16 off-diagonals (diagonal slots zero,
+/// never read), diag = the FP32 diagonal d_j and inv_scale2 =
+/// fp64(fp32(1 / s_j))^2, exactly as narrow_fp16_scaled() derives it.
+inline fp16_scaled_arrays installed_fp16_arrays(const csr_int<float>& L11,
+                                                std::span<const float> col_scale) {
+    fp16_scaled_arrays out;
+    out.vals = std::make_unique_for_overwrite<_Float16[]>(static_cast<std::size_t>(L11.nnz));
+    out.diag.resize(static_cast<std::size_t>(L11.m));
+    out.inv_scale2.resize(static_cast<std::size_t>(L11.m));
+    std::uint64_t subnormal = 0;
+    #pragma omp parallel for schedule(static) reduction(+:subnormal)
+    for (int j = 0; j < L11.m; ++j) {
+        const double inv = 1.0f / col_scale[j];
+        out.inv_scale2[j] = inv * inv;
+        out.diag[j] = L11.vals[L11.ptr[j]];
+        out.vals[L11.ptr[j]] = _Float16(0);
+        for (int p = L11.ptr[j] + 1; p < L11.ptr[j + 1]; ++p) {
+            out.vals[p] = static_cast<_Float16>(L11.vals[p]);
+            subnormal += std::fpclassify(L11.vals[p]) != FP_ZERO
+                && std::abs(L11.vals[p]) < 0x1p-14f;
+        }
+    }
+    out.subnormal = subnormal;
     return out;
 }
 

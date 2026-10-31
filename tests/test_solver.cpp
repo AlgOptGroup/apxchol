@@ -31,6 +31,8 @@
 #include <cuda_runtime.h>
 #endif
 
+using csc_access = apxchol::detail::sparse_csc_access;
+
 namespace {
 using Sparse = Eigen::SparseMatrix<double>;
 
@@ -346,10 +348,10 @@ TEST(Solver, CopiesShareTheFactorAndSolveInParallel) {
         return std::get<apxchol::detail::cpu_route>(apxchol::detail::solver_access::route(owner));
     };
     for (int t = 0; t < callers; ++t) {
-        EXPECT_EQ(&owners[t].factor(), &original->factor());
+        EXPECT_EQ(&route(owners[t]).factor(), &route(*original).factor());
         EXPECT_EQ(&route(owners[t]).trsv(), &route(*original).trsv());
     }
-    const auto* shared_factor = &original->factor();
+    const auto* shared_factor = &route(*original).factor();
     original.reset();
     for (int round = 0; round < 3; ++round) {
         std::vector<Eigen::VectorXd> x(callers), z(callers);
@@ -369,7 +371,7 @@ TEST(Solver, CopiesShareTheFactorAndSolveInParallel) {
             EXPECT_EQ(batch[t], expected_panel);
         }
     }
-    EXPECT_EQ(&owners[0].factor(), shared_factor);
+    EXPECT_EQ(&route(owners[0]).factor(), shared_factor);
     // Where the CPU triangular solve picks its hybrid schedule (as on x86
     // Linux), the parallel solves above also cover per-copy barrier state.
     RecordProperty("hybrid_schedule", route(owners[0]).trsv().uses_hybrid_schedule());
@@ -378,7 +380,7 @@ TEST(Solver, CopiesShareTheFactorAndSolveInParallel) {
     const Sparse other_matrix = operator_matrix(500);
     apxchol::solver assigned(other_matrix, options);
     assigned = owners[0];
-    EXPECT_EQ(&assigned.factor(), shared_factor);
+    EXPECT_EQ(&route(assigned).factor(), shared_factor);
     EXPECT_EQ(assigned.solve(rhs[1]).x, solved[1]);
 }
 
@@ -386,7 +388,6 @@ TEST(Solver, CpuOwnerAdoptsAnIndependentFactorAndAppliesIt) {
     const scoped_omp_threads threads(1);
     const Sparse matrix = operator_matrix();
     auto options = cpu_options();
-    options.keep_factor = true;
     const auto expected = apxchol::factorize(matrix, options.factor_opts);
     std::unique_ptr<apxchol::solver> owner;
     {
@@ -394,24 +395,25 @@ TEST(Solver, CpuOwnerAdoptsAnIndependentFactorAndAppliesIt) {
         apxchol::factorization supplied = expected;
         owner = std::make_unique<apxchol::solver>(temporary, std::move(supplied), options);
     }
-    const auto& actual = owner->factor();
-    ASSERT_EQ(actual.L.nonZeros(), expected.L.nonZeros());
-    ASSERT_EQ(actual.L.outer_.size(), expected.L.outer_.size());
-    ASSERT_EQ(actual.L.inner_.size(), expected.L.inner_.size());
-    ASSERT_EQ(actual.L.vals_.size(), expected.L.vals_.size());
+    // factor() is the installed form of the adopted construction factor.
+    const auto actual = owner->factor();
+    EXPECT_EQ(expected.storage, apxchol::factor_storage_type::automatic);
+    EXPECT_EQ(actual.storage, apxchol::factor_storage_type::fp32);
     EXPECT_EQ(actual.perm, expected.perm);
-    EXPECT_TRUE(same_bytes(actual.L.outer_.data(), expected.L.outer_.data(), actual.L.outer_.size()));
-    EXPECT_TRUE(same_bytes(actual.L.inner_.data(), expected.L.inner_.data(), actual.L.inner_.size()));
-    EXPECT_TRUE(same_bytes(actual.L.vals_.data(), expected.L.vals_.data(), actual.L.vals_.size()));
+    EXPECT_EQ(actual.L.rows(), expected.L.rows());
+    EXPECT_EQ(static_cast<std::size_t>(actual.L.nonZeros()), csc_access::vals(actual.L).size());
+    EXPECT_LE(actual.L.nonZeros(), expected.L.nonZeros());
     apxchol::solver reference(matrix, expected, options);
+    apxchol::solver reinstalled(matrix, actual, options);
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), -1.0, 2.0);
     const auto applied = owner->apply(rhs);
     const auto reference_applied = reference.apply(rhs);
     EXPECT_TRUE(same_bytes(applied.data(), reference_applied.data(), applied.size()));
+    const auto reinstalled_applied = reinstalled.apply(rhs);
+    EXPECT_TRUE(same_bytes(applied.data(), reinstalled_applied.data(), applied.size()));
     expect_solution(matrix, rhs, owner->solve(rhs).x);
 
     options.backend = apxchol::solve_backend::automatic;
-    options.keep_factor = false;
     apxchol::solver automatic_owner(matrix, expected, options);
     EXPECT_EQ(automatic_owner.backend(), apxchol::solve_backend::cpu);
     EXPECT_TRUE(same_bytes(automatic_owner.apply(rhs).data(),
@@ -481,7 +483,8 @@ TEST(Solver, AdoptedSddmFactorCanPreconditionALaplacian) {
     const auto factor = apxchol::factorize(sddm);
     ASSERT_TRUE(factor.sddm);
     apxchol::solver owner(laplacian, factor, cpu_options());
-    const Eigen::Vector2d rhs(1, -1);
+    // Dynamic-size: GCC 14 with AVX misreads a Vector2d copy as out of bounds.
+    const Eigen::VectorXd rhs = (Eigen::VectorXd(2) << 1, -1).finished();
     const auto result = owner.solve(rhs);
     EXPECT_TRUE(result.converged);
     expect_solution(laplacian, rhs, result.x);
@@ -795,15 +798,50 @@ TEST(Solver, RejectsInvalidDefaultsAndResolvedOverrides) {
     const Eigen::VectorXd b = Eigen::VectorXd::Ones(matrix.rows());
     Eigen::MatrixXd B = b.replicate(1, 2), X(matrix.rows(), 2);
     Eigen::MatrixXd empty(matrix.rows(), 0), empty_output(matrix.rows(), 0);
-    for (double tol : {0.0, std::numeric_limits<double>::quiet_NaN(),
+    for (double tol : {0.0, -1.0, -1e-12, std::numeric_limits<double>::quiet_NaN(),
                        std::numeric_limits<double>::infinity(),
                        -std::numeric_limits<double>::infinity()}) {
         EXPECT_THROW(owner.solve(b, tol), std::invalid_argument);
         EXPECT_THROW(owner.solve(B, X, tol), std::invalid_argument);
         EXPECT_THROW(owner.solve(empty, empty_output, tol), std::invalid_argument);
     }
-    EXPECT_TRUE(owner.solve(b, -1, -1).converged);
+    for (int max_iter : {-1, -7}) {
+        EXPECT_THROW(owner.solve(b, std::nullopt, max_iter), std::invalid_argument);
+        EXPECT_THROW(owner.solve(B, X, std::nullopt, max_iter), std::invalid_argument);
+    }
+    EXPECT_TRUE(owner.solve(b).converged);
     EXPECT_FALSE(owner.solve(b, defaults.tol, 0).converged);
+}
+
+TEST(Solver, OmittedLimitsUseConstructorOptions) {
+    const scoped_omp_threads threads(1);
+    const Sparse matrix = operator_matrix();
+    auto options = cpu_options();
+    options.tol = 1e-3;
+    options.max_iter = 2;
+    apxchol::solver owner(matrix, options);
+    const Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
+    const Eigen::MatrixXd B = Eigen::MatrixXd::Random(matrix.rows(), 3);
+    const auto same = [](const apxchol::solve_result& left, const apxchol::solve_result& right) {
+        EXPECT_EQ(left.iterations, right.iterations);
+        EXPECT_EQ(left.residual, right.residual);
+        EXPECT_EQ(left.converged, right.converged);
+    };
+    const auto check = [&](auto& instance) {
+        const auto implicit = instance.solve(b);
+        const auto explicit_limits = instance.solve(b, options.tol, options.max_iter);
+        same(implicit, explicit_limits);
+        EXPECT_TRUE(same_bytes(implicit.x.data(), explicit_limits.x.data(), b.size()));
+        EXPECT_LE(implicit.iterations, options.max_iter);
+        Eigen::MatrixXd X(B.rows(), B.cols()), Y(B.rows(), B.cols());
+        const auto batch = instance.solve(B, X);
+        const auto explicit_batch = instance.solve(B, Y, options.tol, options.max_iter);
+        ASSERT_EQ(batch.columns.size(), explicit_batch.columns.size());
+        for (std::size_t c = 0; c < batch.columns.size(); ++c)
+            same(batch.columns[c], explicit_batch.columns[c]);
+        EXPECT_TRUE(same_bytes(X.data(), Y.data(), X.size()));
+    };
+    check(owner);
 }
 
 TEST(Solver, CpuScalarViewsRejectWrongSizesAndAliasing) {
@@ -815,7 +853,7 @@ TEST(Solver, CpuScalarViewsRejectWrongSizesAndAliasing) {
     EXPECT_THROW(owner.solve(wrong), std::invalid_argument);
     EXPECT_THROW(owner.solve(wrong, x), std::invalid_argument);
     EXPECT_THROW(owner.solve(b, b), std::invalid_argument);
-    EXPECT_THROW(owner.solve(b, x, -1, -1, &x), std::invalid_argument);
+    EXPECT_THROW(owner.solve(b, x, std::nullopt, std::nullopt, &x), std::invalid_argument);
 }
 
 TEST(Solver, ExitChecksRunWithoutATimingTree) {
@@ -967,7 +1005,7 @@ TEST(Solver, CudaCopiesShareTheDeviceFactorAndSolveConcurrently) {
 
         std::vector<apxchol::solver> owners(callers, *original);
         for (int t = 0; t < callers; ++t) {
-            EXPECT_EQ(&owners[t].factor(), &original->factor());
+            EXPECT_EQ(&route(owners[t]).factor(), &route(*original).factor());
             EXPECT_EQ(route(owners[t]).trsv().device_factor_values(),
                       route(*original).trsv().device_factor_values());
             EXPECT_EQ(route(owners[t]).pcg().device_operator_values(),
@@ -1025,19 +1063,19 @@ TEST(Solver, CudaOwnerAdoptsHostFactorsAndRejectsInvalidWarmStarts) {
         GTEST_SKIP() << "CUDA unavailable: " << cudaGetErrorString(status);
     ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
     if (count == 0) GTEST_SKIP() << "No CUDA devices";
-    options.factor_opts.is_select = "priority_greedy";
+    options.factor_opts.partitioner = apxchol::partitioner_kind::priority_greedy;
     EXPECT_THROW(apxchol::solver(matrix, options), std::invalid_argument);
     apxchol::solver owner(matrix, host_factor, options);
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     Eigen::VectorXd x0 = Eigen::VectorXd::Zero(matrix.rows() - 1);
-    EXPECT_THROW(owner.solve(rhs, -1.0, -1, &x0), std::invalid_argument);
+    EXPECT_THROW(owner.solve(rhs, std::nullopt, std::nullopt, &x0), std::invalid_argument);
     Eigen::VectorXd output(matrix.rows());
-    EXPECT_THROW(owner.solve(rhs, output, -1.0, -1, &x0), std::invalid_argument);
+    EXPECT_THROW(owner.solve(rhs, output, std::nullopt, std::nullopt, &x0), std::invalid_argument);
     x0 = Eigen::VectorXd::Zero(matrix.rows());
     for (const double value : {std::numeric_limits<double>::infinity(),
                                std::numeric_limits<double>::quiet_NaN()}) {
         x0[0] = value;
-        EXPECT_THROW(owner.solve(rhs, -1.0, -1, &x0), std::invalid_argument);
+        EXPECT_THROW(owner.solve(rhs, std::nullopt, std::nullopt, &x0), std::invalid_argument);
     }
     EXPECT_EQ(owner.backend(), apxchol::solve_backend::gpu);
     const auto recovered = owner.solve(rhs);
@@ -1235,7 +1273,6 @@ TEST(Solver, GpuOwnerPreservesStorageAndAdoptsItsFactor) {
         auto options = cpu_options();
         options.backend = apxchol::solve_backend::gpu;
         options.factor_opts.factor_storage = storage;
-        options.keep_factor = true;
         std::unique_ptr<apxchol::solver> owner;
         {
             Sparse temporary = matrix;
@@ -1244,21 +1281,23 @@ TEST(Solver, GpuOwnerPreservesStorageAndAdoptsItsFactor) {
         EXPECT_EQ(owner->backend(), apxchol::solve_backend::gpu);
         EXPECT_EQ(owner->rows(), matrix.rows());
         EXPECT_EQ(owner->factor_storage(), storage);
-        const auto& exported = owner->factor();
-        options.factor_opts.is_select = "priority_greedy";
+        const auto exported = owner->factor();
+        EXPECT_EQ(exported.storage, storage);
+        options.factor_opts.partitioner = apxchol::partitioner_kind::priority_greedy;
         EXPECT_THROW(apxchol::solver(matrix, options), std::invalid_argument);
         apxchol::solver adopted(matrix, exported, options);
         EXPECT_EQ(adopted.backend(), apxchol::solve_backend::gpu);
         EXPECT_EQ(adopted.factor_storage(), storage);
-        const auto& retained = adopted.factor();
+        const auto retained = adopted.factor();
+        EXPECT_EQ(retained.scale, exported.scale);
         EXPECT_EQ(retained.sddm, exported.sddm);
-        EXPECT_EQ(retained.L.n_, exported.L.n_);
+        EXPECT_EQ(retained.L.rows(), exported.L.rows());
         EXPECT_EQ(retained.perm, exported.perm);
-        EXPECT_EQ(retained.L.outer_, exported.L.outer_);
-        EXPECT_EQ(retained.L.inner_, exported.L.inner_);
-        ASSERT_EQ(retained.L.vals_.size(), exported.L.vals_.size());
-        EXPECT_TRUE(same_bytes(retained.L.vals_.data(), exported.L.vals_.data(),
-                               retained.L.vals_.size()));
+        EXPECT_EQ(csc_access::outer(retained.L), csc_access::outer(exported.L));
+        EXPECT_EQ(csc_access::inner(retained.L), csc_access::inner(exported.L));
+        ASSERT_EQ(csc_access::vals(retained.L).size(), csc_access::vals(exported.L).size());
+        EXPECT_TRUE(same_bytes(csc_access::vals(retained.L).data(), csc_access::vals(exported.L).data(),
+                               csc_access::vals(retained.L).size()));
         const auto result = owner->solve(rhs);
         const auto expected = adopted.solve(rhs);
         EXPECT_EQ(result.backend, apxchol::solve_backend::gpu);
@@ -1656,7 +1695,6 @@ void check_thread_budget(const Sparse& matrix, int ambient, int budget,
     auto options = cpu_options();
     options.backend = backend;
     options.num_threads = budget;
-    options.keep_factor = true;
     Owner owner(matrix, options);
     EXPECT_EQ(omp_get_max_threads(), ambient);
     Owner adopted(matrix, owner.factor(), options);
@@ -1687,10 +1725,10 @@ void check_thread_budget(const Sparse& matrix, int ambient, int budget,
         EXPECT_EQ(omp_get_max_threads(), ambient);
     }
     const Eigen::VectorXd wrong_guess = Eigen::VectorXd::Zero(1);
-    EXPECT_THROW(owner.solve(rhs, -1, -1, &wrong_guess), std::invalid_argument);
+    EXPECT_THROW(owner.solve(rhs, std::nullopt, std::nullopt, &wrong_guess), std::invalid_argument);
     EXPECT_EQ(omp_get_max_threads(), ambient);
     auto invalid = options;
-    invalid.factor_opts.is_select = "not_a_partitioner";
+    invalid.factor_opts.partitioner = static_cast<apxchol::partitioner_kind>(99);
     EXPECT_THROW(Owner(matrix, invalid), std::invalid_argument);
     EXPECT_EQ(omp_get_max_threads(), ambient);
 }

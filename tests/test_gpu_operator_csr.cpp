@@ -869,7 +869,6 @@ TEST(GpuOperatorCsr, ReusableOwnersFollowTheirSetupDeviceAcrossThreads) {
     options.backend = apxchol::solve_backend::gpu;
     options.num_threads = 1;
     options.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
-    options.keep_factor = true;
     const auto host_factor = apxchol::factorize(A);
     for (const bool adopt : {false, true}) {
         SCOPED_TRACE(adopt);
