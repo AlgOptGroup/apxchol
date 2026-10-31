@@ -4,6 +4,8 @@
 #include <Eigen/Sparse>
 #include <array>
 #include <filesystem>
+#include <optional>
+#include <utility>
 #include <vector>
 #include <memory>
 
@@ -41,6 +43,9 @@ struct solve_options {
 namespace detail {
 void validate_solve_parameters(double tol, int max_iter);
 void validate_solve_options(const solve_options& opts);
+/// Omitted values take the owner's defaults; explicit values must be valid.
+std::pair<double, int> resolve_solve_parameters(std::optional<double> tol,
+    std::optional<int> max_iter, double default_tolerance, int default_iterations);
 }
 
 struct solve_result {
@@ -53,9 +58,6 @@ struct solve_result {
     /// Wall-clock seconds spent in the solve call. Zero in batch columns,
     /// which share the batch total.
     double solve_seconds = 0.0;
-    // Device-wide VRAM usage (MB), sampled at solve end via cudaMemGetInfo.
-    // -1 = unmeasured (CPU build / host PCG).
-    double solve_vram_mb = -1.0;
     solve_backend backend = solve_backend::cpu;
 };
 
@@ -93,14 +95,17 @@ public:
     solver(const solver& other);
     solver& operator=(const solver& other);
 
-    /// Solve Ax=b. Negative tol/max_iter use constructor defaults. x0 supplies
-    /// an optional initial guess; nullptr starts from zero. Inspect converged
-    /// in the result even when the iteration budget is exhausted.
-    solve_result solve(const Eigen::VectorXd& b, double tol = -1.0,
-                       int max_iter = -1, const Eigen::VectorXd* x0 = nullptr);
+    /// Solve Ax=b. Omitted tol/max_iter use the constructor's solve_options;
+    /// explicit values must be valid. x0 supplies an optional initial guess;
+    /// nullptr starts from zero. Inspect converged in the result even when
+    /// the iteration budget is exhausted.
+    solve_result solve(const Eigen::VectorXd& b, std::optional<double> tol = std::nullopt,
+                       std::optional<int> max_iter = std::nullopt,
+                       const Eigen::VectorXd* x0 = nullptr);
     /// Write into caller storage; the returned result leaves x empty.
     solve_result solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
-                       double tol = -1.0, int max_iter = -1,
+                       std::optional<double> tol = std::nullopt,
+                       std::optional<int> max_iter = std::nullopt,
                        const Eigen::VectorXd* x0 = nullptr);
     /// Apply the preconditioner to finite scalar or matrix input.
     Eigen::VectorXd apply(const Eigen::VectorXd& r);
@@ -111,7 +116,8 @@ public:
             && (Input::Flags & Eigen::DirectAccessBit) != 0
             && (Output::Flags & Eigen::DirectAccessBit) != 0)
     batch_solve_result solve(const Eigen::MatrixBase<Input>& B, Eigen::MatrixBase<Output>& X,
-                             double tol = -1, int max_iter = -1,
+                             std::optional<double> tol = std::nullopt,
+                             std::optional<int> max_iter = std::nullopt,
                              const const_matrix_view* X0 = nullptr) {
         using Stride = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
         const Eigen::Map<const Eigen::MatrixXd, 0, Stride> rhs(B.derived().data(),
@@ -149,8 +155,9 @@ public:
 private:
     solver(const Eigen::SparseMatrix<double>& A, factorization* F,
            const solve_options& opts, detail::checkpoint* timings);
-    batch_solve_result solve_batch(const_matrix_view B, matrix_view X, double tol,
-                                   int max_iter, const const_matrix_view* X0);
+    batch_solve_result solve_batch(const_matrix_view B, matrix_view X,
+                                   std::optional<double> tol, std::optional<int> max_iter,
+                                   const const_matrix_view* X0);
     struct impl;
     std::unique_ptr<impl> impl_;
 };

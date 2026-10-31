@@ -148,6 +148,52 @@ class CompleteRouteReceiptTest(unittest.TestCase):
             self.assertEqual(row["retained_repeats"], 3)
             self.assertEqual(row["stop_check_s"], 0.25)
 
+
+GPU_RECEIPT = ("[bench] gpu_memory pid=4242 bus_id=00000000:01:00.0 baseline_mib=238.0 "
+               "other_processes=1 other_mib=512.0\n")
+
+
+class GpuMemoryTest(unittest.TestCase):
+    def test_nvml_columns_parse_with_repeat_receipts(self):
+        row = rc.parse_csv("v1,m,4,12,1,2,3,7,1e-9,1,2,3,96.5,120.0,3,2,9e-9,original-v1,2,0.25,gpu\n")
+        self.assertEqual(row["solve_vram_mb"], 96.5)
+        self.assertEqual(row["setup_vram_mb"], 120.0)
+        self.assertEqual(row["retained_repeats"], 3)
+        self.assertEqual(row["max_repeat_rel_res"], 9e-9)
+
+    def test_unavailable_vram_is_absent(self):
+        row = rc.parse_csv("v1,m,4,12,1,2,3,7,1e-9,1,2,3,-1,-1,3,2,9e-9,original-v1,2,0.25,cpu\n")
+        self.assertNotIn("solve_vram_mb", row)
+        self.assertNotIn("setup_vram_mb", row)
+        self.assertEqual(row["retained_repeats"], 3)
+
+    def test_device_wide_vram_from_older_binaries_is_not_stored(self):
+        row = rc.parse_csv("v1,m,4,12,1,2,3,7,1e-9,1,2,3,900,3,2,9e-9,original-v1,2,0.25,gpu\n")
+        self.assertNotIn("solve_vram_mb", row)
+        self.assertEqual(row["retained_repeats"], 3)
+
+    def test_receipt_reports_baseline_and_other_processes(self):
+        self.assertEqual(rc.parse_gpu_memory("noise\n" + GPU_RECEIPT), {
+            "vram_baseline_mb": 238.0, "gpu_other_processes": 1,
+            "gpu_other_mb": 512.0, "gpu_shared": True})
+        self.assertEqual(rc.parse_gpu_memory("cpu route only\n"), {})
+
+    def test_unavailable_receipt_is_none_not_zero(self):
+        metrics = rc.parse_gpu_memory(
+            "[bench] gpu_memory pid=7 bus_id=unknown baseline_mib=unavailable reason=mig "
+            "other_processes=unknown other_mib=unknown\n")
+        self.assertEqual(metrics, {
+            "vram_baseline_mb": None, "vram_unavailable": "mig", "gpu_other_processes": None,
+            "gpu_other_mb": None, "gpu_shared": None})
+
+    def test_multiword_nvml_reason_keeps_sharing_metadata(self):
+        metrics = rc.parse_gpu_memory(
+            "[bench] gpu_memory pid=7 bus_id=00000000:01:00.0 baseline_mib=unavailable "
+            "reason=Insufficient Permissions other_processes=2 other_mib=640.0\n")
+        self.assertEqual(metrics, {
+            "vram_baseline_mb": None, "vram_unavailable": "Insufficient Permissions",
+            "gpu_other_processes": 2, "gpu_other_mb": 640.0, "gpu_shared": True})
+
     def test_old_rows_do_not_invent_route_and_unknown_routes_fail(self):
         old = "v1,m,4,12,1,2,3,7,1e-9,1,2,original-v1,2,0.25"
         self.assertNotIn("execution_route", rc.parse_csv(old + "\n"))
