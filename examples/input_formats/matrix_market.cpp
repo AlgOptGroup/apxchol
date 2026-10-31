@@ -27,7 +27,13 @@ const char* const example_file = R"(%%MatrixMarket matrix coordinate real symmet
 int main(int argc, char** argv) {
     std::ifstream file;
     std::istringstream text(example_file);
-    if (argc > 1) file.open(argv[1]);
+    if (argc > 1) {
+        file.open(argv[1]);
+        if (!file) {
+            std::fprintf(stderr, "cannot open %s\n", argv[1]);
+            return 2;
+        }
+    }
     std::istream& in = argc > 1 ? static_cast<std::istream&>(file) : text;
 
     // Symmetric files store one triangle; the reader mirrors it into both.
