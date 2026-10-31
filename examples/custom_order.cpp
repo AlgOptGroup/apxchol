@@ -63,7 +63,7 @@ int main() {
     std::printf("custom-order factor: nnz %zu, %zu rounds\n",
                 size_t(F.L.nonZeros()), F.rounds.size());
 
-    apxchol::cpu_solver slv(L, std::move(F));
+    apxchol::solver slv(L, std::move(F));
     auto res = slv.solve(b);
     std::printf("custom-order solve : %ld iterations, residual %.2e\n",
                 long(res.iterations), res.residual);
