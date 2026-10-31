@@ -85,7 +85,8 @@ See the header for optional `sample_bounded` and
 `residual_handoff_threshold` traits.
 
 `ctx.options` contains selection settings, `ctx.seed` supplies randomness,
-`ctx.omp_threshold` gates parallel work, and `ctx.cp` is optional profiling.
+`ctx.omp_threshold` gates parallel work, `ctx.degree_tiebreak` asks the rule to
+prefer lower-degree vertices in conflicts, and `ctx.cp` is optional profiling.
 The rule is called once per round and may parallelize internally. This is the
 opposite of the eliminator, whose individual calls are already parallelized.
 
@@ -108,8 +109,9 @@ edges, not current live edges.
 
 Partitioner instances are passed by value. Callable adapters are
 `as_partitioner` and `as_prepass_partitioner`. Direct template use requires no
-registry change; by-name CLI/binding dispatch requires adding the type to
-`partitioner_list`. [custom_order.cpp](../examples/custom_order.cpp) shows
+registry change; dispatch through `factor_options::partitioner`, the CLI and
+bindings requires adding the type to `partitioner_list` and a matching
+`partitioner_kind` value and name. [custom_order.cpp](../examples/custom_order.cpp) shows
 complete integration.
 
 ## Reusing a custom factor
@@ -135,9 +137,11 @@ Eigen iterative solver. That adapter always applies it on CPU.
 
 A `factorization` holds CSC factor columns
 (diagonal first), permutation with `perm[original] = elimination_position`,
-operator kind, and round metadata. Preserve these conventions. Enable
-`set_keep_factor(true)` before installation if the preconditioner must retain
-exportable factor arrays; consuming solver paths may release them.
+operator kind, and round metadata. Preserve these conventions. The factor `L`
+is a read-only view; build factors with `factorize` or load them from an
+archive. Enable `set_keep_factor(true)` before installation if the
+preconditioner must retain exportable factor arrays; consuming solver paths
+may release them.
 
 Graph storage is the directed AoS pool. Custom partitioners and eliminators
 operate on the same graph. The PCG recurrence, factor-column formula, and triangular-solve

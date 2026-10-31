@@ -160,12 +160,9 @@ support fewer construction choices.
 
 | Keyword | Meaning |
 |---|---|
-| `degree_quantile` | Degree cutoff quantile; `0` selects the multiplier-based cutoff |
+| `sampler` | Clique sampler: `"gks"` (default) or `"trace_cycle"` (CPU and CUDA only) |
+| `degree_quantile` | Degree cutoff quantile in `[0, 1)`; `0` selects the multiplier-based cutoff (Metal requires `(0, 1)`); `None` uses the backend default |
 | `degree_multiplier` | Positive degree multiplier, used only when `degree_quantile=0` |
-| `degree_tiebreak` | Prefer lower-degree vertices in selection conflicts |
-| `exact_clique_max_degree` | Maximum degree for exact clique elimination; `0` disables it |
-| `residual_peel` | Residual pivot order: `"natural"`, `"min_degree"` or `"bk_serial"` |
-| `cpu_schedule` | CPU triangular-solve scheduling: `"auto"` or `"levels"` |
 | `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
 | `regularization` | Minimum diagonal excess of the preconditioner, as a fraction of each diagonal after lumping; excess below 1e-12 of the diagonal counts as zero first; `A` is not modified; `0` disables it |
 | `lump_max_mass` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |

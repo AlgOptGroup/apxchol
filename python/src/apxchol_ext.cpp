@@ -54,10 +54,8 @@ Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
 // ── options dict -> solve_options ────────────────────────────────────────────
 // Every key the binding understands, in the order reported by the error message.
 const char* const kValidKeys[] = {
-    "backend", "num_threads", "seed", "partitioner", "keep_factor", "factor_storage_dtype",
-    "degree_quantile", "degree_multiplier", "degree_tiebreak",
-    "exact_clique_max_degree",
-    "residual_peel", "cpu_schedule", "drop_tolerance",
+    "backend", "num_threads", "seed", "partitioner", "sampler", "keep_factor",
+    "factor_storage_dtype", "degree_quantile", "degree_multiplier", "drop_tolerance",
     "regularization", "lump_max_mass", "verbose",
 };
 
@@ -77,15 +75,6 @@ apxchol::solve_backend parse_backend(const std::string& name) {
     throw std::invalid_argument("backend must be auto, cpu or gpu");
 }
 
-apxchol::residual_peel_strategy parse_peel(const std::string& name) {
-    if (name == "natural")    return apxchol::residual_peel_strategy::natural;
-    if (name == "min_degree") return apxchol::residual_peel_strategy::min_degree;
-    if (name == "bk_serial")  return apxchol::residual_peel_strategy::bk_serial;
-    throw std::invalid_argument(
-        "unknown residual_peel '" + name +
-        "'; valid: natural, min_degree, bk_serial");
-}
-
 apxchol::solve_options parse_options(const py::dict& d) {
     apxchol::solve_options so{.collect_timings = false};
     for (auto item : d) {
@@ -98,18 +87,18 @@ apxchol::solve_options parse_options(const py::dict& d) {
         else if (key == "keep_factor")       so.keep_factor_values = v.cast<bool>();
         // factor_options
         else if (key == "seed")               so.factor_opts.seed = v.cast<unsigned>();
-        else if (key == "partitioner")        so.factor_opts.is_select = v.cast<std::string>();
-        else if (key == "degree_quantile")    so.factor_opts.partition.degree_quantile = v.cast<double>();
+        else if (key == "partitioner")
+            so.factor_opts.partitioner = apxchol::detail::parse_option_name(
+                apxchol::detail::partitioner_names, v.cast<std::string>(), key);
+        else if (key == "sampler")
+            so.factor_opts.sampler = apxchol::detail::parse_option_name(
+                apxchol::detail::clique_sampler_names, v.cast<std::string>(), key);
+        else if (key == "degree_quantile") {
+            if (!v.is_none()) so.factor_opts.partition.degree_quantile = v.cast<double>();
+        }
         else if (key == "degree_multiplier")  so.factor_opts.partition.degree_multiplier = v.cast<double>();
-        else if (key == "degree_tiebreak")    so.factor_opts.partition.degree_tiebreak = v.cast<bool>();
-        else if (key == "exact_clique_max_degree")
-            so.factor_opts.exact_clique_max_degree = v.cast<std::size_t>();
-        else if (key == "residual_peel")
-            so.factor_opts.residual_peel = parse_peel(v.cast<std::string>());
         else if (key == "factor_storage_dtype")
             so.factor_opts.factor_storage = apxchol::detail::parse_factor_storage(v.cast<std::string>());
-        else if (key == "cpu_schedule")
-            so.factor_opts.cpu_schedule = apxchol::detail::parse_cpu_schedule(v.cast<std::string>());
         else if (key == "drop_tolerance")     so.factor_opts.drop_tolerance = v.cast<double>();
         else if (key == "regularization")     so.factor_opts.regularization = v.cast<double>();
         else if (key == "lump_max_mass")       so.factor_opts.lump_max_mass = v.cast<double>();
@@ -256,7 +245,7 @@ public:
     }
 
     // nnz of the lower-triangular factor G (diagonal included). Survives
-    // release_values() — the column pointers are always retained.
+    // released values — the column pointers are always retained.
     std::int64_t factor_nnz() const {
         return static_cast<std::int64_t>(factor().L.nonZeros());
     }
@@ -266,7 +255,7 @@ public:
     py::tuple factor_csc() const {
         const apxchol::factorization& F = factor();
         const std::int64_t nnz = static_cast<std::int64_t>(F.L.nonZeros());
-        if (nnz > 0 && F.L.vals_.empty())
+        if (nnz > 0 && !F.L.has_values())
             throw std::runtime_error(
                 "factor values not retained; construct with keep_factor=True");
 
@@ -277,11 +266,14 @@ public:
         auto* ip = indptr.mutable_data();
         auto* ii = indices.mutable_data();
         auto* dd = data.mutable_data();
+        const auto outer = F.L.col_ptrs();
+        const auto inner = F.L.row_indices();
+        const auto vals = F.L.values();
         for (std::int64_t c = 0; c <= ncol; ++c)
-            ip[c] = static_cast<std::int64_t>(F.L.outer_[static_cast<std::size_t>(c)]);
+            ip[c] = static_cast<std::int64_t>(outer[static_cast<std::size_t>(c)]);
         for (std::int64_t k = 0; k < nnz; ++k) {
-            ii[k] = static_cast<std::int32_t>(F.L.inner_[static_cast<std::size_t>(k)]);
-            dd[k] = F.L.vals_[static_cast<std::size_t>(k)];
+            ii[k] = static_cast<std::int32_t>(inner[static_cast<std::size_t>(k)]);
+            dd[k] = vals[static_cast<std::size_t>(k)];
         }
         return py::make_tuple(indptr, indices, data);
     }

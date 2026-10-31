@@ -448,7 +448,7 @@ struct metal_solver::impl {
         detail::validate_solve_options(opts);
         if (opts.backend == solve_backend::cpu)
             throw std::invalid_argument("metal_solver cannot execute an explicit CPU request");
-        if (opts.factor_opts.cpu_schedule != cpu_sptrsv_schedule::automatic)
+        if (opts.factor_opts.experimental.cpu_schedule != cpu_sptrsv_schedule::automatic)
             throw std::invalid_argument("Metal cannot use a CPU triangular-solve schedule");
         factor_fp16 = detail::resolve_fp16_storage(opts.factor_opts.factor_storage, false);
         if (!metal_solver::available())
@@ -555,7 +555,7 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
     static_assert(std::is_same_v<Eigen::SparseMatrix<double>::StorageIndex, int>);
     laplacian = !F.sddm;
     const auto m = static_cast<std::uint32_t>(laplacian ? n - 1 : n);
-    if (F.L.outerIndexPtr()[m] > static_cast<edge_index>(std::numeric_limits<int>::max()))
+    if (F.L.col_ptrs()[m] > static_cast<edge_index>(std::numeric_limits<int>::max()))
         throw std::length_error("metal_solver: the factor exceeds the device's 32-bit offsets");
 
     if (cp) { cp->descend("setup"); cp->tick(); }
@@ -584,7 +584,7 @@ void metal_solver::impl::setup(const Eigen::SparseMatrix<double>& A, checkpoint*
         // Keep compensated dropping in the shared FP64 host implementation.
         // Both backends consume the CSR factor without a level-permuted value copy.
         backward = cuda_host::build_L11_csc_int<float>(F.L, m);
-        if (!opts.keep_factor_values) F.L.release_values();
+        if (!opts.keep_factor_values) detail::sparse_csc_access::release_values(F.L);
         scales = cuda_host::column_scales(backward);
         if (factor_fp16) cuda_host::normalize_fp16_scales(backward, scales);
         cuda_host::apply_factor_drop(backward, scales, opts.factor_opts.drop_tolerance, factor_fp16);

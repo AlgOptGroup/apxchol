@@ -29,6 +29,8 @@
 #include "apxchol/solver/metal_solver.h"
 #endif
 
+using csc_access = apxchol::detail::sparse_csc_access;
+
 namespace {
 using Sparse = Eigen::SparseMatrix<double>;
 
@@ -429,13 +431,13 @@ TEST(Solver, CpuOwnerAdoptsAnIndependentFactorAndAppliesIt) {
     }
     const auto& actual = owner->factor();
     ASSERT_EQ(actual.L.nonZeros(), expected.L.nonZeros());
-    ASSERT_EQ(actual.L.outer_.size(), expected.L.outer_.size());
-    ASSERT_EQ(actual.L.inner_.size(), expected.L.inner_.size());
-    ASSERT_EQ(actual.L.vals_.size(), expected.L.vals_.size());
+    ASSERT_EQ(csc_access::outer(actual.L).size(), csc_access::outer(expected.L).size());
+    ASSERT_EQ(csc_access::inner(actual.L).size(), csc_access::inner(expected.L).size());
+    ASSERT_EQ(csc_access::vals(actual.L).size(), csc_access::vals(expected.L).size());
     EXPECT_EQ(actual.perm, expected.perm);
-    EXPECT_TRUE(same_bytes(actual.L.outer_.data(), expected.L.outer_.data(), actual.L.outer_.size()));
-    EXPECT_TRUE(same_bytes(actual.L.inner_.data(), expected.L.inner_.data(), actual.L.inner_.size()));
-    EXPECT_TRUE(same_bytes(actual.L.vals_.data(), expected.L.vals_.data(), actual.L.vals_.size()));
+    EXPECT_TRUE(same_bytes(csc_access::outer(actual.L).data(), csc_access::outer(expected.L).data(), csc_access::outer(actual.L).size()));
+    EXPECT_TRUE(same_bytes(csc_access::inner(actual.L).data(), csc_access::inner(expected.L).data(), csc_access::inner(actual.L).size()));
+    EXPECT_TRUE(same_bytes(csc_access::vals(actual.L).data(), csc_access::vals(expected.L).data(), csc_access::vals(actual.L).size()));
     const apxchol::cpu_solver reference(matrix, expected, options);
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), -1.0, 2.0);
     const auto applied = owner->apply(rhs);
@@ -1031,7 +1033,7 @@ TEST(Solver, CudaOwnerAdoptsHostFactorsAndRejectsInvalidWarmStarts) {
         GTEST_SKIP() << "CUDA unavailable: " << cudaGetErrorString(status);
     ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
     if (count == 0) GTEST_SKIP() << "No CUDA devices";
-    options.factor_opts.is_select = "priority_greedy";
+    options.factor_opts.partitioner = apxchol::partitioner_kind::priority_greedy;
     EXPECT_THROW(apxchol::solver(matrix, options), std::invalid_argument);
     apxchol::solver owner(matrix, host_factor, options);
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
@@ -1256,20 +1258,20 @@ TEST(Solver, GpuOwnerPreservesStorageAndAdoptsItsFactor) {
         EXPECT_EQ(owner->rows(), matrix.rows());
         EXPECT_EQ(owner->factor_storage(), storage);
         const auto& exported = owner->factor();
-        options.factor_opts.is_select = "priority_greedy";
+        options.factor_opts.partitioner = apxchol::partitioner_kind::priority_greedy;
         EXPECT_THROW(apxchol::solver(matrix, options), std::invalid_argument);
         apxchol::solver adopted(matrix, exported, options);
         EXPECT_EQ(adopted.backend(), apxchol::solve_backend::gpu);
         EXPECT_EQ(adopted.factor_storage(), storage);
         const auto& retained = adopted.factor();
         EXPECT_EQ(retained.sddm, exported.sddm);
-        EXPECT_EQ(retained.L.n_, exported.L.n_);
+        EXPECT_EQ(retained.L.rows(), exported.L.rows());
         EXPECT_EQ(retained.perm, exported.perm);
-        EXPECT_EQ(retained.L.outer_, exported.L.outer_);
-        EXPECT_EQ(retained.L.inner_, exported.L.inner_);
-        ASSERT_EQ(retained.L.vals_.size(), exported.L.vals_.size());
-        EXPECT_TRUE(same_bytes(retained.L.vals_.data(), exported.L.vals_.data(),
-                               retained.L.vals_.size()));
+        EXPECT_EQ(csc_access::outer(retained.L), csc_access::outer(exported.L));
+        EXPECT_EQ(csc_access::inner(retained.L), csc_access::inner(exported.L));
+        ASSERT_EQ(csc_access::vals(retained.L).size(), csc_access::vals(exported.L).size());
+        EXPECT_TRUE(same_bytes(csc_access::vals(retained.L).data(), csc_access::vals(exported.L).data(),
+                               csc_access::vals(retained.L).size()));
         const auto result = owner->solve(rhs);
         const auto expected = adopted.solve(rhs);
         EXPECT_EQ(result.backend, apxchol::solve_backend::gpu);
@@ -1703,7 +1705,7 @@ void check_thread_budget(const Sparse& matrix, int ambient, int budget,
     EXPECT_THROW(owner.solve(rhs, std::nullopt, std::nullopt, &wrong_guess), std::invalid_argument);
     EXPECT_EQ(omp_get_max_threads(), ambient);
     auto invalid = options;
-    invalid.factor_opts.is_select = "not_a_partitioner";
+    invalid.factor_opts.partitioner = static_cast<apxchol::partitioner_kind>(99);
     EXPECT_THROW(Owner(matrix, invalid), std::invalid_argument);
     EXPECT_EQ(omp_get_max_threads(), ambient);
 }

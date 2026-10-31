@@ -767,7 +767,6 @@ void cpu_solver::solve_panel(const double *b, double *x, solve_result *results, 
     for (int c = 0; c < C; c++) {
         results[c].lumped_offdiag = precond_.factor().lumped_offdiag;
         results[c].backend = solve_backend::cpu;
-        results[c].solve_vram_mb = -1;
         results[c].iterations = 0;
     }
     r_.resize(n * C);
@@ -1082,12 +1081,11 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
     }
 #if defined(APXCHOL_USE_CUDA)
     bool compatible = sizeof(node_index) == sizeof(std::uint32_t) &&
-        opts.factor_opts.is_select == "block_greedy" &&
-        opts.factor_opts.cpu_schedule == cpu_sptrsv_schedule::automatic &&
-        opts.factor_opts.residual_peel == residual_peel_strategy::natural &&
-        opts.factor_opts.exact_clique_max_degree == 0 &&
-        exact_core_or_off(opts.factor_opts.exact_core_max_h) == 0 &&
-        opts.factor_opts.double_cycle_min_h == 0;
+        opts.factor_opts.partitioner == partitioner_kind::block_greedy &&
+        opts.factor_opts.experimental.cpu_schedule == cpu_sptrsv_schedule::automatic &&
+        opts.factor_opts.experimental.exact_clique_max_degree == 0 &&
+        opts.factor_opts.experimental.exact_core_max_h.value_or(0) == 0 &&
+        opts.factor_opts.experimental.double_cycle_min_h == 0;
     if (compatible && opts.backend == solve_backend::automatic && A) {
         std::size_t offdiagonals = 0;
         bool zeros = false;
