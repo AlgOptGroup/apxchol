@@ -61,8 +61,12 @@ private:
         const auto n = ip.size() - 1;
         if (ip.at(n) != values_.size())
             throw std::invalid_argument("CSC indptr must end at the length of data and indices");
-        imported_ = std::make_unique<apxchol::detail::imported_csc<Index>>(
-            n, ip.data(), ii.data(), values_.data());
+        // The arrays stay referenced, so the O(nnz) import runs without the GIL.
+        {
+            py::gil_scoped_release release;
+            imported_ = std::make_unique<apxchol::detail::imported_csc<Index>>(
+                n, ip.data(), ii.data(), values_.data());
+        }
         indptr_ = std::move(ip);
         indices_ = std::move(ii);
     }
@@ -203,12 +207,15 @@ public:
         r = checked_rhs(r);
         const Fortran input = Fortran::ensure(r);
         if (r.ndim() == 1) {
-            std::vector<double> z;
+            // Write straight into the result: Krylov wrappers call this every iteration.
+            Fortran out(std::vector<py::ssize_t>{r.shape(0)});
+            const apxchol::const_matrix_view in{input.data(), input.shape(0), 1, input.shape(0)};
+            const apxchol::matrix_view z{out.mutable_data(), out.shape(0), 1, out.shape(0)};
             {
                 py::gil_scoped_release release;
-                z = slv_.apply(vector(input));
+                slv_.apply(in, z);
             }
-            return py::array_t<double>(static_cast<py::ssize_t>(z.size()), z.data());
+            return out;
         }
         Fortran out(std::vector<py::ssize_t>(r.shape(), r.shape() + r.ndim()));
         auto z = mutable_matrix(out);

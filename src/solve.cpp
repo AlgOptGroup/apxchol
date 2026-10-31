@@ -1347,6 +1347,9 @@ namespace {
 template<class Index>
 solver from_view(basic_csc_view<Index> A, factorization* F, const solve_options& opts) {
     const auto start = std::chrono::steady_clock::now();
+    // Options first, and the thread ceiling also bounds checking the view.
+    detail::validate_solve_options(opts);
+    const detail::thread_budget threads(opts.num_threads);
     const detail::csc_input input(A);
     solver owner = F ? detail::solver_access::make(input, std::move(*F), opts)
                      : detail::solver_access::make(input, opts);
