@@ -768,6 +768,8 @@ static BenchResult run_apxchol_v1(
         res.iterations = r.iterations;
         capture_fill(solver.preconditioner());
         r.solve_rss_mb = read_vmrss_mb();
+        r.solve_vram_mb = read_vram_mb();   // device VRAM held at solve end, before
+                                            // the session releases its device state.
     } else
 #endif
     {
@@ -799,9 +801,6 @@ static BenchResult run_apxchol_v1(
     r.solve_time = wall_total - r.setup_time;
     if (r.solve_time < 0.0) r.solve_time = 0.0;
     r.total_time = wall_total;
-    r.solve_vram_mb = res.solve_vram_mb; // sampled INSIDE apxchol::solve (the GPU-resident
-                                         // PCG frees all device state before returning);
-                                         // -1 on CPU builds / host-PCG paths.
     r.iterations = static_cast<int>(res.iterations);
     // Independently grade the returned solution against the original operator and RHS.
     {

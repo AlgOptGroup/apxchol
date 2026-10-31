@@ -78,7 +78,6 @@ TEST(SolveRoutes, ExplicitCpuDoesNotPrewarm) {
     options.tol = 1e-10;
     const auto result = apxchol::solve(matrix, rhs, options);
     EXPECT_EQ(result.backend, apxchol::solve_backend::cpu);
-    EXPECT_EQ(result.solve_vram_mb, -1.0);
     expect_solution(matrix, rhs, result);
     // Both named CPU owners stay on CPU even with their default options.
     apxchol::cpu_solver reusable(matrix);

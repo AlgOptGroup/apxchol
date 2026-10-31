@@ -27,6 +27,7 @@
 - Breaking: removed from Python: `apxchol.solver`, `Solver.aspreconditioner` (use `aslinearoperator`), the `storage` and `stagnation_window` options, and the `luby` and `rootset` partitioners.
 - Breaking: Python 3.10 is no longer supported.
 - Breaking: removed CLI flags `--stagnation-window`, `--graph-storage`, `--fs-compact` and `--fs-filter-append`.
+- Breaking: `solve_result::solve_vram_mb` is removed. It reported device-wide memory in use, including other processes, so it did not measure the solve.
 - Breaking: the CLI and bindings no longer accept an adjacency matrix as if it were the operator. Previously both solved adjacency input as the operator and failed without a clear error; now validation rejects it and the error suggests the conversion.
 - New `apxchol.as_operator(M)`, `apxchol_as_operator(M)` and CLI `--convert-input`: a finite symmetric matrix with at least one off-diagonal entry, all of them positive, becomes its graph Laplacian `L = D - M` (self-loops cancel), any other finite symmetric matrix is used as given and checked by the solver, and asymmetric or non-finite input is an error.
 - The CLI solves an `n` by `k` `--rhs` file as one batch, writes an `n` by `k` solution with `-o`, and logs iterations and residuals per column.
