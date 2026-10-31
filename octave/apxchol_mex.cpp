@@ -261,11 +261,11 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                      "usage: [x,iters,resid,conv] = apxchol_mex('solve', h, b, tol, maxiter, x0)");
             auto& s = get_solver(prhs[1]);
             const auto B = mx_to_rhs(prhs[2], s.rows(), "b");
-            const double tol = mxIsDouble(prhs[3]) && mxIsEmpty(prhs[3])
-                ? apxchol::default_tol : scalar_option(prhs[3], "rtol");
-            const int maxiter = mxIsDouble(prhs[4]) && mxIsEmpty(prhs[4])
-                ? apxchol::default_max_iter : integer_option<int>(prhs[4], "maxiter");
-            apxchol::detail::validate_solve_parameters(tol, maxiter);
+            std::optional<double> tol;
+            std::optional<int> maxiter;
+            if (!(mxIsDouble(prhs[3]) && mxIsEmpty(prhs[3]))) tol = scalar_option(prhs[3], "rtol");
+            if (!(mxIsDouble(prhs[4]) && mxIsEmpty(prhs[4])))
+                maxiter = integer_option<int>(prhs[4], "maxiter");
             std::optional<apxchol::const_matrix_view> X0;
             if (nrhs == 6 && !(mxIsDouble(prhs[5]) && mxIsEmpty(prhs[5]))) {
                 const auto guess = mx_to_rhs(prhs[5], s.rows(), "x0");

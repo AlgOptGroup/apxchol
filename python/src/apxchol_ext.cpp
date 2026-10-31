@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/eigen.h>
+#include <pybind11/stl.h>
 #include <pybind11/stl/filesystem.h>
 #include <Eigen/Core>
 #include <Eigen/Sparse>
@@ -178,9 +179,8 @@ public:
         return out;
     }
 
-    py::dict solve(Array b, double tol, int maxiter,
+    py::dict solve(Array b, std::optional<double> tol, std::optional<int> maxiter,
                    py::object x0, py::object out_arr) {
-        apxchol::detail::validate_solve_parameters(tol, maxiter);
         b = checked_rhs(b);
         auto output = output_array(b, out_arr);
         auto copy_alias = [&](Array input) {

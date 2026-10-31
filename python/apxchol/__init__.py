@@ -276,8 +276,8 @@ class Solver:
             x0 = self._rhs(x0, "x0")
             if x0.shape != b.shape:
                 raise ValueError("x0 must have the same shape as b")
-        rtol = _apxchol.DEFAULT_TOL if rtol is None else float(rtol)
-        maxiter = _apxchol.DEFAULT_MAXITER if maxiter is None else index(maxiter)
+        rtol = None if rtol is None else float(rtol)
+        maxiter = None if maxiter is None else index(maxiter)
         res = self._impl.solve(b, rtol, maxiter, x0, out)
         return SolveResult(**res)
 

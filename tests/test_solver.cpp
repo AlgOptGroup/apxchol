@@ -815,7 +815,7 @@ TEST(Solver, RejectsInvalidDefaultsAndResolvedOverrides) {
     const Eigen::VectorXd b = Eigen::VectorXd::Ones(matrix.rows());
     Eigen::MatrixXd B = b.replicate(1, 2), X(matrix.rows(), 2);
     Eigen::MatrixXd empty(matrix.rows(), 0), empty_output(matrix.rows(), 0);
-    for (double tol : {0.0, std::numeric_limits<double>::quiet_NaN(),
+    for (double tol : {0.0, -1.0, -1e-12, std::numeric_limits<double>::quiet_NaN(),
                        std::numeric_limits<double>::infinity(),
                        -std::numeric_limits<double>::infinity()}) {
         EXPECT_THROW(owner.solve(b, tol), std::invalid_argument);
@@ -824,8 +824,47 @@ TEST(Solver, RejectsInvalidDefaultsAndResolvedOverrides) {
         EXPECT_THROW(cpu.solve(B, X, tol), std::invalid_argument);
         EXPECT_THROW(owner.solve(empty, empty_output, tol), std::invalid_argument);
     }
-    EXPECT_TRUE(owner.solve(b, -1, -1).converged);
+    for (int max_iter : {-1, -7}) {
+        EXPECT_THROW(owner.solve(b, std::nullopt, max_iter), std::invalid_argument);
+        EXPECT_THROW(cpu.solve(b, std::nullopt, max_iter), std::invalid_argument);
+        EXPECT_THROW(owner.solve(B, X, std::nullopt, max_iter), std::invalid_argument);
+        EXPECT_THROW(cpu.solve(B, X, std::nullopt, max_iter), std::invalid_argument);
+    }
+    EXPECT_TRUE(owner.solve(b).converged);
     EXPECT_FALSE(owner.solve(b, defaults.tol, 0).converged);
+}
+
+TEST(Solver, OmittedLimitsUseConstructorOptions) {
+    const scoped_omp_threads threads(1);
+    const Sparse matrix = operator_matrix();
+    auto options = cpu_options();
+    options.tol = 1e-3;
+    options.max_iter = 2;
+    apxchol::solver owner(matrix, options);
+    const apxchol::cpu_solver cpu(matrix, options);
+    const Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
+    const Eigen::MatrixXd B = Eigen::MatrixXd::Random(matrix.rows(), 3);
+    const auto same = [](const apxchol::solve_result& left, const apxchol::solve_result& right) {
+        EXPECT_EQ(left.iterations, right.iterations);
+        EXPECT_EQ(left.residual, right.residual);
+        EXPECT_EQ(left.converged, right.converged);
+    };
+    const auto check = [&](auto& instance) {
+        const auto implicit = instance.solve(b);
+        const auto explicit_limits = instance.solve(b, options.tol, options.max_iter);
+        same(implicit, explicit_limits);
+        EXPECT_TRUE(same_bytes(implicit.x.data(), explicit_limits.x.data(), b.size()));
+        EXPECT_LE(implicit.iterations, options.max_iter);
+        Eigen::MatrixXd X(B.rows(), B.cols()), Y(B.rows(), B.cols());
+        const auto batch = instance.solve(B, X);
+        const auto explicit_batch = instance.solve(B, Y, options.tol, options.max_iter);
+        ASSERT_EQ(batch.columns.size(), explicit_batch.columns.size());
+        for (std::size_t c = 0; c < batch.columns.size(); ++c)
+            same(batch.columns[c], explicit_batch.columns[c]);
+        EXPECT_TRUE(same_bytes(X.data(), Y.data(), X.size()));
+    };
+    check(owner);
+    check(cpu);
 }
 
 TEST(Solver, CpuScalarViewsRejectWrongSizesAndAliasing) {
@@ -839,14 +878,14 @@ TEST(Solver, CpuScalarViewsRejectWrongSizesAndAliasing) {
     EXPECT_THROW(cpu.solve(wrong, x), std::invalid_argument);
     EXPECT_THROW(owner.solve(b, b), std::invalid_argument);
     EXPECT_THROW(cpu.solve(b, b), std::invalid_argument);
-    EXPECT_THROW(owner.solve(b, x, -1, -1, &x), std::invalid_argument);
-    EXPECT_THROW(cpu.solve(b, x, -1, -1, &x), std::invalid_argument);
+    EXPECT_THROW(owner.solve(b, x, std::nullopt, std::nullopt, &x), std::invalid_argument);
+    EXPECT_THROW(cpu.solve(b, x, std::nullopt, std::nullopt, &x), std::invalid_argument);
     apxchol::solve_result result;
     result.x = b;
     EXPECT_THROW(owner.solve(result.x, result), std::invalid_argument);
     EXPECT_THROW(cpu.solve(result.x, result), std::invalid_argument);
-    EXPECT_THROW(owner.solve(b, result, -1, -1, &result.x), std::invalid_argument);
-    EXPECT_THROW(cpu.solve(b, result, -1, -1, &result.x), std::invalid_argument);
+    EXPECT_THROW(owner.solve(b, result, std::nullopt, std::nullopt, &result.x), std::invalid_argument);
+    EXPECT_THROW(cpu.solve(b, result, std::nullopt, std::nullopt, &result.x), std::invalid_argument);
 }
 
 TEST(Solver, TimingsCanBeDisabledWithoutDisablingExitChecks) {
@@ -999,16 +1038,16 @@ TEST(Solver, CudaOwnerAdoptsHostFactorsAndRejectsInvalidWarmStarts) {
     apxchol::solver owner(matrix, host_factor, options);
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     Eigen::VectorXd x0 = Eigen::VectorXd::Zero(matrix.rows() - 1);
-    EXPECT_THROW(owner.solve(rhs, -1.0, -1, &x0), std::invalid_argument);
+    EXPECT_THROW(owner.solve(rhs, std::nullopt, std::nullopt, &x0), std::invalid_argument);
     Eigen::VectorXd output(matrix.rows());
-    EXPECT_THROW(owner.solve(rhs, output, -1.0, -1, &x0), std::invalid_argument);
+    EXPECT_THROW(owner.solve(rhs, output, std::nullopt, std::nullopt, &x0), std::invalid_argument);
     apxchol::solve_result result;
-    EXPECT_THROW(owner.solve(rhs, result, -1.0, -1, &x0), std::invalid_argument);
+    EXPECT_THROW(owner.solve(rhs, result, std::nullopt, std::nullopt, &x0), std::invalid_argument);
     x0 = Eigen::VectorXd::Zero(matrix.rows());
     for (const double value : {std::numeric_limits<double>::infinity(),
                                std::numeric_limits<double>::quiet_NaN()}) {
         x0[0] = value;
-        EXPECT_THROW(owner.solve(rhs, result, -1.0, -1, &x0), std::invalid_argument);
+        EXPECT_THROW(owner.solve(rhs, result, std::nullopt, std::nullopt, &x0), std::invalid_argument);
     }
     EXPECT_EQ(owner.backend(), apxchol::solve_backend::gpu);
     const auto recovered = owner.solve(rhs);
@@ -1663,7 +1702,7 @@ void check_thread_budget(const Sparse& matrix, int ambient, int budget,
         EXPECT_EQ(omp_get_max_threads(), ambient);
     }
     const Eigen::VectorXd wrong_guess = Eigen::VectorXd::Zero(1);
-    EXPECT_THROW(owner.solve(rhs, -1, -1, &wrong_guess), std::invalid_argument);
+    EXPECT_THROW(owner.solve(rhs, std::nullopt, std::nullopt, &wrong_guess), std::invalid_argument);
     EXPECT_EQ(omp_get_max_threads(), ambient);
     auto invalid = options;
     invalid.factor_opts.partitioner = static_cast<apxchol::partitioner_kind>(99);
