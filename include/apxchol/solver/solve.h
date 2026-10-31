@@ -76,7 +76,7 @@ struct batch_solve_result {
 /// Owns its input data. solve() and apply() use this object's workspace, so
 /// they are non-const. Concurrent non-const calls on one object are not allowed:
 /// use a copy per thread, or batch the right-hand sides
-/// (docs/usage.md#thread-safety). An overlapping call throws.
+/// (see "Thread safety" in docs/usage.md). An overlapping call throws.
 /// Copies of a CPU solver share its factor and operator; GPU solvers cannot be copied.
 /// Every solve verifies the returned residual against the original operator/RHS.
 /// Supplied factors use CPU in automatic mode; an explicit GPU request uploads them.
