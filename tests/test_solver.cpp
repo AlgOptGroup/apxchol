@@ -527,7 +527,9 @@ TEST(Solver, AttachedTimingTreeRecordsSetupAndEverySolve) {
     apxchol::detail::checkpoint timings;
     auto owner = apxchol::detail::solver_access::with_timings(matrix, cpu_options(), timings);
     const double setup = timings.total("setup");
-    EXPECT_GT(timings.total("setup.backend_selection"), 0.0);
+    // Selecting the backend can take less than one clock tick, so check that
+    // the stage was recorded rather than that it took time.
+    EXPECT_NE(timings.report().find("backend_selection"), std::string::npos);
     EXPECT_EQ(timings.total("pcg"), 0.0);
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     expect_solution(matrix, rhs, owner.solve(rhs).x);
