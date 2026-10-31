@@ -274,10 +274,17 @@ private:
         detail::parallel_exception error;
         #pragma omp parallel reduction(+:multi_total,distinct_total)
         {
+#ifdef _OPENMP
+            const std::size_t tid = static_cast<std::size_t>(omp_get_thread_num());
+            const std::size_t team = static_cast<std::size_t>(omp_get_num_threads());
+#else
+            const std::size_t tid = 0;
+            const std::size_t team = 1;
+#endif
             #pragma omp single
-            totals.assign(static_cast<std::size_t>(omp_get_num_threads()), {});
-            long double& weight_total = totals[static_cast<std::size_t>(omp_get_thread_num())][0];
-            long double& strongest_total = totals[static_cast<std::size_t>(omp_get_thread_num())][1];
+            totals.assign(team, {});
+            long double& weight_total = totals[tid][0];
+            long double& strongest_total = totals[tid][1];
             std::vector<std::pair<node_index, double>> neighbors;
             #pragma omp for schedule(static)
             for (std::size_t s = 0; s < samples; ++s) error.run([&] {
