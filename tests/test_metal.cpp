@@ -1099,7 +1099,7 @@ TEST_F(MetalDevice, CommonSolverAdoptsHostFactorWithCpuOnlyOptions) {
     EXPECT_EQ(adopted.backend(), apxchol::solve_backend::gpu);
     options.backend = apxchol::solve_backend::automatic;
     EXPECT_EQ(apxchol::solver(A, F, options).backend(), apxchol::solve_backend::cpu);
-    options.factor_opts.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+    options.factor_opts.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
     EXPECT_EQ(apxchol::solver(A, F, options).backend(), apxchol::solve_backend::cpu);
     options.backend = apxchol::solve_backend::gpu;
     EXPECT_THROW(apxchol::solver(A, F, options), std::invalid_argument);
@@ -1130,7 +1130,7 @@ TEST_F(MetalDevice, PerSolverPreparationOptionsAreIndependent) {
     EXPECT_THROW(apxchol::metal_solver(near, options), std::invalid_argument);
     options.factor_opts.lump_max_mass = 0.25;
     EXPECT_EQ(apxchol::metal_solver(near, options).factor().lumped_offdiag, 2);
-    options.factor_opts.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+    options.factor_opts.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
     EXPECT_THROW(apxchol::metal_solver(A, options), std::invalid_argument);
 }
 
@@ -1337,9 +1337,9 @@ TEST(MetalOptions, ResidentSetupRejectsUnsupportedOptionsAndLayouts) {
     options.factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
     EXPECT_THROW(apxchol::solver(A, options), std::invalid_argument);
     options.factor_opts.sampler = apxchol::clique_sampler::gks;
-    options.factor_opts.is_select = "priority_greedy";
+    options.factor_opts.partitioner = apxchol::partitioner_kind::priority_greedy;
     EXPECT_THROW(apxchol::solver(A, options), std::invalid_argument);
-    options.factor_opts.is_select = "block_greedy";
+    options.factor_opts.partitioner = apxchol::partitioner_kind::block_greedy;
     if (!apxchol::metal_solver::available()) GTEST_SKIP() << "no usable Metal device";
     Sparse lower = A.triangularView<Eigen::Lower>();
     EXPECT_THROW(apxchol::solver(lower, options), std::invalid_argument);

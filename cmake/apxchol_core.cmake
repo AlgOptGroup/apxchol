@@ -116,7 +116,10 @@ function(apxchol_add_core)
     endif()
     add_library(apxchol_core)
     add_library(apxchol::core ALIAS apxchol_core)
-    set_target_properties(apxchol_core PROPERTIES EXPORT_NAME core POSITION_INDEPENDENT_CODE ON)
+    # Shared builds get a major.minor soname: there is no stable ABI across minors.
+    string(REGEX MATCH "^[0-9]+\\.[0-9]+" soversion "${APXCHOL_VERSION}")
+    set_target_properties(apxchol_core PROPERTIES EXPORT_NAME core POSITION_INDEPENDENT_CODE ON
+        VERSION "${APXCHOL_VERSION}" SOVERSION "${soversion}")
     apxchol_configure_core(apxchol_core)
     include(${CMAKE_CURRENT_FUNCTION_LIST_DIR}/apxchol_install.cmake)
     apxchol_install_core()

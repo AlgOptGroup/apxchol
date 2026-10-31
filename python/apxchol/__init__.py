@@ -58,8 +58,6 @@ def _solver_options(*, backend="auto", num_threads=0, seed=None, partitioner=Non
     if partitioner is not None:
         options["partitioner"] = partitioner
     options.update(advanced)
-    if "exact_clique_max_degree" in options:
-        options["exact_clique_max_degree"] = index(options["exact_clique_max_degree"])
     if factor_storage_dtype is not None:
         options["factor_storage_dtype"] = np.dtype(factor_storage_dtype).name
     return options
@@ -78,16 +76,16 @@ def _scipy_sparse():
 def as_operator(M):
     """Return `M` as an operator for :func:`factorize` and :func:`solve`.
 
-    Like :func:`numpy.asarray`, a valid input is returned unchanged:
+    Like :func:`numpy.asarray`, an operator is returned unchanged. `M` must
+    be square, finite and symmetric; otherwise a ``ValueError`` says why.
 
-    - If `M` passes the solver's operator check (a symmetric Laplacian or
-      SDDM matrix, possibly nearly SDDM), `M` itself is returned.
-    - Otherwise, if `M` has no negative off-diagonal entry, it is a graph
-      adjacency matrix and its Laplacian ``L = D - M`` is returned, where
-      ``D`` holds the row sums of `M`. A diagonal entry (self-loop) adds to
-      ``D`` and is subtracted again, so it cancels. Boolean (pattern) input
-      has unit weights.
-    - Otherwise a ``ValueError`` explains why `M` is neither.
+    - If `M` has off-diagonal entries and none of them is negative, it is a
+      graph adjacency matrix and its Laplacian ``L = D - M`` is returned,
+      where ``D`` holds the row sums of `M`. A diagonal entry (self-loop)
+      adds to ``D`` and is subtracted again, so it cancels. Boolean
+      (pattern) input has unit weights.
+    - Otherwise `M` itself is returned; :func:`factorize` and :func:`solve`
+      check it as an operator.
 
     The CLI's ``--convert-input`` applies the same rule.
 
@@ -413,8 +411,8 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
         deterministic per seed at one thread only). None uses the C++ default.
     partitioner : str or None
         Independent-set selector: "block_greedy", "priority_greedy", or
-        "baumann_kyng". None uses the C++ default. Unknown names raise at
-        factorization time.
+        "baumann_kyng". None uses the C++ default. Unknown names raise
+        ``ValueError``.
     keep_factor : bool
         Retain an extra host factor copy for ``save()``, ``chol()``, ``L``
         and ``D`` export; enabled by default. ``False`` saves this memory while still
@@ -428,12 +426,14 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
         does not change the exported factor's FP32 type or CPU arithmetic's
         FP64 type. Unsupported FP16 requests fail; FP64 storage is unavailable.
     **advanced
-        Passed straight through to the core options: `degree_quantile`,
-        `degree_multiplier`, `degree_tiebreak`, `exact_clique_max_degree`,
-        `residual_peel` ("natural" | "min_degree" | "bk_serial"),
-        `cpu_schedule` ("auto" | "levels"),
+        Passed straight through to the core options:
+        `sampler` ("gks" | "trace_cycle"; default "gks"),
+        `degree_quantile` (in [0, 1); None uses the backend default),
+        `degree_multiplier` (positive),
         `drop_tolerance` (in [0, 1]; 0 disables dropping),
-        `regularization` (nonnegative diagonal fraction; 0 disables),
+        `regularization` (minimum diagonal excess of the preconditioner, as a
+        fraction of each diagonal after lumping; excess below 1e-12 of the
+        diagonal counts as zero first; 0 disables),
         `lump_max_mass` (fraction in [0, 1]; 0 rejects positive off-diagonals),
         and `verbose` (default False).
 
