@@ -30,9 +30,9 @@ struct resident_factor {
 
 void prepare_lane_plans(id<MTLDevice> device, const factorization& factor,
                         triangle& forward, triangle& backward);
-/// The single-lane round plans resident setup builds, for an installed factor
+/// The round plans resident setup builds, for an installed factor
 /// whose rounds are elimination rounds (round_plans_apply), so a reinstalled
-/// factor is solved in the same order as when it was built.
+/// factor uses the same solve schedule as when it was built.
 void prepare_round_plans(id<MTLDevice> device, const factorization& factor,
                          triangle& forward, triangle& backward);
 /// The device operator resident setup builds (input row order, permuted
