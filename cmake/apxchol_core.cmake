@@ -31,37 +31,6 @@ include(${CMAKE_CURRENT_LIST_DIR}/apxchol_eigen.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_arch.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_openmp.cmake)
 
-# Consumers compile the public headers without the core's arch flag. Clang
-# lowers their long double OpenMP reductions to 16-byte atomics, which inline
-# only with cmpxchg16b and otherwise need libatomic.
-include(CheckCXXSourceCompiles)
-include(CMakePushCheckState)
-set(_apxchol_reduction_source "int main() {
-    long double sum = 0;
-#pragma omp parallel for reduction(+ : sum)
-    for (int i = 0; i < 64; ++i) sum += i;
-    return sum > 0 ? 0 : 1;
-}")
-# The probes must link, and their cached results belong to these flags.
-set(_apxchol_saved_target_type "${CMAKE_TRY_COMPILE_TARGET_TYPE}")
-set(CMAKE_TRY_COMPILE_TARGET_TYPE EXECUTABLE)
-string(MD5 _apxchol_probe_key "${CMAKE_CXX_COMPILER};${CMAKE_CXX_FLAGS};${OpenMP_CXX_FLAGS}")
-cmake_push_check_state(RESET)
-set(CMAKE_REQUIRED_LIBRARIES OpenMP::OpenMP_CXX)
-set(CMAKE_REQUIRED_QUIET ON)
-check_cxx_source_compiles("${_apxchol_reduction_source}" APXCHOL_REDUCTION_LINKS_${_apxchol_probe_key})
-set(_APXCHOL_LINK_ATOMIC OFF)
-if (NOT APXCHOL_REDUCTION_LINKS_${_apxchol_probe_key})
-    list(APPEND CMAKE_REQUIRED_LIBRARIES atomic)
-    check_cxx_source_compiles("${_apxchol_reduction_source}"
-                              APXCHOL_REDUCTION_LINKS_ATOMIC_${_apxchol_probe_key})
-    set(_APXCHOL_LINK_ATOMIC ${APXCHOL_REDUCTION_LINKS_ATOMIC_${_apxchol_probe_key}})
-endif()
-cmake_pop_check_state()
-set(CMAKE_TRY_COMPILE_TARGET_TYPE "${_apxchol_saved_target_type}")
-unset(_apxchol_saved_target_type)
-unset(_apxchol_probe_key)
-unset(_apxchol_reduction_source)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_archive.cmake)
 
 if (APXCHOL_DEVICE STREQUAL "METAL")
@@ -86,9 +55,6 @@ function(_apxchol_configure_core target)
         ${root}/src/solver_archive.cpp
     )
     target_link_libraries(${target} PUBLIC Eigen3::Eigen OpenMP::OpenMP_CXX PRIVATE ZLIB::ZLIB)
-    if (_APXCHOL_LINK_ATOMIC)
-        target_link_libraries(${target} PUBLIC atomic)
-    endif()
     target_compile_features(${target} PUBLIC cxx_std_23)
     set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
     target_compile_options(${target} PRIVATE
