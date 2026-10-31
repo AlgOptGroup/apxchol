@@ -1,18 +1,31 @@
 # Apple M1 Max: Metal
 
-Apple M1 Max with 8 performance cores and 32 GB unified memory. Metal is the
-route measured here; for ARM CPU results, see [Daint](performance-daint.md).
+Apple M1 Max: 8 performance and 2 efficiency cores, a 32-core GPU and 32 GB
+unified memory, on macOS 26.0.1. Metal is the route measured here; for ARM CPU
+results, see [Daint](performance-daint.md).
+
+No other solver in the comparison has a Metal backend, so this page shows
+apxchol's own times. All 27 matrices met the 1e-8 tolerance on the original
+system, including com-Orkut (237 million stored nonzeros) within the 32 GB of
+unified memory.
 
 ```{note}
-The 1.0 campaign is running. This page will compare apxchol's Metal route
-with the CPU solvers that build on macOS, on matrices that fit in 32 GB.
+These results were measured with the benchmark's Metal route from a pull
+request that is not merged yet, at revision `0009d670`. Host code used the
+8 performance cores; macOS can't pin threads, so runs were unpinned.
 ```
 
 ## Metal
 
-Chart and table pending.
+![Apple M1 Max Metal: apxchol setup, solve and total time per matrix](performance/mac-metal.svg)
+
+Times come from the repeat with the median total, out of three after one warm-up. Peak memory is the
+whole process.
+
+```{include} performance/mac-metal-table.md
+```
 
 ## Provenance
 
-Source revision, toolchains and input checksums will be listed here, with
-the raw results available for download.
+[Download all cells](performance/mac-20261031.json): hardware, toolchain,
+benchmark binary checksum, matrix checksums and the largest residual over the repeats.

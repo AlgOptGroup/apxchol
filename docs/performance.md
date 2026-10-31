@@ -21,14 +21,13 @@ Apple M1 Max (Metal) <performance-mac>
 ## Headline results
 
 ```{note}
-Each chart shows one-RHS time (setup plus solve) for each competitor relative
+The comparison charts show one-RHS time (setup plus solve) for each competitor relative
 to apxchol: dots are matrices, bars are medians, and values above 1 mean
-apxchol was faster. Euler and Apple M1 Max results for 1.0 are being measured.
+apxchol was faster. Euler results for 1.0 are being measured.
 ```
 
 - **x86_64 CPU (Euler):** chart pending.
 - **CUDA (Euler):** chart pending.
-- **Metal (Apple M1 Max):** chart pending.
 
 ### ARM64 CPU (Daint)
 
@@ -36,6 +35,14 @@ apxchol was faster. Euler and Apple M1 Max results for 1.0 are being measured.
 
 Recorded in September 2026 under older benchmark rules; see the [Daint page](performance-daint.md) for every
 cell and the differences.
+
+### Metal (Apple M1 Max)
+
+No other solver here has a Metal backend, so this chart shows apxchol's own
+one-RHS time on each matrix. All 27 met the tolerance; see the
+[Apple M1 Max page](performance-mac.md) for the table.
+
+![Apple M1 Max Metal: apxchol setup, solve and total time per matrix](performance/mac-metal.svg)
 
 ## How results are measured
 
