@@ -125,9 +125,14 @@ protected:
     Sparse A = matrix();
     solver original{A, options()};
     void SetUp() override {
-        directory = std::filesystem::temp_directory_path() /
-            ("apxchol-archive-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        ASSERT_TRUE(std::filesystem::create_directory(directory));
+        // Parallel test processes can read the same clock tick, so retry until
+        // create_directory claims a fresh directory.
+        const auto stem = "apxchol-archive-" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-";
+        int attempt = 0;
+        do directory = std::filesystem::temp_directory_path() / (stem + std::to_string(attempt));
+        while (!std::filesystem::create_directory(directory) && ++attempt < 1000);
+        ASSERT_LT(attempt, 1000);
         original.save(directory / "original.apxchol");
     }
     void TearDown() override { std::filesystem::remove_all(directory); }
