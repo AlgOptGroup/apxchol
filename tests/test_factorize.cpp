@@ -406,7 +406,7 @@ void expect_valid_rebuilt_laplacian_factor(
     }
     if (::testing::Test::HasFailure()) return;
     const auto b = apxchol::generate_test_rhs(n);
-    apxchol::cpu_solver solver(A, F, {.tol = 1e-8, .max_iter = 500});
+    apxchol::solver solver(A, F, {.tol = 1e-8, .max_iter = 500});
     const auto first = solver.solve(b);
     const auto repeated = solver.solve(b);
     ASSERT_TRUE(first.x.allFinite());
@@ -687,7 +687,7 @@ TEST(FactorRegularization, RejectsUnrepresentableStoredDiagonal) {
         opts.backend = apxchol::solve_backend::cpu;
         opts.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
         opts.factor_opts.regularization = regularization;
-        EXPECT_THROW(apxchol::cpu_solver(L, opts), std::range_error);
+        EXPECT_THROW(apxchol::solver(L, opts), std::range_error);
     }
 }
 
@@ -929,7 +929,7 @@ TEST(PruneSkip, HubGridSolvesAtEveryFactorIncludingTheAggressiveOne) {
     auto run = [&](double skip_factor) {
         auto factor = factorize_controlled(apxchol::make_graph(A), opts.factor_opts,
                                            {.prune_skip_factor = skip_factor});
-        apxchol::cpu_solver solver(A, std::move(factor), opts);
+        apxchol::solver solver(A, std::move(factor), opts);
         return solver.solve(b);
     };
     const auto off = run(0);
@@ -1237,7 +1237,8 @@ static void expect_repeated_solves_bit_identical(const Eigen::SparseMatrix<doubl
                                                  const Eigen::VectorXd& b, bool laplacian) {
     apxchol::solve_options opts;
     opts.tol = 1e-8; opts.max_iter = 500; opts.factor_opts.seed = 42;
-    apxchol::cpu_solver slv(A, opts);
+    opts.backend = apxchol::solve_backend::cpu;
+    apxchol::solver slv(A, opts);
     auto r1 = slv.solve(b);
     auto r2 = slv.solve(b);
     ASSERT_LT(r1.residual, 1e-8);
@@ -1257,7 +1258,7 @@ static void expect_repeated_solves_bit_identical(const Eigen::SparseMatrix<doubl
     if (laplacian) {
         EXPECT_NEAR(z1.mean(), 0.0, 1e-13 * z1.cwiseAbs().maxCoeff());
         // The returned SOLUTION is min-norm regardless of the schedule
-        // (cpu_solver::solve centres x once at the end).
+        // (the CPU solve centres x once at the end).
         EXPECT_NEAR(r1.x.mean(), 0.0, 1e-14 * r1.x.cwiseAbs().maxCoeff());
         EXPECT_NEAR(w1.x.mean(), 0.0, 1e-14 * w1.x.cwiseAbs().maxCoeff());
     }
@@ -1266,7 +1267,7 @@ static void expect_repeated_solves_bit_identical(const Eigen::SparseMatrix<doubl
 TEST(Grounding, PublicApplyIsIndependentOfCallOrderAndPanelWidth) {
     const auto matrix = grid_laplacian(8, 8);
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 64.0);
-    apxchol::cpu_solver owner(matrix);
+    apxchol::solver owner(matrix, {.backend = apxchol::solve_backend::cpu});
     const Eigen::VectorXd expected = owner.apply(rhs);
     ASSERT_GT(expected.norm(), 0.0);
     const double tolerance = 1e-12 * expected.norm();
@@ -1281,8 +1282,7 @@ TEST(Grounding, PublicApplyIsIndependentOfCallOrderAndPanelWidth) {
         SCOPED_TRACE(repeat);
         const Eigen::VectorXd scalar = owner.apply(rhs);
         EXPECT_TRUE((scalar.array() == expected.array()).all());
-        const Eigen::VectorXd eigen = owner.preconditioner().solve(rhs);
-        EXPECT_TRUE((eigen.array() == expected.array()).all());
+        EXPECT_GT(owner.solve(rhs, std::nullopt, 2).iterations, 0);
         owner.apply(panel, output);
         EXPECT_LE((output.col(0) - expected).norm(), tolerance);
         EXPECT_LE((output.col(1) - 2 * expected).norm(), 2 * tolerance);
@@ -1305,7 +1305,7 @@ TEST(PcgFusion, RepeatedSolvesBitIdenticalSDDM) {
 }
 
 // ── Grounding: min-norm Laplacian solution ──
-// cpu_solver::solve returns the MIN-NORM solution of a Laplacian system.
+// The CPU solve returns the MIN-NORM solution of a Laplacian system.
 // Under the center-k schedule the preconditioner skips its output
 // re-centring on most applications, so the PCG iterate drifts along the null
 // space 1 (invisible to the residual); solve_impl subtracts mean(x) once at
@@ -1316,7 +1316,8 @@ TEST(Grounding, LaplacianSolutionIsMinNorm) {
     auto b = apxchol::generate_test_rhs(L.rows());
     apxchol::solve_options opts;
     opts.tol = 1e-8; opts.max_iter = 500; opts.factor_opts.seed = 42;
-    apxchol::cpu_solver slv(L, opts);
+    opts.backend = apxchol::solve_backend::cpu;
+    apxchol::solver slv(L, opts);
     auto r = slv.solve(b);
     ASSERT_LT(r.residual, 1e-8);
     EXPECT_NEAR(r.x.mean(), 0.0, 1e-14 * r.x.cwiseAbs().maxCoeff());
@@ -1617,7 +1618,7 @@ TEST(ResidualSparsifyGate, DuplicateHeavyIndexedGraphConvergesWithEitherSetting)
         auto factor = factorize_controlled(graph, options, {.residual_sparsify = sparsify}, &timings);
         EXPECT_EQ(timings.total("setup.sparsify_residual") > 0.0, sparsify)
             << "fixture must exercise the residual sparsification gate";
-        apxchol::cpu_solver solver(L, std::move(factor));
+        apxchol::solver solver(L, std::move(factor));
         const auto result = solver.solve(b, 1e-8, 500);
         EXPECT_LT((L * result.x - b).norm() / b.norm(), 1e-8);
     }

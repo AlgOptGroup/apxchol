@@ -81,8 +81,8 @@ TEST(SolveRoutes, ExplicitCpuDoesNotPrewarm) {
     const auto result = apxchol::solve(matrix, rhs, options);
     EXPECT_EQ(result.backend, apxchol::solve_backend::cpu);
     expect_solution(matrix, rhs, result);
-    // Both named CPU owners stay on CPU even with their default options.
-    apxchol::cpu_solver reusable(matrix);
+    // A reusable solver on the CPU route stays on CPU as well.
+    apxchol::solver reusable(matrix, options);
     const auto reused = reusable.solve(rhs, 1e-10);
     EXPECT_EQ(reused.backend, apxchol::solve_backend::cpu);
     expect_solution(matrix, rhs, reused);
@@ -189,12 +189,6 @@ TEST(SolveRoutes, ExplicitGpuRejectsUnsupportedConfigurationsBeforeSetup) {
 #endif
 }
 
-TEST(SolveRoutes, CpuSolverRejectsExplicitGpuRequest) {
-    apxchol::solve_options options;
-    options.backend = apxchol::solve_backend::gpu;
-    EXPECT_THROW(apxchol::cpu_solver(operator_matrix(), options), std::invalid_argument);
-}
-
 TEST(SolveRoutes, CommonOwnerRejectsEmptyInput) {
     const Eigen::SparseMatrix<double> empty(0, 0);
     for (const auto backend : {apxchol::solve_backend::automatic,
@@ -210,10 +204,10 @@ TEST(SolveRoutes, CpuFactorReuseAndExportRemainAvailable) {
     apxchol::solve_options options;
     options.backend = apxchol::solve_backend::cpu;
     options.keep_factor_values = true;
-    apxchol::cpu_solver solver(matrix, options);
-    ASSERT_FALSE(csc_access::vals(solver.preconditioner().factor().L).empty());
-    auto factor = solver.preconditioner().factor();
-    apxchol::cpu_solver adopted(matrix, std::move(factor), options);
+    apxchol::solver solver(matrix, options);
+    ASSERT_FALSE(csc_access::vals(solver.factor().L).empty());
+    auto factor = solver.factor();
+    apxchol::solver adopted(matrix, std::move(factor), options);
     for (double offset : {0.5, 2.0}) {
         const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), offset, offset + 1);
         const auto result = adopted.solve(rhs);
@@ -235,15 +229,17 @@ TEST(SolveRoutes, FactorStorageAppliesToNewAndAdoptedFactors) {
         EXPECT_EQ(apxchol::cuda_sptrsv::fp16_resolved(options.factor_opts.factor_storage), fp16);
 #endif
         if (fp16 && !apxchol::omp_sptrsv::fp16_supported()) {
-            EXPECT_THROW(apxchol::cpu_solver(matrix, options), std::runtime_error);
+            EXPECT_THROW(apxchol::solver(matrix, options), std::runtime_error);
             continue;
         }
-        apxchol::cpu_solver original(matrix, options);
-        auto factor = original.preconditioner().factor();
+        apxchol::solver original(matrix, options);
+        auto factor = original.factor();
         options.keep_factor_values = false;
-        apxchol::cpu_solver adopted(matrix, std::move(factor), options);
-        EXPECT_EQ(original.preconditioner().trsv().fp16(), fp16);
-        EXPECT_EQ(adopted.preconditioner().trsv().fp16(), fp16);
+        apxchol::solver adopted(matrix, std::move(factor), options);
+        const auto storage = fp16 ? apxchol::factor_storage_type::fp16
+                                  : apxchol::factor_storage_type::fp32;
+        EXPECT_EQ(original.factor_storage(), storage);
+        EXPECT_EQ(adopted.factor_storage(), storage);
         expect_solution(matrix, rhs, original.solve(rhs, 1e-10));
         expect_solution(matrix, rhs, adopted.solve(rhs, 1e-10));
     }

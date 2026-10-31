@@ -44,13 +44,13 @@ def test_archive_save_requires_retained_factor(tmp_path, loaded):
     assert not destination.exists()
 
 
-def test_archive_does_not_replace_existing_file(tmp_path):
+def test_archive_replaces_existing_file(tmp_path):
     destination = tmp_path / "existing.apxchol"
-    sentinel = b"existing file must remain intact"
-    destination.write_bytes(sentinel)
-    with pytest.raises(RuntimeError, match="already exists"):
-        owner().save(destination)
-    assert destination.read_bytes() == sentinel
+    destination.write_bytes(b"old contents")
+    solver = owner()
+    solver.save(destination)
+    check_solve_and_apply(apxchol.Solver.load(destination), 4)
+    assert not (tmp_path / "existing.apxchol.tmp").exists()
 
 
 def test_archive_null_path_and_invalid_options(tmp_path):

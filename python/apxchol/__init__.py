@@ -168,7 +168,7 @@ class Solver:
     def save(self, path):
         """Save the operator and retained factor to a portable binary file.
 
-        Requires ``keep_factor=True``. Existing destinations are rejected.
+        Requires ``keep_factor=True``. An existing file is replaced atomically.
         The file contains no RHS, solution or device-specific workspace.
         """
         self._impl.save(path)
