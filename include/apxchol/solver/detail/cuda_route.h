@@ -17,9 +17,9 @@
 
 namespace apxchol::detail {
 // solver validates options and arguments, selects the route and rejects
-// overlapping calls; the session trusts its arguments. Copies share the
+// overlapping calls; the route trusts its arguments. Copies share the
 // factor and operator and own their device workspace and stream.
-class gpu_solve_session {
+class cuda_route {
 public:
     // Panel widths solve_columns and apply_columns accept, widest first.
     static constexpr std::array<int, 3> solve_widths{4, 2, 1};
@@ -27,7 +27,7 @@ public:
 
     /// Factorizes A on the device, or uploads the host factor F when it is
     /// not null. cp receives setup timings and is not retained.
-    gpu_solve_session(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
+    cuda_route(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
                       checkpoint* cp, factorization* F)
         : opts_(opts.factor_opts), keep_factor_(opts.keep_factor) {
         if (F) {
@@ -117,7 +117,7 @@ public:
 
     /// Shares the factor, the device triangular-solve storage and the device
     /// operator; allocates this copy's device workspace and stream.
-    gpu_solve_session(const gpu_solve_session& other)
+    cuda_route(const cuda_route& other)
         : opts_(other.opts_), keep_factor_(other.keep_factor_), F_(other.F_),
           trsv_(other.trsv_), gpcg_(other.gpcg_) {}
 

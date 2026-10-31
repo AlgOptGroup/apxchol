@@ -309,7 +309,7 @@ TEST(GpuFactorFinalize, DeviceSolvesAndSessionsInstallOwnedCapsules) {
         solve_options.factor_opts.drop_tolerance = 0;
         for (double shift : {0.0, 1.0}) {
             const apxchol::solver owner(solve_matrix(64, shift), solve_options);
-            const auto& preconditioner = std::get<apxchol::detail::gpu_solve_session>(
+            const auto& preconditioner = std::get<apxchol::detail::cuda_route>(
                 apxchol::detail::solver_access::route(owner));
             ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
             const auto& factor = preconditioner.factor();

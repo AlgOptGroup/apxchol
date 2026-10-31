@@ -413,7 +413,7 @@ TEST(SolveRoutes, GpuSingletonSddmAndUnsupportedEmptyFactorAreExplicit) {
     matrix.insert(0, 0) = 2.0;
     matrix.makeCompressed();
     const apxchol::solver owner(matrix, options);
-    ASSERT_TRUE(std::get<apxchol::detail::gpu_solve_session>(
+    ASSERT_TRUE(std::get<apxchol::detail::cuda_route>(
         apxchol::detail::solver_access::route(owner)).trsv().adopted_device_factor());
     const Eigen::VectorXd rhs = Eigen::VectorXd::Constant(1, 2.0);
     const auto result = apxchol::solve(matrix, rhs, options);

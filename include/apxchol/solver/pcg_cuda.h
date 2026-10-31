@@ -25,13 +25,13 @@
 #include "apxchol/solver/sptrsv/cuda.h"
 
 namespace apxchol::detail {
-class gpu_solve_session;
+class cuda_route;
 
 #define APXCHOL_PCG_CUDA_CHECK(c)      apxchol::detail::check_cuda((c), #c)
 
 /// All-on-device PCG. Construct once per matrix; reusable across solves.
 class cuda_pcg {
-    friend class gpu_solve_session;
+    friend class cuda_route;
 public:
     cuda_pcg() = default;
     /// Shares the device operator, which is read-only after setup, and

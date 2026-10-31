@@ -941,7 +941,7 @@ TEST(Solver, CudaCopiesShareTheDeviceFactorAndSolveConcurrently) {
 #else
     if (!apxchol::backend_available(apxchol::solve_backend::gpu))
         GTEST_SKIP() << "GPU unavailable";
-    using session = apxchol::detail::gpu_solve_session;
+    using session = apxchol::detail::cuda_route;
     const auto route = [](const apxchol::solver& owner) -> const session& {
         return std::get<session>(apxchol::detail::solver_access::route(owner));
     };

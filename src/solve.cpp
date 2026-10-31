@@ -1200,8 +1200,8 @@ struct solver::impl {
         if (const auto* cpu = std::get_if<detail::cpu_route>(&route))
             return detail::solver_route(std::in_place_type<detail::cpu_route>, *cpu);
 #if defined(APXCHOL_USE_CUDA)
-        if (const auto* gpu = std::get_if<detail::gpu_solve_session>(&route))
-            return detail::solver_route(std::in_place_type<detail::gpu_solve_session>, *gpu);
+        if (const auto* gpu = std::get_if<detail::cuda_route>(&route))
+            return detail::solver_route(std::in_place_type<detail::cuda_route>, *gpu);
 #endif
         throw std::runtime_error("solver: a Metal solver cannot be copied; construct one per thread");
     }
@@ -1226,7 +1226,7 @@ struct solver::impl {
         if (cp) { (*cp)("backend_selection"); cp->ascend(); }
 #if defined(APXCHOL_USE_CUDA)
         if (route == solve_backend::gpu)
-            return detail::solver_route(std::in_place_type<detail::gpu_solve_session>, A, opts, cp, F);
+            return detail::solver_route(std::in_place_type<detail::cuda_route>, A, opts, cp, F);
 #elif defined(APXCHOL_USE_METAL)
         if (route == solve_backend::gpu) {
             const auto& device = detail::metal::status();
@@ -1248,7 +1248,7 @@ struct solver::impl {
           tol(opts.tol), max_iter(opts.max_iter),
           num_threads(opts.num_threads), timings(cp) {
 #if defined(APXCHOL_USE_CUDA)
-        if (const auto* gpu = std::get_if<detail::gpu_solve_session>(&route))
+        if (const auto* gpu = std::get_if<detail::cuda_route>(&route))
             print_sptrsv_banner<solve_backend::gpu>(gpu->trsv().fp16(), opts.factor_opts.verbose);
 #endif
     }
@@ -1343,7 +1343,7 @@ Eigen::SparseMatrix<double> detail::cpu_route::original_operator() const {
 }
 
 #if defined(APXCHOL_USE_CUDA)
-Eigen::SparseMatrix<double> detail::gpu_solve_session::original_operator() const {
+Eigen::SparseMatrix<double> detail::cuda_route::original_operator() const {
     const auto& pcg = gpcg_;
     const cuda_device_scope device(pcg.device_, cuda_device_scope::checked{});
     const auto& op = *pcg.op_;

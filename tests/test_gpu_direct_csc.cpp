@@ -512,7 +512,7 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
         try { owner.emplace(A, setup); }
         catch (...) { const auto trace=testing::internal::GetCapturedStderr(); ADD_FAILURE()<<trace; throw; }
         const auto trace = testing::internal::GetCapturedStderr();
-        const auto& preconditioner = std::get<apxchol::detail::gpu_solve_session>(
+        const auto& preconditioner = std::get<apxchol::detail::cuda_route>(
             apxchol::detail::solver_access::route(*owner));
         ASSERT_NE(trace.find("[gpu-owned-csc] n=257 "),std::string::npos) << trace;
         EXPECT_NE(trace.find("host_graph_bytes=0 host_snapshot_bytes=0 selector_edge_upload_bytes=0"),std::string::npos) << trace;

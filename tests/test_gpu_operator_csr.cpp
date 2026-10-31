@@ -208,8 +208,8 @@ void pcg_solve(apxchol::detail::cuda_pcg& pcg, const Precond& precond, const Eig
     residual = rr[0];
 }
 
-const apxchol::detail::gpu_solve_session& session(const apxchol::solver& owner) {
-    return std::get<apxchol::detail::gpu_solve_session>(apxchol::detail::solver_access::route(owner));
+const apxchol::detail::cuda_route& session(const apxchol::solver& owner) {
+    return std::get<apxchol::detail::cuda_route>(apxchol::detail::solver_access::route(owner));
 }
 
 struct TestPreconditioner {
