@@ -502,7 +502,8 @@ TEST(Solver, AdoptedSddmFactorCanPreconditionALaplacian) {
     const auto factor = apxchol::factorize(sddm);
     ASSERT_TRUE(factor.sddm);
     apxchol::solver owner(laplacian, factor, cpu_options());
-    const Eigen::Vector2d rhs(1, -1);
+    // Dynamic-size: GCC 14 with AVX misreads a Vector2d copy as out of bounds.
+    const Eigen::VectorXd rhs = (Eigen::VectorXd(2) << 1, -1).finished();
     const auto result = owner.solve(rhs);
     EXPECT_TRUE(result.converged);
     expect_solution(laplacian, rhs, result.x);
