@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+using csc_access = apxchol::detail::sparse_csc_access;
+
 namespace {
 
 #if defined(APXCHOL_USE_METAL)
@@ -85,8 +87,8 @@ TEST(SolveRoutes, ExplicitCpuDoesNotPrewarm) {
     EXPECT_EQ(reused.backend, apxchol::solve_backend::cpu);
     expect_solution(matrix, rhs, reused);
     const auto factor = apxchol::factorize(matrix);
-    EXPECT_EQ(factor.L.vals_.size(), factor.L.nonZeros());
-    EXPECT_EQ(factor.L.inner_.size(), factor.L.nonZeros());
+    EXPECT_EQ(csc_access::vals(factor.L).size(), factor.L.nonZeros());
+    EXPECT_EQ(csc_access::inner(factor.L).size(), factor.L.nonZeros());
     EXPECT_EQ(factor.perm.size(), static_cast<std::size_t>(matrix.rows()));
 #if defined(APXCHOL_USE_CUDA)
     EXPECT_FALSE(factor.research_device_factor);
@@ -209,7 +211,7 @@ TEST(SolveRoutes, CpuFactorReuseAndExportRemainAvailable) {
     options.backend = apxchol::solve_backend::cpu;
     options.keep_factor_values = true;
     apxchol::cpu_solver solver(matrix, options);
-    ASSERT_FALSE(solver.preconditioner().factor().L.vals_.empty());
+    ASSERT_FALSE(csc_access::vals(solver.preconditioner().factor().L).empty());
     auto factor = solver.preconditioner().factor();
     apxchol::cpu_solver adopted(matrix, std::move(factor), options);
     for (double offset : {0.5, 2.0}) {
@@ -261,11 +263,11 @@ TEST(SolveRoutes, RequiredGpuPreconditionerValidatesHostFactorsBeforeCuda) {
         auto malformed = valid;
         switch (defect) {
             case 0: malformed.perm[1] = malformed.perm[0]; break;
-            case 1: malformed.L.outer_.back()++; break;
-            case 2: malformed.L.vals_.front() = 0; break;
-            case 3: malformed.L.inner_.front() = malformed.L.rows(); break;
-            case 4: malformed.L.vals_.front() = std::numeric_limits<float>::quiet_NaN(); break;
-            case 5: malformed.L.release_values(); break;
+            case 1: csc_access::outer(malformed.L).back()++; break;
+            case 2: csc_access::vals(malformed.L).front() = 0; break;
+            case 3: csc_access::inner(malformed.L).front() = malformed.L.rows(); break;
+            case 4: csc_access::vals(malformed.L).front() = std::numeric_limits<float>::quiet_NaN(); break;
+            case 5: csc_access::release_values(malformed.L); break;
         }
         apxchol::detail::gpu_preconditioner gpu;
         EXPECT_THROW(gpu.set_factor(malformed), std::invalid_argument) << defect;
@@ -273,8 +275,8 @@ TEST(SolveRoutes, RequiredGpuPreconditionerValidatesHostFactorsBeforeCuda) {
     }
     EXPECT_THROW(apxchol::solver(operator_matrix(32), valid, options), std::invalid_argument);
     apxchol::factorization grounded;
-    grounded.L.n_ = 1;
-    grounded.L.outer_ = {0, 0};
+    csc_access::n(grounded.L) = 1;
+    csc_access::outer(grounded.L) = {0, 0};
     grounded.perm = {0};
     grounded.sddm = false;
     apxchol::detail::gpu_preconditioner gpu;

@@ -246,7 +246,7 @@ public:
                     static_cast<std::size_t>(F.L.nonZeros()),
                     static_cast<unsigned long long>(trsv.stored_nnz()),
                     trsv.adopted_device_factor() ? 1 : 0, trsv.fp16() ? 1 : 0,
-                    F.L.inner_.size() * sizeof(node_index) + F.L.vals_.size() * sizeof(factor_value_t),
+                    F.L.row_indices().size() * sizeof(node_index) + F.L.values().size() * sizeof(factor_value_t),
                     trsv.adoption_host_download_bytes(), drop.rel,
                     static_cast<unsigned long long>(drop.dropped_threshold),
                     static_cast<unsigned long long>(drop.dropped_flush));
@@ -271,7 +271,7 @@ public:
                 throw std::invalid_argument("CUDA cannot adopt a scalar Laplacian factor");
         }
 #endif
-        else if (F.L.nonZeros() > 0 && F.L.vals_.empty())
+        else if (F.L.nonZeros() > 0 && !F.L.has_values())
             throw std::invalid_argument("apx_cholesky::set_factor: factorization values were released");
         auto next = std::make_shared<installed>();
         next->F = std::move(F);
@@ -370,7 +370,7 @@ private:
         // path setup_consuming has normally done this already; idempotent.)
         // set_keep_factor(true) skips the free for callers that export L.
         if (!keep_factor_)
-            F.L.release_values();
+            detail::sparse_csc_access::release_values(F.L);
 
         // Publish the dimension with the state, so a failed install keeps both.
         n_ = n;

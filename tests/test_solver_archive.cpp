@@ -16,6 +16,8 @@
 #include <vector>
 #include <barrier>
 
+using csc_access = apxchol::detail::sparse_csc_access;
+
 namespace {
 using namespace apxchol;
 using Sparse = Eigen::SparseMatrix<double>;
@@ -198,10 +200,10 @@ TEST_F(SolverArchive, ExactFactorAndScalarBatchWarmSolves) {
     EXPECT_EQ(original.operator_nnz(), A.nonZeros());
     const auto& before = original.factor();
     const auto& after = restored.factor();
-    EXPECT_EQ(before.L.outer_, after.L.outer_);
-    EXPECT_EQ(before.L.inner_, after.L.inner_);
-    ASSERT_EQ(before.L.vals_.size(), after.L.vals_.size());
-    EXPECT_EQ(std::memcmp(before.L.vals_.data(), after.L.vals_.data(), before.L.vals_.size() * sizeof(float)), 0);
+    EXPECT_EQ(csc_access::outer(before.L), csc_access::outer(after.L));
+    EXPECT_EQ(csc_access::inner(before.L), csc_access::inner(after.L));
+    ASSERT_EQ(csc_access::vals(before.L).size(), csc_access::vals(after.L).size());
+    EXPECT_EQ(std::memcmp(csc_access::vals(before.L).data(), csc_access::vals(after.L).data(), csc_access::vals(before.L).size() * sizeof(float)), 0);
     EXPECT_EQ(before.perm, after.perm);
     EXPECT_EQ(before.sddm, after.sddm);
     EXPECT_EQ(before.lumped_offdiag, after.lumped_offdiag);
@@ -236,9 +238,9 @@ TEST_F(SolverArchive, LaplacianFactorAndCenteredSolves) {
     save_solver(path, before);
     auto restored = load_solver(path, options());
     EXPECT_FALSE(restored.factor().sddm);
-    EXPECT_EQ(restored.factor().L.outer_, before.factor().L.outer_);
-    EXPECT_EQ(restored.factor().L.inner_, before.factor().L.inner_);
-    EXPECT_EQ(restored.factor().L.vals_, before.factor().L.vals_);
+    EXPECT_EQ(csc_access::outer(restored.factor().L), csc_access::outer(before.factor().L));
+    EXPECT_EQ(csc_access::inner(restored.factor().L), csc_access::inner(before.factor().L));
+    EXPECT_EQ(csc_access::vals(restored.factor().L), csc_access::vals(before.factor().L));
     EXPECT_EQ(restored.factor().perm, before.factor().perm);
     const Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(L.rows(), -1.0, 1.0);
     const auto scalar = restored.solve(b, 1e-9);
@@ -392,7 +394,7 @@ TEST_F(SolverArchive, ReadsOppositeEndianArrays) {
     const auto path = directory / "opposite-endian.apxchol";
     write_bytes(path, encode_fixture(arrays));
     auto restored = load_solver(path, options());
-    EXPECT_EQ(restored.factor().L.vals_, original.factor().L.vals_);
+    EXPECT_EQ(csc_access::vals(restored.factor().L), csc_access::vals(original.factor().L));
     EXPECT_EQ(restored.factor().perm, original.factor().perm);
     const Eigen::VectorXd b = Eigen::VectorXd::Ones(A.rows());
     auto result = restored.solve(b, 1e-9);
@@ -406,9 +408,9 @@ TEST_F(SolverArchive, ReadsWideIntegerArrays) {
     const auto path = directory / "wide.apxchol";
     write_bytes(path, encode_fixture(arrays));
     auto restored = load_solver(path, options());
-    EXPECT_EQ(restored.factor().L.outer_, original.factor().L.outer_);
-    EXPECT_EQ(restored.factor().L.inner_, original.factor().L.inner_);
-    EXPECT_EQ(restored.factor().L.vals_, original.factor().L.vals_);
+    EXPECT_EQ(csc_access::outer(restored.factor().L), csc_access::outer(original.factor().L));
+    EXPECT_EQ(csc_access::inner(restored.factor().L), csc_access::inner(original.factor().L));
+    EXPECT_EQ(csc_access::vals(restored.factor().L), csc_access::vals(original.factor().L));
     EXPECT_EQ(restored.factor().perm, original.factor().perm);
 }
 
@@ -432,7 +434,7 @@ TEST_F(SolverArchive, AcceptsUnicodeAndExtensionlessPaths) {
         const auto path = directory / name;
         save_solver(path, original);
         auto restored = load_solver(path, options());
-        EXPECT_EQ(restored.factor().L.vals_, original.factor().L.vals_);
+        EXPECT_EQ(csc_access::vals(restored.factor().L), csc_access::vals(original.factor().L));
         EXPECT_EQ(restored.factor().perm, original.factor().perm);
     }
 }
@@ -477,10 +479,10 @@ TEST_F(SolverArchive, CpuAndGpuFactorsCrossAdopt) {
                     auto restored = load_solver(path, opts); ++loaded_owners;
                     EXPECT_EQ(restored.backend(), target);
                     EXPECT_EQ(restored.operator_nnz(), input.nonZeros());
-                    EXPECT_EQ(restored.factor().L.outer_, F.L.outer_);
-                    EXPECT_EQ(restored.factor().L.inner_, F.L.inner_);
-                    ASSERT_EQ(restored.factor().L.vals_.size(), F.L.vals_.size());
-                    EXPECT_EQ(std::memcmp(restored.factor().L.vals_.data(), F.L.vals_.data(), F.L.vals_.size() * sizeof(float)), 0);
+                    EXPECT_EQ(csc_access::outer(restored.factor().L), csc_access::outer(F.L));
+                    EXPECT_EQ(csc_access::inner(restored.factor().L), csc_access::inner(F.L));
+                    ASSERT_EQ(csc_access::vals(restored.factor().L).size(), csc_access::vals(F.L).size());
+                    EXPECT_EQ(std::memcmp(csc_access::vals(restored.factor().L).data(), csc_access::vals(F.L).data(), csc_access::vals(F.L).size() * sizeof(float)), 0);
                     EXPECT_EQ(restored.factor().perm, F.perm);
                     EXPECT_EQ(restored.factor().sddm, F.sddm);
                     ASSERT_EQ(restored.factor().rounds.size(), F.rounds.size());
@@ -524,9 +526,9 @@ TEST_F(SolverArchive, PreservesLumpingAndRegularizationWithoutReapplyingThem) {
     auto restored = load_solver(path, admission);
     EXPECT_EQ(restored.factor().lumped_offdiag, 2);
     EXPECT_EQ(restored.operator_nnz(), 4);
-    ASSERT_EQ(restored.factor().L.vals_.size(), before.factor().L.vals_.size());
-    EXPECT_EQ(std::memcmp(restored.factor().L.vals_.data(), before.factor().L.vals_.data(),
-        before.factor().L.vals_.size() * sizeof(float)), 0);
+    ASSERT_EQ(csc_access::vals(restored.factor().L).size(), csc_access::vals(before.factor().L).size());
+    EXPECT_EQ(std::memcmp(csc_access::vals(restored.factor().L).data(), csc_access::vals(before.factor().L).data(),
+        csc_access::vals(before.factor().L).size() * sizeof(float)), 0);
     const Eigen::VectorXd b = Eigen::VectorXd::Ones(2);
     const auto result = restored.solve(b, 1e-10);
     EXPECT_TRUE(result.converged);

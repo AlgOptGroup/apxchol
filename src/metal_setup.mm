@@ -173,16 +173,17 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         if (!options.keep_factor_values) {
             F.perm.assign(static_cast<unsigned *>(finalized.permutation.contents),
                           static_cast<unsigned *>(finalized.permutation.contents) + n);
-            F.L.resize(n, n);
+            detail::sparse_csc_access::resize(F.L, n);
+            auto& outer = detail::sparse_csc_access::outer(F.L);
             for (unsigned row = 0; row < n; ++row)
-                F.L.outer_[row] = data.columns[row].begin + row;
-            F.L.outer_[n] = data.state->entries + n;
+                outer[row] = data.columns[row].begin + row;
+            outer[n] = data.state->entries + n;
         }
         F.rounds.reserve(data.state->round);
         for (unsigned r = 0; r < data.state->round; ++r) {
             const unsigned first = data.round_ptr[r], last = data.round_ptr[r + 1];
             F.rounds.push_back({n - first, last - first, std::numeric_limits<double>::quiet_NaN(),
-                F.L.outer_[last] - F.L.outer_[first], F.L.outer_[last]});
+                F.L.col_ptrs()[last] - F.L.col_ptrs()[first], F.L.col_ptrs()[last]});
         }
         raw = {};
         cached.finalizer.prepare_operator(input.ptr, input.idx, input.values, finalized.permutation,
