@@ -46,7 +46,7 @@ def test_default_storage_ignores_environment(monkeypatch, setting):
     assert apxchol.factorize(operator_matrix(), backend="cpu").factor_storage == np.float32
 
 
-@pytest.mark.parametrize("dtype", [np.float64, np.int16, np.complex64])
+@pytest.mark.parametrize("dtype", [np.float64, np.int16, np.complex64, "Auto", "fp16"])
 def test_unsupported_storage_dtype_is_rejected(dtype):
     with pytest.raises(ValueError, match="factor storage must be auto, float16 or float32"):
         apxchol.factorize(operator_matrix(), backend="cpu", factor_storage=dtype)

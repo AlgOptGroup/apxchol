@@ -60,7 +60,10 @@ def _solver_options(*, backend="auto", num_threads=0, seed=None, partitioner=Non
         options["partitioner"] = partitioner
     options.update(advanced)
     if not (isinstance(factor_storage, str) and factor_storage == "auto"):
-        factor_storage = np.dtype(factor_storage).name
+        try:
+            factor_storage = np.dtype(factor_storage).name
+        except TypeError:
+            raise ValueError("factor storage must be auto, float16 or float32") from None
     options["factor_storage"] = factor_storage
     return options
 
