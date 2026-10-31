@@ -13,6 +13,7 @@
 #include <vector>
 
 using namespace apxchol;
+using apxchol::detail::tree_elimination;
 
 namespace {
 

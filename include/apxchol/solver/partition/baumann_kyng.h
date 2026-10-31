@@ -18,7 +18,6 @@
 namespace apxchol::detail {
 
 struct baumann_kyng_partitioner {
-    static constexpr std::string_view name = "baumann_kyng";
     static constexpr bool sample_bounded = true;
 
     /// Sampling probability = 1/(c·d_avg); lower c → larger IS per round.
@@ -52,8 +51,9 @@ struct baumann_kyng_partitioner {
     /// extra residual-graph traversal.
     size_t selected_degree_work() const { return selected_degree_work_; }
 
-    void find_partition(graph& G, std::span<const node_index> active,
+    void find_partition(const partition_graph& view, std::span<const node_index> active,
                         const partition_context& ctx, selection& out) {
+        graph& G = partition_graph_access::graph_of(view);
         selected_degree_work_ = 0;
         if (active.empty()) return;
 

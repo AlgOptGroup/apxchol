@@ -2,7 +2,6 @@
 /// (stateful) partitioners, adopting an external factorization, keep-factor,
 /// and the PCG initial guess.
 #include "apxchol.h"
-#include "apxchol/solver/partitioner_helpers.h"
 #include "apxchol/solver/sptrsv/omp.h"
 #include <gtest/gtest.h>
 #include "grid_laplacian.h"
@@ -36,12 +35,10 @@ static_assert(apxchol::eliminator<exact_clique_eliminator>);
 
 // Greedy IS scanned in a user-supplied priority order.
 struct priority_partitioner {
-    static constexpr std::string_view name = "priority_test";
-
     /// User-supplied priority per vertex (lower = eliminated earlier).
     std::vector<double> priority;
 
-    void find_partition(apxchol::graph& G,
+    void find_partition(const apxchol::partition_graph& G,
                         std::span<const apxchol::node_index> active,
                         const apxchol::partition_context& /*ctx*/,
                         apxchol::selection& out) {
@@ -52,10 +49,9 @@ struct priority_partitioner {
                   [&](auto a, auto b) { return priority[a] < priority[b]; });
         for (auto v : order_) {
             bool independent = true;
-            for (auto idx : G.adj(v)) {
-                auto u = idx.to;
-                if (G.is_active(u) && out.contains(u)) { independent = false; break; }
-            }
+            G.for_each_neighbor(v, [&](auto u) {
+                if (out.contains(u)) independent = false;
+            });
             if (independent) out.add(v);
         }
     }
@@ -64,8 +60,6 @@ private:
     std::vector<apxchol::node_index> order_;       // sorted candidate list
 };
 static_assert(apxchol::partitioner<priority_partitioner>);
-
-using vp_graph = apxchol::graph;
 
 const apxchol::solve_options on_cpu{.backend = apxchol::solve_backend::cpu};
 
@@ -101,6 +95,34 @@ TEST(CustomEliminator, LambdaViaAsEliminator) {
     auto res = slv.solve(b, 1e-8, 500);
     EXPECT_LE(res.iterations, kExactFactorMaxIters);   // exact factor
     EXPECT_LT(res.residual, 1e-8);
+}
+
+// The eliminator overload honours opts.partitioner: each kind selects the
+// same first round as passing that built-in partitioner explicitly.
+TEST(CustomEliminator, HonoursOptionsPartitioner) {
+    const auto L = grid_laplacian(30, 30);
+    auto first_round = [](const apxchol::factorization& F) {
+        std::vector<apxchol::node_index> selected;
+        const auto size = F.rounds.at(0).is_size;
+        for (std::size_t v = 0; v < F.perm.size(); ++v)
+            if (F.perm[v] < size) selected.push_back(apxchol::node_index(v));
+        return selected;
+    };
+    auto by_option = [&](apxchol::partitioner_kind kind) {
+        apxchol::factor_options opts;
+        opts.partitioner = kind;
+        return first_round(apxchol::factorize(L, exact_clique_eliminator{}, opts));
+    };
+    auto by_instance = [&](auto partitioner) {
+        return first_round(apxchol::factorize(L, partitioner, exact_clique_eliminator{}));
+    };
+    const auto bg = by_option(apxchol::partitioner_kind::block_greedy);
+    const auto pg = by_option(apxchol::partitioner_kind::priority_greedy);
+    const auto bk = by_option(apxchol::partitioner_kind::baumann_kyng);
+    EXPECT_EQ(bg, by_instance(apxchol::detail::block_greedy_partitioner{}));
+    EXPECT_EQ(pg, by_instance(apxchol::detail::priority_greedy_partitioner{}));
+    EXPECT_EQ(bk, by_instance(apxchol::detail::baumann_kyng_partitioner{}));
+    EXPECT_NE(bg, bk);
 }
 
 TEST(CustomEliminator, ExactCliqueFactorIsExact) {
@@ -157,10 +179,9 @@ TEST(CustomPartitioner, LambdaViaAsPartitioner) {
            const apxchol::partition_context&, apxchol::selection& out) {
             for (auto v : active) {
                 bool ok = true;
-                for (auto idx : G.adj(v)) {
-                    auto u = idx.to;
-                    if (G.is_active(u) && out.contains(u)) { ok = false; break; }
-                }
+                G.for_each_neighbor(v, [&](auto u) {
+                    if (out.contains(u)) ok = false;
+                });
                 if (ok) out.add(v);
             }
         });
@@ -169,6 +190,33 @@ TEST(CustomPartitioner, LambdaViaAsPartitioner) {
     apxchol::solver slv(L, std::move(F));
     auto res = slv.solve(b, 1e-8, 500);
     EXPECT_LT(res.residual, 1e-8);
+}
+
+TEST(CustomPartitioner, GraphViewMatchesPrepassDegrees) {
+    const auto L = grid_laplacian(15, 15);
+    std::size_t checked = 0;
+    auto part = apxchol::as_prepass_partitioner(
+        [&](const apxchol::partition_graph& G,
+            std::span<const apxchol::node_index> candidates,
+            const apxchol::partition_context& ctx, apxchol::selection& out) {
+            for (auto v : candidates) {
+                std::size_t visited = 0;
+                bool ok = true;
+                const auto degree = G.for_each_neighbor(v, [&](auto u) {
+                    ++visited;
+                    EXPECT_TRUE(G.is_active(u));
+                    if (out.contains(u)) ok = false;
+                });
+                EXPECT_EQ(degree, visited);
+                EXPECT_EQ(degree, G.degree(v));
+                EXPECT_EQ(degree, ctx.degrees[v]);
+                ++checked;
+                if (ok) out.add(v);
+            }
+        });
+    const auto F = apxchol::factorize(L, std::move(part));
+    EXPECT_FALSE(F.rounds.empty());
+    EXPECT_GT(checked, 0u);
 }
 
 TEST(SetFactor, ExternalFactorizationInPreconditioner) {

@@ -305,7 +305,7 @@ TEST(GpuOwnedSparsify, EmptyAllKeptAndInvalidInputsPreserveOwnedContract) {
 }
 TEST(GpuOwnedSparsify, PreviewReplacementInvalidatesAndResetsHandbackCounts) {
     REQUIRE_OWNED_SPARSIFY_DEVICE();
-    using graph_type = apxchol::graph;
+    using graph_type = apxchol::detail::graph;
     graph_type graph(5);
     std::vector<edge> edges;
     for (node_index u = 1; u < 5; ++u)

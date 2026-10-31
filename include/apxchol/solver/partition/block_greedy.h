@@ -26,13 +26,12 @@
 namespace apxchol::detail {
 
 struct block_greedy_partitioner {
-    static constexpr std::string_view name = "block_greedy";
     static constexpr size_t residual_handoff_threshold = 500;
     static constexpr bool degree_prepass = true;
 
-    void find_partition(graph& G, std::span<const node_index> candidates,
+    void find_partition(const partition_graph& G, std::span<const node_index> candidates,
                         const partition_context& ctx, selection& out) {
-        select_into_chosen(G, candidates, out, ctx);
+        select_into_chosen(partition_graph_access::graph_of(G), candidates, out, ctx);
     }
 
 private:
