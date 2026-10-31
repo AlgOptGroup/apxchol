@@ -1,7 +1,7 @@
 #pragma once
 // GPU-owned operator and reusable PCG workspace. Kernels use native FP64,
-// fixed reductions and the shared device recurrence; only the completed state
-// is read by the host each iteration. The core links cudart alone.
+// fixed reductions and the shared device recurrence; the host reads only the
+// completed state, once per batch of iterations. The core links cudart alone.
 
 #include <Eigen/Sparse>
 #include <Eigen/Core>
@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cuda_runtime.h>
 #include <limits>
+#include <memory>
 #include <initializer_list>
 #include <stdexcept>
 #include <string>
@@ -23,17 +24,37 @@
 #include "apxchol/solver/detail/gpu_diagnostics.h"
 #include "apxchol/solver/sptrsv/cuda.h"
 
-namespace apxchol {
-namespace detail { struct solver_archive_access; }
+namespace apxchol::detail {
+class cuda_route;
 
 #define APXCHOL_PCG_CUDA_CHECK(c)      apxchol::detail::check_cuda((c), #c)
 
 /// All-on-device PCG. Construct once per matrix; reusable across solves.
 class cuda_pcg {
-    friend struct detail::solver_archive_access;
+    friend class cuda_route;
 public:
+    /// PCG iterations per host wait. A wait costs about 10 us and a skipped
+    /// iteration after convergence 18-25 us; batches of 2-8 were within noise
+    /// of each other and 16-32 slowed small systems.
+    static constexpr unsigned batch_iterations = 4;
+
     cuda_pcg() = default;
-    cuda_pcg(const cuda_pcg&) = delete;
+    /// Shares the device operator, which is read-only after setup, and
+    /// allocates its own vectors and stream, so copies solve concurrently.
+    cuda_pcg(const cuda_pcg& other)
+        : n_(other.n_), op_(other.op_), spmv_lanes_(other.spmv_lanes_) {
+        if (!other.ready_) return;
+        device_ = other.device_;
+        const detail::cuda_device_scope device(device_, detail::cuda_device_scope::checked{});
+        try {
+            APXCHOL_PCG_CUDA_CHECK(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking));
+            reserve_columns(1);
+        } catch (...) {
+            destroy();
+            throw;
+        }
+        ready_ = true;
+    }
     cuda_pcg& operator=(const cuda_pcg&) = delete;
     ~cuda_pcg() { destroy(); }
 
@@ -60,15 +81,19 @@ public:
 
         // Allocate the permutation before accepting device ownership. The
         // factor supplied this validated bijection; the builder checks the CSC.
-        h_perm_.assign(perm.begin(), perm.begin() + n_);
+        auto op = std::make_shared<operator_storage>();
+        op->perm.assign(perm.begin(), perm.begin() + n_);
         APXCHOL_PCG_CUDA_CHECK(cudaGetDevice(&device_));
-        if (!pcg_cuda::try_build_permuted_operator_csr(
+        op->device = device_;
+        if (!cuda_pcg_kernels::try_build_permuted_operator_csr(
                 static_cast<int>(n_), static_cast<int>(L.nonZeros()),
                 L.outerIndexPtr(), L.innerIndexPtr(), L.valuePtr(),
-                reinterpret_cast<const std::uint32_t*>(perm.data()), -1, matrix_))
+                reinterpret_cast<const std::uint32_t*>(perm.data()), -1, op->matrix))
             throw std::invalid_argument("GPU PCG requires sorted, unique, fully paired CSC storage; request CPU explicitly");
+        op_ = std::move(op);
+        APXCHOL_PCG_CUDA_CHECK(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking));
 
-        spmv_lanes_ = pcg_cuda::spmv_lanes_for(n_ > 0 ? static_cast<double>(matrix_.nnz) / static_cast<double>(n_) : 1.0);
+        spmv_lanes_ = cuda_pcg_kernels::spmv_lanes_for(n_ > 0 ? static_cast<double>(op_->matrix.nnz) / static_cast<double>(n_) : 1.0);
         // Scalar-only sessions retain one column of storage. The first panel
         // grows this same workspace transactionally, then reuses it.
         reserve_columns(1);
@@ -81,32 +106,9 @@ public:
         ready_ = true;
     }
 
-    /// Solve A*x = b via PCG using a device-capable preconditioner. The
-    /// preconditioner's `solve_LLt_dev(d_in, d_out)` device entry point is
-    /// invoked per iter. Returns iteration count and final relative residual.
-    template<class Precond>
-    void solve(const Precond& precond,
-               const Eigen::VectorXd& b_host,
-               Eigen::VectorXd& x_host,
-               double tol,
-               int max_iter,
-               int& iters_out,
-               double& residual_out,
-               bool laplacian,
-               const Eigen::VectorXd* x0 = nullptr)
-    {
-        if (!ready_) throw std::runtime_error("cuda_pcg::solve: setup() not called");
-        if (b_host.size() != n_ || (x0 && x0->size() != n_))
-            throw std::invalid_argument("cuda_pcg::solve: vector length mismatch");
-        std::array<int, 1> iterations{};
-        std::array<double, 1> residuals{};
-        x_host.resize(n_);
-        solve_columns<1>(precond, b_host, x_host, tol, max_iter, iterations,
-                         residuals, laplacian, x0);
-        iters_out = iterations[0];
-        residual_out = residuals[0];
-    }
-
+    /// Solve A*X = B for one, two or four columns via PCG using a
+    /// device-capable preconditioner, whose `trsv().solve_LLt_dev` runs per
+    /// iteration. Reports iteration counts and final relative residuals.
     template<unsigned Columns, class Precond, class Input, class Output>
     void solve_panel(const Precond& precond, const Input& b_host, Output& x_host,
                     double tol, int max_iter, std::array<int, Columns>& iterations,
@@ -118,17 +120,18 @@ public:
 
     bool ready() const { return ready_; }
     int64_t n() const { return n_; }
-    int64_t nnz() const { return matrix_.nnz; }
+    int64_t nnz() const { return op_ ? op_->matrix.nnz : 0; }
     /// Operator storage precision resolved at setup (FP32 only when exact).
-    bool fp32_operator() const { return matrix_.fp32; }
+    bool fp32_operator() const { return op_ && op_->matrix.fp32; }
+    /// This copy's stream; every solve is ordered on it.
+    cudaStream_t stream() const { return stream_; }
+    /// Device operator values; copies share them.
+    const void* device_operator_values() const {
+        return !op_ ? nullptr : op_->matrix.fp32 ? static_cast<const void*>(op_->matrix.values_f32)
+                                                 : static_cast<const void*>(op_->matrix.values_f64);
+    }
     /// Threads per row of the SpMV resolved from the average row length.
     int spmv_lanes() const { return spmv_lanes_; }
-    double device_memory_used_mb() const {
-        const detail::cuda_device_scope device(device_, detail::cuda_device_scope::checked{});
-        size_t free = 0, total = 0;
-        return cudaMemGetInfo(&free, &total) == cudaSuccess && total >= free
-            ? (total - free) / (1024.0 * 1024.0) : -1;
-    }
 
 private:
     template<unsigned Columns, class Precond, class Input, class Output>
@@ -179,25 +182,19 @@ private:
             throw std::invalid_argument("cuda_pcg::solve: dimensions mismatch");
         const detail::cuda_device_scope device(device_, detail::cuda_device_scope::checked{});
         reserve_columns(Columns);
+        const auto& perm = op_->perm;
         using host_panel = Eigen::Matrix<double, Eigen::Dynamic, Columns,
             Columns == 1 ? Eigen::ColMajor : Eigen::RowMajor>;
         host_panel packed(n_, Columns);
         std::array<double, Columns> scales{}, bnorm{}, max_b{}, max_x0{};
         bool any_active = false, any_warm = false;
-        std::fill_n(h_state_, Columns, pcg_cuda::solve_state{});
+        std::fill_n(h_state_, Columns, cuda_pcg_kernels::solve_state{});
         for (int64_t v = 0; v < n_; ++v) {
             for (unsigned q = 0; q < Columns; ++q) {
                 const double rhs = b_host(v, q);
-                if (!std::isfinite(rhs))
-                    throw std::invalid_argument("cuda_pcg::solve: RHS must be finite");
-                packed(h_perm_[v], q) = rhs;
+                packed(perm[v], q) = rhs;
                 max_b[q] = std::max(max_b[q], std::abs(rhs));
-                if (x0) {
-                    const double guess = (*x0)(v, q);
-                    if (!std::isfinite(guess))
-                        throw std::invalid_argument("cuda_pcg::solve: x0 must be finite");
-                    max_x0[q] = std::max(max_x0[q], std::abs(guess));
-                }
+                if (x0) max_x0[q] = std::max(max_x0[q], std::abs((*x0)(v, q)));
             }
         }
         for (double maximum : max_b) any_active |= maximum != 0;
@@ -208,17 +205,17 @@ private:
             return {};
         }
         const std::size_t vector_bytes = n_ * Columns * sizeof(double);
-        APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(vectors_.rhs, packed.data(), vector_bytes, cudaMemcpyHostToDevice));
+        APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(vectors_.rhs, packed.data(), vector_bytes, cudaMemcpyHostToDevice, stream_));
         for (unsigned q = 0; q < Columns; ++q) {
             scales[q] = 1;
             bnorm[q] = 1; // Inactive zero columns never divide by a zero norm.
             if (max_b[q] == 0) continue;
             scales[q] = detail::gpu_scaling::fp32_scale(std::max(max_b[q], max_x0[q]));
-            if (scales[q] != 1) packed.col(q) *= scales[q];
-            if constexpr (Columns == 1) bnorm[q] = detail::gpu_scaling::norm(packed);
+            // packed stays unchanged until the stream syncs: the upload above
+            // may still read it. Fold the scaled column's norm contiguously.
+            if (Columns == 1 && scales[q] == 1) bnorm[q] = detail::gpu_scaling::norm(packed);
             else {
-                // Retain the contiguous scalar norm fold for each packed column.
-                const Eigen::VectorXd rhs_column = packed.col(q);
+                const Eigen::VectorXd rhs_column = packed.col(q) * scales[q];
                 bnorm[q] = detail::gpu_scaling::norm(rhs_column);
             }
             if (!std::isnormal(bnorm[q] * bnorm[q]))
@@ -228,41 +225,44 @@ private:
             st.active = 1;
             if (max_x0[q] != 0) { st.alpha = 1; any_warm = true; }
         }
-        pcg_cuda::initialize<Columns>(0, n_, vectors_, scales);
-        APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(vectors_.state, h_state_, Columns * sizeof(*vectors_.state), cudaMemcpyHostToDevice));
+        cuda_pcg_kernels::initialize<Columns>(stream_, n_, vectors_, scales);
+        APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(vectors_.state, h_state_, Columns * sizeof(*vectors_.state), cudaMemcpyHostToDevice, stream_));
         // Width changes reinterpret the reused storage; clear every grounded
         // coordinate on entry rather than inheriting a prior width's contents.
         if (laplacian && n_)
-            APXCHOL_PCG_CUDA_CHECK(cudaMemset(vectors_.z + (n_ - 1) * Columns, 0, Columns * sizeof(double)));
+            APXCHOL_PCG_CUDA_CHECK(cudaMemsetAsync(vectors_.z + (n_ - 1) * Columns, 0, Columns * sizeof(double), stream_));
         iteration<Precond, Columns> commands{*this, precond, bnorm};
+        host_panel warm;
         if (any_warm) {
+            warm.resize(n_, Columns);
             for (int64_t v = 0; v < n_; ++v)
                 for (unsigned q = 0; q < Columns; ++q)
-                    packed(h_perm_[v], q) = h_state_[q].alpha ? (*x0)(v, q) * scales[q] : 0;
+                    warm(perm[v], q) = h_state_[q].alpha ? (*x0)(v, q) * scales[q] : 0;
             if (laplacian)
                 for (unsigned q = 0; q < Columns; ++q)
-                    if (h_state_[q].alpha) packed.col(q).array() -= packed.col(q).mean();
-            APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(vectors_.p, packed.data(), vector_bytes, cudaMemcpyHostToDevice));
+                    if (h_state_[q].alpha) warm.col(q).array() -= warm.col(q).mean();
+            APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(vectors_.p, warm.data(), vector_bytes, cudaMemcpyHostToDevice, stream_));
             // alpha=1 only for warm columns; cold p=0 and alpha=0. Their
             // iteration-zero convergence check is suppressed by finalize.
             commands.step(detail::gpu_pcg::operation::multiply);
             commands.step(detail::gpu_pcg::operation::residual);
             commands.finalize(detail::gpu_pcg::kFinalizeCheck, 0);
         }
-        detail::gpu_pcg::solve(commands, std::max(max_iter, 0), 1);
-        pcg_cuda::finish<Columns>(0, n_, vectors_, matrix_, spmv_lanes_, laplacian, scales, bnorm);
+        detail::gpu_pcg::solve(commands, std::max(max_iter, 0));
+        cuda_pcg_kernels::finish<Columns>(stream_, n_, vectors_, op_->matrix, spmv_lanes_, laplacian, scales, bnorm);
         APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(h_state_, vectors_.state,
-            Columns * sizeof(*vectors_.state), cudaMemcpyDeviceToHost, 0));
-        APXCHOL_PCG_CUDA_CHECK(cudaMemcpy(packed.data(), vectors_.x, vector_bytes, cudaMemcpyDeviceToHost));
+            Columns * sizeof(*vectors_.state), cudaMemcpyDeviceToHost, stream_));
+        APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(packed.data(), vectors_.x, vector_bytes, cudaMemcpyDeviceToHost, stream_));
+        APXCHOL_PCG_CUDA_CHECK(cudaStreamSynchronize(stream_));
         for (unsigned q = 0; q < Columns; ++q) {
-            if (h_state_[q].active & pcg_cuda::kSolutionOverflow)
+            if (h_state_[q].active & cuda_pcg_kernels::kSolutionOverflow)
                 throw std::overflow_error("CUDA solve: solution exceeds the finite range");
-            if (h_state_[q].active & pcg_cuda::kSolutionUnderflow)
+            if (h_state_[q].active & cuda_pcg_kernels::kSolutionUnderflow)
                 throw std::underflow_error("CUDA solve: solution underflows to zero");
         }
         for (int64_t v = 0; v < n_; ++v)
             for (unsigned q = 0; q < Columns; ++q)
-                x_host(v, q) = packed(h_perm_[v], q);
+                x_host(v, q) = packed(perm[v], q);
         std::array<bool, Columns> stopped{};
         for (unsigned q = 0; q < Columns; ++q) {
             iterations[q] = h_state_[q].iters;
@@ -274,34 +274,36 @@ private:
 
     template<class Precond, unsigned Columns>
     struct iteration {
+        static constexpr unsigned batch_iterations = cuda_pcg::batch_iterations;
         cuda_pcg& s;
         const Precond& precond;
         std::array<double, Columns> bnorm;
         void precondition() const {
-            static_assert(sizeof(pcg_cuda::solve_state) % sizeof(unsigned) == 0);
+            static_assert(sizeof(cuda_pcg_kernels::solve_state) % sizeof(unsigned) == 0);
             precond.trsv().template solve_LLt_dev<Columns>(s.vectors_.r, s.vectors_.z,
-                &s.vectors_.state->active, sizeof(pcg_cuda::solve_state) / sizeof(unsigned));
+                &s.vectors_.state->active, sizeof(cuda_pcg_kernels::solve_state) / sizeof(unsigned),
+                s.stream_);
         }
         void finalize(unsigned mode, unsigned it) const {
             const int lanes = mode == detail::gpu_pcg::kFinalizeAlpha ? s.spmv_lanes_ : 1;
-            const int blocks = pcg_cuda::pcg_blocks(s.n_ * lanes);
-            pcg_cuda::finalize<Columns>(0, s.vectors_.partial, blocks, s.vectors_.state, mode, it, bnorm);
+            const int blocks = cuda_pcg_kernels::pcg_blocks(s.n_ * lanes);
+            cuda_pcg_kernels::finalize<Columns>(s.stream_, s.vectors_.partial, blocks, s.vectors_.state, mode, it, bnorm);
         }
         void step(detail::gpu_pcg::operation op) const {
-            pcg_cuda::step<Columns>(0, op, s.n_, s.vectors_, s.matrix_, s.spmv_lanes_);
+            cuda_pcg_kernels::step<Columns>(s.stream_, op, s.n_, s.vectors_, s.op_->matrix, s.spmv_lanes_);
         }
         template<class Record>
         bool submit(bool, Record&& record) const {
             record();
-            APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(s.h_state_, s.vectors_.state, Columns * sizeof(*s.vectors_.state), cudaMemcpyDeviceToHost, 0));
-            APXCHOL_PCG_CUDA_CHECK(cudaStreamSynchronize(0));
+            APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(s.h_state_, s.vectors_.state, Columns * sizeof(*s.vectors_.state), cudaMemcpyDeviceToHost, s.stream_));
+            APXCHOL_PCG_CUDA_CHECK(cudaStreamSynchronize(s.stream_));
             bool active = false;
             for (unsigned q = 0; q < Columns; ++q) active |= s.h_state_[q].active != 0;
             return active;
         }
     };
 
-    static void release_workspace(pcg_cuda::workspace& vectors, pcg_cuda::solve_state*& host) noexcept {
+    static void release_workspace(cuda_pcg_kernels::workspace& vectors, cuda_pcg_kernels::solve_state*& host) noexcept {
         for (void* pointer : std::initializer_list<void*>{vectors.x, vectors.r, vectors.ap,
                 vectors.p, vectors.z, vectors.rhs, vectors.partial, vectors.state})
             if (pointer) (void)cudaFree(pointer);
@@ -311,15 +313,15 @@ private:
 
     void reserve_columns(unsigned columns) {
         if (columns <= capacity_) return;
-        pcg_cuda::workspace next{};
-        pcg_cuda::solve_state* next_host = nullptr;
+        cuda_pcg_kernels::workspace next{};
+        cuda_pcg_kernels::solve_state* next_host = nullptr;
         try {
             for (double** pointer : {&next.x, &next.r, &next.p, &next.z, &next.ap, &next.rhs})
                 APXCHOL_PCG_CUDA_CHECK(cudaMalloc(pointer, columns * n_ * sizeof(double)));
-            APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.partial, columns * pcg_cuda::kMaxBlocks * sizeof(double)));
-            APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.state, columns * sizeof(pcg_cuda::solve_state)));
+            APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.partial, columns * cuda_pcg_kernels::kMaxBlocks * sizeof(double)));
+            APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.state, columns * sizeof(cuda_pcg_kernels::solve_state)));
             APXCHOL_PCG_CUDA_CHECK(cudaHostAlloc(reinterpret_cast<void**>(&next_host),
-                columns * sizeof(pcg_cuda::solve_state), cudaHostAllocDefault));
+                columns * sizeof(cuda_pcg_kernels::solve_state), cudaHostAllocDefault));
         } catch (...) {
             release_workspace(next, next_host);
             throw;
@@ -336,33 +338,47 @@ private:
         // A failed setup may own arrays before ready_ becomes true.
         const detail::cuda_device_scope device(device_, device_ >= 0);
         release_workspace(vectors_, h_state_);
-        for (void* pointer : std::initializer_list<void*>{matrix_.row_ptr, matrix_.col_idx,
-                matrix_.values_f64, matrix_.values_f32, matrix_.row_map})
-            if (pointer) (void)cudaFree(pointer);
-        matrix_ = {};
+        if (stream_) (void)cudaStreamDestroy(stream_);
+        stream_ = nullptr;
+        op_.reset();
         capacity_ = 0;
         spmv_lanes_ = 1;
         ready_ = false;
         device_ = -1;
     }
 
+    // Shared by copies and freed by the last one: the permuted operator and
+    // the host-side permutation map (perm.indices()) that permutes
+    // b -> b_perm and x_perm -> x.
+    struct operator_storage {
+        int device = -1;
+        cuda_pcg_kernels::operator_csr matrix;
+        std::vector<node_index> perm;
+        operator_storage() = default;
+        operator_storage(const operator_storage&) = delete;
+        operator_storage& operator=(const operator_storage&) = delete;
+        ~operator_storage() {
+            const detail::cuda_device_scope scope(device, device >= 0);
+            for (void* pointer : std::initializer_list<void*>{matrix.row_ptr, matrix.col_idx,
+                    matrix.values_f64, matrix.values_f32, matrix.row_map})
+                if (pointer) (void)cudaFree(pointer);
+        }
+    };
+
     int64_t n_ = 0;
     int device_ = -1;
     bool ready_ = false;
     unsigned capacity_ = 0;
-    pcg_cuda::operator_csr matrix_;
-    pcg_cuda::workspace vectors_{};
-    pcg_cuda::solve_state* h_state_ = nullptr;
+    std::shared_ptr<const operator_storage> op_;
+    // Per-copy: the solve stream, vectors and host-visible exit state.
+    cudaStream_t stream_ = nullptr;
+    cuda_pcg_kernels::workspace vectors_{};
+    cuda_pcg_kernels::solve_state* h_state_ = nullptr;
     // SpMV row mapping (threads per row).
     int     spmv_lanes_  = 1;
-
-    // Host-side permutation map (perm.indices()) for one-time use in solve()
-    // to permute b -> b_perm and x_perm -> x.
-    std::vector<node_index> h_perm_;
-
 
 };
 
 #undef APXCHOL_PCG_CUDA_CHECK
 
-}  // namespace apxchol
+}  // namespace apxchol::detail

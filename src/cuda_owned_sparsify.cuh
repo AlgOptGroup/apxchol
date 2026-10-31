@@ -38,9 +38,7 @@ struct owned_sparsify_forest {
     __device__ Edge edge(unsigned i) const { const auto e = edges[i]; return {unsigned(e.owner), unsigned(e.neighbor), e.weight}; }
     __device__ unsigned label(unsigned i) const { return labels[i]; }
     __device__ unsigned bucket(double weight) const {
-        if constexpr (sizeof(pool_value_t) == 4)
-            return residual_sparsify::bucket(__float_as_uint(float(weight)));
-        else return residual_sparsify::bucket(std::uint64_t(__double_as_longlong(weight)));
+        return residual_sparsify::bucket(__float_as_uint(float(weight)));
     }
     __device__ void offer(unsigned i, unsigned bucket, unsigned ordinal) const {
         atomicMin(best + i, static_cast<unsigned long long>(residual_sparsify::priority(bucket, ordinal)));
@@ -70,14 +68,12 @@ __global__ void owned_sparsify_canonical_flags(
 }
 
 __global__ void owned_sparsify_keys(const gpu_round_shadow_incidence* in,
-        std::size_t count, std::uint64_t* keys, bool endpoints) {
+        std::size_t count, std::uint64_t* keys) {
     const auto i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
     if (i >= count) return;
     const auto e = in[i];
     // All dimensions are checked <= INT_MAX, including wide-index builds.
-    // Canonical +0/-0 compare equal in the CPU ascending-weight ordering.
-    keys[i] = endpoints ? (std::uint64_t(e.owner) << 32) | e.neighbor :
-        (e.weight == 0.0 ? 0ULL : std::uint64_t(__double_as_longlong(e.weight)));
+    keys[i] = (std::uint64_t(e.owner) << 32) | e.neighbor;
 }
 
 __global__ void owned_sparsify_coalesce(
@@ -92,7 +88,7 @@ __global__ void owned_sparsify_coalesce(
     if (!flags[i]) return;
     const double sum = residual_sparsify::coalesce(owned_sparsify_math{},
         owned_sparsify_input{sorted}, unsigned(i), unsigned(count)).value;
-    const pool_value_t stored = static_cast<pool_value_t>(sum);
+    const float stored = static_cast<float>(sum);
     if (!isfinite(sum) || !isfinite(double(stored))) atomicExch(error, 1U);
     folded[i] = {e.owner, e.neighbor, stored};
 }
@@ -181,7 +177,7 @@ __global__ void owned_sparsify_sample(const gpu_round_shadow_incidence* edges,
         importance_probability[i], lambda, backbone[i], unsigned(e.owner), unsigned(e.neighbor), seed);
     importance_probability[i] = sampled.probability;
     kept[i] = sampled.kept;
-    if (!sampled.valid || (sampled.kept && !isfinite(double(static_cast<pool_value_t>(sampled.value)))))
+    if (!sampled.valid || (sampled.kept && !isfinite(double(static_cast<float>(sampled.value)))))
         atomicExch(error, 1U);
 }
 
@@ -242,7 +238,7 @@ __global__ void owned_sparsify_expand(const gpu_round_shadow_incidence* edges,
     const auto i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
     if (i >= count) return;
     const auto j = ids[i]; auto e = edges[j];
-    if (!backbone[j]) e.weight = static_cast<pool_value_t>(
+    if (!backbone[j]) e.weight = static_cast<float>(
         __dmul_rn(e.weight, __ddiv_rn(1.0, probabilities[j])));
     output[2 * i] = e; output[2 * i + 1] = {e.neighbor, e.owner, e.weight};
 }
@@ -334,13 +330,11 @@ gpu_owned_sparsify_stats sparsify_owned_residual_device(
     copy_to_host(&canonical_count, counts.get() + 1, 1, "download canonical capacity check");
     result.scalar_download_bytes += sizeof(canonical_count);
     if (canonical_count != edges) throw std::logic_error("GPU owned sparsification requires paired input");
-    const int count = cub.select(input, flags.get(), canonical.get(), live, "select canonical sparsification incidences");
+    const int count = cub.select(input, flags.get(), scratch.get(), live, "select canonical sparsification incidences");
     result.scalar_download_bytes += sizeof(int); check_error();
     if (count != int(edges)) throw std::logic_error("GPU owned sparsification requires paired input");
-    owned_sparsify_keys<<<blocks_for(edges), kBlock>>>(canonical.get(), edges, keys_a.get(), false);
-    cuda_check(cudaGetLastError(), "build sparsification weight keys");
-    cub.sort_pairs(keys_a.get(), keys_b.get(), canonical.get(), scratch.get(), edges, "sort sparsification weights");
-    owned_sparsify_keys<<<blocks_for(edges), kBlock>>>(scratch.get(), edges, keys_a.get(), true);
+    // Duplicates are summed in residual order after this stable sort.
+    owned_sparsify_keys<<<blocks_for(edges), kBlock>>>(scratch.get(), edges, keys_a.get());
     cuda_check(cudaGetLastError(), "build sparsification endpoint keys");
     cub.sort_pairs(keys_a.get(), keys_b.get(), scratch.get(), canonical.get(), edges, "sort sparsification endpoint pairs");
     owned_sparsify_coalesce<<<blocks_for(edges), kBlock>>>(canonical.get(), edges, scratch.get(), flags.get(), counts.get());

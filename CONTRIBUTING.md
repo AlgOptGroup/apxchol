@@ -41,6 +41,9 @@ pytest python/tests
 The release version is set in `cmake/apxchol_version.cmake`; native builds and
 Python packages share it. PyPI publication requires a matching `v<version>`
 GitHub release tag. Manually running the publish workflow builds artifacts without publishing them.
+A GitHub prerelease with that tag also builds everything and attaches the CLI and
+SDK archives, but skips PyPI. Turning a prerelease into a release does not start
+the workflow again; delete the prerelease and its tag, then publish the release.
 
 The [CLI workflow](.github/workflows/cli.yml) sets up each platform and calls
 `.github/scripts/build-cli.sh`: normal CMake install, OpenMP/notices, tar and checksum.
@@ -88,7 +91,8 @@ private members. C++ headers are under `include/`; [API scope](docs/api.md)
 defines the public interface. The CPU compiled core is `factorization.cpp`,
 `operator_class.cpp` and `solve.cpp` in `src/`.
 
-Register new partitioners in `partitioner_list.h`. The working graph uses
+Register new partitioners in `partitioner_list.h`, with a matching
+`partitioner_kind` value and name in `factor_options.h`. The working graph uses
 directed AoS adjacency. Preserve deterministic neighbor ordering, sampling
 streams and thread-team behavior. Consult the
 rationale in `factor_options.h` and the [precision contract](docs/precision.md)

@@ -1,16 +1,43 @@
 #include "apxchol.h"
+#include "apxchol/detail/checkpoint.h"
 #include "apxchol/operator_class.h"
+#include "apxchol/solver/detail/solver_route.h"
 #include "config.h"
 #include "mtx_input.h"
 #include <fast_matrix_market/app/Eigen.hpp>
 #include <spdlog/spdlog.h>
-#include <cstdlib>
+#include <cmath>
+#include <cstdint>
 #include <fstream>
+#include <random>
 #include <stdexcept>
 
 using namespace apxchol;
 
 namespace {
+
+// Zero-mean, unit-norm RHS that is the same on every platform for a given seed:
+// mt19937_64 output is fully specified, and the sums use explicit fma in order.
+Eigen::VectorXd random_rhs(Eigen::Index n, std::uint64_t seed) {
+    std::mt19937_64 rng(seed);
+    Eigen::VectorXd b(n);
+    double sum = 0.0;
+    for (Eigen::Index i = 0; i < n; ++i) {
+        b[i] = static_cast<double>(rng() >> 11) * 0x1p-52 - 1.0;  // uniform in [-1, 1)
+        sum += b[i];
+    }
+    const double mean = n > 0 ? sum / static_cast<double>(n) : 0.0;
+    double squares = 0.0;
+    for (Eigen::Index i = 0; i < n; ++i) {
+        b[i] -= mean;
+        squares = std::fma(b[i], b[i], squares);
+    }
+    if (squares > 0.0) {
+        const double norm = std::sqrt(squares);
+        for (Eigen::Index i = 0; i < n; ++i) b[i] /= norm;
+    }
+    return b;
+}
 
 template<class Dense>
 void write_solution(const std::string& path, const Dense& x) {
@@ -22,11 +49,19 @@ void write_solution(const std::string& path, const Dense& x) {
     spdlog::info("solution written to {}", path);
 }
 
+// -v attaches the internal timing tree, which is printed after the solve.
+solver make_solver(const Eigen::SparseMatrix<double>& L, const run_config& cfg,
+                   detail::checkpoint& timings) {
+    return cfg.solve_opts.factor_opts.verbose
+        ? detail::solver_access::with_timings(L, cfg.solve_opts, timings)
+        : solver(L, cfg.solve_opts);
+}
+
 // An n x k RHS file: one reusable solver, one batched solve over its columns.
 int solve_batch(const Eigen::SparseMatrix<double>& L, const Eigen::MatrixXd& B,
                 const run_config& cfg, bool graph, const input_scan& scan) {
-    checkpoint setup;
-    const solver owner(L, cfg.solve_opts, cfg.solve_opts.collect_timings ? &setup : nullptr);
+    detail::checkpoint timings;
+    solver owner = make_solver(L, cfg, timings);
     Eigen::MatrixXd X(B.rows(), B.cols());
     const auto res = owner.solve(B, X);
 
@@ -39,8 +74,8 @@ int solve_batch(const Eigen::SparseMatrix<double>& L, const Eigen::MatrixXd& B,
                      col.residual, col.converged ? "" : " (did not converge)");
         failed += !col.converged;
     }
-    if (cfg.solve_opts.collect_timings)
-        spdlog::info("timings:\n{}\n{}", setup.report(), res.timings.report());
+    if (cfg.solve_opts.factor_opts.verbose)
+        spdlog::info("timings:\n{}", timings.report());
 
     if (cfg.output_path)
         write_solution(*cfg.output_path, X);
@@ -70,6 +105,10 @@ int main(int argc, char* argv[]) try {
         spdlog::error("matrix must be square, got {}x{}", L.rows(), L.cols());
         return 2;
     }
+    if (L.rows() == 0) {
+        spdlog::error("matrix is empty (0x0)");
+        return 2;
+    }
 
     // The file is the operator; --convert-input applies the as_operator rule
     // (see src/mtx_input.h). Validation errors are logged by the handler
@@ -79,9 +118,8 @@ int main(int argc, char* argv[]) try {
     const bool graph = cfg.convert_input && detail::is_graph_adjacency(L);
     spdlog::info("{}", describe_input(graph, scan,
                                       !cfg.convert_input ? "the default"
-                                      : graph ? "--convert-input: not a valid operator, "
-                                                "no negative off-diagonal"
-                                              : "--convert-input: already a valid operator"));
+                                      : graph ? "--convert-input: no negative off-diagonal"
+                                              : "--convert-input: not a graph adjacency matrix"));
     if (graph)
         L = detail::adjacency_laplacian(L);
 
@@ -90,14 +128,24 @@ int main(int argc, char* argv[]) try {
     Eigen::VectorXd b;
     if (cfg.rhs_path) {
         spdlog::debug("loading RHS from {}", *cfg.rhs_path);
+        // Check the shape before reading: the reader divides by the row count.
+        fast_matrix_market::matrix_market_header rhs_header;
+        {
+            std::ifstream f(*cfg.rhs_path);
+            fast_matrix_market::read_header(f, rhs_header);
+        }
+        if (rhs_header.nrows != L.rows()) {
+            spdlog::error("RHS length {} does not match n = {}", rhs_header.nrows, L.rows());
+            return 2;
+        }
+        if (rhs_header.ncols == 0) {
+            spdlog::error("RHS file has no columns");
+            return 2;
+        }
         Eigen::MatrixXd B;
         {
             std::ifstream f(*cfg.rhs_path);
             fast_matrix_market::read_matrix_market_eigen_dense(f, B);
-        }
-        if (B.rows() != L.rows()) {
-            spdlog::error("RHS length {} does not match n = {}", B.rows(), L.rows());
-            return 2;
         }
         if (B.cols() > 1)
             return solve_batch(L, B, cfg, graph, scan);
@@ -105,8 +153,7 @@ int main(int argc, char* argv[]) try {
     } else {
         // parse_args requires exactly one of --rhs / --random-rhs.
         spdlog::debug("generating random test RHS");
-        std::srand(cfg.solve_opts.factor_opts.seed);  // Eigen::Random uses rand()
-        b = generate_test_rhs(L.rows());
+        b = random_rhs(L.rows(), cfg.solve_opts.factor_opts.seed);
         if (graph ||
             (scan.excess_rows == 0 && scan.deficient_rows == 0)) {
             const Eigen::Index components =
@@ -118,13 +165,15 @@ int main(int argc, char* argv[]) try {
         }
     }
 
-    auto res = solve(L, b, cfg.solve_opts);
+    detail::checkpoint timings;
+    solver owner = make_solver(L, cfg, timings);
+    const auto res = owner.solve(b);
 
     spdlog::info("backend:    {}", res.backend == solve_backend::gpu ? "gpu" : "cpu");
     spdlog::info("iterations: {}", res.iterations);
     spdlog::info("residual:   {}", res.residual);
-    if (cfg.solve_opts.collect_timings)
-        spdlog::info("timings:\n{}", res.timings.report());
+    if (cfg.solve_opts.factor_opts.verbose)
+        spdlog::info("timings:\n{}", timings.report());
 
     if (cfg.output_path)
         write_solution(*cfg.output_path, res.x);

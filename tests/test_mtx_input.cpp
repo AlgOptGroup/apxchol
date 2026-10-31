@@ -10,7 +10,9 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Core>
@@ -19,6 +21,7 @@
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"
 #include "mtx_input.h"
+#include "test_rhs.h"
 
 using apxchol::describe_input;
 using apxchol::detail::adjacency_laplacian;
@@ -136,19 +139,40 @@ TEST(AsOperatorRule, NonnegativeOffDiagonalsAreAGraph) {
     EXPECT_TRUE(is_graph_adjacency(loops));
 }
 
-TEST(AsOperatorRule, MixedSignsRaise) {
-    std::vector<Trip> t{{0, 1, +1.0}, {1, 0, +1.0}, {1, 2, -1.0}, {2, 1, -1.0}};
-    Sparse M(3, 3);
-    M.setFromTriplets(t.begin(), t.end());
-    try {
-        (void)is_graph_adjacency(M);
-        FAIL() << "expected mixed signs to be refused";
-    } catch (const std::invalid_argument& e) {
-        const std::string msg = e.what();
-        EXPECT_NE(msg.find("Condition FAILED"), std::string::npos) << msg;
-        EXPECT_NE(msg.find("not a graph adjacency matrix either: 2 of 4 off-diagonal"),
-                  std::string::npos) << msg;
+TEST(AsOperatorRule, AsymmetricOrNonFiniteInputRaises) {
+    Sparse asymmetric(3, 3);                // edge 0 -> 1 without 1 -> 0
+    std::vector<Trip> t{{0, 1, 1.0}, {1, 2, 1.0}, {2, 1, 1.0}};
+    asymmetric.setFromTriplets(t.begin(), t.end());
+    Sparse nan = grid_adjacency(3, 3);
+    nan.coeffRef(0, 1) = std::numeric_limits<double>::quiet_NaN();
+    Sparse inf = grid_adjacency(3, 3);
+    inf.coeffRef(1, 0) = inf.coeffRef(0, 1) = std::numeric_limits<double>::infinity();
+    for (const auto& [M, reason] : {std::pair{asymmetric, "differ from their transpose partner"},
+                                    std::pair{nan, "NaN or infinite"},
+                                    std::pair{inf, "NaN or infinite"}}) {
+        try {
+            (void)is_graph_adjacency(M);
+            ADD_FAILURE() << "expected a refusal: " << reason;
+        } catch (const std::invalid_argument& e) {
+            const std::string msg = e.what();
+            EXPECT_NE(msg.find("needs a square, finite, symmetric matrix"), std::string::npos)
+                << msg;
+            EXPECT_NE(msg.find(reason), std::string::npos) << msg;
+        }
     }
+}
+
+TEST(AsOperatorRule, AnyNegativeOffDiagonalLeavesTheMatrixToTheSolver) {
+    // Mixed signs, and an operator beyond the default lumping ceiling, are
+    // used as given; only the solver decides whether they are valid.
+    std::vector<Trip> t{{0, 1, +1.0}, {1, 0, +1.0}, {1, 2, -1.0}, {2, 1, -1.0}};
+    Sparse mixed(3, 3);
+    mixed.setFromTriplets(t.begin(), t.end());
+    Sparse heavy = grid_laplacian(4, 4);
+    heavy.coeffRef(0, 5) = heavy.coeffRef(5, 0) = 20.0;   // 45% positive mass
+    for (int i = 0; i < heavy.rows(); ++i) heavy.coeffRef(i, i) += 5.0;
+    EXPECT_FALSE(is_graph_adjacency(mixed));
+    EXPECT_FALSE(is_graph_adjacency(heavy));
 }
 
 // ── describe_input ───────────────────────────────────
@@ -252,7 +276,7 @@ TEST(AdjacencyInputRegression, RawAdjacencyIsRefusedByTheOperatorContract) {
                       },
                       +[](const Sparse& M) {
                           (void)apxchol::solve(
-                              M, apxchol::generate_test_rhs(M.rows()),
+                              M, apxchol::test::random_rhs(M.rows()),
                               {.tol = 1e-8, .max_iter = 200});
                       }}) {
         try {
@@ -280,7 +304,7 @@ TEST(AdjacencyInputRegression, ConvertedAdjacencyHasPlausibleFillAndConverges) {
     EXPECT_GT(offdiag_factor_nnz(F), kEdges)
         << "factor shows no fill at all -- the clique sampler bailed out again";
 
-    const Eigen::VectorXd b = apxchol::generate_test_rhs(L.rows());
+    const Eigen::VectorXd b = apxchol::test::random_rhs(L.rows());
     const auto res = apxchol::solve(L, b, {.tol = 1e-8, .max_iter = 200});
     EXPECT_GT(res.iterations, 0);
     EXPECT_LT(res.residual, 1e-8);
@@ -293,7 +317,7 @@ TEST(AdjacencyInputRegression, ConversionRoutesAnAdjacencyMatrixToConvergence) {
     ASSERT_TRUE(is_graph_adjacency(M));
     M = adjacency_laplacian(M);
 
-    const Eigen::VectorXd b = apxchol::generate_test_rhs(M.rows());
+    const Eigen::VectorXd b = apxchol::test::random_rhs(M.rows());
     const auto res = apxchol::solve(M, b, {.tol = 1e-8, .max_iter = 200});
     EXPECT_GT(res.iterations, 0);
     EXPECT_LT(res.residual, 1e-8);
@@ -309,7 +333,7 @@ TEST(AdjacencyInputRegression, SddmInputIsStillSolvedAsAnOperator) {
     EXPECT_EQ(scan_input(L).excess_rows, L.rows());
     ASSERT_FALSE(is_graph_adjacency(L));
 
-    const Eigen::VectorXd b = apxchol::generate_test_rhs(L.rows());
+    const Eigen::VectorXd b = apxchol::test::random_rhs(L.rows());
     const auto res = apxchol::solve(L, b, {.tol = 1e-8, .max_iter = 200});
     EXPECT_GT(res.iterations, 0);
     EXPECT_LT(res.residual, 1e-8);

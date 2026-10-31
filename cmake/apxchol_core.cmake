@@ -3,7 +3,20 @@ include(GNUInstallDirs)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_version.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_device.cmake)
 
-option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)" ON)
+# Native tuning defaults ON only when apxchol itself is the top-level project:
+# the root, local Python and benchmark builds. Embedding and the SDK stay portable.
+get_filename_component(_apxchol_root "${CMAKE_CURRENT_LIST_DIR}/.." REALPATH)
+get_filename_component(_apxchol_top "${CMAKE_SOURCE_DIR}" REALPATH)
+set(_apxchol_native_default OFF)
+if (_apxchol_top STREQUAL _apxchol_root OR _apxchol_top STREQUAL "${_apxchol_root}/python"
+    OR _apxchol_top STREQUAL "${_apxchol_root}/benchmarks")
+    set(_apxchol_native_default ON)
+endif()
+option(APXCHOL_NATIVE_ARCH "Compile tuned for the build machine (Release/RelWithDebInfo)"
+       ${_apxchol_native_default})
+unset(_apxchol_root)
+unset(_apxchol_top)
+unset(_apxchol_native_default)
 if (DEFINED APXCHOL_64BIT_EDGE_INDICES OR DEFINED APXCHOL_64BIT_NODE_INDICES)
     message(FATAL_ERROR "Use APXCHOL_INDEX_WIDTH=32|64_EDGES|64; remove the old APXCHOL_64BIT_*_INDICES entries from your CMake cache")
 endif()
@@ -12,11 +25,11 @@ set_property(CACHE APXCHOL_INDEX_WIDTH PROPERTY STRINGS 32 64_EDGES 64)
 if (NOT APXCHOL_INDEX_WIDTH MATCHES "^(32|64_EDGES|64)$")
     message(FATAL_ERROR "APXCHOL_INDEX_WIDTH must be 32, 64_EDGES or 64")
 endif()
-option(APXCHOL_POOL_FP32 "Store residual-pool weights in FP32; reads promote to FP64. OFF selects the FP64 reference." ON)
 
-include(${CMAKE_CURRENT_LIST_DIR}/apxchol_arch.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_eigen.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/apxchol_arch.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_openmp.cmake)
+
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_archive.cmake)
 
 if (APXCHOL_DEVICE STREQUAL "METAL")
@@ -32,7 +45,7 @@ elseif (APXCHOL_DEVICE STREQUAL "CUDA")
     find_package(CUDAToolkit 13.3 REQUIRED)
 endif()
 
-function(apxchol_configure_core target)
+function(_apxchol_configure_core target)
     get_filename_component(root "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/.." ABSOLUTE)
     target_sources(${target} PRIVATE
         ${root}/src/factorization.cpp
@@ -45,9 +58,11 @@ function(apxchol_configure_core target)
     set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
     target_compile_options(${target} PRIVATE
         -Wall -Wextra "$<$<COMPILE_LANGUAGE:C,CXX,OBJCXX>:-Wpedantic>")
-    if (APXCHOL_ARCH_FLAG)
-        target_compile_options(${target} PUBLIC "${APXCHOL_ARCH_FLAG}")
+    if (_APXCHOL_ARCH_FLAG)
+        target_compile_options(${target} PRIVATE "${_APXCHOL_ARCH_FLAG}")
     endif()
+    target_compile_definitions(${target} PUBLIC
+        EIGEN_MAX_ALIGN_BYTES=${_APXCHOL_EIGEN_ALIGN_BYTES} EIGEN_MALLOC_ALREADY_ALIGNED=0)
 
     set(APXCHOL_GIT_SHA "unknown")
     execute_process(COMMAND git -C "${root}" rev-parse --show-toplevel
@@ -85,9 +100,9 @@ function(apxchol_configure_core target)
     endif()
 
     if (APXCHOL_DEVICE STREQUAL "METAL")
-        target_sources(${target} PRIVATE ${root}/src/metal_solver.mm ${root}/src/metal_setup.mm)
+        target_sources(${target} PRIVATE ${root}/src/metal_route.mm ${root}/src/metal_setup.mm)
         target_compile_definitions(${target} PUBLIC APXCHOL_USE_METAL)
-        set_source_files_properties(${root}/src/metal_solver.mm ${root}/src/metal_setup.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+        set_source_files_properties(${root}/src/metal_route.mm ${root}/src/metal_setup.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
         target_compile_options(${target} PRIVATE
             "$<$<COMPILE_LANGUAGE:OBJCXX>:SHELL:${OpenMP_CXX_FLAGS}>")
         set_target_properties(${target} PROPERTIES OBJCXX_STANDARD 23 OBJCXX_STANDARD_REQUIRED ON)
@@ -103,9 +118,6 @@ function(apxchol_configure_core target)
     elseif (APXCHOL_INDEX_WIDTH STREQUAL "64")
         target_compile_definitions(${target} PUBLIC APXCHOL_64BIT_NODE_INDICES)
     endif()
-    if (APXCHOL_POOL_FP32)
-        target_compile_definitions(${target} PUBLIC APXCHOL_POOL_FP32)
-    endif()
 endfunction()
 
 # Include this module in the consuming project's scope before calling this
@@ -116,8 +128,11 @@ function(apxchol_add_core)
     endif()
     add_library(apxchol_core)
     add_library(apxchol::core ALIAS apxchol_core)
-    set_target_properties(apxchol_core PROPERTIES EXPORT_NAME core POSITION_INDEPENDENT_CODE ON)
-    apxchol_configure_core(apxchol_core)
+    # Shared builds get a major.minor soname: there is no stable ABI across minors.
+    string(REGEX MATCH "^[0-9]+\\.[0-9]+" soversion "${APXCHOL_VERSION}")
+    set_target_properties(apxchol_core PROPERTIES EXPORT_NAME core POSITION_INDEPENDENT_CODE ON
+        VERSION "${APXCHOL_VERSION}" SOVERSION "${soversion}")
+    _apxchol_configure_core(apxchol_core)
     include(${CMAKE_CURRENT_FUNCTION_LIST_DIR}/apxchol_install.cmake)
-    apxchol_install_core()
+    _apxchol_install_core()
 endfunction()

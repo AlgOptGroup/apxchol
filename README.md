@@ -58,8 +58,8 @@ its Laplacian with `apxchol.as_operator(Adj)`. See the
 Start with the built-in solver for factor reuse and batched solves.
 The [Python](python/README.md), [C++](docs/reference/cpp.md) and
 [MATLAB/Octave](octave/README.md) guides cover each interface.
-Eigen and SciPy adapters let you use the preconditioner with another iterative
-solver; see [integration and factor reuse](docs/usage.md#using-another-iterative-solver).
+`solver.apply` (C++) and `aslinearoperator()` (Python) let you use the
+preconditioner with another iterative solver; see [integration and factor reuse](docs/usage.md#using-another-iterative-solver).
 
 ## Build and run
 
@@ -101,3 +101,7 @@ Baumann–Kyng ([2024](https://dl.acm.org/doi/10.1145/3626183.3659987)).
 
 Developed at ETH Zürich. Contact: <apxchol@inf.ethz.ch>.
 [License](LICENSE) · [Citing apxchol](docs/citing.md) · [Changelog](CHANGELOG.md).
+
+## Acknowledgements
+
+Samuel Talkington contributed the Apple Metal backend and macOS support.

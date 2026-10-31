@@ -47,7 +47,9 @@ static_assert(apxchol::partitioner<priority_partitioner>);
 int main() {
     const int k = 60;
     auto L = grid_laplacian(k);
-    Eigen::VectorXd b = apxchol::generate_test_rhs(L.rows());
+    Eigen::VectorXd b = Eigen::VectorXd::Zero(L.rows());   // unit source and sink
+    b(0) = 1.0;
+    b(L.rows() - 1) = -1.0;
 
     // Eliminate the grid interior first, boundary last (an arbitrary
     // demonstration order — plug in ND/AMD/domain knowledge here).
@@ -63,7 +65,7 @@ int main() {
     std::printf("custom-order factor: nnz %zu, %zu rounds\n",
                 size_t(F.L.nonZeros()), F.rounds.size());
 
-    apxchol::cpu_solver slv(L, std::move(F));
+    apxchol::solver slv(L, std::move(F));
     auto res = slv.solve(b);
     std::printf("custom-order solve : %ld iterations, residual %.2e\n",
                 long(res.iterations), res.residual);

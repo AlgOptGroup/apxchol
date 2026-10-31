@@ -20,12 +20,11 @@
 #if defined(APXCHOL_USE_CUDA)
 namespace {
 using apxchol::node_index;
-using apxchol::pool_value_t;
 using apxchol::detail::gpu_round_shadow_incidence;
 using apxchol::detail::gpu_round_shadow_input;
 using edge = gpu_round_shadow_incidence;
 constexpr std::size_t block_size = 16384;
-pool_value_t pool(double x) { return static_cast<pool_value_t>(x); }
+float pool(double x) { return static_cast<float>(x); }
 
 gpu_round_shadow_input make_input(node_index n, const std::vector<edge>& edges) {
     gpu_round_shadow_input result;
@@ -45,11 +44,7 @@ gpu_round_shadow_input make_input(node_index n, const std::vector<edge>& edges) 
     return result;
 }
 
-std::uint64_t bucket(double w) {
-    if constexpr (sizeof(pool_value_t) == 4)
-        return (~std::uint64_t(std::bit_cast<std::uint32_t>(static_cast<float>(w))) & 0xffffffffULL) >> 20;
-    else return (~std::bit_cast<std::uint64_t>(w)) >> 52;
-}
+std::uint32_t bucket(double w) { return ~std::bit_cast<std::uint32_t>(static_cast<float>(w)) >> 20; }
 double draw(node_index u, node_index v, std::uint64_t seed) {
     std::uint64_t x = seed ^ (std::uint64_t(u) * 0x9E3779B97F4A7C15ULL)
                            ^ (std::uint64_t(v) * 0xBF58476D1CE4E5B9ULL);
@@ -75,8 +70,8 @@ oracle_output reference(const gpu_round_shadow_input& input, std::uint64_t seed,
     std::vector<edge> physical;
     for (const auto& e : input.incidences)
         if (e.owner < e.neighbor) physical.push_back(e);
-    std::sort(physical.begin(), physical.end(), [](const edge& a, const edge& b) {
-        return std::tie(a.owner, a.neighbor, a.weight) < std::tie(b.owner, b.neighbor, b.weight);
+    std::stable_sort(physical.begin(), physical.end(), [](const edge& a, const edge& b) {
+        return std::tie(a.owner, a.neighbor) < std::tie(b.owner, b.neighbor);
     });
     for (std::size_t i = 0; i < physical.size();) {
         const auto u = physical[i].owner, v = physical[i].neighbor;
@@ -204,7 +199,7 @@ void check(const gpu_round_shadow_input& input, const Output& actual,
 #if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 TEST(GpuOwnedSparsify, CanonicalBucketsAndCoalescingMatchCpuLaw) {
     REQUIRE_OWNED_SPARSIFY_DEVICE();
-    const auto one_next = std::nextafter(pool_value_t{1}, pool_value_t{2});
+    const auto one_next = std::nextafter(float{1}, float{2});
     auto ties = make_input(3, {{1,2,one_next},{0,2,one_next},{0,1,1}});
     auto mixed = make_input(8, {{2,3,4},{0,2,0.25},{0,1,-0.0},{0,1,-0.0},
         {0,2,1},{0,2,0.5},{1,2,1},{0,3,2},{1,3,1},{4,5,4},{5,6,1},{4,6,0.0}});
@@ -303,8 +298,8 @@ TEST(GpuOwnedSparsify, EmptyAllKeptAndInvalidInputsPreserveOwnedContract) {
     check(empty, first, reference(empty, 42));
     auto invalid = original; invalid.active[1] = 0;
     EXPECT_THROW(apxchol::detail::gpu_sparsify_owned_residual_for_test(invalid,42), std::exception);
-    auto overflow = make_input(2, {{0,1,double(std::numeric_limits<pool_value_t>::max())},
-                                  {0,1,double(std::numeric_limits<pool_value_t>::max())}});
+    auto overflow = make_input(2, {{0,1,double(std::numeric_limits<float>::max())},
+                                  {0,1,double(std::numeric_limits<float>::max())}});
     EXPECT_THROW(apxchol::detail::gpu_sparsify_owned_residual_for_test(overflow,42), std::exception);
     RecordProperty("owned_sparsify_empty_all_kept_invalid", "pass");
 }
@@ -418,10 +413,10 @@ TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneDeviceAttempt) {
     options.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
     options.factor_opts.drop_tolerance = 0;
     options.factor_opts.verbose = true;
-    options.factor_opts.parallel_residual_threshold = 1;
-    options.factor_opts.omp_threshold = 0;
+    options.factor_opts.experimental.parallel_residual_threshold = 1;
+    options.factor_opts.experimental.omp_threshold = 0;
     options.factor_opts.partition.degree_quantile = .8;
-    ASSERT_DOUBLE_EQ(options.factor_opts.min_is_fraction, .05);
+    ASSERT_DOUBLE_EQ(options.factor_opts.experimental.min_is_fraction, .05);
     auto occurrences = [](const std::string& text, const std::string& needle) {
         std::size_t count = 0, at = 0;
         while ((at = text.find(needle,at)) != std::string::npos) { ++count;at += needle.size(); }

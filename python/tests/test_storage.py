@@ -11,10 +11,8 @@ def operator_matrix():
 
 
 @pytest.mark.parametrize("dtype", [np.float32, "float32", np.dtype("float32"), ">f4"])
-@pytest.mark.parametrize("keep_factor", [False, True])
-def test_explicit_fp32(dtype, keep_factor):
-    solver = apxchol.factorize(operator_matrix(), backend="cpu", factor_storage_dtype=dtype,
-                              keep_factor=keep_factor)
+def test_explicit_fp32(dtype):
+    solver = apxchol.factorize(operator_matrix(), backend="cpu", factor_storage_dtype=dtype)
     assert solver.factor_storage_dtype == np.dtype("float32")
     result = solver.solve([1.0, 0.0])
     assert result.converged

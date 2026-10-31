@@ -21,17 +21,16 @@ valid operator. To start from a graph instead, convert the input first:
 |---|---|---|
 | `--convert-input` | `A = apxchol.as_operator(M)` | `A = apxchol_as_operator(M)` |
 
-All three apply the same rule, like NumPy's `asarray`:
+All three apply the same rule, like NumPy's `asarray`. `M` must be square,
+finite and symmetric; otherwise the conversion fails and says why.
 
-- If `M` passes the operator check (a symmetric Laplacian or SDDM matrix,
-  possibly nearly SDDM), it is used unchanged. A diagonal-only matrix with a
-  positive diagonal passes.
-- Otherwise, if `M` has no negative off-diagonal entry, it is a graph
+- If `M` has off-diagonal entries and none of them is negative, it is a graph
   adjacency matrix, and its Laplacian `L = D - M` is used, where `D` holds the
   row sums of `M`. A diagonal entry (self-loop) adds to `D` and is subtracted
   again, so it cancels. Pattern input (a Matrix Market `pattern` file, a
   MATLAB logical matrix, a boolean SciPy matrix) has unit weights.
-- Otherwise the conversion fails, explaining why `M` is neither.
+- Otherwise `M` is used unchanged, and the solver checks it as an operator.
+  This covers Laplacian, SDDM and nearly SDDM matrices and diagonal matrices.
 
 Without conversion, when a matrix fails as an operator but has no negative
 off-diagonal entry, the error suggests the conversion for each interface.
@@ -69,13 +68,43 @@ and unique, and every stored off-diagonal `(i, j)` needs its matching `(j, i)`.
 GPU setup also requires 32-bit vertex indices.
 
 CPU setup supports custom partitioners and eliminators. CUDA setup supports
-`block_greedy`, natural residual peeling, and GKS or trace-cycle sampling;
-exact-clique, exact-core and double-cycle overrides require CPU construction.
+`block_greedy` and GKS or trace-cycle sampling; the experimental exact-clique,
+exact-core and double-cycle rules require CPU construction.
 Metal setup supports the default `block_greedy`/GKS options and FP32 graph
 weights. See [precision limits](precision.md#apple-metal-pcg) for Metal ranges.
 
 These construction restrictions do not prevent using an explicitly supplied
 host factor with a GPU solver. See [factor handoff](extending.md#reusing-a-custom-factor).
+
+## Option names
+
+Each interface spells the stable options as follows. Python and MATLAB/Octave
+take setup options as keywords or struct fields, and the solve tolerance and
+iteration budget as solve arguments.
+
+| C++ | CLI | Python | MATLAB/Octave |
+|---|---|---|---|
+| `solve_options::backend` | `--backend` | `backend` | CPU only |
+| `solve_options::num_threads` | `--threads` | `num_threads` | `num_threads` |
+| `solve_options::tol` | `--tol` | `rtol` (solve argument) | `rtol` (solve argument) |
+| `solve_options::max_iter` | `--max-iter` | `maxiter` (solve argument) | `maxiter` (solve argument) |
+| `factor_options::seed` | `--seed` | `seed` | `seed` |
+| `factor_options::partitioner` | `--partitioner` | `partitioner` | `partitioner` |
+| `factor_options::sampler` | `--sampler` | `sampler` | `sampler` |
+| `factor_options::factor_storage` | `--factor-storage` | `factor_storage_dtype` | `factor_storage` |
+| `factor_options::drop_tolerance` | `--drop-tolerance` | `drop_tolerance` | `drop_tolerance` |
+| `factor_options::regularization` | `--regularization` | `regularization` | `regularization` |
+| `factor_options::lump_max_mass` | `--lump-max-mass` | `lump_max_mass` | `lump_max_mass` |
+| `partition_options::degree_quantile` | `--degree-quantile` | `degree_quantile` | `degree_quantile` |
+| `partition_options::degree_multiplier` | `--degree-multiplier` | `degree_multiplier` | `degree_multiplier` |
+| `factor_options::verbose` | `--verbose` | `verbose` | `verbose` |
+
+The partitioner (`block_greedy`, `priority_greedy` or `baumann_kyng`) and the
+sampler (`gks` or `trace_cycle`) take the same names everywhere. Factor storage
+is `auto`, `float16` or `float32` in the CLI and MATLAB/Octave, a NumPy dtype
+in Python's `factor_storage_dtype`, and `factor_storage_type::automatic`,
+`fp16` or `fp32` in C++. The research controls in `factor_options::experimental` are
+available only from C++; see the [API policy](api.md).
 
 ## Reuse, batches and initial guesses
 
@@ -96,16 +125,39 @@ For C++:
 #include "apxchol.h"
 apxchol::solver solver(A);
 auto result = solver.solve(b, 1e-8);
-// Negative tolerance/budget arguments keep this solver's defaults.
-auto warm = solver.solve(b2, -1, -1, &result.x);
+// std::nullopt keeps this solver's tolerance or iteration budget.
+auto warm = solver.solve(b2, std::nullopt, std::nullopt, &result.x);
 Eigen::MatrixXd X(B.rows(), B.cols());
 auto batch = solver.solve(B, X);
 ```
 
 One-shot `apxchol::solve(A, b)` uses the same backend selection. For explicit
-CPU execution, set `solve_options.backend = solve_backend::cpu`. Use
-`cpu_solver` only when you need its direct `preconditioner()` accessor;
-see the [C++ reference](reference/cpp.md#cpu-specific-owner).
+CPU execution, set `solve_options.backend = solve_backend::cpu`.
+
+### Judging whether reuse pays off
+
+Setup builds the factor and prepares the backend once; each solve then pays
+only for its own solve work. Every solver reports both parts as wall-clock
+seconds:
+
+| | C++ | Python | MATLAB/Octave |
+|---|---|---|---|
+| Setup | `solver.setup_seconds()` | `solver.setup_seconds` | `s.setup_seconds` |
+| One solve call | `result.solve_seconds` | `result.solve_seconds` | `res.solve_seconds` |
+
+Over `k` separate one-RHS calls, each costs `setup_seconds / k + solve_seconds`
+on average. A matrix RHS reports one `solve_seconds` for all its columns, so
+one batched call of `k` columns costs `(setup_seconds + solve_seconds) / k` per
+RHS. Reuse pays off once that is below the time of solving each system
+another way, for example with a one-shot solve or another preconditioner. After
+`load`, `setup_seconds` includes reading the file, so it also shows what a
+saved solver saves over factorizing again.
+
+```cpp
+apxchol::solver solver(A);
+auto result = solver.solve(b);
+std::printf("setup %.3f s, solve %.3f s\n", solver.setup_seconds(), result.solve_seconds);
+```
 
 ## Binding capabilities
 
@@ -117,7 +169,7 @@ Their language-specific helpers differ:
 | Reusable factor, scalar and batched solves/apply | Yes | Yes |
 | Initial guess, per-call tolerance and iteration budget | Yes | Yes |
 | GPU setup and solve | CUDA or Metal when built and available | CPU only |
-| Factor export | FP32 values when retained | Not exposed |
+| Factor export | Installed factor, float64 copies | Not exposed |
 | External iterative solver | SciPy `LinearOperator` | Function handle for `pcg` |
 
 ## Convergence and cost
@@ -127,10 +179,9 @@ RHS. `result.residual` reports that relative residual, and `result.converged`
 tells whether it meets the requested tolerance. Inspect this flag even when
 the call returns without an exception.
 
-This check is always part of the solve, including when timing collection is
-disabled. It usually costs one additional sparse matrix–vector product and
-norm reductions per RHS; trivial exact exits can avoid that work. Its cost is
-included in reported solve time.
+This check is always part of the solve. It usually costs one additional
+sparse matrix–vector product and norm reductions per RHS; trivial exact exits
+can avoid that work. Its cost is included in `solve_seconds`.
 
 A failed final check does not trigger more iterations or a different backend.
 The [precision contract](precision.md) explains where each backend checks the
@@ -138,30 +189,75 @@ residual and how rounding affects it.
 
 ## Using another iterative solver
 
-apxchol's SciPy operator (`solver.aslinearoperator()`) and Eigen-compatible
-preconditioner (`apx_cholesky`, CPU only) let another solver drive the
-iteration. That solver controls its stopping test.
+To use apxchol as the preconditioner of another Krylov solver (Eigen, SciPy,
+PETSc, MKL's reverse-communication interface), apply it with C++
+`solver.apply(r)` for vectors or `solver.apply(R, Z)` for matrices, using
+`const_matrix_view` and `matrix_view`, or Python `solver.aslinearoperator()`.
+Each application computes `z = M^{-1} r` with the prepared factor; the other
+solver controls the iteration and its stopping test.
+
+For Eigen's iterative solvers, a small adapter is enough. It is an example
+outside apxchol's stable API; copy it into your code:
+
+```cpp
+#include <apxchol.h>
+#include <Eigen/IterativeLinearSolvers>
+
+class apxchol_preconditioner
+    : public Eigen::SparseSolverBase<apxchol_preconditioner> {
+public:
+    using Scalar = double;
+    using StorageIndex = int;
+    enum { ColsAtCompileTime = Eigen::Dynamic, MaxColsAtCompileTime = Eigen::Dynamic };
+
+    void attach(apxchol::solver& s) { solver_ = &s; m_isInitialized = true; }
+
+    // The attached solver already holds the factor.
+    template<class Matrix> apxchol_preconditioner& analyzePattern(const Matrix&) { return *this; }
+    template<class Matrix> apxchol_preconditioner& factorize(const Matrix&) { return *this; }
+    template<class Matrix> apxchol_preconditioner& compute(const Matrix&) { return *this; }
+
+    Eigen::Index rows() const { return solver_->rows(); }
+    Eigen::Index cols() const { return solver_->rows(); }
+    Eigen::ComputationInfo info() const { return Eigen::Success; }
+
+    template<class Rhs, class Dest>
+    void _solve_impl(const Rhs& b, Dest& x) const { x = solver_->apply(b); }
+
+private:
+    apxchol::solver* solver_ = nullptr;
+};
+
+apxchol::solver s(A);
+Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower | Eigen::Upper,
+                         apxchol_preconditioner> cg;
+cg.preconditioner().attach(s);
+cg.setTolerance(1e-10);
+cg.compute(A);
+Eigen::VectorXd x = cg.solve(b);
+```
+
+Eigen default-constructs the preconditioner, so the adapter holds a pointer
+set by `attach`; the solver must outlive `cg`.
 
 A GPU-backed SciPy operator exchanges host vectors with the device on each
 application. Native `solve` keeps iteration vectors on the GPU, so prefer it
 for GPU workloads unless you need another outer solver.
 
-## Keeping and exporting a factor
+## Exporting a factor
 
-Exported factor values are FP32. Internal triangular-solve storage can be
-FP16 or FP32 independently; see [storage choices](precision.md).
-
-C++ defaults to releasing factor values after preparation. Set
-`keep_factor_values=true` when you need them later through `solver.factor()`.
-Python's reusable solver instead defaults to `keep_factor=True`, enabling
-`chol()`, `L` and `D` exports. Set it to `False` to save memory; the permutation
-`P` remains available.
+`solver.factor()` in C++ and `chol()` and `P` in Python return the
+installed factor: the preconditioner the solves actually use, after dropping
+and in the solver's [storage precision](precision.md). The solver keeps no
+separate copy of the factor; export reads its triangular-solve arrays, and a
+GPU solver downloads them. The [factor reference](reference/cpp.md#constructing-and-reusing-a-factor)
+defines the exported form.
 
 CPU-, CUDA- and Metal-built factors can be reused through
 [C++ factor handoff](extending.md#reusing-a-custom-factor). Automatic adoption
 uses CPU; request `solve_backend::gpu` to upload the factor to a GPU.
 
-Portable solver archives [save the original matrix and retained factor
+Portable solver archives [save the original matrix and installed factor
 together](serialization.md), so loading can prepare the solver without
 repeating factorization.
 
@@ -175,3 +271,27 @@ workloads may use fewer threads.
 The setting also covers CPU work in a GPU build; it does not control GPU
 threadgroups. More CPU threads need not be faster. To choose which cores run those CPU workers,
 see [thread placement](../benchmarks/README.md#thread-placement).
+
+## Thread safety
+
+Use one solver per thread. A solver reuses its workspace across `solve`,
+`apply` and batch solves. In C++ these methods are non-const, and concurrent
+non-const calls on one object are not allowed: use a copy, or batch the
+right-hand sides. As a safety net, a call made while another thread is using
+the same solver throws (`RuntimeError` in Python) instead of waiting.
+
+Copies are cheap: a copy shares the factor, the triangular-solve structures
+and the operator, which are read-only after setup, and allocates only its
+own workspace. Copy a solver once per thread, with `solver copy = original;`
+in C++ or `copy.copy(solver)` in Python, and the copies solve in parallel
+with the same results as serial calls. Copies stay valid after the original
+is destroyed. On a GPU, copies share the factor and operator in device memory
+and each copy gets its own device workspace and stream (CUDA) or command queue
+(Metal), so copies on one GPU solve concurrently without storing the factor
+again; they share that GPU's compute and memory bandwidth.
+
+To solve many right-hand sides from one thread, pass them to `solve(B)` as the
+columns of one matrix; the batched solver shares work between columns.
+
+Python releases the GIL during factorization, `solve` and `apply`, but holds it
+while reading the input matrix.

@@ -26,14 +26,14 @@ int main() {
         const std::vector<apxchol::node_index> degrees{1, 2, 20};
         const double average = 23.0 / 3;
         std::vector<apxchol::node_index> scratch;
-        for (double quantile : {-1.0, 0.0, 0.8}) {
+        for (std::optional<double> quantile : {std::optional<double>{}, {0.0}, {0.8}}) {
             apxchol::factor_options requested;
             requested.partition.degree_quantile = quantile;
             requested.partition.degree_multiplier = 3;
             const auto opts = v1_factor_options(capped, requested);
             require(opts.partition.degree_quantile == 0, "cap4 did not disable quantile selection");
             require(opts.partition.degree_multiplier == 4, "cap4 did not set multiplier 4");
-            require(apxchol::is_degree_threshold(degrees, degrees.size(), average,
+            require(apxchol::detail::candidate_degree_cap(degrees, degrees.size(), average,
                         opts.partition, scratch) == 4 * average,
                     "cap4 did not apply the advertised average-degree threshold");
             const auto unchanged = v1_factor_options(standard, requested);

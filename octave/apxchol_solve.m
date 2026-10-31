@@ -1,7 +1,8 @@
 function res = apxchol_solve(A, b, rtol, maxiter, options, x0)
   % APXCHOL_SOLVE  One-shot convenience: factorize A, then solve A x = b.
   %
-  %   res = apxchol_solve(A, b);                % res.x, res.iters, res.residual, res.converged
+  %   res = apxchol_solve(A, b);                % res.x, res.iters, res.residual, res.converged,
+  %                                             % res.solve_seconds
   %   res = apxchol_solve(A, b, 1e-10, 1000);   % custom tol / maxiter
   %
   % b may contain several RHS columns; optional x0 supplies matching initial guesses.

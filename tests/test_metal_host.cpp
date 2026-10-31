@@ -4,7 +4,7 @@
 #include "apxchol/solver/detail/metal_host.h"
 #include "../src/metal_setup_options.h"
 #include "../src/metal_setup/layout.h"
-#include "apxchol/solver/sptrsv/cuda_host.h"
+#include "apxchol/solver/sptrsv/gpu_factor_prep.h"
 
 #include <cmath>
 #include <cstdint>
@@ -17,12 +17,12 @@ namespace mh = apxchol::detail::metal_host;
 TEST(MetalHost, DegreeQuantileOptions) {
     apxchol::factor_options options;
     const bool defaults = apxchol::detail::metal_setup_options_supported(options);
-    for (double quantile : {apxchol::degree_quantile_by_route, 0.1, 0.2, 0.3, 0.5, 0.8,
+    EXPECT_EQ(apxchol::detail::metal_degree_quantile(std::nullopt), 0.2);
+    for (double quantile : {0.1, 0.2, 0.3, 0.5, 0.8,
                             double(float(0.2)), std::nextafter(0.0, 1.0), std::nextafter(1.0, 0.0)}) {
         SCOPED_TRACE(quantile);
         options.partition.degree_quantile = quantile;
-        EXPECT_EQ(apxchol::detail::metal_degree_quantile(quantile),
-                  quantile == apxchol::degree_quantile_by_route ? 0.2 : quantile);
+        EXPECT_EQ(apxchol::detail::metal_degree_quantile(quantile), quantile);
         EXPECT_EQ(apxchol::detail::metal_setup_options_supported(options), defaults);
     }
     for (double quantile : {-2.0, -0.1, 0.0, 1.0, 2.0,
@@ -33,7 +33,7 @@ TEST(MetalHost, DegreeQuantileOptions) {
         options.partition.degree_quantile = quantile;
         EXPECT_FALSE(apxchol::detail::metal_setup_options_supported(options));
     }
-    EXPECT_EQ(apxchol::degree_quantile_device_default, 0.5);
+    EXPECT_EQ(apxchol::detail::degree_quantile_device_default, 0.5);
 }
 
 TEST(MetalHost, DegreeQuantileThresholdBounds) {
@@ -197,7 +197,7 @@ TEST(MetalHost, FactorStorageRangeAndRounding) {
 }
 
 TEST(MetalHost, Float16ScaleFallbackKeepsSmallOffDiagonalFactorsFinite) {
-    namespace ch = apxchol::cuda_host;
+    namespace ch = apxchol::detail::gpu_factor_prep;
     for (const auto& [diagonal, offdiag] : std::vector<std::pair<float, float>>{
              {1, -1e-40f}, {1e20f, -1e-30f}, {1, -0.25f}}) {
         ch::csr_int<float> factor;

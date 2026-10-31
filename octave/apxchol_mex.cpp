@@ -1,11 +1,11 @@
 // apxchol_mex.cpp — Octave/MATLAB MEX gateway for the apxchol CPU solver.
 //
 // One gateway, op-dispatched (keeps the binary surface to a single MEX file):
-//   h                          = apxchol_mex('factorize', A)        % A sparse double, square
-//   [x, iters, resid, conv]    = apxchol_mex('solve', h, b, tol, maxiter, x0)
+//   [h, setup_seconds]         = apxchol_mex('factorize', A)        % A sparse double, square
+//   [x, iters, resid, conv, solve_seconds] = apxchol_mex('solve', h, b, tol, maxiter, x0)
 //   z                          = apxchol_mex('apply', h, r)         % z = M^{-1} r
 //   apxchol_mex('save', h, path)
-//   h                          = apxchol_mex('load', path, options)
+//   [h, setup_seconds]         = apxchol_mex('load', path, options)
 //   apxchol_mex('free', h)
 //
 // M-file wrappers (apxchol_solver.m / apxchol_solve.m) give the user-facing API;
@@ -28,7 +28,6 @@
 #include <utility>
 
 #include "apxchol.h"
-#include "apxchol/solver/archive.h"
 #include "apxchol/detail/csc_import.h"
 #include "apxchol/operator_class.h"
 
@@ -96,7 +95,7 @@ std::string string_option(const mxArray* value, const char* name) {
 }
 
 apxchol::solve_options setup_options(const mxArray* options) {
-    apxchol::solve_options result{.backend = apxchol::solve_backend::cpu, .collect_timings = false};
+    apxchol::solve_options result{.backend = apxchol::solve_backend::cpu};
     if (options != nullptr) {
         if (!mxIsStruct(options) || mxGetNumberOfElements(options) != 1)
             fail("apxchol:badInput", "options must be a scalar struct");
@@ -106,18 +105,23 @@ apxchol::solve_options setup_options(const mxArray* options) {
             if (value == nullptr) fail("apxchol:badInput", "option '" + name + "' is empty");
             if (name == "num_threads") result.num_threads = integer_option<int>(value, name.c_str());
             else if (name == "seed") result.factor_opts.seed = integer_option<unsigned>(value, name.c_str());
-            else if (name == "cpu_schedule")
-                result.factor_opts.cpu_schedule = apxchol::detail::parse_cpu_schedule(string_option(value, name.c_str()));
+            else if (name == "partitioner")
+                result.factor_opts.partitioner = apxchol::detail::parse_option_name(
+                    apxchol::detail::partitioner_names, string_option(value, name.c_str()), name);
+            else if (name == "sampler")
+                result.factor_opts.sampler = apxchol::detail::parse_option_name(
+                    apxchol::detail::clique_sampler_names, string_option(value, name.c_str()), name);
+            else if (name == "degree_quantile") result.factor_opts.partition.degree_quantile = scalar_option(value, name.c_str());
+            else if (name == "degree_multiplier") result.factor_opts.partition.degree_multiplier = scalar_option(value, name.c_str());
             else if (name == "factor_storage")
                 result.factor_opts.factor_storage = apxchol::detail::parse_factor_storage(string_option(value, name.c_str()));
             else if (name == "drop_tolerance") result.factor_opts.drop_tolerance = scalar_option(value, name.c_str());
             else if (name == "regularization") result.factor_opts.regularization = scalar_option(value, name.c_str());
             else if (name == "lump_max_mass") result.factor_opts.lump_max_mass = scalar_option(value, name.c_str());
-            else if (name == "verbose" || name == "keep_factor") {
+            else if (name == "verbose") {
                 const double flag = scalar_option(value, name.c_str());
                 if (flag != 0 && flag != 1) fail("apxchol:badInput", name + " must be logical or 0/1");
-                if (name == "keep_factor") result.keep_factor_values = flag != 0;
-                else result.factor_opts.verbose = flag != 0;
+                result.factor_opts.verbose = flag != 0;
             } else fail("apxchol:badInput", "unknown option '" + name + "'");
         }
     }
@@ -133,12 +137,13 @@ std::uint64_t next_handle = 1;
 
 void at_exit() { store().clear(); }
 
-mxArray* store_solver(std::unique_ptr<apxchol::solver> solver) {
+// Stores the solver: plhs[0] receives its handle and plhs[1], if requested, its setup time.
+void store_solver(std::unique_ptr<apxchol::solver> solver, int nlhs, mxArray* plhs[]) {
+    if (nlhs > 1) plhs[1] = mxCreateDoubleScalar(solver->setup_seconds());
     const std::uint64_t h = next_handle++;
     store()[h] = std::move(solver);
-    mxArray* result = mxCreateNumericMatrix(1, 1, mxUINT64_CLASS, mxREAL);
-    *static_cast<std::uint64_t*>(mxGetData(result)) = h;
-    return result;
+    plhs[0] = mxCreateNumericMatrix(1, 1, mxUINT64_CLASS, mxREAL);
+    *static_cast<std::uint64_t*>(mxGetData(plhs[0])) = h;
 }
 
 apxchol::solver& get_solver(const mxArray* mh) {
@@ -186,7 +191,9 @@ Eigen::Map<const Eigen::MatrixXd> mx_to_rhs(const mxArray* value, Eigen::Index r
     return {mxGetPr(value), rows, static_cast<Eigen::Index>(nc)};
 }
 
-void solve_metadata(int nlhs, mxArray* plhs[], std::span<const apxchol::solve_result> columns) {
+void solve_metadata(int nlhs, mxArray* plhs[], std::span<const apxchol::solve_result> columns,
+                    double solve_seconds) {
+    if (nlhs > 4) plhs[4] = mxCreateDoubleScalar(solve_seconds);
     if (nlhs > 1) plhs[1] = mxCreateDoubleMatrix(1, columns.size(), mxREAL);
     if (nlhs > 2) plhs[2] = mxCreateDoubleMatrix(1, columns.size(), mxREAL);
     if (nlhs > 3) plhs[3] = mxCreateLogicalMatrix(1, columns.size());
@@ -230,7 +237,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 fail("apxchol:usage", "usage: h = apxchol_mex('factorize', A, options)");
             auto solver = std::make_unique<apxchol::solver>(
                 mx_to_eigen(prhs[1]), setup_options(nrhs == 3 ? prhs[2] : nullptr));
-            plhs[0] = store_solver(std::move(solver));
+            store_solver(std::move(solver), nlhs, plhs);
         } else if (op == "as_operator") {
             if (nrhs != 2)
                 fail("apxchol:usage", "usage: A = apxchol_mex('as_operator', M)");
@@ -243,23 +250,23 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 fail("apxchol:usage", "usage: h = apxchol_mex('load', path, options)");
             const auto path = string_option(prhs[1], "path");
             auto options = setup_options(nrhs == 3 ? prhs[2] : nullptr);
-            plhs[0] = store_solver(std::make_unique<apxchol::solver>(
-                apxchol::load_solver(path, options)));
+            store_solver(std::make_unique<apxchol::solver>(
+                apxchol::solver::load(path, options)), nlhs, plhs);
         } else if (op == "save") {
             if (nrhs != 3)
                 fail("apxchol:usage", "usage: apxchol_mex('save', h, path)");
-            apxchol::save_solver(string_option(prhs[2], "path"), get_solver(prhs[1]));
+            get_solver(prhs[1]).save(string_option(prhs[2], "path"));
         } else if (op == "solve") {
             if (nrhs != 5 && nrhs != 6)
                 fail("apxchol:usage",
-                     "usage: [x,iters,resid,conv] = apxchol_mex('solve', h, b, tol, maxiter, x0)");
+                     "usage: [x,iters,resid,conv,seconds] = apxchol_mex('solve', h, b, tol, maxiter, x0)");
             auto& s = get_solver(prhs[1]);
             const auto B = mx_to_rhs(prhs[2], s.rows(), "b");
-            const double tol = mxIsDouble(prhs[3]) && mxIsEmpty(prhs[3])
-                ? apxchol::default_tol : scalar_option(prhs[3], "rtol");
-            const int maxiter = mxIsDouble(prhs[4]) && mxIsEmpty(prhs[4])
-                ? apxchol::default_max_iter : integer_option<int>(prhs[4], "maxiter");
-            apxchol::detail::validate_solve_parameters(tol, maxiter);
+            std::optional<double> tol;
+            std::optional<int> maxiter;
+            if (!(mxIsDouble(prhs[3]) && mxIsEmpty(prhs[3]))) tol = scalar_option(prhs[3], "rtol");
+            if (!(mxIsDouble(prhs[4]) && mxIsEmpty(prhs[4])))
+                maxiter = integer_option<int>(prhs[4], "maxiter");
             std::optional<apxchol::const_matrix_view> X0;
             if (nrhs == 6 && !(mxIsDouble(prhs[5]) && mxIsEmpty(prhs[5]))) {
                 const auto guess = mx_to_rhs(prhs[5], s.rows(), "x0");
@@ -272,12 +279,12 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 if (X0) x0 = X0->col(0);
                 const auto result = s.solve(B.col(0), tol, maxiter, X0 ? &x0 : nullptr);
                 plhs[0] = vec_to_mx(result.x);
-                solve_metadata(nlhs, plhs, {&result, 1});
+                solve_metadata(nlhs, plhs, {&result, 1}, result.solve_seconds);
             } else {
                 plhs[0] = mxCreateDoubleMatrix(B.rows(), B.cols(), mxREAL);
                 Eigen::Map<Eigen::MatrixXd> X(mxGetPr(plhs[0]), B.rows(), B.cols());
                 const auto result = s.solve(B, X, tol, maxiter, X0 ? &*X0 : nullptr);
-                solve_metadata(nlhs, plhs, result.columns);
+                solve_metadata(nlhs, plhs, result.columns, result.solve_seconds);
             }
         } else if (op == "apply") {
             if (nrhs != 3)

@@ -7,6 +7,7 @@
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 #include "apxchol/solver/gpu_block_frontend.h"
 #include "apxchol/solver/solve.h"
+#include "apxchol/solver/detail/solver_route.h"
 
 #include <algorithm>
 #include <bit>
@@ -16,9 +17,12 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
+
+using csc_access = apxchol::detail::sparse_csc_access;
 
 namespace {
 using apxchol::node_index;
@@ -161,7 +165,7 @@ TEST(GpuDirectCscHost, CertifiedEligibilityMatchesRawForValidatedInputs) {
         auto one_zero = make_matrix(3, {}, 1.0);
         one_zero.coeffRef(lower ? 1 : 0, lower ? 0 : 1) = 0.0;
         one_zero.makeCompressed();
-        const apxchol::operator_view op(one_zero);
+        const apxchol::detail::operator_view op(one_zero);
         EXPECT_EQ(op.scan().offdiag_nnz, 0);
         EXPECT_FALSE(gpu_owned_csc_supported(op));
         fixtures.push_back(one_zero);
@@ -170,20 +174,20 @@ TEST(GpuDirectCscHost, CertifiedEligibilityMatchesRawForValidatedInputs) {
     unrelated_zeros.coeffRef(1,0) = 0.0;
     unrelated_zeros.coeffRef(1,2) = -0.0;
     unrelated_zeros.makeCompressed();
-    EXPECT_FALSE(gpu_owned_csc_supported(apxchol::operator_view(unrelated_zeros)));
+    EXPECT_FALSE(gpu_owned_csc_supported(apxchol::detail::operator_view(unrelated_zeros)));
     fixtures.push_back(unrelated_zeros);
     auto lumped = make_matrix(3, {{0,1,1.0},{1,2,-1e-6}}, 1.0);
-    const apxchol::operator_view op_lumped(lumped);
+    const apxchol::detail::operator_view op_lumped(lumped);
     EXPECT_EQ(op_lumped.lumped(), 2);
     fixtures.push_back(lumped);
     for (std::size_t i = 0; i < fixtures.size(); ++i) {
         SCOPED_TRACE(i);
-        const apxchol::operator_view op(fixtures[i]);
+        const apxchol::detail::operator_view op(fixtures[i]);
         EXPECT_EQ(gpu_owned_csc_supported(op), gpu_owned_csc_supported(op.matrix()));
     }
     auto uncompressed = fixtures.front();
     uncompressed.uncompress();
-    const apxchol::operator_view op(uncompressed);
+    const apxchol::detail::operator_view op(uncompressed);
     EXPECT_FALSE(gpu_owned_csc_supported(op));
 }
 
@@ -198,7 +202,7 @@ TEST(GpuDirectCscHost, CertifiedEligibilityRejectsDuplicateAndUnsortedZeroColumn
         else std::swap(A.innerIndexPtr()[1], A.innerIndexPtr()[2]);
         // The numerical scan has no edges to reject. Strict layout validation
         // must run even when an operator_view was constructed successfully.
-        const apxchol::operator_view op(A);
+        const apxchol::detail::operator_view op(A);
         ASSERT_EQ(op.scan().offdiag_nnz, 0);
         EXPECT_FALSE(gpu_owned_csc_supported(op));
         EXPECT_FALSE(gpu_owned_csc_supported(A));
@@ -212,13 +216,13 @@ TEST(GpuDirectCscHost, NumericalCertificateRejectsMissingTinyNonzeroMates) {
             auto A = make_matrix(3, {}, 1.0);
             A.coeffRef(lower ? 1 : 0, lower ? 0 : 1) = -weight;
             A.makeCompressed();
-            EXPECT_THROW((void)apxchol::operator_view(A), std::invalid_argument);
+            EXPECT_THROW((void)apxchol::detail::operator_view(A), std::invalid_argument);
         }
         auto balanced = make_matrix(3, {}, 1.0);
         balanced.coeffRef(1,0) = -weight;
         balanced.coeffRef(1,2) = -weight;
         balanced.makeCompressed();
-        EXPECT_THROW((void)apxchol::operator_view(balanced), std::invalid_argument);
+        EXPECT_THROW((void)apxchol::detail::operator_view(balanced), std::invalid_argument);
     }
 }
 
@@ -238,7 +242,7 @@ TEST(GpuDirectCsc, InitialArraysMatchHostBuilderIncludingRoundingAndSignedZero) 
     for (int v = 0; v < 4; ++v) asymmetric.coeffRef(v,v) = 2.0;
     asymmetric.coeffRef(0,1) = -std::nextafter(1.0, 2.0);
     asymmetric.coeffRef(2,3) = -std::nextafter(1.0+0x1p-25, 2.0);
-    const apxchol::operator_view tolerated(asymmetric);
+    const apxchol::detail::operator_view tolerated(asymmetric);
     EXPECT_EQ(tolerated.lumped(), 0);
     fixtures.push_back(asymmetric); // Tolerated asymmetry still uses LOWER weights twice.
     auto signed_zero = make_matrix(3, {{0,1,-0.0}}, 1.0);
@@ -259,7 +263,7 @@ TEST(GpuDirectCsc, InitialArraysMatchHostBuilderIncludingRoundingAndSignedZero) 
                 [](double x) { return x > 0.0; }));
             EXPECT_EQ(got.initial.active, std::vector<std::uint8_t>(A.rows(), 1));
             for (const auto& edge : got.initial.incidences) {
-                const double canonical = static_cast<double>(static_cast<apxchol::pool_value_t>(
+                const double canonical = static_cast<double>(static_cast<float>(
                     -A.coeff(std::max(edge.owner,edge.neighbor),std::min(edge.owner,edge.neighbor))));
                 EXPECT_EQ(std::bit_cast<std::uint64_t>(double(edge.weight)), std::bit_cast<std::uint64_t>(canonical));
             }
@@ -324,11 +328,9 @@ TEST(GpuDirectCsc, InvalidNumericalInputsFailWithoutPublishingAnInitialSnapshot)
         const double reg = fault == 3 ? std::numeric_limits<double>::infinity() : 0.0;
         EXPECT_THROW((void)apxchol::detail::gpu_initial_owned_csc_for_test(A, reg), std::invalid_argument);
     }
-#ifdef APXCHOL_POOL_FP32
     const double overflow = 2.0 * static_cast<double>(std::numeric_limits<float>::max());
     auto A = make_matrix(2, {{0,1,overflow}});
     EXPECT_THROW((void)apxchol::detail::gpu_initial_owned_csc_for_test(A), std::invalid_argument);
-#endif
 #endif
 }
 
@@ -349,8 +351,8 @@ TEST(GpuDirectCsc, FirstSelectorHasCorrectCandidatesAndIndependentProgress) {
         std::unique_ptr<apxchol::detail::gpu_block_frontend> direct;
         owner.initialize_owned_csc(apxchol::detail::gpu_owned_csc_host_buffers(A), direct);
         apxchol::partition_options options;
-        options.degree_quantile = quantile; options.degree_tiebreak = ties;
-        const auto got = direct->prepare(active, options);
+        options.degree_quantile = quantile;
+        const auto got = direct->prepare(active, options, 42, 0, ties);
         const auto degrees = direct->host_active_degrees();
         std::size_t degree_sum = 0;
         for (node_index v : active) degree_sum += graph.adj_count(v);
@@ -422,10 +424,10 @@ TEST(GpuDirectCsc, InitialOwnerOutlivesInputAndRetiresEveryBorrowedSelectorRead)
         std::vector<node_index> degrees(graph.n()), candidates, expected_selected;
         std::size_t degree_sum = 0;
         for (auto v : active) { degrees[v] = graph.adj_count(v); degree_sum += degrees[v]; }
-        // The oracle must resolve the by-route sentinel exactly as the library
+        // The oracle must resolve an unset quantile exactly as the library
         // does, or it grades the selector against a cap nobody asked for.
-        const double q_cap = apxchol::degree_quantile_or_host_default(
-            options.degree_quantile);
+        const double q_cap = options.degree_quantile.value_or(
+            apxchol::detail::degree_quantile_host_default);
         double threshold = options.degree_multiplier * double(degree_sum) / graph.n();
         if (q_cap > 0.0 && q_cap < 1.0) {
             auto sorted = degrees; std::sort(sorted.begin(), sorted.end());
@@ -439,7 +441,7 @@ TEST(GpuDirectCsc, InitialOwnerOutlivesInputAndRetiresEveryBorrowedSelectorRead)
             return z ^ (z >> 31);
         };
         auto precedes = [&](node_index a, node_index b) {
-            if (options.degree_tiebreak && degrees[a] != degrees[b]) return degrees[a] < degrees[b];
+            if (degrees[a] != degrees[b]) return degrees[a] < degrees[b];
             const auto ha = key(a), hb = key(b);
             return ha != hb ? ha < hb : a < b;
         };
@@ -504,14 +506,16 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
         Eigen::VectorXd exact(n);
         for (int v = 0; v < n; ++v) exact[v] = std::sin(v + 0.25);
         const Eigen::VectorXd b = A * exact;
-        apxchol::detail::gpu_preconditioner preconditioner;
-        apxchol::factor_options factor_options;
-        factor_options.verbose = true;
-        preconditioner.set_options(factor_options);
+        apxchol::solve_options setup;
+        setup.backend = apxchol::solve_backend::gpu;
+        setup.factor_opts.verbose = true;
         testing::internal::CaptureStderr();
-        try { preconditioner.compute(A); }
+        std::optional<apxchol::solver> owner;
+        try { owner.emplace(A, setup); }
         catch (...) { const auto trace=testing::internal::GetCapturedStderr(); ADD_FAILURE()<<trace; throw; }
         const auto trace = testing::internal::GetCapturedStderr();
+        const auto& preconditioner = std::get<apxchol::detail::cuda_route>(
+            apxchol::detail::solver_access::route(*owner));
         ASSERT_NE(trace.find("[gpu-owned-csc] n=257 "),std::string::npos) << trace;
         EXPECT_NE(trace.find("host_graph_bytes=0 host_snapshot_bytes=0 selector_edge_upload_bytes=0"),std::string::npos) << trace;
         EXPECT_NE(trace.find("factor_entry_download_bytes=0"),std::string::npos) << trace;
@@ -519,8 +523,8 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
         ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
         EXPECT_TRUE(preconditioner.trsv().fp16());
         EXPECT_GT(preconditioner.trsv().drop_stats().rel,0.0);
-        EXPECT_TRUE(preconditioner.factor().L.vals_.empty());
-        EXPECT_TRUE(preconditioner.factor().L.inner_.empty());
+        EXPECT_TRUE(csc_access::vals(preconditioner.factor().L).empty());
+        EXPECT_TRUE(csc_access::inner(preconditioner.factor().L).empty());
         EXPECT_GT(preconditioner.factor().rounds.size(),2u);
         apxchol::solve_options options; options.tol=1e-8; options.max_iter=1000;
         options.backend = apxchol::solve_backend::gpu;

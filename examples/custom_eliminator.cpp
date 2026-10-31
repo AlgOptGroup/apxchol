@@ -25,20 +25,21 @@ static_assert(apxchol::eliminator<exact_clique_eliminator>);
 
 int main() {
     auto L = grid_laplacian(60);
-    Eigen::VectorXd b = apxchol::generate_test_rhs(L.rows());
+    Eigen::VectorXd b = Eigen::VectorXd::Zero(L.rows());   // unit source and sink
+    b(0) = 1.0;
+    b(L.rows() - 1) = -1.0;
     apxchol::factor_options opts;
 
     // Reference: the default tree-sampling eliminator (default storage).
     auto F_tree = apxchol::factorize(L, opts);
 
     // Custom rule: factorize with our eliminator (the graph is built
-    // internally), then hand the factorization to cpu_solver (or
-    // apx_cholesky::set_factor) for PCG.
+    // internally), then hand the factorization to apxchol::solver for PCG.
     auto F = apxchol::factorize(L, exact_clique_eliminator{}, opts);
     std::printf("nnz(L): tree-sampled %zu, exact-clique %zu\n",
                 size_t(F_tree.L.nonZeros()), size_t(F.L.nonZeros()));
 
-    apxchol::cpu_solver slv(L, std::move(F));
+    apxchol::solver slv(L, std::move(F));
     auto res = slv.solve(b);
     std::printf("exact-clique factor: %ld iterations, residual %.2e\n",
                 long(res.iterations), res.residual);

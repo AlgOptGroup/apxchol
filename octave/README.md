@@ -14,8 +14,15 @@ res2 = s.solve(b2, 1e-10, 1000);   % tolerance and iteration budget for this cal
 ```
 
 For one solve, use `apxchol_solve(A, b)`. Results contain `x`, `iters`,
-`residual` and `converged`. The built-in solver always checks the returned
-solution against the original matrix and RHS.
+`residual`, `converged` and `solve_seconds`. The built-in solver always checks
+the returned solution against the original matrix and RHS.
+
+`s.setup_seconds` is the wall-clock time of the native setup (or `load`),
+excluding the conversion of `A` before it, and `res.solve_seconds` that of one
+solve call, for all columns of a batch. Over `k` separate one-RHS calls each
+costs `setup_seconds / k + solve_seconds` on average, and one batched call of
+`k` columns costs `(setup_seconds + solve_seconds) / k` per RHS; see
+[judging whether reuse pays off](../docs/usage.md#judging-whether-reuse-pays-off).
 
 Pass an `n`-by-`k` matrix to solve or apply the preconditioner to `k` RHSs
 through the native batched path. Results have `k` columns; `iters`, `residual`
@@ -58,33 +65,36 @@ Unspecified fields use the C++ defaults. Unknown fields are rejected.
 |---|---|
 | `num_threads` | CPU thread ceiling; `0` inherits the caller's OpenMP setting |
 | `seed` | Sampling seed |
+| `partitioner` | `block_greedy` (default), `priority_greedy` or `baumann_kyng` |
+| `sampler` | Clique sampler: `gks` (default) or `trace_cycle` (CPU and CUDA only) |
 | `factor_storage` | `auto`, `float16` or `float32`; affects triangular-solve storage |
-| `cpu_schedule` | CPU triangular-solve scheduling: `auto` or `levels` |
+| `degree_quantile` | Degree cutoff quantile in `[0, 1)`; `0` selects the multiplier-based cutoff (Metal requires `(0, 1)`); omitted uses the default |
+| `degree_multiplier` | Positive degree multiplier, used only when `degree_quantile` is `0` |
 | `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
-| `regularization` | Nonnegative diagonal fraction added during factor construction; `0` disables it |
+| `regularization` | Minimum diagonal excess of the preconditioner, as a fraction of each diagonal after lumping; excess below 1e-12 of the diagonal counts as zero first; `A` is not modified; `0` disables it |
 | `lump_max_mass` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
-| `keep_factor` | Retain canonical FP32 factor values for saving; off by default |
 | `verbose` | Logical flag for setup diagnostics; off by default |
 
 See [precision](../docs/precision.md) and the [native option reference](../docs/reference/cpp.md)
-for storage behavior and advanced controls.
+for storage behavior and the meaning of each control.
 
 ## Save and load a solver
 
-Enable factor retention when constructing a solver, then save its original
-matrix and factor together:
+Save a solver's original matrix and its installed factor, the preconditioner
+the solves actually use, together:
 
 ```matlab
-s = apxchol_solver(A, struct('keep_factor', true));
+s = apxchol_solver(A);
 s.save('system.apxchol');
 restored = apxchol_solver.load('system.apxchol');
 res = restored.solve(B);  % scalar/matrix RHS and warm starts work as usual
 ```
 
-The path must be a character row vector. Saving creates a new file and rejects
-an existing destination. Loading accepts the same optional options struct as
-the constructor, including `factor_storage` and `keep_factor`; enable retention
-when loading if you want to save again. Setup defaults are unchanged.
+The path must be a character row vector. Saving replaces an existing file,
+writing to `<path>.tmp` first and renaming it into place. Loading accepts the
+same optional options struct as the constructor. The file fixes the factor
+storage and dropping, so `factor_storage` and `drop_tolerance` have no effect;
+`num_threads` and `lump_max_mass` apply. A loaded solver can be saved again.
 
 Archives use the shared [portable file format](../docs/serialization.md).
 Loading prepares the saved factor without factorizing the matrix again.
@@ -117,6 +127,7 @@ octave --no-gui --eval "addpath(pwd); run('tests/test_apxchol.m')"
 The extension links the shared native CMake target. Eigen3 is found or fetched
 by the native build helpers; zlib must be installed. A root build is not required.
 `CMAKE_BUILD_PARALLEL_LEVEL` sets the build worker count (default: 2).
+The MEX file goes to `octave/private/`, so only the `apxchol_*` wrappers can call it.
 
 ## Build for MATLAB
 

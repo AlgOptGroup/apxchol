@@ -1,13 +1,12 @@
 # Precision and factor storage
 
-Precision is chosen separately for graph storage, the assembled factor, the
-installed triangular-solve arrays, and the outer iteration. A build with
-`APXCHOL_POOL_FP32=OFF` is not an all-FP64 solver.
+Graph storage, the assembled factor, the installed triangular-solve arrays and
+the outer iteration each have their own precision.
 
 | Stage | Representation | Reason |
 |---|---|---|
-| Mutable residual graph | FP32 weights by default; optional FP64 weights | Storage/bandwidth versus rounding during factor construction |
-| Assembled factor | FP32 values | Shared factor/export representation |
+| Mutable residual graph | FP32 weights; reads aggregate in FP64 | Storage and bandwidth; elimination appends weights; late residuals may be coalesced once |
+| Assembled factor | FP32 values | Construction factor, before dropping and storage rounding |
 | CPU triangular solves | FP32 storage by default; optional scaled FP16 off-diagonals | FP16 requires efficient conversion; CPU arithmetic remains FP64 |
 | CUDA triangular solves | Scaled FP16 off-diagonals by default; FP32 alternative | Reduced value traffic; GPU triangular-solve arithmetic is FP32 |
 | FP16 scales and diagonals | FP32 | Retain scale range and diagonal quality |
@@ -17,7 +16,7 @@ installed triangular-solve arrays, and the outer iteration. A build with
 
 `factor_options::factor_storage` selects triangular-solve storage per solver (`automatic`, `fp16`, or `fp32`). Python exposes this as `factor_storage_dtype=None`, `np.float16`, or `np.float32`. The default is CPU/Metal FP32 and CUDA FP16; C++ owns parsing and default selection.
 
-Construction precision is independent of triangular-solve storage; Python factor exports preserve the C++ factor's FP32 dtype, while CPU solve inputs and results use FP64 arithmetic.
+Construction precision is independent of triangular-solve storage. Factor export and saved solvers carry the installed factor in its triangular-solve storage (FP32, or binary16 off-diagonals with FP32 diagonals and scales); Python returns it as float64. CPU solve inputs and results use FP64 arithmetic.
 
 CPU FP16 is available on x86 CPUs with AVX/F16C and on Apple ARM64, including
 portable wheels. Unsupported explicit requests fail at setup. The CPU path
@@ -63,13 +62,20 @@ Metal reconstructs FP32 coefficients before multiplication; each column stores a
 
 ## Apple Metal PCG
 
+Metal's device setup orders the entries of each forward-solve row by thread
+timing. A Metal solver reloaded from a [saved archive](serialization.md) is
+therefore as precise and as fast as the original and takes the same number of
+iterations, but agrees with it to FP32 rounding rather than bit for bit: about
+3e-7 relative for preconditioner applications and 5e-10 for solutions on the
+large matrices measured. CPU and CUDA reloads are bit-identical.
+
 Metal factorizes [supported inputs](usage.md#native-gpu-input-and-options) on the device and prepares FP32 or scaled FP16 solve storage with compensated dropping. [The solver](usage.md#reuse-batches-and-initial-guesses) accepts vector or matrix right-hand sides, reusing its factor and workspace.
 
 Double-float represents a value as the sum of two FP32 numbers, giving about
 48 significant bits but not IEEE FP64 precision or range. Metal uses it for
 x, r, A p and fixed-tree reductions. The operator uses FP32 when all values
 are exactly representable there, and double-float otherwise. Directions p,
-preconditioned residuals z, alpha and beta are FP32. Setup accumulates degrees and diagonal excess in double-float; graph weights and exported factor values are FP32.
+preconditioned residuals z, alpha and beta are FP32. Setup accumulates degrees and diagonal excess in double-float; graph weights and constructed factor values are FP32.
 
 Each RHS (or initial residual b - A x0) is scaled by an exact power of two,
 targeting a largest magnitude in [1, 2) within FP64's exponent range. The host
@@ -83,7 +89,8 @@ Repeatability covers the same factor and execution configuration, not different
 host thread counts, devices, OS/compiler versions or independent factorizations.
 
 Runtime compilation uses safe math and disables contraction where supported;
-`metal_solver::available()` checks rounding, intermediate precision and FMA.
+`backend_available(solve_backend::gpu)` checks rounding, intermediate precision
+and FMA on the Metal device.
 Metal rejects inputs outside these ranges:
 
 - Nonzero operator values and unscaled factor diagonals: magnitude in [2^-100, 2^100].
@@ -93,9 +100,9 @@ Metal rejects inputs outside these ranges:
 
 ## Accuracy and configuration choice
 
-FP16 applies to the installed triangular-solve arrays, not the mutable graph
-or assembled/exported factor. Graph weights use FP32 by default; FP64 pool
-storage is an optional reference. Scaled FP16 graph storage is not supported.
+FP16 applies to the installed triangular-solve arrays, which `solver::factor()`
+exports, not to the mutable graph or the assembled construction factor. Graph weights always use FP32; scaled FP16 graph
+storage is not supported.
 
 Low-precision preconditioning can retain final solution accuracy while changing
 iteration count. Select precision using original-system residuals, total solve

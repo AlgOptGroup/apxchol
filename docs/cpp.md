@@ -30,8 +30,10 @@ target_link_libraries(my_program PRIVATE apxchol::core)
 
 This builds just the library and enables any GPU language in the consuming
 project's scope. Set `APXCHOL_DEVICE` when configuring the consuming project.
-For distribution, set `APXCHOL_NATIVE_ARCH=OFF`; CUDA consumers must also
-choose `CMAKE_CUDA_ARCHITECTURES` instead of its `native` default.
+This builds portable code by default; CUDA consumers must also choose
+`CMAKE_CUDA_ARCHITECTURES` for distribution instead of its `native` default.
+The core keeps its `-march` flag private. A `-march` or `-mcpu` in
+`CMAKE_CXX_FLAGS` (or `CMAKE_CXX_FLAGS_<CONFIG>`) replaces apxchol's own.
 
 Alternatively, embed the repository root directly:
 
@@ -65,6 +67,11 @@ cmake --install build-sdk
 ```
 
 Configure the consuming project with `-DCMAKE_PREFIX_PATH=/path/to/prefix`.
+From 1.0, a version request such as `find_package(apxchol 1.0 CONFIG REQUIRED)`
+accepts any installed 1.x release from 1.0 on; a 0.x request, such as `0.3`,
+accepts only that minor release. The shared library's soname carries the major
+and minor version (currently `libapxchol_core.so.0.3`), because the binary ABI
+may change between minor releases; rebuild consumers when you upgrade.
 If apxchol fetched Eigen, the install includes its headers. Otherwise, the
 consumer must also provide Eigen. Static SDK consumers also need zlib; CUDA
 SDK consumers need the CUDA Toolkit.

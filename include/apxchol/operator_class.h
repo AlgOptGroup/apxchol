@@ -74,7 +74,7 @@
 #include <Eigen/Sparse>
 #include <string>
 
-namespace apxchol {
+namespace apxchol::detail {
 
 /// One-pass structural census of a candidate operator matrix.
 ///
@@ -198,14 +198,12 @@ private:
 /// how it was classified, what was lumped, and any dominance violations.
 std::string describe_operator(const operator_scan& s, Eigen::Index lumped);
 
-namespace detail {
-
 /// The rule behind the CLI's `--convert-input`, Python's `apxchol.as_operator`
-/// and MATLAB/Octave's `apxchol_as_operator`. Returns false when M passes
-/// `require_operator` (use M unchanged), true when it fails but has no
-/// negative off-diagonal entry (a graph adjacency matrix: use its Laplacian).
-/// Otherwise throws `std::invalid_argument` with the validation failure and
-/// the negative off-diagonal count.
+/// and MATLAB/Octave's `apxchol_as_operator`.
+/// Returns true when M has off-diagonal entries and none is negative (a graph
+/// adjacency matrix: use its Laplacian), false otherwise (use M unchanged; the
+/// solver validates it). Throws `std::invalid_argument` when M is not square,
+/// finite and symmetric.
 bool is_graph_adjacency(const Eigen::SparseMatrix<double>& M);
 
 /// The graph Laplacian L = D - M, with D the diagonal of row sums of M. A
@@ -213,5 +211,4 @@ bool is_graph_adjacency(const Eigen::SparseMatrix<double>& M);
 /// cancels: L_ii is the sum of row i's off-diagonal weights.
 Eigen::SparseMatrix<double> adjacency_laplacian(const Eigen::SparseMatrix<double>& M);
 
-} // namespace detail
-} // namespace apxchol
+} // namespace apxchol::detail

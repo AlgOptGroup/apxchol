@@ -15,11 +15,3 @@
 #else
 #define APXCHOL_EDGE_INDEX_BITS 32
 #endif
-
-#ifdef APXCHOL_USE_CUDA
-#define APXCHOL_SPTRSV_BACKEND "cuda"
-#elif defined(APXCHOL_USE_METAL)
-#define APXCHOL_SPTRSV_BACKEND "metal"
-#else
-#define APXCHOL_SPTRSV_BACKEND "omp"
-#endif

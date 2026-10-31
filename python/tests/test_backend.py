@@ -29,7 +29,7 @@ def gpu_solver(operator_matrix):
         unavailable = (
             "GPU route requested but GPU support is not built",
             "GPU factorization requires an available CUDA device",
-            "apxchol::metal_solver: the Metal backend is unavailable: no Metal device",
+            "apxchol: the Metal backend is unavailable: no Metal device",
             "GPU route requires 32-bit nodes, block_greedy, vec_pool_aos, "
             "natural residual peeling and supported sampler options; request CPU explicitly",
         )
@@ -86,7 +86,7 @@ def test_backend_reuses_factor_and_supports_export_warm_start_and_output(
         pytest.skip("No usable GPU backend in this installation")
     try:
         solver = apxchol.factorize(operator_matrix, backend=backend,
-                                  factor_storage_dtype=dtype, keep_factor=True)
+                                  factor_storage_dtype=dtype)
     except RuntimeError as exc:
         if (backend == "cpu" and dtype == np.float16
                 and str(exc) == "FP16 factor storage requires AVX/F16C or Apple ARM64"):
@@ -95,7 +95,7 @@ def test_backend_reuses_factor_and_supports_export_warm_start_and_output(
     assert solver.backend == backend
     assert solver.factor_storage_dtype == dtype
     factor = solver.chol()
-    assert factor.dtype == np.float32
+    assert factor.dtype == np.float64
     assert factor.nnz == solver.factor_nnz
     np.testing.assert_array_equal(np.sort(solver.P), np.arange(operator_matrix.shape[0]))
 

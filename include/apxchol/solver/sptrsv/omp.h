@@ -24,14 +24,13 @@
 #include <immintrin.h>
 #endif
 
-namespace apxchol {
+namespace apxchol::detail {
 
 // Minimum level-set size before sharing a level among SpTRSV workers.
 // Below this threshold, the thread-dispatch overhead exceeds the
 // computational benefit of parallelizing a single level's rows/cols.
 inline constexpr node_index kSpTRSVOMPThreshold = 1024;
 
-namespace detail {
 
 // A level whose row ids are the implicit contiguous interval [first, last).
 // Elimination appends factor columns round-major, so the round-derived base
@@ -127,7 +126,6 @@ private:
     round_level_ranges ranges_;
 };
 
-} // namespace detail
 
 /// OpenMP sparse triangular solver: shared row arithmetic under either the
 /// established level-set schedule (Anderson & Saad 1989; Naumov 2011) or the
@@ -342,12 +340,12 @@ public:
     /// the storage option at setup.
     void setup(const sparse_csc& L, node_index m,
                const factor_options& options = {}) {
-        setup_dispatch(L, m, nullptr, options);
+        setup_dispatch(L, m, nullptr, options, fp16_resolved(options.factor_storage), false, nullptr);
     }
 
     /// Same analysis, but the SpTRSV CONSUMES L: its row/value arrays are
-    /// released (sparse_csc::release_values) at the first point setup no longer
-    /// reads them, instead of surviving until the caller frees them after setup.
+    /// released (detail::sparse_csc_access::release_values) at the first point
+    /// setup no longer reads them, instead of surviving until the caller frees them after setup.
     /// On the Laplacian path (m == n-1) that is right after the L11 copy, so
     /// the setup transient -- L11 + the transpose bucket + CSR (+ CSC) -- no
     /// longer sits on top of a dead full copy of the factor (nnz*(4+sizeof
@@ -357,27 +355,70 @@ public:
     /// still works). For callers that keep the factor, use setup().
     void setup_consuming(sparse_csc& L, node_index m,
                          const factor_options& options = {}) {
-        setup_dispatch(L, m, &L, options);
+        setup_dispatch(L, m, &L, options, fp16_resolved(options.factor_storage), false, nullptr);
+    }
+
+    /// Install an exported installed factor (factorization::storage fp32 or
+    /// fp16) exactly as given and consume L like setup_consuming(): no drop,
+    /// no rescaling and no rounding. fp16 off-diagonals must be binary16
+    /// values, L's diagonal holds d_j and scale holds s_j for columns [0, m).
+    /// options.drop_tolerance and factor_storage are ignored.
+    void install_exact(sparse_csc& L, node_index m, bool fp16, const float* scale,
+                       const factor_options& options = {}) {
+        if (fp16 && !fp16_supported())
+            throw std::runtime_error("FP16 factor storage requires AVX/F16C or Apple ARM64");
+        setup_dispatch(L, m, &L, options, fp16, true, scale);
+    }
+
+    /// The installed factor in factorization's form (solve.h): columns
+    /// [0, m) of the n x n L hold the stored CSC with fp16 off-diagonals
+    /// widened exactly and diagonal d_j; columns [m, n) are empty. fp16
+    /// storage also returns s_j in scale (one per column; 1 beyond m).
+    void export_installed(sparse_csc& L, node_index n, std::vector<float>& scale) const {
+        const edge_index nnz = csc_col_ptr_.empty() ? 0 : csc_col_ptr_[m_];
+        using access = detail::sparse_csc_access;
+        access::resize(L, n);
+        access::resize_nonzeros(L, nnz);
+        auto& outer = access::outer(L);
+        auto& vals = access::vals(L);
+        std::copy(csc_col_ptr_.begin(), csc_col_ptr_.begin() + m_ + 1, outer.begin());
+        std::fill(outer.begin() + m_ + 1, outer.end(), nnz);
+        std::copy(csc_row_idx_.begin(), csc_row_idx_.begin() + nnz, access::inner(L).begin());
+        scale.clear();
+        if (!fp16_) {
+            std::copy(csc_vals32_.begin(), csc_vals32_.begin() + nnz, vals.begin());
+            return;
+        }
+        #pragma omp parallel for schedule(static)
+        for (node_index j = 0; j < m_; ++j)
+            for (edge_index p = csc_col_ptr_[j]; p < csc_col_ptr_[j + 1]; ++p)
+                vals[p] = p == csc_col_ptr_[j] ? diag_[j] : static_cast<float>(csc_vals16_[p]);
+        scale.assign(n, 1.0f);
+        std::copy(scale_.begin(), scale_.begin() + m_, scale.begin());
     }
 
 private:
     void setup_dispatch(const sparse_csc& L, node_index m, sparse_csc* consumed,
-                        const factor_options& options) {
+                        const factor_options& options, bool fp16, bool exact,
+                        const float* exact_scale) {
         detail::validate_factor_options(options);
         verbose_ = options.verbose;
-        fp16_ = fp16_resolved(options.factor_storage);
+        fp16_ = fp16;
         if (fp16_) {
-            setup_impl<_Float16>(L, m, consumed, options);
+            setup_impl<_Float16>(L, m, consumed, options, exact, exact_scale);
             return;
         }
-        setup_impl<float>(L, m, consumed, options);
+        setup_impl<float>(L, m, consumed, options, exact, exact_scale);
     }
 
     // `consumed` != nullptr: `L` may be released as soon as it is dead (see
     // setup_consuming); it then always aliases &L. V is the storage type.
+    // `exact` installs an exported factor (install_exact): exact_scale
+    // supplies s_j for fp16, and the drop, scale fallback and narrowing
+    // residual are skipped.
     template <class V>
     void setup_impl(const sparse_csc& L, node_index m, sparse_csc* consumed,
-                    const factor_options& options) {
+                    const factor_options& options, bool exact, const float* exact_scale) {
         constexpr bool kScaled = std::is_same_v<V, _Float16>;   // narrow_value / stored_diag read s_j
         m_ = m;
 #ifdef __APPLE__
@@ -415,15 +456,15 @@ private:
         if (m == L.rows()) {
             // SDDM full matrix: alias L (assume already compressed by
             // assemble_csc). Pointer copies only — nominally ~0 ms.
-            L11_outer = L.outerIndexPtr();
-            L11_inner = L.innerIndexPtr();
-            L11_vals  = L.valuePtr();
+            L11_outer = L.col_ptrs().data();
+            L11_inner = L.row_indices().data();
+            L11_vals  = L.values().data();
             nnz = L.nonZeros();
         } else {
             // Parallel build of L11 = L.topLeftCorner(m, m).
-            const edge_index* L_outer = L.outerIndexPtr();
-            const node_index* L_inner = L.innerIndexPtr();
-            const factor_value_t* L_vals = L.valuePtr();
+            const edge_index* L_outer = L.col_ptrs().data();
+            const node_index* L_inner = L.row_indices().data();
+            const factor_value_t* L_vals = L.values().data();
             const node_index drop_row = L.rows() - 1;
             // PASS 1 (parallel): per-column count of entries with row < m.
             // Both passes split columns by stored entries.
@@ -467,12 +508,12 @@ private:
             L11_inner = L11_inner_local.get();
             L11_vals  = L11_vals_local.get();
             // L11 is a full copy: the input factor is dead from here on.
-            if (consumed) consumed->release_values();
+            if (consumed) detail::sparse_csc_access::release_values(*consumed);
         }
         mark("L11_alias_or_copy");
 
         // Compensate dropped mass when off-diagonals remain.
-        const double factor_drop_rel = options.drop_tolerance;
+        const double factor_drop_rel = exact ? 0.0 : options.drop_tolerance;
         stats_ = lowprec_statistics{};
         stats_.rel        = factor_drop_rel;
         stats_.nnz_factor = static_cast<std::uint64_t>(nnz);
@@ -488,7 +529,8 @@ private:
         if constexpr (kScaled) {
             scale_.resize(m_);
             col_scale = scale_.data();
-            need_scale = true;
+            need_scale = !exact;
+            if (exact) std::copy(exact_scale, exact_scale + m_, scale_.begin());
         } else {
             if (factor_drop_rel > 0.0) col_scale_local.resize(m_);
             col_scale = col_scale_local.data();
@@ -508,12 +550,15 @@ private:
             // the same contract in cuda.h): a column whose fp32 1/s_j or
             // fp32(L_jj)/s_j would overflow falls back to s_j = 1. BEFORE the
             // drop, so the threshold and the storage agree on the scale.
+            // An exact install keeps the scales it was given.
             std::uint64_t fallback = 0;
-            #pragma omp parallel for schedule(static) reduction(+ : fallback)
-            for (node_index j = 0; j < m_; ++j) {
-                const float s = col_scale[j];
-                const float d = static_cast<float>(L11_vals[L11_outer[j]]);
-                if (!std::isfinite(1.0f / s) || !std::isfinite(d / s)) { col_scale[j] = 1.0f; ++fallback; }
+            if (!exact) {
+                #pragma omp parallel for schedule(static) reduction(+ : fallback)
+                for (node_index j = 0; j < m_; ++j) {
+                    const float s = col_scale[j];
+                    const float d = static_cast<float>(L11_vals[L11_outer[j]]);
+                    if (!std::isfinite(1.0f / s) || !std::isfinite(d / s)) { col_scale[j] = 1.0f; ++fallback; }
+                }
             }
             stats_.scale_fallback = fallback;
             // r_j = fp32(1 / s_j): the back solve's per-column input scale (see
@@ -540,7 +585,9 @@ private:
         std::vector<edge_index>           drop_outer;
         std::unique_ptr<node_index[]>     drop_inner;
         std::unique_ptr<factor_value_t[]> drop_vals;
-        {
+        if (exact) {
+            stats_.nnz_stored = static_cast<std::uint64_t>(nnz);
+        } else {
             factor_drop_stats ds;
             const bool compacted = compact_factor_columns<edge_index, node_index, factor_value_t>(
                 m_, L11_outer, L11_inner, L11_vals, col_scale, factor_drop_rel,
@@ -565,7 +612,7 @@ private:
                 // SDDM path: L11 aliased the input factor, which the compacted
                 // copy has just replaced -- the input is dead now.
                 if (consumed && m == L.rows())
-                    consumed->release_values();
+                    detail::sparse_csc_access::release_values(*consumed);
             }
             if (factor_drop_rel > 0.0) mark("factor_drop");
         }
@@ -599,10 +646,10 @@ private:
                 lowprec_statistics counts;
 #if defined(__x86_64__) && !defined(__F16C__)
                 if constexpr (kScaled)
-                    counts = copy_csc_fp16(L11_outer, L11_inner, L11_vals, first, last);
+                    counts = copy_csc_fp16(L11_outer, L11_inner, L11_vals, first, last, exact);
                 else
 #endif
-                    counts = copy_csc_columns<V>(L11_outer, L11_inner, L11_vals, first, last);
+                    counts = copy_csc_columns<V>(L11_outer, L11_inner, L11_vals, first, last, exact);
                 n_off += counts.offdiag;
                 n_flush += counts.flushed;
                 n_sub += counts.subnormal;
@@ -672,7 +719,7 @@ private:
         // transpose and level sets below use only the SpTRSV's own arrays, so
         // release all three sources HERE rather than at return (nnz-sized;
         // swap-with-empty / reset, since `v = {}` / clear() keep the capacity).
-        if (consumed) consumed->release_values();
+        if (consumed) detail::sparse_csc_access::release_values(*consumed);
         std::vector<edge_index>().swap(L11_outer_local);
         L11_inner_local.reset();
         L11_vals_local.reset();
@@ -685,14 +732,15 @@ private:
         if constexpr (kScaled)
             transpose(csc_col_ptr_.data(), csc_row_idx_.data(), csc_vals.data());
 
-        build_schedule(options.cpu_schedule, mark);
+        build_schedule(options.experimental.cpu_schedule, mark);
         ready_ = true;
     }
 
     template <class V>
     [[gnu::always_inline]]
     lowprec_statistics copy_csc_columns(const edge_index* ptr, const node_index* idx,
-                                       const factor_value_t* vals, node_index first, node_index last) {
+                                       const factor_value_t* vals, node_index first, node_index last,
+                                       bool exact) {
         constexpr bool kScaled = std::is_same_v<V, _Float16>;
         auto& csc_vals = vals_csc(std::type_identity<V>{});
         lowprec_statistics counts;
@@ -700,19 +748,23 @@ private:
             csc_col_ptr_[j] = ptr[j];
             if constexpr (kScaled) {
                 assert(idx[ptr[j]] == j && "factor column must start with its diagonal");
-                diag_[j] = static_cast<float>(stored_diag<V>(vals[ptr[j]], scale_[j]));
+                // An exact install reads d_j as given; the kernels never read
+                // the narrow diagonal slot, so it holds zero.
+                diag_[j] = exact ? vals[ptr[j]]
+                                 : static_cast<float>(stored_diag<V>(vals[ptr[j]], scale_[j]));
             }
             double resid = 0.0; // Off-diagonal storage-rounding residual.
             for (edge_index k = ptr[j]; k < ptr[j + 1]; ++k) {
                 const node_index    i  = idx[k];
                 const factor_value_t v = vals[k];
-                const V              w = narrow_value<V>(v, kScaled ? scale_[j] : 1.0f);
+                const V              w = !exact ? narrow_value<V>(v, kScaled ? scale_[j] : 1.0f)
+                                       : kScaled && i == j ? V(0) : static_cast<V>(v);
                 csc_row_idx_[k] = i;
                 csc_vals[k]     = w;
                 const bool subnormal = is_stored_subnormal(v);
                 counts.factor_subnormal += subnormal;
                 if constexpr (kScaled) {
-                    if (i != j) {
+                    if (i != j && !exact) {
                         const double x = static_cast<double>(v) / scale_[j];
                         resid += x - widen(w);
                     }
@@ -742,8 +794,9 @@ private:
     // Enter F16C after OpenMP has outlined its worker, so Clang retains the target.
     [[gnu::target("f16c"), gnu::flatten]]
     lowprec_statistics copy_csc_fp16(const edge_index* ptr, const node_index* idx,
-                                    const factor_value_t* vals, node_index first, node_index last) {
-        return copy_csc_columns<_Float16>(ptr, idx, vals, first, last);
+                                    const factor_value_t* vals, node_index first, node_index last,
+                                    bool exact) {
+        return copy_csc_columns<_Float16>(ptr, idx, vals, first, last, exact);
     }
 #endif
 
@@ -1060,8 +1113,8 @@ public:
     /// (L L^T)^-1 either way. See the file header, storage contract.
     /// Valid in place (x_in == y_out).
     template<int Columns = 1>
-    void forward_solve(const double* x_in, double* y_out) const {
-        solve_dispatch<fwd_dir, Columns>(x_in, y_out);
+    void forward_solve(const double* x_in, double* y_out) {
+        solve_dispatch<fwd_dir, Columns>(x_in, y_out, critical_barrier_);
     }
 
     /// Back solve: L^T * z = y.  Under the fp16 storage the input is the
@@ -1069,24 +1122,43 @@ public:
     /// scaled once per column by inv_scale_[j]^2), i.e. z = L^-T y as before;
     /// D = I on the fp32 storage. Valid in place (x_in == y_out).
     template<int Columns = 1>
-    void transpose_solve(const double* x_in, double* y_out) const {
-        solve_dispatch<bck_dir, Columns>(x_in, y_out);
+    void transpose_solve(const double* x_in, double* y_out) {
+        solve_dispatch<bck_dir, Columns>(x_in, y_out, critical_barrier_);
+    }
+
+    /// Mutable synchronization state of one caller's solves. The non-const
+    /// overloads above use this object's own; callers sharing a const
+    /// omp_sptrsv, such as solver copies, pass a workspace each from
+    /// make_workspace().
+    using solve_workspace = detail::critical_weak_barrier;
+    solve_workspace make_workspace() const {
+        solve_workspace workspace;
+        if (hybrid_active_) workspace.setup(critical_plan_.processors);
+        return workspace;
+    }
+    template<int Columns = 1>
+    void forward_solve(const double* x_in, double* y_out, const solve_workspace& workspace) const {
+        solve_dispatch<fwd_dir, Columns>(x_in, y_out, workspace);
+    }
+    template<int Columns = 1>
+    void transpose_solve(const double* x_in, double* y_out, const solve_workspace& workspace) const {
+        solve_dispatch<bck_dir, Columns>(x_in, y_out, workspace);
     }
 
 private:
     // One storage branch per solve; FP16 kernels are only entered after the
     // setup-time CPU capability check.
     template <class Dir, int Columns>
-    void solve_dispatch(const double* x_in, double* y_out) const {
+    void solve_dispatch(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
         if (fp16_) {
-            solve_selected<Dir, _Float16, Columns>(x_in, y_out);
+            solve_selected<Dir, _Float16, Columns>(x_in, y_out, barrier);
             return;
         }
-        solve_selected<Dir, float, Columns>(x_in, y_out);
+        solve_selected<Dir, float, Columns>(x_in, y_out, barrier);
     }
 
     template <class Dir, class V, int Columns = 1>
-    void solve_selected(const double* x_in, double* y_out) const {
+    void solve_selected(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
         const unsigned processors = detail::cpu_solve_threads(team_rows_);
         if (processors == 1)
             return solve_levelset_range_serial<Dir, V, Columns>(
@@ -1094,13 +1166,13 @@ private:
         // A critical plan fixes its lane count at setup. Respect a caller's
         // changed thread limit through the base levels instead of that plan.
         if (hybrid_active_ && processors == critical_plan_.processors)
-            solve_hybrid<Dir, V, Columns>(x_in, y_out);
+            solve_hybrid<Dir, V, Columns>(x_in, y_out, barrier);
         else
             solve_levelset<Dir, V, Columns>(x_in, y_out, processors);
     }
 
     template <class Dir, class V, int Columns = 1>
-    void solve_hybrid(const double* x_in, double* y_out) const {
+    void solve_hybrid(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
         const unsigned processors = critical_plan_.processors;
         bool team_ok = true;
         // Keep both phases in one team. The last level-set workshare already
@@ -1116,9 +1188,9 @@ private:
                 if constexpr (Dir::forward) {
                     solve_levelset_range_team<Dir, V, Columns>(
                         x_in, y_out, 0, hybrid_fwd_level_end_);
-                    solve_critical_team<Dir, V, Columns>(x_in, y_out);
+                    solve_critical_team<Dir, V, Columns>(x_in, y_out, barrier);
                 } else {
-                    solve_critical_team<Dir, V, Columns>(x_in, y_out);
+                    solve_critical_team<Dir, V, Columns>(x_in, y_out, barrier);
                     #pragma omp barrier
                     solve_levelset_range_team<Dir, V, Columns>(
                         x_in, y_out, hybrid_bck_level_begin_,
@@ -1162,32 +1234,32 @@ private:
 #ifdef __x86_64__
     template <class Dir, class V, int Columns>
     [[gnu::target("avx2,f16c,fma"), gnu::flatten]]
-    void solve_critical_fma(const double* x_in, double* y_out) const {
-        solve_critical_team_impl<Dir, V, Columns>(x_in, y_out);
+    void solve_critical_fma(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
+        solve_critical_team_impl<Dir, V, Columns>(x_in, y_out, barrier);
     }
 
     template <class Dir, int Columns>
     [[gnu::target("f16c"), gnu::flatten]]
-    void solve_critical_fp16(const double* x_in, double* y_out) const {
-        solve_critical_team_impl<Dir, _Float16, Columns>(x_in, y_out);
+    void solve_critical_fp16(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
+        solve_critical_team_impl<Dir, _Float16, Columns>(x_in, y_out, barrier);
     }
 #endif
 
     template <class Dir, class V, int Columns = 1>
-    void solve_critical_team(const double* x_in, double* y_out) const {
+    void solve_critical_team(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
 #if defined(__x86_64__) && !(defined(__AVX2__) && defined(__F16C__) && defined(__FMA__))
         if constexpr (std::is_same_v<V, _Float16> || Columns > 1) {
             if (simd_fp16_kernel())
-                return solve_critical_fma<Dir, V, Columns>(x_in, y_out);
+                return solve_critical_fma<Dir, V, Columns>(x_in, y_out, barrier);
             if constexpr (std::is_same_v<V, _Float16>)
-                return solve_critical_fp16<Dir, Columns>(x_in, y_out);
+                return solve_critical_fp16<Dir, Columns>(x_in, y_out, barrier);
         }
 #endif
-        solve_critical_team_impl<Dir, V, Columns>(x_in, y_out);
+        solve_critical_team_impl<Dir, V, Columns>(x_in, y_out, barrier);
     }
 
     template <class Dir, class V, int Columns = 1>
-    void solve_critical_team_impl(const double* x_in, double* y_out) const {
+    void solve_critical_team_impl(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
         const unsigned processor =
             static_cast<unsigned>(omp_get_thread_num());
         const std::size_t steps = critical_plan_.steps;
@@ -1200,7 +1272,7 @@ private:
             const std::size_t begin = ptr[slot];
             const std::size_t end = ptr[slot + 1];
             if (begin != end)
-                critical_barrier_.wait(processor, 1);
+                barrier.wait(processor, 1);
             if constexpr (Dir::forward) {
                 for (std::size_t i = begin; i < end; ++i)
                     solve_row<Dir, V, Columns, /*Fat=*/false>(rows[i], x_in, y_out);
@@ -1208,7 +1280,7 @@ private:
                 for (std::size_t i = end; i-- > begin;)
                     solve_row<Dir, V, Columns, /*Fat=*/false>(rows[i], x_in, y_out);
             }
-            critical_barrier_.arrive(processor);
+            barrier.arrive(processor);
         }
     }
 
@@ -1463,7 +1535,7 @@ private:
     // larger than the dTLB reach of base pages. big_alloc requests huge pages
     // where available to reduce address-translation overhead.
     template<typename T>
-    using big_vec = std::vector<T, util::big_alloc<T>>;
+    using big_vec = std::vector<T, big_alloc<T>>;
     // Index/value output arrays are overwritten in full by the immediately
     // following parallel transpose/copy. Leave their mmap pages lazy and do
     // not value-initialize the elements: the writer threads then perform the
@@ -1471,7 +1543,7 @@ private:
     // (MADV_POPULATE_WRITE plus vector::resize value initialization).
     template<typename T>
     using big_output_vec =
-        std::vector<T, util::big_alloc<T, 32, false, false>>;
+        std::vector<T, big_alloc<T, 32, false, false>>;
 
     // CSR of L11 (forward solve). row_ptr is an offset array (edge_index);
     // col_idx holds column ids (node_index). Exactly ONE of the two value
@@ -1739,4 +1811,4 @@ public:
     }
 };
 
-} // namespace apxchol
+} // namespace apxchol::detail

@@ -3,7 +3,11 @@
 Starting with v1.0, apxchol preserves documented source-level use of these
 interfaces throughout the 1.x series:
 
-- C++ solve and factorize operations, their options and their results.
+- C++ solve and factorize operations, their options and their results,
+  including the read-only `sparse_csc` factor view, `solver::save` and
+  `solver::load` for [saved solvers](serialization.md), and the installed
+  `factorization` that `solver::factor()` exports, with its `storage` and
+  `scale` members.
 - [Python](../python/README.md) names exported through `__all__` and their
   documented methods and arguments.
 - Documented [MATLAB/Octave wrappers](../octave/README.md) and CLI options.
@@ -11,22 +15,31 @@ interfaces throughout the 1.x series:
   CLI's `--convert-input`, with the [rule](usage.md#converting-input-to-an-operator)
   they share.
 - `apxchol::core` and the [documented CMake integration](cpp.md#use-from-cmake).
+- Reading [solver archives](serialization.md) written by any earlier 1.x release.
 
 The [partitioner and eliminator extension contracts](extending.md), and the
 graph/context operations they require, are **experimental**: they may change in
 minor 1.x releases, and each change is noted in the [changelog](../CHANGELOG.md).
 
-`generate_test_rhs` is a test and diagnostic helper outside this promise.
+The research controls in `factor_options::experimental` (the
+`experimental_options` struct) are outside this promise: they may change or
+disappear in any release. The stable factorization options are `seed`,
+`sampler`, `factor_storage`, `drop_tolerance`, `regularization`,
+`lump_max_mass`, `partitioner`, `partition.degree_quantile` and
+`partition.degree_multiplier`, plus `verbose`; the
+[usage guide](usage.md#option-names) lists their names in each interface.
 
 Numerical results and performance may change within the documented
 [precision and convergence contracts](precision.md). This compatibility
 policy begins with v1.0; it does not apply to earlier prereleases.
 
 Some implementation headers must be installed for C++ templates. Installation
-alone does not make every declaration public. Outside the documented contracts
-above, `detail` namespaces, device kernels and capsules, `research_*` members,
-internal mutators, benchmark scripts and diagnostic output are implementation
-details.
+alone does not make every declaration public. The triangular solves, allocator,
+graph storage, built-in partitioners, operator validation, the per-stage timing
+tree and the CPU, CUDA and Metal routes behind `solver` live in `detail`
+namespaces. Outside the documented contracts above, `detail` namespaces, private
+members, device kernels, internal mutators, benchmark scripts and diagnostic
+output are implementation details.
 
 There is no stable C++ binary ABI. Rebuild compiled C++ consumers with
 compatible apxchol headers, compiler and standard library, OpenMP runtime,

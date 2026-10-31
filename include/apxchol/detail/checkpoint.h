@@ -9,7 +9,7 @@
 #include <vector>
 #include <ranges>
 
-namespace apxchol {
+namespace apxchol::detail {
 
 /// Accumulating per-label timer with hierarchical grouping.
 ///
@@ -145,4 +145,4 @@ private:
     std::vector<std::map<std::string, node>::iterator> scopes_;
 };
 
-} // namespace apxchol
+} // namespace apxchol::detail

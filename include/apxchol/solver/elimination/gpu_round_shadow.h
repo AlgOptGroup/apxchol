@@ -44,9 +44,9 @@
 #include <utility>
 #include <vector>
 
-namespace apxchol { class cuda_sptrsv_device_factor; }
 
 namespace apxchol::detail {
+class cuda_sptrsv_device_factor;
 
 inline constexpr std::uint64_t gpu_round_shadow_pivot_seed(
         std::uint64_t run_seed, node_index pivot) noexcept {
@@ -57,7 +57,7 @@ inline constexpr std::uint64_t gpu_round_shadow_pivot_seed(
 struct gpu_round_shadow_incidence {
     node_index owner = 0;
     node_index neighbor = 0;
-    pool_value_t weight = 0;
+    float weight = 0;
 };
 
 struct gpu_round_shadow_input {
@@ -393,12 +393,7 @@ gpu_round_shadow_ordered_residual_hash(
 }
 
 inline std::uint64_t gpu_round_shadow_pool_bits(double value) noexcept {
-    const pool_value_t stored = static_cast<pool_value_t>(value);
-#if defined(APXCHOL_POOL_FP32)
-    return std::bit_cast<std::uint32_t>(stored);
-#else
-    return std::bit_cast<std::uint64_t>(stored);
-#endif
+    return std::bit_cast<std::uint32_t>(static_cast<float>(value));
 }
 
 inline std::uint64_t gpu_round_shadow_factor_bits(
@@ -497,7 +492,7 @@ inline gpu_round_shadow_input make_gpu_round_shadow_input(
         input.incidences.reserve(incidence_count);
         for (node_index owner = 0; owner < residual.n(); ++owner) {
             for (const auto& [neighbor, weight] : residual.neighbors(owner))
-                input.incidences.push_back({owner, neighbor, static_cast<pool_value_t>(weight)});
+                input.incidences.push_back({owner, neighbor, static_cast<float>(weight)});
         }
         if (input.incidences.size() != incidence_count)
             throw std::logic_error(
@@ -925,7 +920,7 @@ inline gpu_round_shadow_report reference_gpu_round_shadow(
     report.excess_updates = excess_updates.size();
 
     // graph is an append-only multigraph.  Every
-    // sampled fill is stored separately and narrowed separately to pool_value_t;
+    // sampled fill is stored separately and narrowed separately to float;
     // colliding endpoint pairs must not be coalesced in fp64 here.
     for (const auto& edge : fills)
         gpu_round_shadow_digest_add(
@@ -1197,8 +1192,7 @@ gpu_round_shadow_cpu_comparison compare_gpu_round_shadow_with_cpu(
             mismatch("non-finite or negative excess at vertex " +
                      std::to_string(vertex));
         if (bound.additions <= 1) {
-            if (std::bit_cast<std::uint64_t>(actual) !=
-                std::bit_cast<std::uint64_t>(bound.expected))
+            if (actual != bound.expected)
                 mismatch("exact excess at vertex " +
                          std::to_string(vertex));
             continue;
@@ -1477,14 +1471,14 @@ public:
             std::vector<node_index>& permutation, sparse_csc& metadata,
             std::vector<factor_entry>* entries = nullptr) {
         if (!active_ || !owned_rounds_ || owned_materialized_ ||
-            !permutation.empty() || !metadata.outer_.empty())
+            !permutation.empty() || !metadata.col_ptrs().empty())
             throw std::logic_error("GPU-owned factorization completion is out of order");
         try {
             permutation.resize(factor_log_columns_);
-            metadata.resize(static_cast<node_index>(factor_log_columns_),
-                            static_cast<node_index>(factor_log_columns_));
+            detail::sparse_csc_access::resize(
+                metadata, static_cast<node_index>(factor_log_columns_));
             auto headers = device_state_->download_owned_factor_columns(
-                permutation, metadata.outer_, entries);
+                permutation, detail::sparse_csc_access::outer(metadata), entries);
             owned_download_bytes_ = headers.size() * sizeof(gpu_round_shadow_factor_column);
             owned_entry_download_bytes_ = entries ? entries->size() * sizeof(factor_entry) : 0;
             owned_materialized_ = true;

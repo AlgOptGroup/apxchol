@@ -23,8 +23,8 @@ Pass exactly one of:
   each connected component of a Laplacian.
 
 `-o FILE` writes the solution as a dense `n` by `k` Matrix Market array.
-The CLI prints the selected backend, iterations and residual for each column,
-and a timing breakdown; `-q` prints errors only. The exit status is 0 when
+The CLI prints the selected backend, iterations and residual for each column;
+`-v` adds a timing breakdown and `-q` prints errors only. The exit status is 0 when
 every column converges, 1 when a column misses the tolerance (the solution is
 still written), and 2 when the input or an option value is rejected or the
 solution cannot be written. Options the parser rejects, such as an unknown

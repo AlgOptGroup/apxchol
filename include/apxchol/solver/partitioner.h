@@ -89,10 +89,11 @@
 /// graph being represented. It is the ONLY mutation a partitioner may
 /// perform; anything else is out of contract.
 ///
-/// Use a custom partitioner at compile time
-/// (factorize<my_partitioner>(G, opts)), as a configured instance
-/// (factorize(A, my_partitioner{...}, opts)), or add it to partitioner_list
-/// for by-name dispatch (factor_options::is_select / CLI / bindings).
+/// Use a custom partitioner as a configured instance
+/// (factorize(A, my_partitioner{...}, opts)), as a template argument with a
+/// custom eliminator (factorize<my_partitioner>(A, my_eliminator{}, opts)), or
+/// add it to partitioner_list for dispatch through factor_options::partitioner,
+/// the CLI and bindings.
 /// Lambdas: as_partitioner(fn) or as_prepass_partitioner(fn) — identical
 /// callable signature, differing only in the trait they declare;
 /// zero-overhead template wrappers, no type erasure.
@@ -113,7 +114,6 @@
 #include "apxchol/solver/partitioner_helpers.h"
 #include "apxchol/solver/factor_options.h"
 #include "apxchol/solver/partition.h"
-#include "apxchol/checkpoint.h"
 #include <concepts>
 #include <limits>
 #include <type_traits>
@@ -126,6 +126,8 @@
 
 namespace apxchol {
 
+namespace detail { struct selection_access; }
+
 /// Read-only services the orchestrator hands to a partitioner call.
 /// Everything except `degrees` is constant for the whole factorize() run.
 struct partition_context {
@@ -134,9 +136,7 @@ struct partition_context {
     /// degree_multiplier) depends on the degree_prepass trait: with the
     /// pre-pass the orchestrator has already applied them when building the
     /// candidate list; without it nothing has been applied and the rule
-    /// honors them itself. degree_tiebreak (prefer the lower-degree vertex
-    /// when adjacent candidates compete) is never applied by the
-    /// orchestrator — honoring it is always the rule's job.
+    /// honors them itself.
     partition_options options;
     /// Determinism source. Derive all randomness as pure functions of
     /// (seed, round, vertex) — hash priorities as the shipped rules do, or
@@ -144,7 +144,10 @@ struct partition_context {
     /// because draws from a shared stream would depend on thread scheduling.
     unsigned seed = 42;
     std::size_t omp_threshold = 2000;  ///< min work size before OpenMP engages
-    checkpoint* cp = nullptr;          ///< optional profiling tree (may be null)
+    /// Prefer the lower-degree vertex when adjacent candidates compete
+    /// (factor_options::experimental.degree_tiebreak). Never applied by the
+    /// orchestrator — honoring it is always the rule's job.
+    bool degree_tiebreak = true;
     /// Degree counts indexed by vertex ID, valid for every active vertex.
     /// Audited prune skipping may supply conservative counts; otherwise they
     /// are exact. Non-empty when this partitioner declares degree_prepass.
@@ -169,17 +172,19 @@ public:
     void remove(node_index v) { mask_[v] = 0; }
     bool contains(node_index v) const { return mask_[v] != 0; }
 
-    // ── Orchestrator side ──
+private:
+    friend struct detail::selection_access;
+
     void reset(node_index n) {
         if (mask_.size() < static_cast<size_t>(n)) mask_.assign(n, 0);
         const int nt = omp_get_max_threads();
         if (per_thread_.size() < static_cast<size_t>(nt)) per_thread_.resize(nt);
         for (auto& l : per_thread_) l.clear();
-        result_.clear();
+        result_.data.clear();
     }
     /// Concatenate the per-thread lists, drop removed entries, reset the
     /// mask. O(inserted), not O(n).
-    const partition_result& finalize() {
+    const detail::partition_result& finalize() {
         for (auto& l : per_thread_)
             for (auto v : l)
                 if (mask_[v]) {
@@ -189,10 +194,17 @@ public:
         return result_;
     }
 
-private:
     std::vector<char> mask_;
     std::vector<std::vector<node_index>> per_thread_;
-    partition_result result_;
+    detail::partition_result result_;
+};
+
+namespace detail {
+
+/// Orchestrator side of `selection`: start a round and collect its result.
+struct selection_access {
+    static void reset(selection& s, node_index n) { s.reset(n); }
+    static const partition_result& finalize(selection& s) { return s.finalize(); }
 };
 
 // ── Trait queries (with defaults) ──
@@ -220,6 +232,8 @@ inline constexpr size_t partitioner_residual_handoff_v = [] {
     else
         return std::numeric_limits<size_t>::max();
 }();
+
+} // namespace detail
 
 template<typename T>
 concept partitioner =

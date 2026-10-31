@@ -16,19 +16,38 @@
 
 namespace apxchol {
 
+namespace detail {
 struct checkpoint;
 #if defined(APXCHOL_USE_CUDA)
 class cuda_sptrsv_device_factor;
+struct factorization_access;
 #endif
+}
 
-/// Approximate Cholesky preconditioner: P^T L L^T P approximates the operator
-/// used for construction, including any lumping or regularization.
+/// Approximate Cholesky preconditioner. With S = diag(scale), or S = I when
+/// scale is empty, it is
+///
+///     M = P^T L S^2 L^T P,
+///
+/// which approximates the operator used for construction, including any
+/// lumping or regularization. P is the permutation matrix of perm. For a
+/// Laplacian, the solve uses only the leading (n-1) x (n-1) blocks of L and S
+/// and centers its input and output.
+///
+/// `storage` says which of two forms L is in:
+///   - automatic: a construction factor from factorize(). S = I, and for a
+///     Laplacian L's last column holds a placeholder diagonal. A solver that
+///     adopts it applies its own drop_tolerance and factor_storage.
+///   - fp32 or fp16: the installed preconditioner, as solver::factor()
+///     returns it after dropping and storage rounding. For a Laplacian, L's
+///     last row and column are empty. A solver adopts it exactly and ignores
+///     its drop_tolerance and factor_storage options.
+/// fp32: L holds the FP32 values the triangular solves use, and scale is
+/// empty. fp16: every off-diagonal of L is a binary16 value (widened exactly
+/// to FP32), the diagonal L_jj = d_j is FP32 and scale holds the positive FP32
+/// column scales s_j. CPU and CUDA apply S^{-2} as fp32(1 / s_j)^2; Metal
+/// forms fp32(L_ij s_j) and fp32(d_j s_j).
 struct factorization {
-#if defined(APXCHOL_USE_CUDA)
-    // Internal CUDA ownership capsule. Exported factors retain host L values;
-    // consuming solves may retain only L's dimensions and column pointers.
-    std::shared_ptr<cuda_sptrsv_device_factor> research_device_factor;
-#endif
     sparse_csc L;                                           // lower-triangular factor (owned CSC)
     // Elimination-order permutation: perm[original_vertex] = new_position.
     //   to permuted space   : x_perm[perm[v]] = b[v]   (scatter)
@@ -39,36 +58,46 @@ struct factorization {
     // Affects preconditioner rank and centering.
     bool sddm = false;
 
-    // Peak graph memory during factorization (bytes, heap only).
-    std::size_t peak_graph_bytes = 0;
-
     // Stored positive off-diagonal entries removed by M-matrix lumping (two
     // per pair). Only the preconditioner changes; the solve operator is untouched.
     Eigen::Index lumped_offdiag = 0;
 
-    // Per-round statistics. active/is_size are always populated; Metal leaves
-    // avg_deg as NaN when unavailable. nnz_added/nnz_total may be zero without
-    // a checkpoint. is_size drives the SpTRSV round-as-level path.
+    // Per-round elimination metadata. is_size drives the SpTRSV round-as-level path.
     struct round_stats {
         size_t active;     // active vertices at start of round
-        size_t is_size;    // IS size chosen (== num_regions for singleton partitions)
-        double avg_deg;    // average degree of active vertices
-        size_t nnz_added;  // nnz added to factor L this round (sum of column sizes incl. diag)
-        size_t nnz_total;  // cumulative nnz(L) at end of round
+        size_t is_size;    // vertices eliminated this round
     };
     std::vector<round_stats> rounds;
+
+    /// Form of L: automatic for a construction factor, otherwise the
+    /// installed triangular-solve storage (see above).
+    factor_storage_type storage = factor_storage_type::automatic;
+    /// fp16 storage only: column scales s_j, one per column of L (1 for an
+    /// empty Laplacian last column). Empty otherwise.
+    std::vector<float> scale;
+
+#if defined(APXCHOL_USE_CUDA)
+private:
+    friend struct detail::factorization_access;
+    // CUDA ownership capsule of a factor that stays on the device. Exported
+    // factors retain host L values; consuming solves may retain only L's
+    // dimensions and column pointers.
+    std::shared_ptr<detail::cuda_sptrsv_device_factor> device_factor_;
+#endif
 };
 
-/// Compute approximate Cholesky factorization of a graph Laplacian.
-///
-/// Partitioner controls the per-round IS / region selection strategy.
-/// Defaults to block_greedy_partitioner; callers can substitute any
-/// partitioner from partitioner_list.h at compile time:
-///   auto F = factorize<priority_greedy_partitioner>(G, opts);
-template<typename Partitioner = block_greedy_partitioner>
-factorization factorize(graph G,
-                        const factor_options& opts = {},
-                        checkpoint* cp = nullptr);
+#if defined(APXCHOL_USE_CUDA)
+namespace detail {
+struct factorization_access {
+    static std::shared_ptr<cuda_sptrsv_device_factor>& device_factor(factorization& F) {
+        return F.device_factor_;
+    }
+    static const std::shared_ptr<cuda_sptrsv_device_factor>& device_factor(const factorization& F) {
+        return F.device_factor_;
+    }
+};
+} // namespace detail
+#endif
 
 namespace detail {
 
@@ -91,13 +120,15 @@ factorization factorize_operator(const Eigen::SparseMatrix<double>& L,
 
 } // namespace detail
 
+/// Extension overloads validate the operator, apply permitted lumping and
+/// regularization, then run the chosen partitioner and eliminator.
+///
 /// Custom-eliminator overload: substitute your own star-vertex elimination
 /// rule (see elimination/elimination.h for the `eliminator` contract).
 /// The default overloads build the tree_elimination rule from `opts`.
-template<typename Partitioner = block_greedy_partitioner, eliminator E>
-factorization factorize(graph G, const E& elim,
-                        const factor_options& opts = {},
-                        checkpoint* cp = nullptr);
+template<typename Partitioner = detail::block_greedy_partitioner, eliminator E>
+factorization factorize(const Eigen::SparseMatrix<double>& L, const E& elim,
+                        const factor_options& opts = {});
 
 /// Partitioner-instance overloads: pass a configured (possibly stateful)
 /// partitioner — the seam for custom independent-set selection and custom
@@ -106,59 +137,26 @@ factorization factorize(graph G, const E& elim,
 /// observable afterwards — reference it through a member pointer if you need
 /// to inspect it post-run.
 template<partitioner P>
-factorization factorize(graph G, P part,
-                        const factor_options& opts = {},
-                        checkpoint* cp = nullptr);
-
-template<partitioner P, eliminator E>
-factorization factorize(graph G, P part, const E& elim,
-                        const factor_options& opts = {},
-                        checkpoint* cp = nullptr);
-
-/// Matrix overloads validate the operator, apply permitted lumping and
-/// regularization, then forward the graph to the chosen partitioner/eliminator.
-template<typename Partitioner = block_greedy_partitioner, eliminator E>
-factorization factorize(const Eigen::SparseMatrix<double>& L, const E& elim,
-                        const factor_options& opts = {},
-                        checkpoint* cp = nullptr) {
-    return detail::factorize_operator(L, opts, [&](auto&& G, const auto& graph_options) {
-        return factorize<Partitioner>(std::move(G), elim, graph_options, cp);
-    });
-}
-
-template<partitioner P>
 factorization factorize(const Eigen::SparseMatrix<double>& L, P part,
-                        const factor_options& opts = {},
-                        checkpoint* cp = nullptr) {
-    return detail::factorize_operator(L, opts, [&](auto&& G, const auto& graph_options) {
-        return factorize(std::move(G), std::move(part), graph_options, cp);
-    });
-}
+                        const factor_options& opts = {});
 
 template<partitioner P, eliminator E>
 factorization factorize(const Eigen::SparseMatrix<double>& L, P part,
                         const E& elim,
-                        const factor_options& opts = {},
-                        checkpoint* cp = nullptr) {
-    return detail::factorize_operator(L, opts, [&](auto&& G, const auto& graph_options) {
-        return factorize(std::move(G), std::move(part), elim, graph_options, cp);
-    });
-}
+                        const factor_options& opts = {});
 
 /// Matrix-level factorization using the built-in AoS graph and named partitioner.
 factorization factorize(const Eigen::SparseMatrix<double>& L,
-                        const factor_options& opts = {},
-                        checkpoint* cp = nullptr);
+                        const factor_options& opts = {});
 
 namespace detail {
 
-// Internal consuming route used only by the preconditioner. Public factorize()
-// always retains exportable host arrays; the resident solve may omit them.
+// Internal consuming route used only by the solver routes. Public factorize()
+// always retains exportable host arrays; the device-resident route omits them.
 factorization factorize_for_solver(const Eigen::SparseMatrix<double>& L,
                                   const factor_options& opts,
                                   checkpoint* cp,
-                                  setup_route route = setup_route::cpu,
-                                  bool keep_factor = false);
+                                  setup_route route = setup_route::cpu);
 
 struct factor_col {
     node_index vertex;

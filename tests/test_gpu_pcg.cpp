@@ -32,7 +32,9 @@ struct step_math {
     double sum_row(double sum) const { return sum; }
 };
 
+template<unsigned Width>
 struct commands {
+    static constexpr unsigned batch_iterations = Width;
     unsigned stop;
     bool active = true;
     unsigned batches = 0, initializations = 0, iterations = 0, directions = 0, preconditions = 0;
@@ -187,18 +189,22 @@ TEST(GpuPcg, ResidualCheckCountsTheCompletedIterationEvenOnBreakdown) {
 }
 
 TEST(GpuPcg, DevicePredicationRespectsIterationLimitsAndConvergence) {
-    for (unsigned batch : {0u, 1u, 4u}) for (unsigned limit : {0u, 1u, 5u})
-    for (unsigned stop : {1u, 3u, 9u}) {
-        SCOPED_TRACE(::testing::Message() << batch << ' ' << limit << ' ' << stop);
-        commands gpu{stop};
-        pcg::solve(gpu, limit, batch);
-        const unsigned expected = std::min(limit, stop), width = std::max(batch, 1u);
-        EXPECT_EQ(gpu.initializations, unsigned(expected > 0));
-        EXPECT_EQ(gpu.iterations, expected);
-        EXPECT_EQ(gpu.directions, expected ? expected - 1 : 0);
-        EXPECT_EQ(gpu.preconditions, expected);
-        EXPECT_EQ(gpu.batches, std::max(1u, (expected + width - 1) / width));
-    }
+    const auto check = [&]<unsigned Width>() {
+        for (unsigned limit : {0u, 1u, 5u, 9u}) for (unsigned stop : {1u, 3u, 9u}) {
+            SCOPED_TRACE(::testing::Message() << Width << ' ' << limit << ' ' << stop);
+            commands<Width> gpu{stop};
+            pcg::solve(gpu, limit);
+            const unsigned expected = std::min(limit, stop);
+            EXPECT_EQ(gpu.initializations, unsigned(expected > 0));
+            EXPECT_EQ(gpu.iterations, expected);
+            EXPECT_EQ(gpu.directions, expected ? expected - 1 : 0);
+            EXPECT_EQ(gpu.preconditions, expected);
+            EXPECT_EQ(gpu.batches, std::max(1u, (expected + Width - 1) / Width));
+        }
+    };
+    check.template operator()<1>();
+    check.template operator()<4>();
+    check.template operator()<8>();
 }
 
 TEST(GpuPcg, ResidualGrowthDoesNotStopBeforeTolerance) {

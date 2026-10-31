@@ -26,9 +26,9 @@ namespace detail {
 struct residual_coalescer;
 }
 
-// Residual-pool edge weight storage type. fp32 under -DAPXCHOL_POOL_FP32 (ON by
-// default; pass =OFF for fp64). The residual graph is a MULTIGRAPH: adjacency writes
-// APPEND new edges and weights are never re-summed in place (the per-vertex
+// Residual-pool edge weights are stored in fp32. The residual graph is a
+// MULTIGRAPH: adjacency writes APPEND new edges and weights are never
+// re-summed in place (the per-vertex
 // dedup/weighted-degree aggregation is done transiently in fp64 at read), so each
 // stored weight is a TERMINAL write -- fp32 is safe (verified: PCG iters/residual
 // unchanged across IPM incl. high-DR, social, grid). fp32 halves the 16 B edge
@@ -65,7 +65,7 @@ public:
     // weighted-degree, conversions) compute in fp64 regardless of pool storage.
     auto neighbors(node_index v) const {
         return adj_[v] | std::views::transform(
-            [](const directed_pool_edge& i) {
+            [](const detail::directed_pool_edge& i) {
                 struct nbr { node_index to; double w; };
                 return nbr{i.to, static_cast<double>(i.w)};
             });
@@ -74,8 +74,8 @@ public:
     // ── mutation ──
 
     void add_edge(node_index u, node_index v, double w) {
-        adj_.push(u, {v, static_cast<pool_value_t>(w)});
-        adj_.push(v, {u, static_cast<pool_value_t>(w)});
+        adj_.push(u, {v, static_cast<float>(w)});
+        adj_.push(v, {u, static_cast<float>(w)});
         ++m_;
     }
 
@@ -95,7 +95,7 @@ public:
     /// into a slab already sized by adj_bulk_reserve_parallel().
     void adj_atomic_push_directed(node_index from, node_index to, double w) {
         adj_.atomic_push_reserved(
-            from, directed_pool_edge{to, static_cast<pool_value_t>(w)});
+            from, detail::directed_pool_edge{to, static_cast<float>(w)});
     }
 
     /// Directed-inline vec_pool: write an incidence at a caller-assigned
@@ -104,7 +104,7 @@ public:
                                         node_index to, double w) {
         adj_.write_reserved_at(
             from, offset,
-            directed_pool_edge{to, static_cast<pool_value_t>(w)});
+            detail::directed_pool_edge{to, static_cast<float>(w)});
     }
 
     /// Publish all preassigned suffix slots for one vec_pool vertex.
@@ -268,11 +268,27 @@ private:
         if (samples == 0) return {};
         unsigned long long multi_total = 0;
         unsigned long long distinct_total = 0;
-        long double weight_total = 0.0L;
-        long double strongest_total = 0.0L;
+        // long double sums go to per-thread slots summed in thread order: an
+        // OpenMP reduction on them needs 16-byte atomics (libatomic).
+        // Allocated before the region: a throwing allocation inside it would
+        // escape the team.
+#ifdef _OPENMP
+        std::vector<std::array<long double, 2>> totals(
+            static_cast<std::size_t>(std::max(1, omp_get_max_threads())));
+#else
+        std::vector<std::array<long double, 2>> totals(1);
+#endif
         detail::parallel_exception error;
-        #pragma omp parallel reduction(+:multi_total,distinct_total,weight_total,strongest_total)
+        #pragma omp parallel num_threads(static_cast<int>(totals.size())) \
+            reduction(+:multi_total,distinct_total)
         {
+#ifdef _OPENMP
+            const std::size_t tid = static_cast<std::size_t>(omp_get_thread_num());
+#else
+            const std::size_t tid = 0;
+#endif
+            long double& weight_total = totals[tid][0];
+            long double& strongest_total = totals[tid][1];
             std::vector<std::pair<node_index, double>> neighbors;
             #pragma omp for schedule(static)
             for (std::size_t s = 0; s < samples; ++s) error.run([&] {
@@ -305,6 +321,11 @@ private:
             });
         }
         error.rethrow();
+        long double weight_total = 0.0L, strongest_total = 0.0L;
+        for (const auto& [weight, strongest] : totals) {
+            weight_total += weight;
+            strongest_total += strongest;
+        }
         active_sparsify_sample result;
         result.sampled_vertices = samples;
         result.duplicate_ratio = distinct_total
@@ -376,32 +397,21 @@ private:
         std::vector<std::size_t> order(items.size());
         std::iota(order.begin(), order.end(), std::size_t{0});
         std::vector<std::size_t> scratch(order.size());
-        auto weight_key = [&](std::size_t index) -> std::uint64_t {
-            if constexpr (sizeof(pool_value_t) == 4)
-                return (~static_cast<std::uint64_t>(
-                    std::bit_cast<std::uint32_t>(static_cast<float>(
-                        items[index].weight)))) & 0xffffffffULL;
-            else
-                return ~std::bit_cast<std::uint64_t>(items[index].weight);
+        // Heaviest first by the inverted exponent and top three mantissa
+        // bits of the FP32 weight, as in residual_sparsify::bucket.
+        auto bucket = [&](std::size_t index) -> std::size_t {
+            return ~std::bit_cast<std::uint32_t>(
+                static_cast<float>(items[index].weight)) >> 20;
         };
-        constexpr unsigned key_bits = 8 * sizeof(pool_value_t);
-        constexpr unsigned pass_bits = 12;
-        constexpr unsigned shift = key_bits - pass_bits;
-        std::array<std::size_t, std::size_t{1} << pass_bits> counts{};
-        for (std::size_t index : order) {
-            const std::uint64_t key = weight_key(index);
-            ++counts[(key >> shift) & (counts.size() - 1)];
-        }
+        std::array<std::size_t, std::size_t{1} << 12> counts{};
+        for (std::size_t index : order) ++counts[bucket(index)];
         std::size_t offset = 0;
         for (std::size_t& count : counts) {
             const std::size_t next = offset + count;
             count = offset;
             offset = next;
         }
-        for (std::size_t index : order) {
-            const std::uint64_t key = weight_key(index);
-            scratch[counts[(key >> shift) & (counts.size() - 1)]++] = index;
-        }
+        for (std::size_t index : order) scratch[counts[bucket(index)]++] = index;
         order.swap(scratch);
         // The radix scratch now contains only the discarded iota order.
         // Release it before allocating an equally wide double cache so the
@@ -660,7 +670,7 @@ private:
                         const item& edge = items[i];
                         if (!edge.kept) continue;
                         const double inv_p = 1.0 / probability(i);
-                        const pool_value_t weight = static_cast<pool_value_t>(
+                        const float weight = static_cast<float>(
                             edge.weight * inv_p);
                         const node_index u = dense_of[edge.u];
                         const node_index v = dense_of[edge.v];
@@ -696,9 +706,9 @@ private:
                     const double inv_p = 1.0 / probability(i);
                     const double weight = edge.weight * inv_p;
                     rebuilt.adj_.push(
-                        edge.u, {edge.v, static_cast<pool_value_t>(weight)});
+                        edge.u, {edge.v, static_cast<float>(weight)});
                     rebuilt.adj_.push(
-                        edge.v, {edge.u, static_cast<pool_value_t>(weight)});
+                        edge.v, {edge.u, static_cast<float>(weight)});
                     ++rebuilt.m_;
                 }
             }
@@ -794,7 +804,7 @@ private:
     node_index n_ = 0;          // vertex count
     edge_index m_ = 0;          // edge count (can exceed 2^31)
     node_index num_active_ = 0; // active vertex count
-    directed_vec_pool_incidence adj_;
+    detail::directed_vec_pool_incidence adj_;
     // Active status is probed randomly in nearly every residual-edge scan, so
     // keep one bit per vertex rather than one byte.  Parallel elimination can
     // clear distinct vertices that share a word; all reads and clears therefore

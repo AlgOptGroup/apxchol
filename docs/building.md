@@ -45,8 +45,7 @@ backend selection and factor storage are runtime settings; see the
 | Option | Default | Meaning |
 |---|---|---|
 | `APXCHOL_DEVICE` | `CPU` | `CPU` only, or CPU plus `CUDA` / `METAL` |
-| `APXCHOL_NATIVE_ARCH` | ON for standalone root/helper/local Python; OFF for root embedding/SDK/wheels | Tune for the build machine; turn OFF for distribution |
-| `APXCHOL_POOL_FP32` | ON | Store mutable graph weights in FP32; OFF uses FP64 |
+| `APXCHOL_NATIVE_ARCH` | ON for standalone root, local Python and benchmarks; OFF for embedding, the SDK and wheels | Tune for the build machine; turn OFF for distribution. Ignored when `CMAKE_CXX_FLAGS` sets `-march`/`-mcpu` |
 | `APXCHOL_INDEX_WIDTH` | `32` | `32`, `64_EDGES` or `64`; see layouts below |
 | `APXCHOL_BUILD_CLI` | ON standalone; OFF when embedded | Build the CLI and its input/logging dependencies |
 | `APXCHOL_BUILD_TESTS` | ON standalone; OFF when embedded | Build the test suite |
@@ -70,5 +69,8 @@ Standard CMake controls also apply: `CMAKE_BUILD_TYPE`, `BUILD_SHARED_LIBS`,
 
 Portable x86 builds use x86-64-v2 and dispatch supported FP16/SIMD kernels at
 runtime. Native tuning can require a newer CPU than this baseline.
-`apxchol::core` propagates architecture and C++23 requirements to consumers;
-these matter because Eigen objects cross the library boundary.
+`apxchol::core` propagates C++23 and two Eigen settings to consumers, because
+Eigen objects cross the library boundary: `EIGEN_MAX_ALIGN_BYTES`, the
+alignment the core's flags give Eigen, and `EIGEN_MALLOC_ALREADY_ALIGNED=0`,
+so both sides allocate and free through Eigen's own aligned allocator. A
+consumer can then target a narrower or wider instruction set than the core.

@@ -9,9 +9,9 @@ namespace apxchol::detail {
 // Input-only cycle eligibility. GKS remains the established law when pool
 // rounding or normalized probabilities cannot retain a positive cycle update.
 inline bool cycle_pool_eligible(double value) {
-    if (!(value >= 0) || !(value <= std::numeric_limits<pool_value_t>::max()))
+    if (!(value >= 0) || !(value <= std::numeric_limits<float>::max()))
         throw std::domain_error("cycle sampler: invalid or overflowing residual-pool edge");
-    return static_cast<pool_value_t>(value) > 0;
+    return static_cast<float>(value) > 0;
 }
 inline void require_pool_edge(double value) {
     if (!cycle_pool_eligible(value))
@@ -169,11 +169,7 @@ inline void sample_trace_cycle(std::span<weighted_neighbor> n, double pivot,
         sample_cycle_gks_fallback(n, pivot, seed, out);
         return;
     }
-    // Reject the by-route sentinel defensively: it is SIZE_MAX, so an
-    // unresolved value would make `h <= exact_core_max_h` true for every core
-    // and switch the exact clique on everywhere.
-    const bool exact_core = exact_core_max_h > 0 &&
-        exact_core_max_h != exact_core_by_route && h <= exact_core_max_h;
+    const bool exact_core = exact_core_max_h > 0 && h <= exact_core_max_h;
     const size_t cycles = (double_cycle_min_h > 0 && h >= double_cycle_min_h) ? 2 : 1;
     // Reserve the actual core edges plus light attachments. Divide the exact
     // pair count before multiplying, and check against the vector's limit.

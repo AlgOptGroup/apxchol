@@ -7,7 +7,7 @@
 // CUDA launch boundary for the common PCG kernels. Both operator storage
 // precisions accumulate in FP64. Reductions use a fixed grid and tree, without
 // floating-point atomics; launch geometry depends only on the input size.
-namespace apxchol::pcg_cuda {
+namespace apxchol::detail::cuda_pcg_kernels {
 
 using solve_state = detail::gpu_pcg::solve_state<double, double>;
 struct workspace : detail::gpu_pcg::workspace<double, double> {
@@ -87,4 +87,4 @@ void finish(cudaStream_t stream, std::int64_t n, workspace vectors,
             const operator_csr& matrix, int lanes, bool laplacian,
             std::array<double, Columns> scales, std::array<double, Columns> bnorm);
 
-} // namespace apxchol::pcg_cuda
+} // namespace apxchol::detail::cuda_pcg_kernels

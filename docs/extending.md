@@ -85,7 +85,8 @@ See the header for optional `sample_bounded` and
 `residual_handoff_threshold` traits.
 
 `ctx.options` contains selection settings, `ctx.seed` supplies randomness,
-`ctx.omp_threshold` gates parallel work, and `ctx.cp` is optional profiling.
+`ctx.omp_threshold` gates parallel work, and `ctx.degree_tiebreak` asks the rule
+to prefer lower-degree vertices in conflicts.
 The rule is called once per round and may parallelize internally. This is the
 opposite of the eliminator, whose individual calls are already parallelized.
 
@@ -108,8 +109,9 @@ edges, not current live edges.
 
 Partitioner instances are passed by value. Callable adapters are
 `as_partitioner` and `as_prepass_partitioner`. Direct template use requires no
-registry change; by-name CLI/binding dispatch requires adding the type to
-`partitioner_list`. [custom_order.cpp](../examples/custom_order.cpp) shows
+registry change; dispatch through `factor_options::partitioner`, the CLI and
+bindings requires adding the type to `partitioner_list` and a matching
+`partitioner_kind` value and name. [custom_order.cpp](../examples/custom_order.cpp) shows
 complete integration.
 
 ## Reusing a custom factor
@@ -125,19 +127,21 @@ An explicit GPU request uploads the factor for CUDA or Metal solves, without
 factorizing again. Automatic adoption stays on CPU. The original matrix `A`
 is still needed for PCG and residual checks.
 
-The factor may come from CPU construction or from a GPU solver created with
-`keep_factor_values=true`: pass its `solver.factor()` to the constructor above.
-The destination rebuilds its own triangular-solve storage. There is no built-in
-save/load format; this handoff is in memory.
+The factor may come from CPU construction or from any solver's
+`solver.factor()`, which returns its installed factor; pass it to the
+constructor above. The destination rebuilds its own triangular-solve layout.
+For a handoff between processes, use [saved solvers](serialization.md).
 
-`apxchol::apx_cholesky::set_factor` also accepts a factor for use with an
-Eigen iterative solver. That adapter always applies it on CPU.
+To precondition another iterative solver with the factor, construct
+`solver(A, std::move(F), opts)` and call its `apply`; see
+[using another iterative solver](usage.md#using-another-iterative-solver).
 
 A `factorization` holds CSC factor columns
 (diagonal first), permutation with `perm[original] = elimination_position`,
-operator kind, and round metadata. Preserve these conventions. Enable
-`set_keep_factor(true)` before installation if the preconditioner must retain
-exportable factor arrays; consuming solver paths may release them.
+operator kind, round metadata and its storage form. Preserve these
+conventions. The factor `L` is a read-only view; build factors with
+`factorize` or load them from an archive. A custom factor uses
+`storage = automatic`, so the solver applies its dropping and storage options.
 
 Graph storage is the directed AoS pool. Custom partitioners and eliminators
 operate on the same graph. The PCG recurrence, factor-column formula, and triangular-solve

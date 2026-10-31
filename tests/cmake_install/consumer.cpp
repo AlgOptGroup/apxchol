@@ -1,4 +1,4 @@
-#include <apxchol/solver/archive.h>
+#include <apxchol/solver/solve.h>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -12,7 +12,6 @@ int main(int argc, char** argv) {
     if (argc > 2 || (route != "cpu" && route != "gpu")) return 2;
     apxchol::solve_options options;
     options.backend = route == "cpu" ? apxchol::solve_backend::cpu : apxchol::solve_backend::gpu;
-    options.keep_factor_values = true;
     options.num_threads = 2;
     options.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
     constexpr int n = 17;
@@ -36,9 +35,9 @@ int main(int argc, char** argv) {
     const auto path = directory / "solver.apxchol";
     {
         apxchol::solver source(A, options);
-        apxchol::save_solver(path, source);
+        source.save(path);
     }
-    auto restored = apxchol::load_solver(path, options);
+    auto restored = apxchol::solver::load(path, options);
     const auto result = restored.solve(rhs, 1e-7, 200);
     const double residual = (A * result.x - rhs).norm() / rhs.norm();
     if (result.backend != options.backend || !result.converged ||

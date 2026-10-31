@@ -93,7 +93,7 @@ struct assignment_counted_slot {
 } // namespace
 
 TEST(VecPoolIncidence, FilterSkipsWritesBeforeTheFirstRemovedEntry) {
-    using Incidence = apxchol::basic_vec_pool_incidence<assignment_counted_slot>;
+    using Incidence = apxchol::detail::basic_vec_pool_incidence<assignment_counted_slot>;
     Incidence adj;
     adj.init(1);
     for (int value : {1, 2, 3, 4})
@@ -113,7 +113,7 @@ TEST(VecPoolIncidence, FilterSkipsWritesBeforeTheFirstRemovedEntry) {
 }
 
 TEST(SegmentedPool, ClaimsNeverCrossSegmentsAndClearReusesTheMap) {
-    apxchol::segmented_pool<std::uint32_t, 8, 64> pool;
+    apxchol::detail::segmented_pool<std::uint32_t, 8, 64> pool;
     pool.prepare();
     const size_t first = pool.claim(6);
     const size_t second = pool.claim(4);
@@ -130,7 +130,7 @@ TEST(SegmentedPool, ClaimsNeverCrossSegmentsAndClearReusesTheMap) {
 }
 
 TEST(SegmentedPool, ParallelClaimsAreDisjoint) {
-    apxchol::segmented_pool<std::uint32_t, 64, 4096> pool;
+    apxchol::detail::segmented_pool<std::uint32_t, 64, 4096> pool;
     pool.prepare();
     constexpr size_t claims = 128;
     constexpr size_t slots_per_claim = 7;
@@ -659,7 +659,7 @@ TEST(SegmentedPool, SmallTouchDoesNotPopulateGiantSegmentPages) {
     constexpr std::size_t bytes = slots * sizeof(std::uint64_t);
     const long page = ::sysconf(_SC_PAGESIZE);
     ASSERT_GT(page, 0);
-    apxchol::segmented_pool<std::uint64_t, slots> pool;
+    apxchol::detail::segmented_pool<std::uint64_t, slots> pool;
     const std::size_t used = 3 * static_cast<std::size_t>(page);
     ASSERT_EQ(pool.claim(used / sizeof(std::uint64_t)), 0u);
     // Touch a complete PMD-aligned region when possible: an unaligned prefix

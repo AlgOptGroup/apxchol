@@ -12,6 +12,17 @@ python3 benchmarks/sweep_fair.py --threads N --store results/cells
 
 For CUDA, use a separate build directory and add `-DAPXCHOL_DEVICE=CUDA
 -DBENCH_HYPRE_USE_CUDA=ON -DBUILD_GPU_RCHOL=ON`; sweep with `--device gpu`.
+
+On macOS, build `benchmarks/build-metal` with `-DAPXCHOL_DEVICE=METAL
+-DOpenMP_ROOT=$(brew --prefix libomp)` (Apple Clang; Hypre needs `OpenMP_ROOT` to
+find Homebrew's `libomp`) and sweep with `--device metal`. That axis runs only
+apxchol, since no competitor has a Metal backend. Its cells are stored under
+`device=metal` with `execution_route=metal`, so they never mix with CUDA
+(`gpu`) cells. The same binary also runs the CPU competitors that build there
+(RCHOL with the portable PCG, pRCHOL, Hypre BoomerAMG; AMGCL when Boost headers
+are found). Use it for the CPU axis with `APXCHOL_BENCH_CPU_BIN`. macOS has no
+CPU pinning, so runs are unpinned and record `benchmark_cpuset=unpinned`.
+Peak RSS comes from BSD `time -l`, and no memory cap is applied.
 Optional solvers require their runtimes. Julia dependencies:
 
 ```sh
@@ -91,13 +102,36 @@ comments, Pages or README measurements.
   transfers and returning the solution. Total is setup + solve.
 - Common parsing/assembly and independent grading are excluded. Process-wide CUDA
   initialization is separately reported; solver-specific allocations/module loading
-  remain charged. Hypre initialization is charged once per row.
+  remain charged. Hypre initialization is charged once per row. Metal device
+  creation and kernel compilation are excluded the same way: one small Metal
+  setup and solve runs before the first timed Metal owner, reported once as
+  `metal_init_s`.
 - v1 host `solve_rss_mb` is sampled while the measured owner is still alive; the
-  `/proc` sampling cost is included in Solve. Older v1 rows sampled after owner
+  `/proc` (Linux) or `task_info` (macOS) sampling cost is included in Solve. Older v1 rows sampled after owner
   destruction and are not comparable as solve-held RSS. GNU child peak RSS keeps
   its separate whole-process definition; do not infer a memory win from that
   boundary correction.
-- Measure GPU memory in separate runs: polling `nvidia-smi` during a timed C++ or ParAC call perturbs its setup.
+- GPU memory is this process's device memory as NVML attributes it to its PID on
+  the benchmark's device, in MiB. Every GPU solver in the benchmark binary (apxchol,
+  AMGCL, Hypre) is measured the same way. Right after CUDA context creation, before
+  any solver allocates, the binary prints
+  `[bench] gpu_memory pid=… bus_id=… baseline_mib=… other_processes=… other_mib=…`.
+  - `vram_baseline_mb`: that raw baseline (CUDA context only).
+  - `setup_vram_mb`: usage above the baseline after setup returns.
+  - `solve_vram_mb`: usage above the baseline at solve end, while the solver still
+    holds its operator, factor or hierarchy and vectors.
+  - Both reads are outside the setup and solve timers. Memory a solver keeps across
+    repetitions (caches, pools) stays in later readings; run one GPU solver per process.
+  - `gpu_other_processes`/`gpu_other_mb`: other compute processes on the device at
+    the baseline. They are excluded from every value above; `gpu_shared=true` flags
+    the cell because they still compete for the device. Graphics-only clients (a
+    display server) are not compute processes and are neither counted nor flagged.
+  - When NVML cannot attribute memory to the process (no NVML, MIG, an unsupported
+    device or driver, PID not listed), the baseline is unavailable with a reason in
+    `vram_unavailable`, and the deltas are absent. A device-wide number is never
+    substituted. Older binaries' device-wide `solve_vram_mb` is not stored.
+- The runners do not report peak GPU memory. Polling `nvidia-smi` during a timed
+  C++ or ParAC call perturbs its setup, so timed runs never poll.
 
 ### Backend and factor accounting
 
@@ -108,7 +142,8 @@ comments, Pages or README measurements.
   no failure silently falls back to another route. The fair/scaling runners force
   their device and require matching `execution_route` CSV/repetition receipts.
   Old mixed-route rows remain historical and cannot resume a current comparison.
-- `--report-fill` reads the actual held factor and its SpTRSV drop statistics.
+- `--report-fill` reads the actual held factor and its SpTRSV drop statistics
+  (on Metal, the statistics of the drop applied before upload).
   It never constructs another factor or uploads a host diagnostic factor. Raw
   factor off-diagonals and stored L11 entries are distinct counts; CSR and CSC each
   hold the latter. The input denominator counts stored off-diagonal entries after

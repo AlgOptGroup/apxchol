@@ -29,11 +29,13 @@
 #include "apxchol/sparse_csc.h"
 #include "apxchol/solver/sptrsv/omp.h"
 
+using csc_access = apxchol::detail::sparse_csc_access;
+
 using apxchol::edge_index;
 using apxchol::node_index;
 using apxchol::sparse_csc;
 using apxchol::factor_value_t;
-using apxchol::sptrsv_value_t;
+using apxchol::detail::sptrsv_value_t;
 
 namespace {
 
@@ -41,21 +43,21 @@ sparse_csc from_cols(node_index m, std::vector<std::vector<node_index>>& col_row
     std::uniform_real_distribution<double> uval(-0.5, 0.5);
     std::uniform_real_distribution<double> udiag(1.0, 3.0);
     sparse_csc L;
-    L.n_ = m;
-    L.outer_.assign(static_cast<size_t>(m) + 1, 0);
+    csc_access::n(L) = m;
+    csc_access::outer(L).assign(static_cast<size_t>(m) + 1, 0);
     for (node_index j = 0; j < m; ++j) {
         auto& r = col_rows[j];
         std::sort(r.begin(), r.end());
         r.erase(std::unique(r.begin(), r.end()), r.end());
-        L.outer_[j + 1] = L.outer_[j] + static_cast<edge_index>(r.size());
+        csc_access::outer(L)[j + 1] = csc_access::outer(L)[j] + static_cast<edge_index>(r.size());
     }
-    L.inner_.resize(static_cast<size_t>(L.outer_[m]));
-    L.vals_.resize(static_cast<size_t>(L.outer_[m]));
+    csc_access::inner(L).resize(static_cast<size_t>(csc_access::outer(L)[m]));
+    csc_access::vals(L).resize(static_cast<size_t>(csc_access::outer(L)[m]));
     for (node_index j = 0; j < m; ++j) {
-        edge_index out = L.outer_[j];
+        edge_index out = csc_access::outer(L)[j];
         for (node_index r : col_rows[j]) {
-            L.inner_[out] = r;
-            L.vals_[out]  = static_cast<factor_value_t>(r == j ? udiag(rng) : uval(rng));
+            csc_access::inner(L)[out] = r;
+            csc_access::vals(L)[out]  = static_cast<factor_value_t>(r == j ? udiag(rng) : uval(rng));
             ++out;
         }
     }
@@ -158,7 +160,7 @@ std::vector<double> random_x(node_index m, unsigned seed) {
 // One solve pair at the current thread count: y = forward(x), z = back(y),
 // plus the same in place (w = x; forward(w, w); back(w, w)).
 struct pair_out { std::vector<double> y, z, w; };
-pair_out solve_pair(const apxchol::omp_sptrsv& t, const std::vector<double>& x) {
+pair_out solve_pair(apxchol::detail::omp_sptrsv& t, const std::vector<double>& x) {
     const node_index m = static_cast<node_index>(x.size());
     pair_out o; o.y.resize(m); o.z.resize(m); o.w = x;
     t.forward_solve(x.data(), o.y.data());
@@ -172,7 +174,7 @@ pair_out solve_pair(const apxchol::omp_sptrsv& t, const std::vector<double>& x) 
 // lane, exercising the real team-mismatch fallback instead of merely changing
 // omp_get_max_threads() (the inner region names num_threads(processors)).
 pair_out solve_pair_with_forced_team_mismatch(
-        const apxchol::omp_sptrsv& t, const std::vector<double>& x) {
+        apxchol::detail::omp_sptrsv& t, const std::vector<double>& x) {
     const int saved_levels = omp_get_max_active_levels();
     omp_set_max_active_levels(1);
     pair_out out;
@@ -204,22 +206,22 @@ void expect_same_bytes(const pair_out& a, const pair_out& b, const char* what) {
 // double on the same stored values: only summation order differs.
 void expect_correct_pair(const sparse_csc& L, const std::vector<double>& x, const pair_out& o) {
     const node_index m = L.rows();
-    const auto* outer = L.outerIndexPtr(); const auto* inner = L.innerIndexPtr(); const auto* vals = L.valuePtr();
+    const auto* outer = L.col_ptrs().data(); const auto* inner = L.row_indices().data(); const auto* vals = L.values().data();
     std::vector<float> s(m);
-    for (node_index j = 0; j < m; ++j) s[j] = apxchol::omp_sptrsv::column_scale(vals, outer[j], outer[j + 1]);
+    for (node_index j = 0; j < m; ++j) s[j] = apxchol::detail::omp_sptrsv::column_scale(vals, outer[j], outer[j + 1]);
     std::vector<double> ry(m), rz(m);
     for (node_index j = 0; j < m; ++j) {
-        ry[j] += apxchol::omp_sptrsv::stored_diag(vals[outer[j]], s[j]) * o.y[j];
-        rz[j] += apxchol::omp_sptrsv::stored_diag(vals[outer[j]], s[j]) * o.z[j];
+        ry[j] += apxchol::detail::omp_sptrsv::stored_diag(vals[outer[j]], s[j]) * o.y[j];
+        rz[j] += apxchol::detail::omp_sptrsv::stored_diag(vals[outer[j]], s[j]) * o.z[j];
         for (edge_index p = outer[j] + 1; p < outer[j + 1]; ++p) {
-            const double v = apxchol::widen(apxchol::omp_sptrsv::narrow_value(vals[p], s[j]));
+            const double v = apxchol::widen(apxchol::detail::omp_sptrsv::narrow_value(vals[p], s[j]));
             ry[inner[p]] += v * o.y[j];      // (L_s y')_i
             rz[j]        += v * o.z[inner[p]];   // (L_s^T z)_j
         }
     }
     double ey = 0.0, ez = 0.0, sy = 0.0, sz = 0.0;
     for (node_index j = 0; j < m; ++j) {
-        const double r = apxchol::omp_sptrsv::inv_scale(s[j]);
+        const double r = apxchol::detail::omp_sptrsv::inv_scale(s[j]);
         ey = std::max(ey, std::fabs(ry[j] - x[j]));
         ez = std::max(ez, std::fabs(rz[j] - o.y[j] * (r * r)));
         sy = std::max(sy, std::fabs(x[j]));
@@ -230,13 +232,13 @@ void expect_correct_pair(const sparse_csc& L, const std::vector<double>& x, cons
 }
 
 struct level_shape { std::size_t levels = 0, thin = 0, fat = 0, thin_runs = 0, longest_thin_run = 0; };
-level_shape shape(const apxchol::omp_sptrsv& t, bool fwd) {
+level_shape shape(const apxchol::detail::omp_sptrsv& t, bool fwd) {
     std::vector<int> sizes; std::vector<long long> work;
     t.level_stats(fwd, sizes, work);
     level_shape s; s.levels = sizes.size();
     std::size_t run = 0;
     for (int sz : sizes) {
-        if (sz <= static_cast<int>(apxchol::kSpTRSVOMPThreshold)) {
+        if (sz <= static_cast<int>(apxchol::detail::kSpTRSVOMPThreshold)) {
             if (run == 0) ++s.thin_runs;
             ++s.thin; ++run; s.longest_thin_run = std::max(s.longest_thin_run, run);
         }
@@ -308,7 +310,7 @@ TEST(SpTRSVRoundRanges, PreserveOldLevelSlotsAndRowOrderAtEmptyBoundaries) {
 
 TEST(SpTRSVRoundRanges, ImplicitPeelIsByteEquivalentToMaterializedFallback) {
     apxchol::factor_options options{.drop_tolerance = 0};
-    options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+    options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
     set_threads(4);
 
     std::vector<node_index> logical_bounds;
@@ -323,18 +325,18 @@ TEST(SpTRSVRoundRanges, ImplicitPeelIsByteEquivalentToMaterializedFallback) {
     const auto x = random_x(L.rows(), 8802);
 
     for (const char* storage : {"float32", "float16"}) {
-        if (std::string_view(storage) == "float16" && !apxchol::omp_sptrsv::fp16_supported())
+        if (std::string_view(storage) == "float16" && !apxchol::detail::omp_sptrsv::fp16_supported())
             continue;
         SCOPED_TRACE(std::string("factor_storage=") + storage);
         options.factor_storage = std::string_view(storage) == "float16"
             ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32;
 
-        apxchol::omp_sptrsv implicit;
+        apxchol::detail::omp_sptrsv implicit;
         implicit.set_round_bounds(bounds);
         implicit.setup(L, L.rows(), options);
 
         // No round metadata takes the retained materialized topological path.
-        apxchol::omp_sptrsv materialized;
+        apxchol::detail::omp_sptrsv materialized;
         materialized.setup(L, L.rows(), options);
 
         std::vector<int> sizes;
@@ -361,13 +363,13 @@ TEST(SpTRSVRoundRanges, ImplicitPeelIsByteEquivalentToMaterializedFallback) {
 TEST(SpTRSVRoundRanges, PostSetupBoundsMutationDoesNotChangeActiveSchedule) {
     apxchol::factor_options options{.drop_tolerance = 0};
     options.factor_storage = apxchol::factor_storage_type::fp32;
-    options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+    options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
     set_threads(4);
 
     std::vector<node_index> bounds;
     const sparse_csc L = make_round(4, 32, 8803, bounds);
     const auto x = random_x(L.rows(), 8804);
-    apxchol::omp_sptrsv trsv;
+    apxchol::detail::omp_sptrsv trsv;
     trsv.set_round_bounds(bounds);
     trsv.setup(L, L.rows(), options);
     const pair_out reference = solve_pair(trsv, x);
@@ -397,17 +399,17 @@ TEST(SpTRSVRoundRanges, EmptyFirstTailRangePreservesHybridBoundary) {
     bounds.insert(bounds.begin() + 2, bounds[1]);
     const auto x = random_x(L.rows(), 8812);
 
-    apxchol::omp_sptrsv level_reference;
+    apxchol::detail::omp_sptrsv level_reference;
     {
-        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+        options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
         level_reference.set_round_bounds(bounds);
         level_reference.setup(L, L.rows(), options);
     }
     const pair_out reference = solve_pair(level_reference, x);
 
-    apxchol::omp_sptrsv hybrid;
+    apxchol::detail::omp_sptrsv hybrid;
     {
-        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
+        options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
         hybrid.set_round_bounds(bounds);
         hybrid.setup(L, L.rows(), options);
     }
@@ -433,7 +435,7 @@ TEST(SpTRSVLevelset, SameBytesAcrossThreadCounts) {
         SCOPED_TRACE("mixed thin/fat topological levels");
         const sparse_csc L = make_mixed(60000, 60, 400, 12345);
         const node_index m = L.rows();
-        apxchol::omp_sptrsv trsv;
+        apxchol::detail::omp_sptrsv trsv;
         trsv.setup(L, m, options);
         for (bool fwd : {true, false}) {
             const level_shape s = shape(trsv, fwd);
@@ -456,7 +458,7 @@ TEST(SpTRSVLevelset, SameBytesAcrossThreadCounts) {
         std::vector<node_index> bounds;
         const sparse_csc L = make_round(8, 8192, 4321, bounds);
         const node_index m = L.rows();
-        apxchol::omp_sptrsv trsv;
+        apxchol::detail::omp_sptrsv trsv;
         trsv.set_round_bounds(bounds);
         trsv.setup(L, m, options);
         for (bool fwd : {true, false}) {
@@ -485,15 +487,15 @@ TEST(CriticalSchedule, HybridRunsFatPrefixAndCriticalThinTailByteIdentically) {
     const auto x = random_x(L.rows(), 552);
     set_threads(4);
 
-    apxchol::omp_sptrsv levels;
+    apxchol::detail::omp_sptrsv levels;
     {
-        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+        options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
         levels.set_round_bounds(bounds);
         levels.setup(L, L.rows(), options);
     }
-    apxchol::omp_sptrsv hybrid;
+    apxchol::detail::omp_sptrsv hybrid;
     {
-        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
+        options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
         hybrid.set_round_bounds(bounds);
         hybrid.setup(L, L.rows(), options);
     }
@@ -526,7 +528,7 @@ TEST(CriticalSchedule, HybridRunsFatPrefixAndCriticalThinTailByteIdentically) {
 
 TEST(CriticalSchedule, HybridPreservesFp16Arithmetic) {
     apxchol::factor_options options{.drop_tolerance = 0};
-    if (!apxchol::omp_sptrsv::fp16_supported()) GTEST_SKIP() << "CPU lacks F16C";
+    if (!apxchol::detail::omp_sptrsv::fp16_supported()) GTEST_SKIP() << "CPU lacks F16C";
     options.factor_storage = apxchol::factor_storage_type::fp16;
     std::vector<node_index> bounds;
     const sparse_csc L = make_fat_prefix_thin_tail(
@@ -534,15 +536,15 @@ TEST(CriticalSchedule, HybridPreservesFp16Arithmetic) {
     const auto x = random_x(L.rows(), 558);
     set_threads(4);
 
-    apxchol::omp_sptrsv levels;
+    apxchol::detail::omp_sptrsv levels;
     {
-        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+        options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
         levels.set_round_bounds(bounds);
         levels.setup(L, L.rows(), options);
     }
-    apxchol::omp_sptrsv hybrid;
+    apxchol::detail::omp_sptrsv hybrid;
     {
-        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
+        options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
         hybrid.set_round_bounds(bounds);
         hybrid.setup(L, L.rows(), options);
     }
@@ -569,15 +571,15 @@ TEST(CriticalSchedule, HybridLimitsArePureLevelsAndPureCritical) {
         const sparse_csc L = make_round(
             6, 32768, 553, bounds);
         const auto x = random_x(L.rows(), 554);
-        apxchol::omp_sptrsv levels;
+        apxchol::detail::omp_sptrsv levels;
         {
-            options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+            options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
             levels.set_round_bounds(bounds);
             levels.setup(L, L.rows(), options);
         }
-        apxchol::omp_sptrsv hybrid;
+        apxchol::detail::omp_sptrsv hybrid;
         {
-            options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
+            options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
             hybrid.set_round_bounds(bounds);
             hybrid.setup(L, L.rows(), options);
         }
@@ -591,15 +593,15 @@ TEST(CriticalSchedule, HybridLimitsArePureLevelsAndPureCritical) {
         std::vector<node_index> bounds;
         const sparse_csc L = make_round(130, 1024, 555, bounds);
         const auto x = random_x(L.rows(), 556);
-        apxchol::omp_sptrsv levels;
+        apxchol::detail::omp_sptrsv levels;
         {
-            options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+            options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
             levels.set_round_bounds(bounds);
             levels.setup(L, L.rows(), options);
         }
-        apxchol::omp_sptrsv hybrid;
+        apxchol::detail::omp_sptrsv hybrid;
         {
-            options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
+            options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
             hybrid.set_round_bounds(bounds);
             hybrid.setup(L, L.rows(), options);
         }
@@ -616,23 +618,23 @@ TEST(CriticalSchedule, HybridLimitsArePureLevelsAndPureCritical) {
 TEST(CriticalSchedule, AutoUsesThinSuffixAboveSerialThreshold) {
     apxchol::factor_options options{.drop_tolerance = 0};
     options.factor_storage = apxchol::factor_storage_type::fp32;
-    options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
+    options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
     std::vector<node_index> bounds;
     const sparse_csc L = make_round(130, 1024, 111, bounds);
-    ASSERT_GT(L.rows(), apxchol::kSpTRSVOMPThreshold);
+    ASSERT_GT(L.rows(), apxchol::detail::kSpTRSVOMPThreshold);
 
     set_threads(4);
-    apxchol::omp_sptrsv parallel;
+    apxchol::detail::omp_sptrsv parallel;
     parallel.set_round_bounds(bounds);
     parallel.setup(L, L.rows(), options);
     EXPECT_TRUE(parallel.uses_hybrid_schedule());
 
-    apxchol::omp_sptrsv without_rounds;
+    apxchol::detail::omp_sptrsv without_rounds;
     without_rounds.setup(L, L.rows(), options);
     EXPECT_FALSE(without_rounds.uses_hybrid_schedule());
 
     set_threads(1);
-    apxchol::omp_sptrsv serial;
+    apxchol::detail::omp_sptrsv serial;
     serial.set_round_bounds(bounds);
     serial.setup(L, L.rows(), options);
     EXPECT_FALSE(serial.uses_hybrid_schedule());
@@ -641,10 +643,10 @@ TEST(CriticalSchedule, AutoUsesThinSuffixAboveSerialThreshold) {
 
 TEST(SpTRSVLevelset, SmallFactorsSkipParallelScheduling) {
     apxchol::factor_options options{.drop_tolerance = 0};
-    options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
+    options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
     set_threads(4);
     for (const char* storage : {"float32", "float16"}) {
-        if (std::string_view(storage) == "float16" && !apxchol::omp_sptrsv::fp16_supported())
+        if (std::string_view(storage) == "float16" && !apxchol::detail::omp_sptrsv::fp16_supported())
             continue;
         options.factor_storage = std::string_view(storage) == "float16"
             ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32;
@@ -652,7 +654,7 @@ TEST(SpTRSVLevelset, SmallFactorsSkipParallelScheduling) {
             SCOPED_TRACE(std::string(storage) + " n=" + std::to_string(n));
             std::vector<node_index> bounds;
             const sparse_csc L = make_round(n / 8, 8, 112, bounds);
-            apxchol::omp_sptrsv trsv;
+            apxchol::detail::omp_sptrsv trsv;
             trsv.set_round_bounds(bounds);
             trsv.setup(L, n, options);
             EXPECT_FALSE(trsv.uses_hybrid_schedule());
@@ -671,18 +673,18 @@ TEST(SpTRSVLevelset, SmallFactorsSkipParallelScheduling) {
 TEST(SpTRSVLevelset, GroundingPreservesOuterTeamAndHonorsChangedLimit) {
     apxchol::factor_options options{.drop_tolerance = 0};
     options.factor_storage = apxchol::factor_storage_type::fp32;
-    options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
+    options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
     options.verbose = true;
     std::vector<node_index> bounds;
     const sparse_csc L11 = make_round(1024, 8, 114, bounds);
     auto L = L11;
-    ++L.n_;
-    L.outer_.push_back(L.outer_.back());
+    ++csc_access::n(L);
+    csc_access::outer(L).push_back(csc_access::outer(L).back());
     set_threads(4);
     const int workers = apxchol::detail::cpu_solve_threads(L.rows());
     ASSERT_EQ(workers, 3);
     ASSERT_EQ(apxchol::detail::cpu_spmv_threads(L.rows(), L.nonZeros()), workers);
-    apxchol::omp_sptrsv trsv;
+    apxchol::detail::omp_sptrsv trsv;
     trsv.set_round_bounds(bounds);
     testing::internal::CaptureStderr();
     trsv.setup(L, L11.rows(), options);
@@ -718,14 +720,14 @@ TEST(CriticalSchedule, HybridGroupsInteriorThinRounds) {
     const sparse_csc L = from_cols(bounds.back(), columns, rng);
     const auto x = random_x(L.rows(), 560);
     set_threads(4);
-    apxchol::omp_sptrsv levels, hybrid;
+    apxchol::detail::omp_sptrsv levels, hybrid;
     {
-        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+        options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
         levels.set_round_bounds(bounds);
         levels.setup(L, L.rows(), options);
     }
     {
-        options.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
+        options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
         hybrid.set_round_bounds(bounds);
         hybrid.setup(L, L.rows(), options);
     }

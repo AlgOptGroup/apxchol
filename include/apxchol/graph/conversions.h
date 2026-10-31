@@ -245,7 +245,7 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
     // Phase 2: excess = diag − weighted degree.  Zero for pure Laplacians.
     //
     // The weighted degree MUST come from the exact fp64 input values, not
-    // from a re-walk of the stored edges: under APXCHOL_POOL_FP32 the
+    // from a re-walk of the stored edges: the
     // vec_pool slabs hold fp32-quantized weights, so exact diag[v] minus a
     // quantized wdeg leaves ≈1e-8·diag of phantom excess — far above the
     // 1e-12 gate — and a pure Laplacian gets misclassified as SDDM.
