@@ -1,5 +1,6 @@
 #pragma once
-#include "apxchol/solver/archive.h"
+#include "apxchol/solver/solve.h"
+#include <filesystem>
 #include <span>
 
 namespace apxchol {

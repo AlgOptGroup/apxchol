@@ -369,12 +369,12 @@ void detail::save_solver_data(const std::filesystem::path& path, const Eigen::Sp
     archive.finish();
 }
 
-void save_solver(const std::filesystem::path& path, const solver& owner) {
+void solver::save(const std::filesystem::path& path) const {
     check_path(path);
-    detail::solver_archive_access::save(path, owner);
+    detail::solver_archive_access::save(path, *this);
 }
 
-solver load_solver(const std::filesystem::path& path, const solve_options& options) {
+solver solver::load(const std::filesystem::path& path, const solve_options& options) {
     detail::validate_solve_options(options);
     check_path(path);
     reader archive(path);
