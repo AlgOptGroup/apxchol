@@ -331,7 +331,7 @@ void detail::save_solver_data(const std::filesystem::path& path, const Eigen::Sp
     const auto n = static_cast<std::size_t>(op->rows());
     const auto annz = static_cast<std::size_t>(op->nonZeros());
     if (F.lumped_offdiag < 0) invalid("negative lumped entry count");
-    const std::array<std::uint64_t, 7> metadata{1, n, F.sddm, annz, F.L.vals_.size(),
+    const std::array<std::uint64_t, 7> metadata{1, n, F.sddm, annz, F.L.values().size(),
         static_cast<std::uint64_t>(F.lumped_offdiag), static_cast<std::uint64_t>(input_entries)};
     std::vector<std::uint64_t> rounds;
     rounds.reserve(F.rounds.size());
@@ -341,9 +341,9 @@ void detail::save_solver_data(const std::filesystem::path& path, const Eigen::Sp
     archive.add(array_id::operator_offsets, std::span<const int>(op->outerIndexPtr(), n + 1));
     archive.add(array_id::operator_indices, std::span<const int>(op->innerIndexPtr(), annz));
     archive.add(array_id::operator_values, std::span<const double>(op->valuePtr(), annz));
-    archive.add(array_id::factor_offsets, std::span<const edge_index>(F.L.outer_));
-    archive.add(array_id::factor_indices, std::span<const node_index>(F.L.inner_));
-    archive.add(array_id::factor_values, std::span<const factor_value_t>(F.L.vals_));
+    archive.add(array_id::factor_offsets, F.L.col_ptrs());
+    archive.add(array_id::factor_indices, F.L.row_indices());
+    archive.add(array_id::factor_values, F.L.values());
     archive.add(array_id::permutation, std::span<const node_index>(F.perm));
     archive.add(array_id::round_sizes, std::span<const std::uint64_t>(rounds));
     archive.finish();
@@ -391,12 +391,13 @@ solver load_solver(const std::filesystem::path& path, const solve_options& optio
     archive.read(av, std::span<double>(A.valuePtr(), annz));
     check_operator_structure(A);
     factorization F;
-    F.L.n_ = static_cast<node_index>(n);
+    using access = detail::sparse_csc_access;
+    access::n(F.L) = static_cast<node_index>(n);
     F.sddm = sddm;
     F.lumped_offdiag = static_cast<Eigen::Index>(lumped);
-    F.L.outer_ = archive.read_vector<edge_index>(lo);
-    F.L.inner_ = archive.read_vector<node_index>(li);
-    F.L.vals_ = archive.read_vector<float>(lv);
+    access::outer(F.L) = archive.read_vector<edge_index>(lo);
+    access::inner(F.L) = archive.read_vector<node_index>(li);
+    access::vals(F.L) = archive.read_vector<float>(lv);
     F.perm = archive.read_vector<node_index>(perm);
     const auto sizes = archive.read_vector<std::uint64_t>(rounds);
     for (auto count : sizes) {

@@ -137,9 +137,11 @@ Eigen iterative solver. That adapter always applies it on CPU.
 
 A `factorization` holds CSC factor columns
 (diagonal first), permutation with `perm[original] = elimination_position`,
-operator kind, and round metadata. Preserve these conventions. Enable
-`set_keep_factor(true)` before installation if the preconditioner must retain
-exportable factor arrays; consuming solver paths may release them.
+operator kind, and round metadata. Preserve these conventions. The factor `L`
+is a read-only view; build factors with `factorize` or load them from an
+archive. Enable `set_keep_factor(true)` before installation if the
+preconditioner must retain exportable factor arrays; consuming solver paths
+may release them.
 
 Graph storage is the directed AoS pool. Custom partitioners and eliminators
 operate on the same graph. The PCG recurrence, factor-column formula, and triangular-solve
