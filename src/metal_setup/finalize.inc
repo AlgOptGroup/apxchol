@@ -7,7 +7,6 @@ enum Stage : unsigned {
     stage_count_transpose = 3,
     stage_initialize_cursor = 4,
     stage_emit_transpose = 5,
-    stage_sort_transpose = 6,
 };
 
 struct Metadata { float scale, diagonal, scaled_diagonal; };
@@ -100,35 +99,6 @@ template<class Memory>
 APXCHOL_GPU_FUNCTION void transpose_count(Memory s, unsigned row) {
     if (row >= s.shape.m) return;
     for (unsigned p = s.ptr[row]; p < s.ptr[row + 1]; ++p) s.increment_count(s.idx[p]);
-}
-
-// Atomic slots leave each forward row's off-diagonals in thread order. Sort
-// them by column, as the host transpose orders them, so the solve's summation
-// order is deterministic and an installed copy of the factor reproduces it.
-// Rows of up to 32 entries sort here; longer rows are queued for one
-// threadgroup each.
-template<class Memory>
-APXCHOL_GPU_FUNCTION void transpose_sort(Memory s, unsigned row) {
-    if (row >= s.shape.m) return;
-    const unsigned begin = s.transpose_ptr[row], count = s.transpose_ptr[row + 1] - 1 - begin;
-    if (count > 32) {
-        s.queue_long_row(row);
-        return;
-    }
-    auto idx = s.transpose_idx + begin;
-    auto val = s.transpose_val + begin;
-    for (unsigned p = 1; p < count; ++p) {
-        const auto i = idx[p];
-        if (idx[p - 1] <= i) continue;
-        const auto v = val[p];
-        unsigned q = p;
-        for (; q > 0 && idx[q - 1] > i; --q) {
-            idx[q] = idx[q - 1];
-            val[q] = val[q - 1];
-        }
-        idx[q] = i;
-        val[q] = v;
-    }
 }
 
 template<class Memory>

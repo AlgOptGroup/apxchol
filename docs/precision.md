@@ -62,6 +62,13 @@ Metal reconstructs FP32 coefficients before multiplication; each column stores a
 
 ## Apple Metal PCG
 
+Metal's device setup orders the entries of each forward-solve row by thread
+timing. A Metal solver reloaded from a [saved archive](serialization.md) is
+therefore as precise and as fast as the original and takes the same number of
+iterations, but agrees with it to FP32 rounding rather than bit for bit: about
+3e-7 relative for preconditioner applications and 5e-10 for solutions on the
+large matrices measured. CPU and CUDA reloads are bit-identical.
+
 Metal factorizes [supported inputs](usage.md#native-gpu-input-and-options) on the device and prepares FP32 or scaled FP16 solve storage with compensated dropping. [The solver](usage.md#reuse-batches-and-initial-guesses) accepts vector or matrix right-hand sides, reusing its factor and workspace.
 
 Double-float represents a value as the sum of two FP32 numbers, giving about

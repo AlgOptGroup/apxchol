@@ -35,7 +35,7 @@ The file stores the factor after dropping and storage rounding, with its storage
 
 `factor_storage` and `drop_tolerance` have no effect: the file fixes both. Construction options such as the seed, partitioner, regularization and lumping are already represented in the saved factor.
 
-A solver loaded on the backend that saved the file gives bit-identical solves at the same thread count. CPU, CUDA and Metal use one stored form, so a file saved by one backend loads on another; their kernels round differently, so solutions agree to the solve tolerance rather than bit for bit.
+A loaded solver is as precise and as fast as the one that saved it: it solves in the same number of iterations and in the same time. On CPU and CUDA it gives bit-identical solves at the same thread count. On Metal, setup orders each forward-solve row by thread timing, so a reloaded solver agrees with the original to FP32 rounding: preconditioner applications agree to 3e-7 relative on large grids, ecology2, G3_circuit and com-Youtube, and solutions to 5e-10. CPU, CUDA and Metal use one stored form, so a file saved by one backend loads on another; their kernels round differently, so solutions agree to the solve tolerance rather than bit for bit.
 
 ## Stored preconditioner
 
@@ -70,7 +70,7 @@ Only canonical CSC is stored. Loading copies the arrays and rebuilds triangular-
 
 The original stored entry count is kept separately for fill-ratio reporting. It can differ from the saved matrix’s count when normalization reflects or removes unmatched explicit zeros.
 
-The file format version is independent of the package version. Any 1.x release reads every format version written by earlier 1.x releases. A minor 1.x release may introduce a new format version, as long as it keeps reading the older ones. An older apxchol given a newer archive fails with a message that names the format version and asks for an upgrade; that message is not a promise to reject every future format. Each format version has one committed fixture, such as `tests/fixtures/path5_sddm_v1.apxchol` for version 1, which the unit tests load and solve in CI.
+The file format version is independent of the package version. Saving always writes the newest format version. Any 1.x release reads every format version written by earlier 1.x releases. A minor 1.x release may introduce a new format version, as long as it keeps reading the older ones. An older apxchol given a newer archive fails with a message that names the format version and asks for an upgrade; that message is not a promise to reject every future format. Each format version has one committed fixture, such as `tests/fixtures/path5_sddm_v1.apxchol` for version 1, which the unit tests load and solve in CI.
 
 <details>
 <summary>Binary layout</summary>
