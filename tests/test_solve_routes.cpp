@@ -12,6 +12,8 @@
 #include <utility>
 #include <vector>
 
+using csc_access = apxchol::detail::sparse_csc_access;
+
 namespace {
 
 #if defined(APXCHOL_USE_METAL)
@@ -43,15 +45,13 @@ void expect_solution(const Eigen::SparseMatrix<double>& matrix,
 }
 
 std::vector<apxchol::solve_options> host_only_options() {
-    std::vector<apxchol::solve_options> options(6);
-    options[0].factor_opts.is_select = "priority_greedy";
-    options[1].factor_opts.exact_clique_max_degree = 3;
+    std::vector<apxchol::solve_options> options(4);
+    options[0].factor_opts.partitioner = apxchol::partitioner_kind::priority_greedy;
+    options[1].factor_opts.experimental.exact_clique_max_degree = 3;
     options[2].factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
-    options[2].factor_opts.exact_core_max_h = 3;
+    options[2].factor_opts.experimental.exact_core_max_h = 3;
     options[3].factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
-    options[3].factor_opts.double_cycle_min_h = 4;
-    options[4].factor_opts.residual_peel = apxchol::residual_peel_strategy::min_degree;
-    options[5].factor_opts.residual_peel = apxchol::residual_peel_strategy::bk_serial;
+    options[3].factor_opts.experimental.double_cycle_min_h = 4;
     return options;
 }
 } // namespace
@@ -78,7 +78,6 @@ TEST(SolveRoutes, ExplicitCpuDoesNotPrewarm) {
     options.tol = 1e-10;
     const auto result = apxchol::solve(matrix, rhs, options);
     EXPECT_EQ(result.backend, apxchol::solve_backend::cpu);
-    EXPECT_EQ(result.solve_vram_mb, -1.0);
     expect_solution(matrix, rhs, result);
     // A reusable solver on the CPU route stays on CPU as well, including
     // preconditioner applications for an external Krylov solver.
@@ -88,8 +87,8 @@ TEST(SolveRoutes, ExplicitCpuDoesNotPrewarm) {
     expect_solution(matrix, rhs, reused);
     EXPECT_TRUE(reusable.apply(rhs).allFinite());
     const auto factor = apxchol::factorize(matrix);
-    EXPECT_EQ(factor.L.vals_.size(), factor.L.nonZeros());
-    EXPECT_EQ(factor.L.inner_.size(), factor.L.nonZeros());
+    EXPECT_EQ(csc_access::vals(factor.L).size(), factor.L.nonZeros());
+    EXPECT_EQ(csc_access::inner(factor.L).size(), factor.L.nonZeros());
     EXPECT_EQ(factor.perm.size(), static_cast<std::size_t>(matrix.rows()));
 #if defined(APXCHOL_USE_CUDA)
     EXPECT_FALSE(apxchol::detail::factorization_access::device_factor(factor));
@@ -103,7 +102,7 @@ TEST(SolveRoutes, AutomaticSelectionRespectsConfigurationAndAvailability) {
     const auto matrix = operator_matrix();
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(matrix.rows());
     const auto cases = host_only_options();
-    ASSERT_EQ(cases.size(), 6u);
+    ASSERT_EQ(cases.size(), 4u);
     for (std::size_t i = 0; i < cases.size(); ++i) {
         SCOPED_TRACE(i);
         EXPECT_EQ(apxchol::detail::select_solve_backend(cases[i]),
@@ -175,7 +174,7 @@ TEST(SolveRoutes, ExplicitGpuRejectsUnsupportedConfigurationsBeforeSetup) {
     const auto matrix = operator_matrix();
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(matrix.rows());
     auto cases = host_only_options();
-    ASSERT_EQ(cases.size(), 6u);
+    ASSERT_EQ(cases.size(), 4u);
     for (auto& options : cases) {
         options.backend = apxchol::solve_backend::gpu;
         EXPECT_THROW(apxchol::detail::select_solve_backend(options), std::invalid_argument);
@@ -202,7 +201,7 @@ TEST(SolveRoutes, CpuFactorReuseAndExportRemainAvailable) {
     options.backend = apxchol::solve_backend::cpu;
     options.keep_factor = true;
     apxchol::solver solver(matrix, options);
-    ASSERT_FALSE(solver.factor().L.vals_.empty());
+    ASSERT_FALSE(csc_access::vals(solver.factor().L).empty());
     auto factor = solver.factor();
     apxchol::solver adopted(matrix, std::move(factor), options);
     for (double offset : {0.5, 2.0}) {
@@ -256,18 +255,18 @@ TEST(SolveRoutes, RequiredGpuPreconditionerValidatesHostFactorsBeforeCuda) {
         auto malformed = valid;
         switch (defect) {
             case 0: malformed.perm[1] = malformed.perm[0]; break;
-            case 1: malformed.L.outer_.back()++; break;
-            case 2: malformed.L.vals_.front() = 0; break;
-            case 3: malformed.L.inner_.front() = malformed.L.rows(); break;
-            case 4: malformed.L.vals_.front() = std::numeric_limits<float>::quiet_NaN(); break;
-            case 5: malformed.L.release_values(); break;
+            case 1: csc_access::outer(malformed.L).back()++; break;
+            case 2: csc_access::vals(malformed.L).front() = 0; break;
+            case 3: csc_access::inner(malformed.L).front() = malformed.L.rows(); break;
+            case 4: csc_access::vals(malformed.L).front() = std::numeric_limits<float>::quiet_NaN(); break;
+            case 5: csc_access::release_values(malformed.L); break;
         }
         EXPECT_THROW(apxchol::solver(matrix, malformed, options), std::invalid_argument) << defect;
     }
     EXPECT_THROW(apxchol::solver(operator_matrix(32), valid, options), std::invalid_argument);
     apxchol::factorization grounded;
-    grounded.L.n_ = 1;
-    grounded.L.outer_ = {0, 0};
+    csc_access::n(grounded.L) = 1;
+    csc_access::outer(grounded.L) = {0, 0};
     grounded.perm = {0};
     grounded.sddm = false;
     try {

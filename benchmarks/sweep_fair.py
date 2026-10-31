@@ -268,6 +268,7 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
             cuda_init_s = rc.parse_cuda_init(e.stderr)
             if cuda_init_s is not None:
                 diag["cuda_init_s"] = cuda_init_s
+            diag.update(rc.parse_gpu_memory(e.stderr))
             return "timeout", diag
         BUILD.update(rc.parse_build_meta(p.stderr))   # what built the binary that just ran
         st,m = classify(rc.parse_csv(p.stdout))
@@ -295,6 +296,7 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
             cuda_init_s = rc.parse_cuda_init(p.stderr)
             if cuda_init_s is not None:
                 m["cuda_init_s"] = cuda_init_s
+            m.update(rc.parse_gpu_memory(p.stderr))
             for ln in p.stderr.splitlines():
                 if ln.startswith("APXRSS "):
                     try: m["max_rss_mb"]=round(int(ln.split()[1])/1024.0,1)

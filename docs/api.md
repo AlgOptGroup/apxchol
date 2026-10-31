@@ -4,7 +4,8 @@ Starting with v1.0, apxchol preserves documented source-level use of these
 interfaces throughout the 1.x series:
 
 - C++ solve and factorize operations, their options and their results,
-  including `solver::save` and `solver::load` for [saved solvers](serialization.md).
+  including the read-only `sparse_csc` factor view and `solver::save` and
+  `solver::load` for [saved solvers](serialization.md).
 - [Python](../python/README.md) names exported through `__all__` and their
   documented methods and arguments.
 - Documented [MATLAB/Octave wrappers](../octave/README.md) and CLI options.
@@ -16,6 +17,14 @@ interfaces throughout the 1.x series:
 The [partitioner and eliminator extension contracts](extending.md), and the
 graph/context operations they require, are **experimental**: they may change in
 minor 1.x releases, and each change is noted in the [changelog](../CHANGELOG.md).
+
+The research controls in `factor_options::experimental` (the
+`experimental_options` struct) are outside this promise: they may change or
+disappear in any release. The stable factorization options are `seed`,
+`sampler`, `factor_storage`, `drop_tolerance`, `regularization`,
+`lump_max_mass`, `partitioner`, `partition.degree_quantile` and
+`partition.degree_multiplier`, plus `verbose`; the
+[usage guide](usage.md#option-names) lists their names in each interface.
 
 `generate_test_rhs` is a test and diagnostic helper outside this promise.
 

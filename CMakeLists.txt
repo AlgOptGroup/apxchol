@@ -65,7 +65,7 @@ apxchol_add_core()
 if (APXCHOL_BUILD_TESTS AND APXCHOL_DEVICE STREQUAL "CUDA")
     # Test-only declarations must agree across the whole core and its consumers.
     add_library(apxchol_test_core STATIC)
-    apxchol_configure_core(apxchol_test_core)
+    _apxchol_configure_core(apxchol_test_core)
     target_compile_definitions(apxchol_test_core PUBLIC APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
 endif()
 
@@ -85,8 +85,8 @@ if (APXCHOL_BUILD_CLI OR APXCHOL_BUILD_TESTS)
     target_include_directories(apxchol_mtx_input PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
     target_compile_features(apxchol_mtx_input PUBLIC cxx_std_23)
-    if (APXCHOL_ARCH_FLAG)
-        target_compile_options(apxchol_mtx_input PUBLIC "${APXCHOL_ARCH_FLAG}")
+    if (_APXCHOL_ARCH_FLAG)
+        target_compile_options(apxchol_mtx_input PUBLIC "${_APXCHOL_ARCH_FLAG}")
     endif()
 endif()
 

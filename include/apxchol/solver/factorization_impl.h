@@ -29,7 +29,6 @@
 #include <limits>
 #include <memory>
 #include <numeric>
-#include <random>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -352,7 +351,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
     // count and regressed sparse IPM / grid rounds. Here cheap rounds stay
     // serial and increasingly dense rounds acquire workers continuously.
     const int team_threads = static_cast<int>(elimination_round_team_size(
-        n_verts, work_hint, opts.omp_threshold, ws.threads.size()));
+        n_verts, work_hint, opts.experimental.omp_threshold, ws.threads.size()));
     const bool parallel_round = team_threads > 1;
     if (parallel_round) {
         // Large independent sets amortize dynamic scheduling with coarse
@@ -362,7 +361,7 @@ void eliminate_partition_singleton(const Eliminator& elim,
         // one thread). Give those rounds one pivot per claim so the work gate
         // actually exposes their available inter-vertex parallelism.
         const int compute_chunk =
-            elimination_compute_chunk(n_verts, opts.omp_threshold);
+            elimination_compute_chunk(n_verts, opts.experimental.omp_threshold);
         // The fused paths use exactly the work-sized team selected above.
         {
             // Compute, reserve, publish edges and deactivate pivots in one
@@ -660,69 +659,9 @@ void eliminate_remaining(const Eliminator& elim,
         G.deactivate(v);
     };
 
-    if (opts.residual_peel == residual_peel_strategy::min_degree) {
-        // Historical lazy degree-heap heuristic, retained under min_degree.
-        // Revalidate the popped key, but leave other keys unchanged. Degree
-        // decreases can therefore hide a better pivot under a stale larger
-        // key: this is not exact current-minimum-degree selection. Changing
-        // the update policy changes pivot order, factor quality and cost.
-        using entry = std::pair<node_index, node_index>;  // (degree, vertex)
-        std::vector<entry> heap;
-        heap.reserve(active.size());
-        for (auto v : active) {
-            if (!G.is_active(v)) continue;
-            heap.emplace_back(G.prune_and_degree(v), v);
-        }
-        std::make_heap(heap.begin(), heap.end(), std::greater<entry>{});
-
-        while (!heap.empty()) {
-            std::pop_heap(heap.begin(), heap.end(), std::greater<entry>{});
-            auto [stored_d, v] = heap.back();
-            heap.pop_back();
-            if (!G.is_active(v)) continue;
-            node_index cur_d = G.prune_and_degree(v);
-            if (cur_d != stored_d) {
-                heap.emplace_back(cur_d, v);
-                std::push_heap(heap.begin(), heap.end(), std::greater<entry>{});
-                continue;
-            }
-            peel_one(v);
-        }
-        active.clear();
-    } else if (opts.residual_peel == residual_peel_strategy::bk_serial) {
-        // BK-style sampling: pick ~√|active| candidates, peel min-degree one.
-        // Serial path — a local generator (seeded from the run seed) suffices.
-        std::mt19937 peel_rng(opts.seed ^ 0x1CE4E5B9U);
-        std::uniform_int_distribution<size_t> pick(0, 0);
-        while (!active.empty()) {
-            // Compact dead entries lazily.
-            while (!active.empty() && !G.is_active(active.back()))
-                active.pop_back();
-            if (active.empty()) break;
-
-            size_t k = std::max<size_t>(1, static_cast<size_t>(std::sqrt(double(active.size()))));
-            k = std::min(k, active.size());
-            size_t best_idx = 0;
-            node_index best_deg = std::numeric_limits<node_index>::max();
-            pick.param(std::uniform_int_distribution<size_t>::param_type(0, active.size() - 1));
-            for (size_t s = 0; s < k; ++s) {
-                size_t i = pick(peel_rng);
-                if (!G.is_active(active[i])) continue;
-                node_index d = G.prune_and_degree(active[i]);
-                if (d < best_deg) { best_deg = d; best_idx = i; }
-            }
-            node_index v = active[best_idx];
-            active[best_idx] = active.back();
-            active.pop_back();
-            if (!G.is_active(v)) continue;
-            peel_one(v);
-        }
-    } else {
-        // natural order — fastest, no extra scan.
-        for (auto v : active)
-            peel_one(v);
-        active.clear();
-    }
+    // Natural order: no extra scan.
+    for (auto v : active)
+        peel_one(v);
     active.clear();
 }
 
@@ -758,17 +697,17 @@ factorization factorize_impl(const Eliminator& elim,
 
     const bool gpu_owned_setup_route = route == detail::setup_route::gpu;
 
-    // Resolve the by-route sentinels for this factorization.
+    // Resolve unset options to this factorization route's defaults.
     const factor_options opts = [&] {
         factor_options o = opts_in;
-        if (o.partition.degree_quantile < 0.0)
+        if (!o.partition.degree_quantile)
             o.partition.degree_quantile = gpu_owned_setup_route
-                                              ? degree_quantile_device_default
-                                              : degree_quantile_host_default;
+                                              ? detail::degree_quantile_device_default
+                                              : detail::degree_quantile_host_default;
         // The device route does not implement the host trace-cycle core rules.
-        if (o.exact_core_max_h == exact_core_by_route)
-            o.exact_core_max_h = gpu_owned_setup_route
-                                     ? 0u : exact_core_host_default;
+        if (!o.experimental.exact_core_max_h)
+            o.experimental.exact_core_max_h = gpu_owned_setup_route
+                                                  ? 0u : detail::exact_core_host_default;
         return o;
     }();
 
@@ -809,9 +748,8 @@ factorization factorize_impl(const Eliminator& elim,
     constexpr bool sample_bounded = partitioner_sample_bounded_v<Partitioner>;
     constexpr size_t residual_handoff_default =
         partitioner_residual_handoff_v<Partitioner>;
-    size_t residual_thresh = opts.parallel_residual_threshold;
-    if (residual_thresh == std::numeric_limits<size_t>::max())
-        residual_thresh = residual_handoff_default;
+    const size_t residual_thresh =
+        opts.experimental.parallel_residual_threshold.value_or(residual_handoff_default);
 
     // Active vertex list (natural index order) — filtered in-place each round.
     std::vector<node_index> active(n);
@@ -838,18 +776,17 @@ factorization factorize_impl(const Eliminator& elim,
             bool sparsification_attempted = false;
             peak_graph_bytes = std::max(peak_graph_bytes, work.memory_bytes());
             while (!active.empty()) {
-                const auto prep = gpu_frontend->prepare(active, opts.partition
-                    , opts.seed, ws.round_index
-                );
+                const auto prep = gpu_frontend->prepare(active, opts.partition,
+                    opts.seed, ws.round_index, opts.experimental.degree_tiebreak);
                 auto part = gpu_frontend->select_block_greedy();
                 if (part.data.empty())
                     throw std::runtime_error("GPU-owned factorization selection made no progress");
                 const double min_yield = detail::adaptive_is_yield_fraction(
-                    opts.min_is_fraction, active.size(), prep.average_degree, residual_thresh);
+                    opts.experimental.min_is_fraction, active.size(), prep.average_degree, residual_thresh);
                 if (controls.residual_sparsify && !sparsification_attempted &&
                     detail::selection_should_handoff(part.data.size(),
                         prep.candidate_count, active.size(), min_yield, residual_thresh,
-                        opts.omp_threshold)) {
+                        opts.experimental.omp_threshold)) {
                     // This is a preview, not an eliminated/countable round.
                     // Capture its gate inputs before changing the residual.
                     sparsification_attempted = true;
@@ -982,7 +919,8 @@ factorization factorize_impl(const Eliminator& elim,
         partition_context pctx{
             .options = opts.partition,
             .seed = opts.seed,
-            .omp_threshold = opts.omp_threshold,
+            .omp_threshold = opts.experimental.omp_threshold,
+            .degree_tiebreak = opts.experimental.degree_tiebreak,
             .degrees = {},
         };
         if (cp) { cp->descend("find_partition"); cp->tick(); }
@@ -1004,7 +942,7 @@ factorization factorize_impl(const Eliminator& elim,
                 pre_degrees.resize(act.size());
                 double total_degree = 0.0;
 #pragma omp parallel for reduction(+:total_degree) schedule(static) \
-    if(act.size() > opts.omp_threshold)
+    if(act.size() > opts.experimental.omp_threshold)
                 for (std::size_t i = 0; i < act.size(); ++i) {
                     pre_degrees[i] = live_degrees[act[i]];
                     total_degree += pre_degrees[i];
@@ -1042,7 +980,7 @@ factorization factorize_impl(const Eliminator& elim,
                 }
                 std::size_t hidden = 0;
                 avg_deg = prune_and_degrees(
-                    g, act, pre_degrees, opts.omp_threshold, skip_above,
+                    g, act, pre_degrees, opts.experimental.omp_threshold, skip_above,
                     audit_above,
                     static_cast<node_index>(std::min(
                         previous_degree_threshold,
@@ -1066,10 +1004,9 @@ factorization factorize_impl(const Eliminator& elim,
                     incremental_dead_incidence = 0;
                 }
             }
-            const double q = degree_quantile_or_host_default(
-                opts.partition.degree_quantile);
+            const double q = *opts.partition.degree_quantile;
             const double thr = q > 0.0 && q < 1.0
-                                   && act.size() > opts.omp_threshold
+                                   && act.size() > opts.experimental.omp_threshold
                 ? static_cast<double>(parallel_degree_quantile(
                       pre_degrees, act.size(), q, pre_histograms))
                 : candidate_degree_cap(pre_degrees, act.size(), avg_deg,
@@ -1078,7 +1015,7 @@ factorization factorize_impl(const Eliminator& elim,
             if (live_degrees.size() < static_cast<size_t>(g.n()))
                 live_degrees.resize(g.n());
             size_t eligible_count;
-            if (act.size() > opts.omp_threshold) {
+            if (act.size() > opts.experimental.omp_threshold) {
                 eligible_count = parallel_ordered_degree_filter(
                     act, pre_degrees, thr, live_degrees, pre_eligible,
                     pre_filter_offsets);
@@ -1127,7 +1064,7 @@ factorization factorize_impl(const Eliminator& elim,
     // the round index.
     auto finish_round = [&] {
         peak_graph_bytes = std::max(peak_graph_bytes, work.memory_bytes());
-        if (active.size() > opts.omp_threshold) {
+        if (active.size() > opts.experimental.omp_threshold) {
             parallel_stable_active_filter(
                 active, active_scratch, pre_filter_offsets,
                 [&](node_index v) { return work.is_active(v); });
@@ -1159,7 +1096,7 @@ factorization factorize_impl(const Eliminator& elim,
         // independent level -> incorrect triangular solve.
         if constexpr (!sample_bounded) {
             const double min_yield = detail::adaptive_is_yield_fraction(
-                opts.min_is_fraction, active.size(), last_avg_degree,
+                opts.experimental.min_is_fraction, active.size(), last_avg_degree,
                 residual_thresh);
             // A low relative yield can still be a large, profitable round.
             // Keep any non-empty selection that is already large enough for
@@ -1168,7 +1105,7 @@ factorization factorize_impl(const Eliminator& elim,
             if (detail::selection_should_handoff(
                     part.data.size(),
                     last_candidate_count, active.size(), min_yield,
-                    residual_thresh, opts.omp_threshold)) {
+                    residual_thresh, opts.experimental.omp_threshold)) {
                 handoff_vertices = part.data.size();
                 if (opts.verbose)
                     std::fprintf(stderr,
@@ -1180,7 +1117,7 @@ factorization factorize_impl(const Eliminator& elim,
                             ? static_cast<double>(part.data.size()) /
                                   static_cast<double>(last_candidate_count)
                             : 0.0,
-                        opts.min_is_fraction, min_yield, last_avg_degree,
+                        opts.experimental.min_is_fraction, min_yield, last_avg_degree,
                         residual_thresh);
                 break;
             }
@@ -1219,7 +1156,7 @@ factorization factorize_impl(const Eliminator& elim,
             ? 0.0L : prune_work /
                 static_cast<long double>(elimination_work_hint);
         const size_t incremental_workers = detail::elimination_round_team_size(
-            part.data.size(), elimination_work_hint, opts.omp_threshold,
+            part.data.size(), elimination_work_hint, opts.experimental.omp_threshold,
             static_cast<size_t>(num_threads_factorize));
         // Every ordinary prepass is an exact decision sample. Across the
         // nine-graph screen the measured
@@ -1351,7 +1288,7 @@ factorization factorize_impl(const Eliminator& elim,
     // the factor has less fill. Most residual rounds are below `omp_threshold`
     // and run the peel's per-vertex code plus one O(|active|) BK scan.
     //
-    // `parallel_residual_threshold` = SIZE_MAX means "defer to the
+    // An unset `parallel_residual_threshold` means "defer to the
     // partitioner", NOT "off": block_greedy / priority_greedy declare
     // `residual_handoff_threshold` = 500, so this loop runs by default and the
     // peel sees at most 500 columns. Only a partitioner that declares no
@@ -1471,10 +1408,10 @@ factorization factorize_impl(const Eliminator& elim,
                 "host_metadata_bytes=%zu raw_factor_nnz=%zu "
                 "host_factor_entry_download_bytes=%zu host_factor_entry_omitted_bytes=%zu\n",
                 keep_factor ? "retained" : "omitted",
-                result.L.inner_.capacity() * sizeof(node_index) +
-                    result.L.vals_.capacity() * sizeof(factor_value_t),
+                detail::sparse_csc_access::inner(result.L).capacity() * sizeof(node_index) +
+                    detail::sparse_csc_access::vals(result.L).capacity() * sizeof(factor_value_t),
                 result.perm.size() * sizeof(node_index) +
-                    result.L.outer_.size() * sizeof(edge_index),
+                    result.L.col_ptrs().size() * sizeof(edge_index),
                 static_cast<std::size_t>(result.L.nonZeros()),
                 keep_factor ? omitted_payload_bytes : 0,
                 keep_factor ? 0 : omitted_payload_bytes);
@@ -1494,19 +1431,17 @@ factorization factorize_impl(const Eliminator& elim,
 
 // Build the tree eliminator from options. Single source of truth so the
 // fixed-partitioner and runtime-dispatch paths stay in sync -- and therefore
-// the place the by-route exact-core sentinel has to be resolved, since the
+// the place an unset exact-core cap has to be resolved, since the
 // eliminator is built here, before factorize_impl sees the options, and the
 // GPU round shadow inspects the ELIMINATOR's copy of the knob.
 inline tree_elimination make_tree_elim(const factor_options& opts,
         detail::setup_route route = detail::setup_route::cpu) {
-    const std::size_t exact_core =
-        opts.exact_core_max_h == exact_core_by_route
-            ? (route == detail::setup_route::gpu ? 0u : exact_core_host_default)
-            : opts.exact_core_max_h;
+    const std::size_t exact_core = opts.experimental.exact_core_max_h.value_or(
+        route == detail::setup_route::gpu ? 0u : detail::exact_core_host_default);
     return tree_elimination{
-        .exact_clique_max_degree = opts.exact_clique_max_degree,
+        .exact_clique_max_degree = opts.experimental.exact_clique_max_degree,
         .exact_core_max_h = exact_core,
-        .double_cycle_min_h = opts.double_cycle_min_h,
+        .double_cycle_min_h = opts.experimental.double_cycle_min_h,
         .sampler = opts.sampler};
 }
 

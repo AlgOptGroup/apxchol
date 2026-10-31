@@ -63,9 +63,9 @@ struct csr_int {
 /// a factor exceeding int32 cannot use the dataflow kernels' index type.
 template <class Val>
 inline csr_int<Val> build_L11_csc_int(const sparse_csc& L, std::int64_t m) {
-    const edge_index* Lo = L.outerIndexPtr();
-    const node_index* Li = L.innerIndexPtr();
-    const auto*       Lv = L.valuePtr();   // factor_value_t*
+    const edge_index* Lo = L.col_ptrs().data();
+    const node_index* Li = L.row_indices().data();
+    const auto*       Lv = L.values().data();   // const factor_value_t*
     const std::int64_t n = static_cast<std::int64_t>(L.rows());
     csr_int<Val> out;
     if (m > static_cast<std::int64_t>(std::numeric_limits<int>::max()) ||

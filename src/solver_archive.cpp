@@ -16,6 +16,7 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <fcntl.h>
 #include <unistd.h>
 
 namespace apxchol {
@@ -30,25 +31,33 @@ void check_path(const std::filesystem::path& path) {
         invalid("path contains a null character");
 }
 
+// The archive is written to <destination>.tmp and renamed into place, so readers
+// see either the old file or the complete new one. O_EXCL makes a second save
+// to the same path fail instead of interleaving writes, and mode 0666 applies
+// the caller's umask.
 struct temporary_file {
     std::string name;
     int fd = -1;
+    bool published = false;
     explicit temporary_file(const std::filesystem::path& destination)
-        : name((destination.parent_path() / ".apxchol-XXXXXX").string()) {
-        if (std::filesystem::exists(std::filesystem::symlink_status(destination)))
-            throw std::runtime_error("solver archive: destination already exists");
-        fd = mkstemp(name.data());
-        if (fd < 0) throw std::system_error(errno, std::generic_category(), "create archive temporary");
+        : name(destination.string() + ".tmp") {
+        fd = ::open(name.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+        if (fd >= 0) return;
+        if (errno == EEXIST)
+            throw std::runtime_error("solver archive: " + name + " already exists; another save "
+                                     "to this path is running, or an interrupted save left it "
+                                     "behind and it must be removed");
+        throw std::system_error(errno, std::generic_category(), "create " + name);
     }
     std::FILE* open() {
         auto* file = fdopen(fd, "wb+");
-        if (!file) throw std::system_error(errno, std::generic_category(), "open archive temporary");
+        if (!file) throw std::system_error(errno, std::generic_category(), "open " + name);
         fd = -1;
         return file;
     }
     ~temporary_file() {
         if (fd >= 0) (void)close(fd);
-        (void)unlink(name.c_str());
+        if (!published) (void)unlink(name.c_str());
     }
     temporary_file(const temporary_file&) = delete;
     temporary_file& operator=(const temporary_file&) = delete;
@@ -172,13 +181,24 @@ public:
         set<std::uint32_t>(prefix_.data() + 20, checksum(0, prefix_.data(), prefix_.size()));
         seek(file_.get(), 0);
         write_exact(file_.get(), prefix_.data(), prefix_.size());
+        if (std::fflush(file_.get()) != 0 || ::fsync(fileno(file_.get())) != 0)
+            throw std::system_error(errno, std::generic_category(), "flush solver archive");
         if (std::fclose(file_.release()) != 0)
             throw std::system_error(errno, std::generic_category(), "finish solver archive");
-        std::error_code error;
-        std::filesystem::create_hard_link(temporary_.name, destination_, error);
-        if (error == std::errc::file_exists)
-            throw std::runtime_error("solver archive: destination already exists");
-        if (error) throw std::system_error(error, "publish solver archive");
+        if (std::rename(temporary_.name.c_str(), destination_.c_str()) != 0)
+            throw std::system_error(errno, std::generic_category(), "publish solver archive");
+        temporary_.published = true;
+        // Sync the directory so the rename itself survives a power loss.
+        const auto parent = destination_.parent_path();
+        const int directory = ::open(parent.empty() ? "." : parent.c_str(),
+                                     O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (directory < 0)
+            throw std::system_error(errno, std::generic_category(), "open archive directory");
+        const int synced = ::fsync(directory);
+        const int error = errno;
+        (void)::close(directory);
+        if (synced != 0)
+            throw std::system_error(error, std::generic_category(), "sync archive directory");
     }
 };
 
@@ -332,7 +352,7 @@ void detail::save_solver_data(const std::filesystem::path& path, const Eigen::Sp
     const auto n = static_cast<std::size_t>(op->rows());
     const auto annz = static_cast<std::size_t>(op->nonZeros());
     if (F.lumped_offdiag < 0) invalid("negative lumped entry count");
-    const std::array<std::uint64_t, 7> metadata{1, n, F.sddm, annz, F.L.vals_.size(),
+    const std::array<std::uint64_t, 7> metadata{1, n, F.sddm, annz, F.L.values().size(),
         static_cast<std::uint64_t>(F.lumped_offdiag), static_cast<std::uint64_t>(input_entries)};
     std::vector<std::uint64_t> rounds;
     rounds.reserve(F.rounds.size());
@@ -342,9 +362,9 @@ void detail::save_solver_data(const std::filesystem::path& path, const Eigen::Sp
     archive.add(array_id::operator_offsets, std::span<const int>(op->outerIndexPtr(), n + 1));
     archive.add(array_id::operator_indices, std::span<const int>(op->innerIndexPtr(), annz));
     archive.add(array_id::operator_values, std::span<const double>(op->valuePtr(), annz));
-    archive.add(array_id::factor_offsets, std::span<const edge_index>(F.L.outer_));
-    archive.add(array_id::factor_indices, std::span<const node_index>(F.L.inner_));
-    archive.add(array_id::factor_values, std::span<const factor_value_t>(F.L.vals_));
+    archive.add(array_id::factor_offsets, F.L.col_ptrs());
+    archive.add(array_id::factor_indices, F.L.row_indices());
+    archive.add(array_id::factor_values, F.L.values());
     archive.add(array_id::permutation, std::span<const node_index>(F.perm));
     archive.add(array_id::round_sizes, std::span<const std::uint64_t>(rounds));
     archive.finish();
@@ -392,12 +412,13 @@ solver solver::load(const std::filesystem::path& path, const solve_options& opti
     archive.read(av, std::span<double>(A.valuePtr(), annz));
     check_operator_structure(A);
     factorization F;
-    F.L.n_ = static_cast<node_index>(n);
+    using access = detail::sparse_csc_access;
+    access::n(F.L) = static_cast<node_index>(n);
     F.sddm = sddm;
     F.lumped_offdiag = static_cast<Eigen::Index>(lumped);
-    F.L.outer_ = archive.read_vector<edge_index>(lo);
-    F.L.inner_ = archive.read_vector<node_index>(li);
-    F.L.vals_ = archive.read_vector<float>(lv);
+    access::outer(F.L) = archive.read_vector<edge_index>(lo);
+    access::inner(F.L) = archive.read_vector<node_index>(li);
+    access::vals(F.L) = archive.read_vector<float>(lv);
     F.perm = archive.read_vector<node_index>(perm);
     const auto sizes = archive.read_vector<std::uint64_t>(rounds);
     for (auto count : sizes) {
