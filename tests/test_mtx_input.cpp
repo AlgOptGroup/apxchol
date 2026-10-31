@@ -277,7 +277,7 @@ TEST(AdjacencyInputRegression, RawAdjacencyIsRefusedByTheOperatorContract) {
                       +[](const Sparse& M) {
                           (void)apxchol::solve(
                               M, apxchol::test::random_rhs(M.rows()),
-                              {.tol = 1e-8, .max_iter = 200});
+                              1e-8, 200);
                       }}) {
         try {
             call(A);
@@ -305,7 +305,7 @@ TEST(AdjacencyInputRegression, ConvertedAdjacencyHasPlausibleFillAndConverges) {
         << "factor shows no fill at all -- the clique sampler bailed out again";
 
     const Eigen::VectorXd b = apxchol::test::random_rhs(L.rows());
-    const auto res = apxchol::solve(L, b, {.tol = 1e-8, .max_iter = 200});
+    const auto res = apxchol::solve(L, b, 1e-8, 200);
     EXPECT_GT(res.iterations, 0);
     EXPECT_LT(res.residual, 1e-8);
 }
@@ -318,7 +318,7 @@ TEST(AdjacencyInputRegression, ConversionRoutesAnAdjacencyMatrixToConvergence) {
     M = adjacency_laplacian(M);
 
     const Eigen::VectorXd b = apxchol::test::random_rhs(M.rows());
-    const auto res = apxchol::solve(M, b, {.tol = 1e-8, .max_iter = 200});
+    const auto res = apxchol::solve(M, b, 1e-8, 200);
     EXPECT_GT(res.iterations, 0);
     EXPECT_LT(res.residual, 1e-8);
 }
@@ -334,7 +334,7 @@ TEST(AdjacencyInputRegression, SddmInputIsStillSolvedAsAnOperator) {
     ASSERT_FALSE(is_graph_adjacency(L));
 
     const Eigen::VectorXd b = apxchol::test::random_rhs(L.rows());
-    const auto res = apxchol::solve(L, b, {.tol = 1e-8, .max_iter = 200});
+    const auto res = apxchol::solve(L, b, 1e-8, 200);
     EXPECT_GT(res.iterations, 0);
     EXPECT_LT(res.residual, 1e-8);
 }

@@ -22,12 +22,15 @@ Pass exactly one of:
 - `--random-rhs`: a random right-hand side for experiments, compatible with
   each connected component of a Laplacian.
 
+`--x0 FILE` reads an initial guess shaped like the right-hand side (`n` by
+`k`); without it the solve starts from zero.
+
 `-o FILE` writes the solution as a dense `n` by `k` Matrix Market array.
 The CLI prints the selected backend, iterations and residual for each column;
 `-v` adds a timing breakdown and `-q` prints errors only. The exit status is 0 when
 every column converges, 1 when a column misses the tolerance (the solution is
-still written), and 2 when the input or an option value is rejected or the
-solution cannot be written. Options the parser rejects, such as an unknown
+still written), and 2 on an error: a rejected input or option value, an
+execution failure, or a solution that cannot be written. Options the parser rejects, such as an unknown
 value or a missing input file, exit with a nonzero CLI11 error code.
 
 Common options:
@@ -35,7 +38,7 @@ Common options:
 | Option | Default | Meaning |
 |---|---|---|
 | `--tol` | `1e-8` | Relative residual tolerance |
-| `--maxiter` | `200` | PCG iteration budget |
+| `--max-iter` | `200` | PCG iteration budget |
 | `--backend` | `auto` | `auto`, `cpu` or `gpu`; see [choosing CPU or GPU](usage.md#choosing-cpu-or-gpu) |
 | `--threads` | `0` | CPU thread ceiling; `0` uses the OpenMP default |
 | `--seed` | `42` | Seed for factorization and `--random-rhs` |

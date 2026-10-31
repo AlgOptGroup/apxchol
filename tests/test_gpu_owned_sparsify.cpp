@@ -408,7 +408,7 @@ TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneDeviceAttempt) {
     Eigen::VectorXd exact(n);
     for (int i = 0; i < n; ++i) exact[i] = .125 * (i % 7 - 3);
     const Eigen::VectorXd rhs = original * exact;
-    apxchol::solve_options options;options.tol = 1e-8;options.max_iter = 1000;
+    apxchol::solve_options options;
     options.backend = apxchol::solve_backend::gpu;
     options.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
     options.factor_opts.drop_tolerance = 0;
@@ -426,7 +426,7 @@ TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneDeviceAttempt) {
     apxchol::solve_result solved;
     testing::internal::CaptureStderr();
     try {
-        solved = apxchol::solve(original, rhs, options);
+        solved = apxchol::solve(original, rhs, 1e-8, 1000, nullptr, options);
         EXPECT_EQ(solved.backend, apxchol::solve_backend::gpu);
     } catch (...) {
         const auto failure = testing::internal::GetCapturedStderr();

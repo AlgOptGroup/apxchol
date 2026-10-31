@@ -30,7 +30,7 @@ The original operator is reconstructed from the solver’s owned data when savin
 The file stores the factor after dropping and storage rounding, with its storage precision. Loading reinstalls it exactly: no dropping, rescaling or rounding is applied again. These load options apply:
 
 - `backend`: automatic adoption selects CPU; `apxchol::solve_backend::gpu` uploads to the compiled GPU backend.
-- `num_threads`, `cpu_schedule` and the solve defaults `tol` and `max_iter`.
+- `num_threads` and `cpu_schedule`.
 - `lump_max_mass`: an operator admitted with a larger value still needs it when loading.
 
 `factor_storage` and `drop_tolerance` have no effect: the file fixes both. Construction options such as the seed, partitioner, regularization and lumping are already represented in the saved factor.

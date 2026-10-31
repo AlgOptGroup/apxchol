@@ -32,7 +32,7 @@ def test_numpy_archive_round_trip(tmp_path):
 @pytest.mark.parametrize("dtype", ["float32", "float16"])
 def test_archive_reinstalls_the_installed_factor_exactly(tmp_path, dtype):
     try:
-        original = owner(seed=3, num_threads=1, factor_storage_dtype=dtype)
+        original = owner(seed=3, num_threads=1, factor_storage=dtype)
     except RuntimeError as error:
         if dtype != "float16" or "FP16 factor storage requires" not in str(error):
             raise
@@ -40,9 +40,9 @@ def test_archive_reinstalls_the_installed_factor_exactly(tmp_path, dtype):
     path = tmp_path / "exact.apxchol"
     original.save(path)
     # Storage and dropping come from the file, not from load options.
-    restored = apxchol.Solver.load(path, num_threads=1, factor_storage_dtype="float32",
+    restored = apxchol.Solver.load(path, num_threads=1, factor_storage="float32",
                                    drop_tolerance=0.5)
-    assert restored.factor_storage_dtype == original.factor_storage_dtype
+    assert restored.factor_storage == original.factor_storage
     assert restored.factor_nnz == original.factor_nnz
     before, after = original.chol(), restored.chol()
     for name in ("indptr", "indices", "data"):
@@ -110,7 +110,7 @@ def test_archive_gpu_cpu_handoff(tmp_path, storage):
     for path in (cpu_path, gpu_path):
         for backend in ("cpu", "gpu"):
             restored = apxchol.Solver.load(path, backend=backend,
-                                          factor_storage_dtype=np.float32)
+                                          factor_storage=np.float32)
             assert restored.backend == backend
             for width in (1, 4, 16):
                 check_solve_and_apply(restored, width)

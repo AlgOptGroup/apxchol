@@ -2372,11 +2372,11 @@ TEST(GpuOwnedMetadataHost, RawOffsetCapacityMatchesOriginalConstruction) {
         headers[0].entry_count = maximum - 1; headers[1].entry_begin = maximum - 1;
         old_columns[0].entry_count = maximum - 1;
         EXPECT_THROW(apxchol::detail::validate_owned_factor_columns(
-            headers, maximum - 1, permutation, offsets), std::length_error);
+            headers, maximum - 1, permutation, offsets), std::overflow_error);
         EXPECT_THROW(apxchol::detail::build_csc(
-            expected, old_columns, 2, nullptr, false), std::length_error);
+            expected, old_columns, 2, nullptr, false), std::overflow_error);
         EXPECT_THROW(apxchol::detail::build_csc(
-            expected, old_columns, 2, nullptr, true), std::length_error);
+            expected, old_columns, 2, nullptr, true), std::overflow_error);
     } else {
         GTEST_SKIP() << "32-bit edge capacity boundary; no giant allocation for 64-bit offsets";
     }
@@ -3230,10 +3230,10 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
         Eigen::VectorXd exact(A.rows());
         for (int i = 0; i < exact.size(); ++i) exact[i] = std::sin(i + 0.25);
         Eigen::VectorXd b = A * exact;
-        apxchol::solve_options options; options.tol = 1e-8; options.max_iter = 1000;
+        apxchol::solve_options options;
         options.backend = apxchol::solve_backend::gpu;
         options.factor_opts = factor_options;
-        const auto solved = apxchol::solve(A, b, options);
+        const auto solved = apxchol::solve(A, b, 1e-8, 1000, nullptr, options);
         EXPECT_LE((A * solved.x - b).norm() / b.norm(), 1e-8);
     }
 #endif
@@ -3512,12 +3512,12 @@ TEST(GpuCycleSampler, OwnedSolveReturnsOriginalSystemSolution) {
         auto A=owned_solve_matrix(257,shift);
         Eigen::VectorXd exact(A.rows());for(int i=0;i<exact.size();++i)exact[i]=std::sin(i+.25);
         const Eigen::VectorXd b=A*exact;
-        apxchol::solve_options opts;opts.tol=1e-8;opts.max_iter=1000;
+        apxchol::solve_options opts;
         opts.backend=apxchol::solve_backend::gpu;
         opts.factor_opts.verbose = true;
         opts.factor_opts.sampler=sampler;opts.factor_opts.partition.degree_quantile=.8;
         testing::internal::CaptureStderr();
-        const auto result=apxchol::solve(A,b,opts);
+        const auto result=apxchol::solve(A, b, 1e-8, 1000, nullptr, opts);
         const auto trace=testing::internal::GetCapturedStderr();
         EXPECT_LE((A*result.x-b).norm()/b.norm(),1e-8);
         EXPECT_NE(trace.find("[gpu-owned-factorization] complete rounds="),std::string::npos);

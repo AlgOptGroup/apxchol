@@ -7,6 +7,7 @@
 #include <Eigen/Sparse>
 #include <algorithm>
 #include <cstdint>
+#include <exception>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -55,7 +56,7 @@ Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
 // Every key the binding understands, in the order reported by the error message.
 const char* const kValidKeys[] = {
     "backend", "num_threads", "seed", "partitioner", "sampler",
-    "factor_storage_dtype", "degree_quantile", "degree_multiplier", "drop_tolerance",
+    "factor_storage", "degree_quantile", "degree_multiplier", "drop_tolerance",
     "regularization", "lump_max_mass", "verbose",
 };
 
@@ -96,7 +97,7 @@ apxchol::solve_options parse_options(const py::dict& d) {
             if (!v.is_none()) so.factor_opts.partition.degree_quantile = v.cast<double>();
         }
         else if (key == "degree_multiplier")  so.factor_opts.partition.degree_multiplier = v.cast<double>();
-        else if (key == "factor_storage_dtype")
+        else if (key == "factor_storage")
             so.factor_opts.factor_storage = apxchol::detail::parse_factor_storage(v.cast<std::string>());
         else if (key == "drop_tolerance")     so.factor_opts.drop_tolerance = v.cast<double>();
         else if (key == "regularization")     so.factor_opts.regularization = v.cast<double>();
@@ -146,13 +147,13 @@ public:
         return slv_.backend() == apxchol::solve_backend::cpu ? "cpu" : "gpu";
     }
     bool sddm() const { return factor().sddm; }
-    const char* factor_storage_dtype() const {
+    const char* factor_storage() const {
         return slv_.factor_storage() == apxchol::factor_storage_type::fp16
             ? "float16" : "float32";
     }
     // Positive off-diagonal entries M-matrix lumping moved onto the diagonal
     // while building the preconditioner; 0 for a Laplacian/SDDM operator.
-    std::int64_t lumped() const {
+    std::int64_t lumped_offdiag() const {
         return static_cast<std::int64_t>(factor().lumped_offdiag);
     }
 
@@ -212,7 +213,7 @@ public:
                 py::gil_scoped_release release;
                 res = slv_.solve(rhs, x, tol, maxiter, x0.is_none() ? nullptr : &x0v);
             }
-            out["iters"] = static_cast<int>(res.iterations);
+            out["iterations"] = static_cast<int>(res.iterations);
             out["residual"] = res.residual;
             out["converged"] = res.converged;
             out["solve_seconds"] = res.solve_seconds;
@@ -228,16 +229,16 @@ public:
                 res = slv_.solve(matrix(b), x, tol, maxiter, &x0m);
             }
             const auto count = b.shape(1);
-            py::array_t<int> iters(count);
+            py::array_t<int> iterations(count);
             py::array_t<double> residual(count);
             py::array_t<bool> converged(count);
             for (py::ssize_t j = 0; j < count; ++j) {
                 const auto& column = res.columns[static_cast<std::size_t>(j)];
-                iters.mutable_data()[j] = static_cast<int>(column.iterations);
+                iterations.mutable_data()[j] = static_cast<int>(column.iterations);
                 residual.mutable_data()[j] = column.residual;
                 converged.mutable_data()[j] = column.converged;
             }
-            out["iters"] = iters;
+            out["iterations"] = iterations;
             out["residual"] = residual;
             out["converged"] = converged;
             out["solve_seconds"] = res.solve_seconds;
@@ -369,6 +370,21 @@ PYBIND11_MODULE(_apxchol, m) {
     m.attr("__version__") = APXCHOL_VERSION;
     m.attr("DEFAULT_TOL") = apxchol::default_tol;
     m.attr("DEFAULT_MAXITER") = apxchol::default_max_iter;
+    // The native contract has two error classes: std::invalid_argument for bad
+    // input, options or unsupported requests, and std::runtime_error (with its
+    // standard subclasses) for execution failures. Map them to ValueError and
+    // RuntimeError; pybind11's own errors keep their Python types.
+    py::register_local_exception_translator([](std::exception_ptr error) {
+        try {
+            std::rethrow_exception(error);
+        } catch (const py::builtin_exception&) {
+            throw;
+        } catch (const std::invalid_argument& e) {
+            PyErr_SetString(PyExc_ValueError, e.what());
+        } catch (const std::runtime_error& e) {
+            PyErr_SetString(PyExc_RuntimeError, e.what());
+        }
+    });
     // Returns None when the input is already a valid operator, else the CSC
     // arrays of its graph Laplacian; throws for anything else.
     m.def("as_operator",
@@ -400,8 +416,8 @@ PYBIND11_MODULE(_apxchol, m) {
         .def("setup_seconds", &Solver::setup_seconds)
         .def("backend", &Solver::backend)
         .def("sddm", &Solver::sddm)
-        .def("factor_storage_dtype", &Solver::factor_storage_dtype)
-        .def("lumped", &Solver::lumped)
+        .def("factor_storage", &Solver::factor_storage)
+        .def("lumped_offdiag", &Solver::lumped_offdiag)
         .def("factor_nnz", &Solver::factor_nnz)
         .def("factor_csc", &Solver::factor_csc)
         .def("perm", &Solver::perm);

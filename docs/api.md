@@ -30,6 +30,13 @@ disappear in any release. The stable factorization options are `seed`,
 `partition.degree_multiplier`, plus `verbose`; the
 [usage guide](usage.md#option-names) lists their names in each interface.
 
+Errors use two classes in every interface: `std::invalid_argument`
+(`ValueError` in Python, `apxchol:badInput` in MATLAB/Octave) for invalid
+input or options and unsupported requests, and `std::runtime_error` or a type
+derived from it (`RuntimeError`, `apxchol:error`) for execution failures; see
+[results and errors](usage.md#results-and-errors). Message texts are not part
+of the promise.
+
 Numerical results and performance may change within the documented
 [precision and convergence contracts](precision.md). This compatibility
 policy begins with v1.0; it does not apply to earlier prereleases.

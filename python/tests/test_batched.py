@@ -10,7 +10,7 @@ from test_solve import grid2d_laplacian, grid2d_sddm
 def solver(request):
     A = grid2d_sddm(7)
     try:
-        instance = apxchol.factorize(A, backend="cpu", factor_storage_dtype=request.param)
+        instance = apxchol.factorize(A, backend="cpu", factor_storage=request.param)
     except RuntimeError as exc:
         if request.param == np.float16 and str(exc) == "FP16 factor storage requires AVX/F16C or Apple ARM64":
             pytest.skip("CPU lacks FP16 conversion support")
@@ -39,7 +39,7 @@ def test_matrix_solve_and_apply_reuse_scalar_contract(solver, layout):
     result = instance.solve(B, rtol=1e-9)
     assert result.x.shape == B.shape
     assert result.x.dtype == np.float64
-    assert result.iters.shape == result.residual.shape == result.converged.shape == (B.shape[1],)
+    assert result.iterations.shape == result.residual.shape == result.converged.shape == (B.shape[1],)
     assert result.converged.dtype == np.bool_
     assert result.converged.all()
     norm = np.linalg.norm(B, axis=0)
@@ -58,7 +58,7 @@ def test_empty_and_single_rhs_matrices_preserve_rank(solver, width):
     B = rhs(A, width)
     result = instance.solve(B)
     assert result.x.shape == B.shape
-    assert result.iters.shape == result.residual.shape == result.converged.shape == (width,)
+    assert result.iterations.shape == result.residual.shape == result.converged.shape == (width,)
     assert result.converged.all()
     assert instance.apply(B).shape == B.shape
 
@@ -76,13 +76,13 @@ def test_matrix_warm_start_and_output(solver, order):
     result = instance.solve(B, x0=guess, out=out, rtol=1e-9)
     assert result.x is out
     assert result.converged.all()
-    assert (result.iters[::2] == 0).all()
-    assert result.iters[1] == 0
+    assert (result.iterations[::2] == 0).all()
+    assert result.iterations[1] == 0
     warm = instance.solve(B, x0=result.x, rtol=1e-8)
     assert warm.converged.all()
-    assert (warm.iters == 0).all()
+    assert (warm.iterations == 0).all()
     limited = instance.solve(B, x0=guess, maxiter=1, rtol=1e-14)
-    assert (limited.iters <= 1).all()
+    assert (limited.iterations <= 1).all()
     assert limited.converged[::2].all()
     assert not limited.converged[3::2].all()
 
@@ -172,7 +172,7 @@ def test_one_shot_matrix_solve_and_vector_result_types(solver):
     result = apxchol.solve(A, B, backend="cpu")
     assert result.x.shape == B.shape and result.converged.all()
     vector = instance.solve(B[:, 0])
-    assert isinstance(vector.iters, int)
+    assert isinstance(vector.iterations, int)
     assert isinstance(vector.residual, float)
     assert isinstance(vector.converged, bool)
     assert vector.x.shape == (A.shape[0],)
@@ -203,7 +203,7 @@ def test_one_shot_forwards_warm_start_and_output(matrix):
     out = np.empty_like(B)
     result = apxchol.solve(A, B, backend="cpu", x0=exact, out=out, maxiter=0)
     assert result.x is out
-    assert np.all(result.converged) and np.all(result.iters == 0)
+    assert np.all(result.converged) and np.all(result.iterations == 0)
     np.testing.assert_allclose(result.x, exact, rtol=0, atol=1e-14)
 
     # Reuse the owner's overlap handling when the output aliases the RHS.

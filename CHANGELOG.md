@@ -19,6 +19,7 @@
 - CUDA and Metal solvers can be copied: copies share the device factor and operator, and solve concurrently on their own streams or command queues and workspace.
 
 ### API and CLI changes
+- Breaking: the C++ one-shot `solve(A, b, tol, max_iter, x0, opts)` takes an optional initial guess before the options, like the reusable solver, Python and MATLAB/Octave; the CLI reads one with `--x0 FILE`, shaped like the right-hand side.
 - Breaking: runtime environment variables are replaced by explicit solver options.
 - Breaking: the CUDA build no longer uses cuSPARSE or cuBLAS, and the level-set GPU triangular solve is removed.
 - Breaking: forward-star and indexed pooled graph storage and the standalone analysis/setup tools are retired.
@@ -32,7 +33,12 @@
 - Breaking: removed CLI flags `--stagnation-window`, `--graph-storage`, `--fs-compact` and `--fs-filter-append`.
 - `apxchol::core` no longer passes its `-march` flag to consumers, and a `-march`/`-mcpu` already in `CMAKE_CXX_FLAGS` or `CMAKE_CXX_FLAGS_<CONFIG>` replaces apxchol's own. Consumers get `EIGEN_MAX_ALIGN_BYTES` and `EIGEN_MALLOC_ALREADY_ALIGNED=0` instead, so Eigen objects cross the library boundary safely whichever instruction set each side targets. Projects that embed apxchol by including `cmake/apxchol_core.cmake` now default to portable code, like `add_subdirectory` embedding; standalone root, Python and benchmark builds stay native.
 - Breaking: `solve_result::solve_vram_mb` is removed. It reported device-wide memory in use, including other processes, so it did not measure the solve.
-- Breaking: C++ `solve()` takes `std::optional` tolerance and iteration budget; `std::nullopt` selects the solver's defaults, and a negative value now throws `std::invalid_argument` instead of selecting them.
+- Breaking: C++ `solve()` takes `std::optional` tolerance and iteration budget; `std::nullopt` selects the defaults, and a negative value now throws `std::invalid_argument` instead of selecting them.
+- Breaking: `solve_options::tol` and `solve_options::max_iter` are removed; the tolerance and iteration budget are solve arguments in every interface, and an omitted one uses `default_tol` or `default_max_iter`. The one-shot C++ call becomes `solve(A, b, tol, max_iter, x0, opts)`.
+- Breaking: the iteration count is `iterations` in every interface; Python `SolveResult.iters` and the MATLAB/Octave result field `iters` are renamed.
+- Breaking: the Python option and property `factor_storage_dtype` are renamed `factor_storage`; the option accepts `"auto"` (the default), `"float16"`, `"float32"` or a NumPy dtype.
+- Breaking: MATLAB/Octave `apxchol_solve(A, b, rtol, maxiter, x0, options)` takes the initial guess before the options, in the order of `s.solve`.
+- Breaking: errors use two classes in every interface: `std::invalid_argument` (Python `ValueError`, MATLAB/Octave `apxchol:badInput`) for invalid input, options and unsupported requests, and `std::runtime_error` or a subclass (`RuntimeError`, `apxchol:error`) for execution failures. Metal input checks now throw `std::invalid_argument` instead of `std::domain_error` or `std::length_error`, an edge-index overflow throws `std::overflow_error` instead of `std::length_error`, Python no longer raises `OverflowError` or `ValueError` for execution failures, and MATLAB/Octave `apxchol:badMatrix`, `apxchol:badVector`, `apxchol:tooLarge` and `apxchol:badHandle` become `apxchol:badInput`.
 - Breaking: `apxchol::cpu_solver` is removed; use `apxchol::solver` with `solve_backend::cpu`.
 - Breaking: `save_solver`/`load_solver` are replaced by `solver::save` and `solver::load`.
 - Breaking: `apxchol::apx_cholesky` is removed from the public API; use `apxchol::solver` (`apply` inside an external Krylov solver).
