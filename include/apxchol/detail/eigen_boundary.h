@@ -9,6 +9,8 @@
 #include "apxchol/operator_class.h"
 #include <Eigen/Core>
 #include <Eigen/Sparse>
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 #include <type_traits>
@@ -16,40 +18,56 @@
 
 namespace apxchol::detail {
 
-/// Square Eigen sparse matrix as a csc_ref. A compressed matrix whose index
-/// widths match node_index/edge_index is borrowed in place (the default
-/// 32-bit build); otherwise the arrays are converted into owned storage.
-/// Reports non-square input through rows()/cols() and an empty ref.
+/// Square Eigen sparse matrix as a csc_ref. A compressed matrix is borrowed
+/// in place; only index arrays narrower than node_index/edge_index are
+/// widened into owned copies (none in the default 32-bit build). An
+/// uncompressed matrix is compressed into owned storage. Reports non-square
+/// input through rows()/cols() and an empty ref.
 class eigen_csc {
 public:
     explicit eigen_csc(const Eigen::SparseMatrix<double>& A)
         : rows_(A.rows()), cols_(A.cols()) {
         if (rows_ != cols_) return;
         using StorageIndex = Eigen::SparseMatrix<double>::StorageIndex;
-        constexpr bool same_rows = sizeof(StorageIndex) == sizeof(node_index);
-        constexpr bool same_offsets = sizeof(StorageIndex) == sizeof(edge_index);
-        if (A.isCompressed() && same_rows && same_offsets) {
-            // StorageIndex is a signed int and node_index/edge_index its
-            // unsigned counterpart, which may alias it. Valid indices are
-            // nonnegative and keep their values.
-            ref_ = {static_cast<node_index>(rows_),
-                    reinterpret_cast<const edge_index*>(A.outerIndexPtr()),
-                    reinterpret_cast<const node_index*>(A.innerIndexPtr()), A.valuePtr()};
+        if (A.isCompressed()) {
+            // StorageIndex is a signed int and node_index/edge_index, when
+            // equally wide, its unsigned counterpart, which may alias it.
+            // Valid indices are nonnegative and keep their values.
+            const auto n = static_cast<std::size_t>(rows_);
+            const auto nnz = static_cast<std::int64_t>(A.nonZeros());
+            const edge_index* ptr = nullptr;
+            const node_index* idx = nullptr;
+            if constexpr (sizeof(StorageIndex) == sizeof(edge_index)) {
+                ptr = reinterpret_cast<const edge_index*>(A.outerIndexPtr());
+            } else {
+                offsets_.resize(n + 1);
+                std::copy_n(A.outerIndexPtr(), n + 1, offsets_.data());
+                ptr = offsets_.data();
+            }
+            if constexpr (sizeof(StorageIndex) == sizeof(node_index)) {
+                idx = reinterpret_cast<const node_index*>(A.innerIndexPtr());
+            } else {
+                rows_copy_.resize(static_cast<std::size_t>(nnz));
+                const StorageIndex* inner = A.innerIndexPtr();
+                node_index* out = rows_copy_.data();
+                #pragma omp parallel for schedule(static)
+                for (std::int64_t p = 0; p < nnz; ++p) out[p] = static_cast<node_index>(inner[p]);
+                idx = rows_copy_.data();
+            }
+            ref_ = {static_cast<node_index>(rows_), ptr, idx, A.valuePtr()};
             return;
         }
         const auto n = static_cast<node_index>(rows_);
         const StorageIndex* outer = A.outerIndexPtr();
         const StorageIndex* inner = A.innerIndexPtr();
-        const StorageIndex* counts = A.innerNonZeroPtr();
+        const StorageIndex* counts = A.innerNonZeroPtr();  // uncompressed: never null
         const auto range = [&](Eigen::Index col) {
             const Eigen::Index first = outer[col];
-            const Eigen::Index last = counts ? first + counts[col] : outer[col + 1];
+            const Eigen::Index last = first + counts[col];
             if (first < 0 || last < first || last > A.data().size())
                 throw std::invalid_argument("apxchol: invalid Eigen sparse storage");
             return std::pair{first, last};
         };
-        if (!counts && outer[0] != 0)
-            throw std::invalid_argument("apxchol: invalid Eigen sparse storage");
         Eigen::Index stored = 0;
         for (Eigen::Index col = 0; col < rows_; ++col) {
             const auto [first, last] = range(col);
@@ -79,6 +97,8 @@ public:
 
 private:
     Eigen::Index rows_ = 0, cols_ = 0;
+    buffer<edge_index> offsets_;
+    buffer<node_index> rows_copy_;
     csc_matrix<double> owned_;
     csc_ref<double> ref_;
 };
