@@ -270,19 +270,23 @@ private:
         unsigned long long distinct_total = 0;
         // long double sums go to per-thread slots summed in thread order: an
         // OpenMP reduction on them needs 16-byte atomics (libatomic).
-        std::vector<std::array<long double, 2>> totals;
+        // Allocated before the region: a throwing allocation inside it would
+        // escape the team.
+#ifdef _OPENMP
+        std::vector<std::array<long double, 2>> totals(
+            static_cast<std::size_t>(std::max(1, omp_get_max_threads())));
+#else
+        std::vector<std::array<long double, 2>> totals(1);
+#endif
         detail::parallel_exception error;
-        #pragma omp parallel reduction(+:multi_total,distinct_total)
+        #pragma omp parallel num_threads(static_cast<int>(totals.size())) \
+            reduction(+:multi_total,distinct_total)
         {
 #ifdef _OPENMP
             const std::size_t tid = static_cast<std::size_t>(omp_get_thread_num());
-            const std::size_t team = static_cast<std::size_t>(omp_get_num_threads());
 #else
             const std::size_t tid = 0;
-            const std::size_t team = 1;
 #endif
-            #pragma omp single
-            totals.assign(team, {});
             long double& weight_total = totals[tid][0];
             long double& strongest_total = totals[tid][1];
             std::vector<std::pair<node_index, double>> neighbors;
