@@ -1,4 +1,5 @@
 #include <apxchol.h>
+#include <Eigen/Sparse>
 #include <cmath>
 #include <iostream>
 #include <vector>
@@ -29,8 +30,13 @@ int main() {
         Eigen::VectorXd expected(n);
         for (int i = 0; i < n; ++i) expected[i] = std::sin(0.13 * i);
         const Eigen::VectorXd rhs = matrix * expected;
-        const auto result = apxchol::solve(matrix, rhs);
-        const double residual = (matrix * result.x - rhs).norm() / rhs.norm();
+        const apxchol::csc_view view{n,
+            {matrix.outerIndexPtr(), static_cast<std::size_t>(n) + 1},
+            {matrix.innerIndexPtr(), static_cast<std::size_t>(matrix.nonZeros())},
+            {matrix.valuePtr(), static_cast<std::size_t>(matrix.nonZeros())}};
+        const auto result = apxchol::solve(view, {rhs.data(), static_cast<std::size_t>(n)});
+        const Eigen::Map<const Eigen::VectorXd> x(result.x.data(), n);
+        const double residual = (matrix * x - rhs).norm() / rhs.norm();
         if (!std::isfinite(residual) || residual > 1e-8) {
             std::cerr << "original-system residual failed at size " << n << '\n';
             return 1;

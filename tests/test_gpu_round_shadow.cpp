@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "scoped_omp_threads.h"
 #include "apxchol/solver/solve.h"
+#include "csc_test_util.h"
 #include "gpu_preconditioner_fixture.h"
 
 #include "apxchol/detail/checkpoint.h"
@@ -790,7 +791,7 @@ TEST(GpuRoundShadowReference, FreshPairedContentMatchesFullValidation) {
             {1, 0, -1}, {2, 1, -2}};
         if (full) { entries.emplace_back(0, 1, -7); entries.emplace_back(1, 2, -9); }
         A.setFromTriplets(entries.begin(), entries.end());
-        const auto graph = apxchol::detail::make_graph(A);
+        const auto graph = apxchol::detail::make_graph(apxchol::test::eigen_csc(A));
         const std::vector<node_index> selected = {0};
         const auto fresh = apxchol::detail::make_gpu_round_shadow_input(graph, selected, 42);
         EXPECT_EQ(apxchol::detail::gpu_round_selection_content_from_paired_input(fresh),
@@ -3201,7 +3202,7 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
         setup.factor_opts = factor_options;
         apxchol::detail::checkpoint owned_cp;
         testing::internal::CaptureStderr();
-        const auto owner = apxchol::detail::solver_access::with_timings(A, setup, owned_cp);
+        const auto owner = apxchol::test::with_timings(A, setup, owned_cp);
         const std::string trace = testing::internal::GetCapturedStderr();
         const auto& preconditioner = gpu_session(owner);
         ASSERT_NE(trace.find("[gpu-owned-factorization] complete rounds="), std::string::npos) << trace;
@@ -3233,8 +3234,8 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::gpu;
         options.factor_opts = factor_options;
-        const auto solved = apxchol::solve(A, b, 1e-8, 1000, nullptr, options);
-        EXPECT_LE((A * solved.x - b).norm() / b.norm(), 1e-8);
+        const auto solved = apxchol::solve(apxchol::test::csc(A), apxchol::test::cspan(b), 1e-8, 1000, {}, options);
+        EXPECT_LE((A * apxchol::test::vec(solved.x) - b).norm() / b.norm(), 1e-8);
     }
 #endif
 }
@@ -3252,22 +3253,22 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     apxchol::solve_options options;
     options.backend = apxchol::solve_backend::gpu;
     options.factor_opts = factor_options;
-    const apxchol::solver tiny_owner(tiny, options);
+    const apxchol::solver tiny_owner(apxchol::test::csc(tiny), options);
     const auto& small = gpu_session(tiny_owner);
     EXPECT_EQ(small.factor().perm.size(), 2u);
     EXPECT_TRUE(small.trsv().adopted_device_factor());
     EXPECT_TRUE(csc_access::vals(small.factor().L).empty());
     auto A = owned_solve_matrix(64, 1.0);
-    auto exported = apxchol::factorize(A, factor_options);
+    auto exported = apxchol::factorize(apxchol::test::csc(A), factor_options);
     EXPECT_EQ(csc_access::vals(exported.L).size(), exported.L.nonZeros());
     EXPECT_FALSE(apxchol::detail::factorization_access::device_factor(exported));
-    apxchol::solver owner(A, exported, options);
+    apxchol::solver owner(apxchol::test::csc(A), exported, options);
     EXPECT_FALSE(gpu_session(owner).trsv().adopted_device_factor());
     EXPECT_TRUE(csc_access::vals(gpu_session(owner).factor().L).empty());
     EXPECT_EQ(csc_access::vals(exported.L).size(), exported.L.nonZeros());
     auto host_options = options;
     host_options.backend = apxchol::solve_backend::cpu;
-    ASSERT_NO_THROW(apxchol::solver(A, exported, host_options));
+    ASSERT_NO_THROW(apxchol::solver(apxchol::test::csc(A), exported, host_options));
     ASSERT_TRUE(exported.sddm);
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(A.rows(), 1.0, 2.0);
     Eigen::VectorXd permuted(A.rows()), expected(A.rows());
@@ -3276,7 +3277,7 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     apxchol::detail::cuda_sptrsv uploaded;
     uploaded.setup(exported.L, static_cast<node_index>(A.rows()), factor_options);
     uploaded.solve_LLt(permuted.data(), expected.data());
-    const Eigen::VectorXd actual = owner.apply(rhs);
+    const Eigen::VectorXd actual = apxchol::test::vec(owner.apply(apxchol::test::cspan(rhs)));
     for (Eigen::Index v = 0; v < A.rows(); ++v) EXPECT_EQ(actual[v], expected[exported.perm[v]]) << v;
 #endif
 }
@@ -3517,9 +3518,9 @@ TEST(GpuCycleSampler, OwnedSolveReturnsOriginalSystemSolution) {
         opts.factor_opts.verbose = true;
         opts.factor_opts.sampler=sampler;opts.factor_opts.partition.degree_quantile=.8;
         testing::internal::CaptureStderr();
-        const auto result=apxchol::solve(A, b, 1e-8, 1000, nullptr, opts);
+        const auto result=apxchol::solve(apxchol::test::csc(A), apxchol::test::cspan(b), 1e-8, 1000, {}, opts);
         const auto trace=testing::internal::GetCapturedStderr();
-        EXPECT_LE((A*result.x-b).norm()/b.norm(),1e-8);
+        EXPECT_LE((A*apxchol::test::vec(result.x)-b).norm()/b.norm(),1e-8);
         EXPECT_NE(trace.find("[gpu-owned-factorization] complete rounds="),std::string::npos);
         EXPECT_NE(trace.find("[gpu-clique-sampler] sampler=trace_cycle"),std::string::npos);
         EXPECT_NE(trace.find("device_sampling=1"),std::string::npos);

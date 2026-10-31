@@ -42,10 +42,11 @@ static_assert(apxchol::partitioner<priority_partitioner>);
 
 int main() {
     const int k = 60;
-    auto L = grid_laplacian(k);
-    Eigen::VectorXd b = Eigen::VectorXd::Zero(L.rows());   // unit source and sink
-    b(0) = 1.0;
-    b(L.rows() - 1) = -1.0;
+    const auto grid = grid_laplacian(k);
+    const apxchol::csc_view L = grid.view();
+    std::vector<double> b(static_cast<std::size_t>(L.n), 0.0);   // unit source and sink
+    b.front() = 1.0;
+    b.back() = -1.0;
 
     // Eliminate the grid interior first, boundary last (an arbitrary
     // demonstration order — plug in ND/AMD/domain knowledge here).

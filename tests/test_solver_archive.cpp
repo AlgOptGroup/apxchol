@@ -2,6 +2,7 @@
 #include "apxchol/solver/solve.h"
 #include "apxchol/detail/csc_import.h"
 #include "apxchol/solver/sptrsv/omp.h"
+#include "csc_test_util.h"
 #include "../src/solver_archive_internal.h"
 #include <zlib.h>
 #include <algorithm>
@@ -24,6 +25,9 @@ using csc_access = apxchol::detail::sparse_csc_access;
 namespace {
 using namespace apxchol;
 using Sparse = Eigen::SparseMatrix<double>;
+using test::csc;
+using test::cspan;
+using test::vec;
 
 Sparse matrix(int n = 32) {
     Sparse A(n, n);
@@ -125,7 +129,7 @@ class SolverArchive : public ::testing::Test {
 protected:
     std::filesystem::path directory;
     Sparse A = matrix();
-    solver original{A, options()};
+    solver original{csc(A), options()};
     void SetUp() override {
         // Parallel test processes can read the same clock tick, so retry until
         // create_directory claims a fresh directory.
@@ -179,11 +183,12 @@ protected:
                 std::vector<solve_result> columns;
                 if (width == 1) {
                     const Eigen::VectorXd b = B.col(0), x0 = initial.col(0);
-                    columns.push_back(restored.solve(b, 1e-8, phase == 2 ? 0 : 200, phase ? &x0 : nullptr));
-                    X.col(0) = columns.front().x;
+                    columns.push_back(restored.solve(cspan(b), 1e-8, phase == 2 ? 0 : 200,
+                                                     phase ? cspan(x0) : std::span<const double>{}));
+                    X.col(0) = vec(columns.front().x);
                 } else {
-                    const const_matrix_view x0(initial);
-                    columns = restored.solve(B, X, 1e-8, phase == 2 ? 0 : 200, phase ? &x0 : nullptr).columns;
+                    const const_matrix_view x0 = phase ? test::cmat(initial) : const_matrix_view{};
+                    columns = restored.solve(test::cmat(B), test::mmat(X), 1e-8, phase == 2 ? 0 : 200, x0).columns;
                 }
                 ASSERT_EQ(columns.size(), static_cast<std::size_t>(width));
                 for (int col = 0; col < width; ++col) {
@@ -221,16 +226,16 @@ TEST_F(SolverArchive, ExactFactorAndScalarBatchWarmSolves) {
     for (std::size_t i = 0; i < before.rounds.size(); ++i)
         EXPECT_EQ(before.rounds[i].is_size, after.rounds[i].is_size);
     Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(A.rows(), -1.0, 1.0);
-    auto scalar = restored.solve(b, 1e-9);
+    auto scalar = restored.solve(cspan(b), 1e-9);
     EXPECT_TRUE(scalar.converged);
-    EXPECT_LT((A * scalar.x - b).norm() / b.norm(), 1e-9);
-    EXPECT_EQ(restored.apply(b), original.apply(b));
-    auto warm = restored.solve(b, 1e-9, 0, &scalar.x);
+    EXPECT_LT((A * vec(scalar.x) - b).norm() / b.norm(), 1e-9);
+    EXPECT_EQ(restored.apply(cspan(b)), original.apply(cspan(b)));
+    auto warm = restored.solve(cspan(b), 1e-9, 0, scalar.x);
     EXPECT_TRUE(warm.converged);
     EXPECT_EQ(warm.iterations, 0);
     Eigen::MatrixXd B(A.rows(), 5), X(A.rows(), 5);
     for (int col = 0; col < B.cols(); ++col) B.col(col) = (col + 1) * b;
-    auto batch = restored.solve(B, X, 1e-9);
+    auto batch = restored.solve(test::cmat(B), test::mmat(X), 1e-9);
     ASSERT_EQ(batch.columns.size(), 5);
     for (int col = 0; col < B.cols(); ++col) {
         EXPECT_TRUE(batch.columns[col].converged);
@@ -242,7 +247,7 @@ TEST_F(SolverArchive, LaplacianFactorAndCenteredSolves) {
     auto L = matrix();
     for (int i = 0; i < L.rows(); ++i)
         L.coeffRef(i, i) = (i > 0) + (i + 1 < L.rows());
-    solver before(L, options());
+    solver before(csc(L), options());
     ASSERT_FALSE(before.factor().sddm);
     const auto path = directory / "laplacian.apxchol";
     before.save(path);
@@ -253,13 +258,13 @@ TEST_F(SolverArchive, LaplacianFactorAndCenteredSolves) {
     EXPECT_EQ(csc_access::vals(restored.factor().L), csc_access::vals(before.factor().L));
     EXPECT_EQ(restored.factor().perm, before.factor().perm);
     const Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(L.rows(), -1.0, 1.0);
-    const auto scalar = restored.solve(b, 1e-9);
+    const auto scalar = restored.solve(cspan(b), 1e-9);
     EXPECT_TRUE(scalar.converged);
-    EXPECT_LT((L * scalar.x - b).norm() / b.norm(), 1e-9);
-    EXPECT_NEAR(scalar.x.mean(), 0.0, 1e-12);
+    EXPECT_LT((L * vec(scalar.x) - b).norm() / b.norm(), 1e-9);
+    EXPECT_NEAR(vec(scalar.x).mean(), 0.0, 1e-12);
     Eigen::MatrixXd B(L.rows(), 3), X(L.rows(), 3);
     for (int col = 0; col < B.cols(); ++col) B.col(col) = (col + 1) * b;
-    const auto batch = restored.solve(B, X, 1e-9);
+    const auto batch = restored.solve(test::cmat(B), test::mmat(X), 1e-9);
     ASSERT_EQ(batch.columns.size(), 3);
     for (int col = 0; col < B.cols(); ++col) {
         EXPECT_TRUE(batch.columns[col].converged);
@@ -282,8 +287,8 @@ TEST_F(SolverArchive, ReconstructsOriginalSystemCoefficients) {
         if (mode == 3) input.coeffRef(0, 1) = std::nextafter(input.coeff(0, 1), 0.0);
         if (mode == 4) input.insert(0, 2) = 0.0;
         input.makeCompressed(); expected.makeCompressed();
-        solver fresh(expected, options());
-        solver owner(input, fresh.factor(), options());
+        solver fresh(csc(expected), options());
+        solver owner(csc(input), fresh.factor(), options());
         const auto path = directory / ("operator-" + std::to_string(mode) + ".apxchol");
         owner.save(path);
         expect_operator(path, expected);
@@ -291,9 +296,9 @@ TEST_F(SolverArchive, ReconstructsOriginalSystemCoefficients) {
         EXPECT_EQ(restored.operator_nnz(), input.nonZeros());
         EXPECT_EQ(restored.operator_nnz(), owner.operator_nnz());
         const Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(expected.rows(), 0.1, 1.0);
-        const auto result = restored.solve(b, 1e-10);
+        const auto result = restored.solve(cspan(b), 1e-10);
         EXPECT_TRUE(result.converged);
-        EXPECT_LT((expected * result.x - b).norm() / b.norm(), 1e-10);
+        EXPECT_LT((expected * vec(result.x) - b).norm() / b.norm(), 1e-10);
     }
 }
 
@@ -313,8 +318,8 @@ TEST_F(SolverArchive, SharedReconstructionReversesBothCoordinatePermutations) {
     std::copy_n(stored.outerIndexPtr(), stored.rows() + 1, transposed.outerIndexPtr());
     std::copy_n(stored.innerIndexPtr(), stored.nonZeros(), transposed.innerIndexPtr());
     std::copy_n(stored.valuePtr(), stored.nonZeros(), transposed.valuePtr());
-    const detail::eigen_csc input(transposed);
-    const auto restored = detail::to_eigen(detail::archive_operator_csc(input.ref(), perm).ref());
+    const test::eigen_csc input(transposed);
+    const auto restored = test::to_eigen(detail::archive_operator_csc(input.ref(), perm).ref());
     EXPECT_EQ(restored.nonZeros(), expected.nonZeros());
     EXPECT_EQ((restored - expected).norm(), 0.0);
 }
@@ -322,7 +327,7 @@ TEST_F(SolverArchive, SharedReconstructionReversesBothCoordinatePermutations) {
 TEST_F(SolverArchive, RejectsTooManyEmptyRoundsBeforeWriting) {
     auto F = original.factor();
     F.rounds.resize(A.rows() + 1);
-    solver owner(A, std::move(F), options());
+    solver owner(csc(A), std::move(F), options());
     const auto path = directory / "empty-rounds.apxchol";
     EXPECT_THROW(owner.save(path), std::invalid_argument);
     EXPECT_FALSE(std::filesystem::exists(path));
@@ -379,7 +384,7 @@ TEST_F(SolverArchive, ReinstallsInstalledFactorExactly) {
                 auto opts = options();
                 opts.factor_opts.factor_storage = storage;
                 opts.factor_opts.drop_tolerance = drop;
-                solver saver(input, opts);
+                solver saver(csc(input), opts);
                 const auto F = saver.factor();
                 EXPECT_EQ(F.storage, storage);
                 EXPECT_EQ(F.scale.size(), storage == factor_storage_type::fp16 ? input.rows() : 0);
@@ -400,16 +405,16 @@ TEST_F(SolverArchive, ReinstallsInstalledFactorExactly) {
                 EXPECT_EQ(std::memcmp(csc_access::vals(G.L).data(), csc_access::vals(F.L).data(), csc_access::vals(F.L).size() * sizeof(float)), 0);
                 EXPECT_EQ(G.scale, F.scale);
                 // Adopting the exported factor directly is exact too.
-                solver adopted(input, F, other);
+                solver adopted(csc(input), F, other);
                 Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(input.rows(), -1.0, 2.0);
                 if (laplacian) b.array() -= b.mean();
-                const auto x = saver.solve(b, 1e-9, 2000), y = loaded.solve(b, 1e-9, 2000),
-                           z = adopted.solve(b, 1e-9, 2000);
+                const auto x = saver.solve(cspan(b), 1e-9, 2000), y = loaded.solve(cspan(b), 1e-9, 2000),
+                           z = adopted.solve(cspan(b), 1e-9, 2000);
                 EXPECT_TRUE(x.converged);
                 EXPECT_EQ(x.iterations, y.iterations);
                 EXPECT_EQ(x.x, y.x);
                 EXPECT_EQ(x.x, z.x);
-                EXPECT_EQ(saver.apply(b), loaded.apply(b));
+                EXPECT_EQ(saver.apply(cspan(b)), loaded.apply(cspan(b)));
             }
 }
 
@@ -418,18 +423,18 @@ TEST_F(SolverArchive, RejectsInvalidInstalledFactors) {
     for (std::size_t col = 0; col < F.L.rows(); ++col)
         for (auto p = csc_access::outer(F.L)[col] + 1; p < csc_access::outer(F.L)[col + 1]; ++p) csc_access::vals(F.L)[p] = -0.25f;
     F.storage = factor_storage_type::fp16;
-    EXPECT_THROW((void)solver(A, F, options()), std::invalid_argument);  // no scales
+    EXPECT_THROW((void)solver(csc(A), F, options()), std::invalid_argument);  // no scales
     F.scale.assign(A.rows(), 1.0f);
     csc_access::vals(F.L)[1] = 0.1f;  // not a binary16 value
-    EXPECT_THROW((void)solver(A, F, options()), std::invalid_argument);
+    EXPECT_THROW((void)solver(csc(A), F, options()), std::invalid_argument);
     csc_access::vals(F.L)[1] = -0.25f;
     F.scale[0] = 0.0f;
-    EXPECT_THROW((void)solver(A, F, options()), std::invalid_argument);
+    EXPECT_THROW((void)solver(csc(A), F, options()), std::invalid_argument);
     F.scale[0] = 1.0f;
-    EXPECT_NO_THROW((void)solver(A, F, options()));
+    EXPECT_NO_THROW((void)solver(csc(A), F, options()));
     auto G = original.factor();
     G.scale.assign(A.rows(), 1.0f);  // scales only belong to fp16 storage
-    EXPECT_THROW((void)solver(A, G, options()), std::invalid_argument);
+    EXPECT_THROW((void)solver(csc(A), G, options()), std::invalid_argument);
 }
 
 TEST_F(SolverArchive, NewArchivesFollowTheUmask) {
@@ -532,9 +537,9 @@ TEST(SolverArchiveFormat, LoadsCommittedVersion1Fixture) {
     EXPECT_TRUE(restored.factor().sddm);
     EXPECT_EQ(restored.factor_storage(), factor_storage_type::fp32);
     const Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(5, 1.0, 5.0);
-    const auto result = restored.solve(b, 1e-10);
+    const auto result = restored.solve(cspan(b), 1e-10);
     EXPECT_TRUE(result.converged);
-    EXPECT_LT((A * result.x - b).norm() / b.norm(), 1e-10);
+    EXPECT_LT((A * vec(result.x) - b).norm() / b.norm(), 1e-10);
 }
 
 TEST_F(SolverArchive, ReadsOppositeEndianArrays) {
@@ -550,9 +555,9 @@ TEST_F(SolverArchive, ReadsOppositeEndianArrays) {
     EXPECT_EQ(csc_access::vals(restored.factor().L), csc_access::vals(original.factor().L));
     EXPECT_EQ(restored.factor().perm, original.factor().perm);
     const Eigen::VectorXd b = Eigen::VectorXd::Ones(A.rows());
-    auto result = restored.solve(b, 1e-9);
+    auto result = restored.solve(cspan(b), 1e-9);
     EXPECT_TRUE(result.converged);
-    EXPECT_LT((A * result.x - b).norm() / b.norm(), 1e-9);
+    EXPECT_LT((A * vec(result.x) - b).norm() / b.norm(), 1e-9);
 }
 
 TEST_F(SolverArchive, ReadsWideIntegerArrays) {
@@ -595,10 +600,10 @@ TEST_F(SolverArchive, AcceptsUnicodeAndExtensionlessPaths) {
 TEST_F(SolverArchive, OperatorEntryCountUsesCanonicalInput) {
     const int outer[]{0, 3, 6}, rows[]{0, 0, 1, 0, 1, 1};
     const double values[]{1.5, 1.5, -1, -1, 1.5, 1.5};
-    const auto canonical = detail::import_csc(2, outer, rows, values);
-    ASSERT_EQ(canonical.nonZeros(), 4);
-    solver direct(canonical, options());
-    solver adopted(canonical, direct.factor(), options());
+    const detail::imported_csc<int> canonical(2, outer, rows, values);
+    ASSERT_EQ(canonical.view().col_ptr[2], 4);
+    solver direct(canonical.view(), options());
+    solver adopted(canonical.view(), direct.factor(), options());
     EXPECT_EQ(direct.operator_nnz(), 4);
     EXPECT_EQ(adopted.operator_nnz(), 4);
     direct.save(directory / "duplicates.apxchol");
@@ -619,7 +624,7 @@ TEST_F(SolverArchive, CpuAndGpuFactorsCrossAdopt) {
                 SCOPED_TRACE(source_owners);
                 auto build = options(); build.backend = origin;
                 if (origin == solve_backend::gpu) build.factor_opts.factor_storage = storage;
-                solver resident(input, build);
+                solver resident(csc(input), build);
                 const auto path = directory / ("source-" + std::to_string(source_owners++) + ".apxchol");
                 resident.save(path);
                 expect_operator(path, input);
@@ -651,13 +656,13 @@ TEST_F(SolverArchive, CpuAndGpuFactorsCrossAdopt) {
                         // the same number of iterations.
                         Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(input.rows(), -1.0, 2.0);
                         if (laplacian) b.array() -= b.mean();
-                        const Eigen::VectorXd za = resident.apply(b), zb = restored.apply(b);
-                        const auto xa = resident.solve(b, 1e-9, 500), xb = restored.solve(b, 1e-9, 500);
+                        const Eigen::VectorXd za = vec(resident.apply(cspan(b))), zb = vec(restored.apply(cspan(b)));
+                        const auto xa = resident.solve(cspan(b), 1e-9, 500), xb = restored.solve(cspan(b), 1e-9, 500);
 #if defined(APXCHOL_USE_METAL)
                         if (target == solve_backend::gpu) {
                             EXPECT_LT((za - zb).norm() / za.norm(), 1e-6);
                             EXPECT_EQ(xa.iterations, xb.iterations);
-                            EXPECT_LT((xa.x - xb.x).norm() / xa.x.norm(), 1e-8);
+                            EXPECT_LT((vec(xa.x) - vec(xb.x)).norm() / vec(xa.x).norm(), 1e-8);
                         } else
 #endif
                         {
@@ -670,9 +675,9 @@ TEST_F(SolverArchive, CpuAndGpuFactorsCrossAdopt) {
                         restored.save(adopted); expect_operator(adopted, input);
                         auto host = solver::load(adopted, options());
                         Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(input.rows(), -1.0, 1.0);
-                        const auto result = host.solve(b, 1e-8);
+                        const auto result = host.solve(cspan(b), 1e-8);
                         EXPECT_TRUE(result.converged);
-                        EXPECT_LT((input * result.x - b).stableNorm() / b.stableNorm(), 1e-8);
+                        EXPECT_LT((input * vec(result.x) - b).stableNorm() / b.stableNorm(), 1e-8);
                         ++checked_rhs;
                     }
                 }
@@ -693,7 +698,7 @@ TEST_F(SolverArchive, PreservesLumpingAndRegularizationWithoutReapplyingThem) {
     auto construction = options();
     construction.factor_opts.lump_max_mass = 1.0;
     construction.factor_opts.regularization = 0.25;
-    solver before(positive, construction);
+    solver before(csc(positive), construction);
     ASSERT_EQ(before.factor().lumped_offdiag, 2);
     const auto path = directory / "positive.apxchol";
     before.save(path);
@@ -706,9 +711,9 @@ TEST_F(SolverArchive, PreservesLumpingAndRegularizationWithoutReapplyingThem) {
     EXPECT_EQ(std::memcmp(csc_access::vals(restored.factor().L).data(), csc_access::vals(before.factor().L).data(),
         csc_access::vals(before.factor().L).size() * sizeof(float)), 0);
     const Eigen::VectorXd b = Eigen::VectorXd::Ones(2);
-    const auto result = restored.solve(b, 1e-10);
+    const auto result = restored.solve(cspan(b), 1e-10);
     EXPECT_TRUE(result.converged);
-    EXPECT_LT((positive * result.x - b).norm() / b.norm(), 1e-10);
+    EXPECT_LT((positive * vec(result.x) - b).norm() / b.norm(), 1e-10);
 }
 
 TEST_F(SolverArchive, ReplacesSymlinksAndSerializesConcurrentWriters) {

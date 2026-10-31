@@ -1,15 +1,13 @@
 #pragma once
-/// Conversions between Eigen sparse matrices and graphs.
+/// Conversions between the library's CSC storage and graphs.
 ///
-///   laplacian(g)     — graph → Eigen Laplacian
-///   make_graph(L) — Eigen Laplacian → graph
+///   laplacian(g)  — graph → Laplacian
+///   make_graph(L) — Laplacian → graph
 
 #include "apxchol/csc_work.h"
 #include "apxchol/detail/csc_matrix.h"
-#include "apxchol/detail/eigen_boundary.h"
 #include "apxchol/detail/operator_options.h"
 #include "apxchol/graph/graph.h"
-#include <Eigen/Sparse>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -23,23 +21,19 @@ namespace apxchol::detail {
 
 /// Build the graph Laplacian L = D - A as a sparse matrix.
 template<typename G>
-Eigen::SparseMatrix<double> laplacian(const G& g) {
-    using T = Eigen::Triplet<double>;
+csc_matrix<double> laplacian(const G& g) {
     const node_index N = g.n();
-    std::vector<T> trips;
+    std::vector<triplet> trips;
 
     for (node_index v = 0; v < N; ++v) {
         double deg = 0.0;
         for (const auto& e : g.neighbors(v)) {
-            trips.emplace_back(v, e.to, -e.w);
+            trips.push_back({v, static_cast<node_index>(e.to), -static_cast<double>(e.w)});
             deg += e.w;
         }
-        trips.emplace_back(v, v, deg);
+        trips.push_back({v, v, deg});
     }
-
-    Eigen::SparseMatrix<double> L(N, N);
-    L.setFromTriplets(trips.begin(), trips.end());
-    return L;
+    return csc_from_triplets(N, trips);
 }
 
 /// make_graph with the caller's proof about the operator. `triangles_bit_identical`
@@ -288,10 +282,8 @@ inline graph make_graph_from_operator(csc_ref<double> L,
 /// Off-diagonal entries become weighted edges (negated).
 /// Any excess diagonal (row sum > 0, i.e. SDDM) is stored
 /// per-vertex in graph::excess() for use during factorization.
-inline graph make_graph(const Eigen::SparseMatrix<double>& L) {
-    const detail::eigen_csc input(L);
-    if (!input.square()) throw std::invalid_argument("make_graph: matrix must be square");
-    return detail::make_graph_from_operator(input, /*triangles_bit_identical=*/false);
+inline graph make_graph(csc_ref<double> L) {
+    return make_graph_from_operator(L, /*triangles_bit_identical=*/false);
 }
 
 } // namespace apxchol::detail
