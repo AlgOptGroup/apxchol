@@ -42,10 +42,10 @@ void prepare_round_plans(id<MTLDevice> device, const factorization& factor,
 /// perm, or nullopt when A lacks the paired 32-bit CSC layout it needs. Only
 /// the operator fields of the result are set.
 std::optional<resident_factor> prepare_input_operator(id<MTLDevice> device,
-    const Eigen::SparseMatrix<double>& A, const std::vector<node_index>& perm,
+    csc_ref<double> A, const std::vector<node_index>& perm,
     double lump_max_mass);
 
-resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double> &A,
+resident_factor factorize(id<MTLDevice> device, csc_ref<double> A,
                           const solve_options &options, checkpoint *cp,
                           bool input_prechecked = false);
 

@@ -5,11 +5,11 @@
 // plans and operator in device memory, and each copy has its own command
 // queue and PCG workspace.
 #include "apxchol/detail/checkpoint.h"
+#include "apxchol/detail/csc_matrix.h"
+#include "apxchol/detail/dense.h"
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"
-#include <Eigen/Core>
-#include <Eigen/Sparse>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -26,7 +26,7 @@ public:
     static constexpr std::array<int, 1> apply_widths{1};
 
     struct statistics {
-        Eigen::Index n = 0;
+        std::int64_t n = 0;
         std::size_t levels_forward = 0;
         std::size_t levels_backward = 0;
         std::size_t steps_forward = 0;   // dispatch steps per sweep
@@ -41,7 +41,7 @@ public:
     /// regularization/lumping) are not reapplied to F. Factorization requires supported GKS options and
     /// compressed, sorted, paired CSC input satisfying operator_class.h;
     /// numerical limits are in docs/precision.md.
-    metal_route(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
+    metal_route(csc_ref<double> A, const solve_options& opts,
                 checkpoint* cp, factorization* F);
     ~metal_route();
     metal_route(metal_route&&) noexcept;
@@ -51,12 +51,12 @@ public:
 
     /// Solves the columns of B, a panel of one of solve_widths, into X.
     /// timings, when not null, receives the PCG checkpoints.
-    void solve_columns(const_matrix_view B, matrix_view X, const const_matrix_view* X0,
+    void solve_columns(const_matrix_ref B, matrix_ref X, const const_matrix_ref* X0,
                        std::span<solve_result> results, checkpoint* timings,
                        double tol, int max_iter) const;
     /// One device preconditioner application z = M^{-1} r (centred for a
     /// Laplacian).
-    void apply_columns(const_matrix_view R, matrix_view Z) const;
+    void apply_columns(const_matrix_ref R, matrix_ref Z) const;
 
     /// Permutation, rounds and flags; L keeps only its column pointers.
     const factorization& factor() const;
@@ -68,7 +68,7 @@ public:
     factor_storage_type factor_storage() const;
     statistics stats() const;
     /// The original operator in FP64 CSC.
-    Eigen::SparseMatrix<double> original_operator() const;
+    csc_matrix<double> original_operator() const;
 
 private:
     struct device_state;

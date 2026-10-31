@@ -24,26 +24,30 @@ id<MTLBuffer> buffer(id<MTLDevice> device, std::size_t bytes) {
     return out;
 }
 
-input_buffers upload(id<MTLDevice> device, const Eigen::SparseMatrix<double> &A) {
-    const auto n = A.rows(), nnz = A.nonZeros();
+input_buffers upload(id<MTLDevice> device, csc_ref<double> A) {
+    const std::size_t n = A.n, nnz = A.nnz();
     input_buffers out{buffer(device, (n + 1) * sizeof(unsigned)),
                       buffer(device, nnz * sizeof(unsigned)),
                       buffer(device, nnz * sizeof(metal_host::df))};
-    std::memcpy(out.ptr.contents, A.outerIndexPtr(), (n + 1) * sizeof(unsigned));
-    std::memcpy(out.idx.contents, A.innerIndexPtr(), nnz * sizeof(unsigned));
+    // Indices are below 2^31 (gpu_owned_csc_layout_supported); wider ones narrow.
+    std::copy_n(A.ptr, n + 1, static_cast<unsigned*>(out.ptr.contents));
+    if constexpr (sizeof(node_index) == sizeof(unsigned))
+        std::memcpy(out.idx.contents, A.idx, nnz * sizeof(unsigned));
+    else
+        std::copy_n(A.idx, nnz, static_cast<unsigned*>(out.idx.contents));
     auto values = static_cast<metal_host::df *>(out.values.contents);
     double min_diagonal = std::numeric_limits<double>::infinity(), max_diagonal = 0;
     bool exact = true, valid = true;
     unsigned max_row = 0;
     #pragma omp parallel reduction(&& : exact, valid) reduction(min : min_diagonal) reduction(max : max_diagonal, max_row)
     {
-        const auto [first, last] = work_balanced_range(A.outerIndexPtr(), A.rows(),
+        const auto [first, last] = work_balanced_range(A.ptr, static_cast<std::int64_t>(A.n),
             omp_get_thread_num(), omp_get_num_threads());
         for (auto col = first; col < last; ++col) {
-            max_row = std::max(max_row, unsigned(A.outerIndexPtr()[col + 1] - A.outerIndexPtr()[col]));
-            for (int p = A.outerIndexPtr()[col]; p < A.outerIndexPtr()[col + 1]; ++p) {
-                const int row = A.innerIndexPtr()[p];
-                const double value = A.valuePtr()[p];
+            max_row = std::max(max_row, unsigned(A.ptr[col + 1] - A.ptr[col]));
+            for (edge_index p = A.ptr[col]; p < A.ptr[col + 1]; ++p) {
+                const auto row = static_cast<std::int64_t>(A.idx[p]);
+                const double value = A.val[p];
                 valid = valid && metal_schedule::in_range(value);
                 values[p] = metal_host::split(value);
                 if (row >= col && double(float(value)) != value) exact = false;
@@ -114,7 +118,7 @@ void prepare_round_plans(id<MTLDevice> device, const factorization& factor,
 }
 
 std::optional<resident_factor> prepare_input_operator(id<MTLDevice> device,
-    const Eigen::SparseMatrix<double>& A, const std::vector<node_index>& perm,
+    csc_ref<double> A, const std::vector<node_index>& perm,
     double lump_max_mass) {
     @autoreleasepool {
         std::size_t offdiagonals = 0;
@@ -122,7 +126,7 @@ std::optional<resident_factor> prepare_input_operator(id<MTLDevice> device,
             return std::nullopt;
         const operator_view validated(A, lump_max_mass);
         const auto input = upload(device, A);
-        const unsigned n = unsigned(A.rows());
+        const unsigned n = unsigned(A.n);
         resident_factor out;
         out.operator_exact = input.operator_exact;
         out.max_operator_row = input.max_operator_row;
@@ -131,12 +135,12 @@ std::optional<resident_factor> prepare_input_operator(id<MTLDevice> device,
         auto permutation = buffer(device, std::size_t(n) * sizeof(unsigned));
         std::copy(perm.begin(), perm.end(), static_cast<unsigned*>(permutation.contents));
         pipelines_for(device).finalizer.prepare_operator(input.ptr, input.idx, input.values,
-                                                         permutation, n, unsigned(A.nonZeros()), out);
+                                                         permutation, n, unsigned(A.nnz()), out);
         return out;
     }
 }
 
-resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double> &A,
+resident_factor factorize(id<MTLDevice> device, csc_ref<double> A,
                           const solve_options &options, checkpoint *cp, bool input_prechecked) {
     @autoreleasepool {
         validate_factor_options(options.factor_opts);
@@ -158,7 +162,7 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         const operator_view validated(A, options.factor_opts.lump_max_mass);
         if (cp)
             (*cp)("operator_prepare");
-        const bool unchanged = &validated.matrix() == &A;
+        const bool unchanged = validated.lumped() == 0;
         // Validation proves pairing only for the unchanged nonzero operator.
         const bool paired = input_prechecked || (unchanged && !zeros) || gpu_owned_csc_paired(A);
         if (!paired || (!unchanged && !gpu_owned_csc_supported(validated)))
@@ -170,7 +174,7 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
             (*cp)("metal_input");
         const float regularization = float(options.factor_opts.regularization);
         auto raw = cached.factorizer.run(
-            unsigned(A.rows()), unsigned(validated.matrix().nonZeros()),
+            unsigned(A.n), unsigned(validated.matrix().nnz()),
             unsigned(validated.scan().offdiag_nnz - validated.lumped()), options.factor_opts.seed,
             graph.ptr, graph.idx, graph.values, regularization,
             unsigned(unchanged && validated.scan().triangles_bit_identical), options.factor_opts,
@@ -212,7 +216,7 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         }
         raw = {};
         cached.finalizer.prepare_operator(input.ptr, input.idx, input.values, finalized.permutation,
-                                          n, unsigned(A.nonZeros()), out);
+                                          n, unsigned(A.nnz()), out);
         if (cp) {
             (*cp)("metal_operator");
             cp->ascend();

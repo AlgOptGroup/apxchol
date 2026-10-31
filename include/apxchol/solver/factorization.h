@@ -7,6 +7,7 @@
 #include "apxchol/solver/detail/factor_entry.h"
 #include "apxchol/solver/partitioner_list.h"
 #include "apxchol/sparse_csc.h"
+#include "apxchol/detail/eigen_boundary.h"
 #include <Eigen/Sparse>
 #include <cstddef>
 #include <memory>
@@ -104,7 +105,7 @@ namespace detail {
 /// Shared matrix-input path: validate, lump if needed, and build the graph with
 /// regularization. The caller's operator remains unchanged for PCG.
 template<typename Build>
-factorization factorize_operator(const Eigen::SparseMatrix<double>& L,
+factorization factorize_operator(csc_ref<double> L,
                                  const factor_options& options, Build&& build) {
     validate_factor_options(options);
     const operator_view op(L, options.lump_max_mass);
@@ -112,10 +113,22 @@ factorization factorize_operator(const Eigen::SparseMatrix<double>& L,
     auto graph_options = options;
     graph_options.regularization = 0;
     graph_options.lump_max_mass = kDefaultLumpMassCeiling;
+    // The scan's bit-identical-triangles proof holds for L, i.e. only when
+    // nothing was lumped.
     factorization F = build(make_graph_from_operator(op.matrix(),
-        &op.matrix() == &L && op.scan().triangles_bit_identical, options.regularization), graph_options);
+        op.lumped() == 0 && op.scan().triangles_bit_identical, options.regularization), graph_options);
     F.lumped_offdiag = op.lumped();
     return F;
+}
+
+/// The public factorize() overloads' input: Eigen's matrix as a square csc_ref.
+inline const eigen_csc& factorize_input(const eigen_csc& input, const factor_options& options) {
+    if (!input.square()) {
+        validate_factor_options(options);
+        validate_lump_max_mass(options.lump_max_mass);
+        throw_operator_not_square(input.rows(), input.cols());
+    }
+    return input;
 }
 
 } // namespace detail
@@ -153,7 +166,7 @@ namespace detail {
 
 // Internal consuming route used only by the solver routes. Public factorize()
 // always retains exportable host arrays; the device-resident route omits them.
-factorization factorize_for_solver(const Eigen::SparseMatrix<double>& L,
+factorization factorize_for_solver(csc_ref<double> L,
                                   const factor_options& opts,
                                   checkpoint* cp,
                                   setup_route route = setup_route::cpu);

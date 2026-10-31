@@ -686,11 +686,11 @@ factorization factorize_impl(const Eliminator& elim,
                              graph G,
                              const factor_options& opts_in,
                              checkpoint* cp,
-                             const Eigen::SparseMatrix<double>* initial_csc = nullptr,
+                             const csc_ref<double>* initial_csc = nullptr,
                              detail::setup_route route = detail::setup_route::cpu,
                              const detail::factorization_controls& controls = {}) {
     detail::validate_factor_options(opts_in);
-    const node_index n = initial_csc ? static_cast<node_index>(initial_csc->rows()) : G.n();
+    const node_index n = initial_csc ? initial_csc->n : G.n();
     if (n == 0)
         return {};
 
@@ -1433,7 +1433,8 @@ inline tree_elimination make_tree_elim(const factor_options& opts,
 template<typename Partitioner, eliminator E>
 factorization factorize(const Eigen::SparseMatrix<double>& L, const E& elim,
                         const factor_options& opts) {
-    return detail::factorize_operator(L, opts, [&](graph&& G, const auto& graph_options) {
+    const detail::eigen_csc input(L);
+    return detail::factorize_operator(detail::factorize_input(input, opts), opts, [&](graph&& G, const auto& graph_options) {
         Partitioner partitioner;
         return detail::factorize_impl(elim, partitioner, std::move(G), graph_options, nullptr);
     });
@@ -1442,7 +1443,8 @@ factorization factorize(const Eigen::SparseMatrix<double>& L, const E& elim,
 template<partitioner P>
 factorization factorize(const Eigen::SparseMatrix<double>& L, P part,
                         const factor_options& opts) {
-    return detail::factorize_operator(L, opts, [&](graph&& G, const auto& graph_options) {
+    const detail::eigen_csc input(L);
+    return detail::factorize_operator(detail::factorize_input(input, opts), opts, [&](graph&& G, const auto& graph_options) {
         return detail::factorize_impl(detail::make_tree_elim(graph_options), part,
                                       std::move(G), graph_options, nullptr);
     });
@@ -1451,7 +1453,8 @@ factorization factorize(const Eigen::SparseMatrix<double>& L, P part,
 template<partitioner P, eliminator E>
 factorization factorize(const Eigen::SparseMatrix<double>& L, P part, const E& elim,
                         const factor_options& opts) {
-    return detail::factorize_operator(L, opts, [&](graph&& G, const auto& graph_options) {
+    const detail::eigen_csc input(L);
+    return detail::factorize_operator(detail::factorize_input(input, opts), opts, [&](graph&& G, const auto& graph_options) {
         return detail::factorize_impl(elim, part, std::move(G), graph_options, nullptr);
     });
 }

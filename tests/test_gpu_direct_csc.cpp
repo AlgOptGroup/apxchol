@@ -32,6 +32,24 @@ using apxchol::detail::gpu_round_shadow_input;
 
 struct weighted_edge { int u, v; double weight; };
 
+// Eligibility of an Eigen fixture after the library's boundary conversion,
+// which compresses storage; a matrix that is not square is never eligible.
+bool gpu_owned_csc_supported(const matrix& A) {
+    try {
+        const apxchol::detail::eigen_csc input(A);
+        return input.square() && apxchol::detail::gpu_owned_csc_supported(input.ref());
+    } catch (const std::invalid_argument&) {
+        return false; // Corrupt storage the boundary cannot convert.
+    }
+}
+
+// An operator_view of an Eigen fixture, keeping the converted input alive.
+struct viewed {
+    apxchol::detail::eigen_csc input;
+    apxchol::detail::operator_view op;
+    explicit viewed(const matrix& A) : input(A), op(input.ref()) {}
+};
+
 matrix make_matrix(int n, const std::vector<weighted_edge>& edges, double shift = 0.0) {
     std::vector<Eigen::Triplet<double>> entries;
     std::vector<double> diagonal(n, shift);
@@ -89,7 +107,6 @@ matrix make_matrix(int n, const std::vector<weighted_edge>& edges, double shift 
 
 TEST(GpuDirectCscHost, RejectsUnsupportedStoredFormatsBeforeCuda) {
     scoped_omp_threads serial(1);
-    using apxchol::detail::gpu_owned_csc_supported;
     const auto valid = make_matrix(3, {{0,1,1.0},{0,2,2.0},{1,2,0.5}});
     ASSERT_TRUE(gpu_owned_csc_supported(valid));
     auto spare_capacity = valid;
@@ -107,8 +124,10 @@ TEST(GpuDirectCscHost, RejectsUnsupportedStoredFormatsBeforeCuda) {
     std::vector<matrix> unsupported;
     unsupported.emplace_back(0, 0);
     unsupported.emplace_back(2, 3);
+    // Uncompressed storage is compressed at the boundary and stays eligible.
     auto uncompressed = valid; uncompressed.uncompress();
-    ASSERT_FALSE(uncompressed.isCompressed()); unsupported.push_back(std::move(uncompressed));
+    ASSERT_FALSE(uncompressed.isCompressed());
+    EXPECT_TRUE(gpu_owned_csc_supported(uncompressed));
     for (bool lower : {false, true}) {
         matrix triangular(2, 2);
         std::vector<Eigen::Triplet<double>> entries{{0,0,1.0},{1,1,1.0}};
@@ -124,21 +143,21 @@ TEST(GpuDirectCscHost, RejectsUnsupportedStoredFormatsBeforeCuda) {
         case 2: bad.innerIndexPtr()[1] = -1; break;
         case 3: bad.innerIndexPtr()[1] = 3; break;
         case 4: bad.outerIndexPtr()[1] = -1; break;
-        case 5: bad.outerIndexPtr()[3] = bad.data().size() + 1; break;
-        case 6: bad.outerIndexPtr()[3] = -1; break;
+        case 5: bad.outerIndexPtr()[2] = bad.outerIndexPtr()[3] + 1; break;
+        case 6: bad.outerIndexPtr()[2] = -1; break;
         case 7: bad.outerIndexPtr()[0] = 1; break;
         }
         unsupported.push_back(std::move(bad));
     }
-    ASSERT_EQ(unsupported.size(), 13u);
-    unsupported[2].uncompress(); // Eigen copies may recompress; fix the final stored fixture.
-    ASSERT_FALSE(unsupported[2].isCompressed());
+    ASSERT_EQ(unsupported.size(), 12u);
     for (std::size_t i = 0; i < unsupported.size(); ++i) {
         SCOPED_TRACE(i);
         EXPECT_FALSE(gpu_owned_csc_supported(unsupported[i]));
 #if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
         // No runtime/device probe: unsupported layouts must stop on the host.
-        const auto got = apxchol::detail::gpu_initial_owned_csc_for_test(unsupported[i]);
+        const auto got = gpu_owned_csc_supported(unsupported[i])
+            ? apxchol::detail::gpu_initial_owned_csc_for_test(apxchol::detail::eigen_csc(unsupported[i]))
+            : apxchol::detail::gpu_owned_csc_test_result{};
         EXPECT_FALSE(got.eligible); EXPECT_TRUE(got.initial.incidences.empty());
 #endif
     }
@@ -146,7 +165,6 @@ TEST(GpuDirectCscHost, RejectsUnsupportedStoredFormatsBeforeCuda) {
 
 TEST(GpuDirectCscHost, CertifiedEligibilityMatchesRawForValidatedInputs) {
     scoped_omp_threads serial(1);
-    using apxchol::detail::gpu_owned_csc_supported;
     std::vector<matrix> fixtures;
     fixtures.push_back(make_matrix(4, {{0,1,1.0},{1,2,2.0}}, 0.5));
     fixtures.emplace_back(0, 0);
@@ -165,35 +183,34 @@ TEST(GpuDirectCscHost, CertifiedEligibilityMatchesRawForValidatedInputs) {
         auto one_zero = make_matrix(3, {}, 1.0);
         one_zero.coeffRef(lower ? 1 : 0, lower ? 0 : 1) = 0.0;
         one_zero.makeCompressed();
-        const apxchol::detail::operator_view op(one_zero);
-        EXPECT_EQ(op.scan().offdiag_nnz, 0);
-        EXPECT_FALSE(gpu_owned_csc_supported(op));
+        const viewed checked(one_zero);
+        EXPECT_EQ(checked.op.scan().offdiag_nnz, 0);
+        EXPECT_FALSE(gpu_owned_csc_supported(checked.op));
         fixtures.push_back(one_zero);
     }
     auto unrelated_zeros = make_matrix(3, {}, 1.0);
     unrelated_zeros.coeffRef(1,0) = 0.0;
     unrelated_zeros.coeffRef(1,2) = -0.0;
     unrelated_zeros.makeCompressed();
-    EXPECT_FALSE(gpu_owned_csc_supported(apxchol::detail::operator_view(unrelated_zeros)));
+    EXPECT_FALSE(gpu_owned_csc_supported(viewed(unrelated_zeros).op));
     fixtures.push_back(unrelated_zeros);
     auto lumped = make_matrix(3, {{0,1,1.0},{1,2,-1e-6}}, 1.0);
-    const apxchol::detail::operator_view op_lumped(lumped);
-    EXPECT_EQ(op_lumped.lumped(), 2);
+    const viewed op_lumped(lumped);
+    EXPECT_EQ(op_lumped.op.lumped(), 2);
     fixtures.push_back(lumped);
     for (std::size_t i = 0; i < fixtures.size(); ++i) {
         SCOPED_TRACE(i);
-        const apxchol::detail::operator_view op(fixtures[i]);
-        EXPECT_EQ(gpu_owned_csc_supported(op), gpu_owned_csc_supported(op.matrix()));
+        const viewed checked(fixtures[i]);
+        EXPECT_EQ(gpu_owned_csc_supported(checked.op), gpu_owned_csc_supported(checked.op.matrix()));
     }
     auto uncompressed = fixtures.front();
     uncompressed.uncompress();
-    const apxchol::detail::operator_view op(uncompressed);
-    EXPECT_FALSE(gpu_owned_csc_supported(op));
+    const viewed checked(uncompressed);
+    EXPECT_EQ(gpu_owned_csc_supported(checked.op), gpu_owned_csc_supported(fixtures.front()));
 }
 
 TEST(GpuDirectCscHost, CertifiedEligibilityRejectsDuplicateAndUnsortedZeroColumns) {
     scoped_omp_threads serial(1);
-    using apxchol::detail::gpu_owned_csc_supported;
     for (bool duplicate : {false, true}) {
         auto A = make_matrix(4, {{0,2,0.0},{0,3,0.0}}, 1.0);
         ASSERT_EQ(A.innerIndexPtr()[1], 2);
@@ -202,9 +219,9 @@ TEST(GpuDirectCscHost, CertifiedEligibilityRejectsDuplicateAndUnsortedZeroColumn
         else std::swap(A.innerIndexPtr()[1], A.innerIndexPtr()[2]);
         // The numerical scan has no edges to reject. Strict layout validation
         // must run even when an operator_view was constructed successfully.
-        const apxchol::detail::operator_view op(A);
-        ASSERT_EQ(op.scan().offdiag_nnz, 0);
-        EXPECT_FALSE(gpu_owned_csc_supported(op));
+        const viewed checked(A);
+        ASSERT_EQ(checked.op.scan().offdiag_nnz, 0);
+        EXPECT_FALSE(gpu_owned_csc_supported(checked.op));
         EXPECT_FALSE(gpu_owned_csc_supported(A));
     }
 }
@@ -216,13 +233,13 @@ TEST(GpuDirectCscHost, NumericalCertificateRejectsMissingTinyNonzeroMates) {
             auto A = make_matrix(3, {}, 1.0);
             A.coeffRef(lower ? 1 : 0, lower ? 0 : 1) = -weight;
             A.makeCompressed();
-            EXPECT_THROW((void)apxchol::detail::operator_view(A), std::invalid_argument);
+            EXPECT_THROW((void)viewed(A), std::invalid_argument);
         }
         auto balanced = make_matrix(3, {}, 1.0);
         balanced.coeffRef(1,0) = -weight;
         balanced.coeffRef(1,2) = -weight;
         balanced.makeCompressed();
-        EXPECT_THROW((void)apxchol::detail::operator_view(balanced), std::invalid_argument);
+        EXPECT_THROW((void)viewed(balanced), std::invalid_argument);
     }
 }
 
@@ -242,8 +259,8 @@ TEST(GpuDirectCsc, InitialArraysMatchHostBuilderIncludingRoundingAndSignedZero) 
     for (int v = 0; v < 4; ++v) asymmetric.coeffRef(v,v) = 2.0;
     asymmetric.coeffRef(0,1) = -std::nextafter(1.0, 2.0);
     asymmetric.coeffRef(2,3) = -std::nextafter(1.0+0x1p-25, 2.0);
-    const apxchol::detail::operator_view tolerated(asymmetric);
-    EXPECT_EQ(tolerated.lumped(), 0);
+    const viewed tolerated(asymmetric);
+    EXPECT_EQ(tolerated.op.lumped(), 0);
     fixtures.push_back(asymmetric); // Tolerated asymmetry still uses LOWER weights twice.
     auto signed_zero = make_matrix(3, {{0,1,-0.0}}, 1.0);
     signed_zero.coeffRef(1,0) = +0.0; signed_zero.coeffRef(0,1) = -0.0;
@@ -254,9 +271,9 @@ TEST(GpuDirectCsc, InitialArraysMatchHostBuilderIncludingRoundingAndSignedZero) 
             SCOPED_TRACE(threads);
             SCOPED_TRACE(i);
             const auto& A = fixtures[i];
-            ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(A));
+            ASSERT_TRUE(gpu_owned_csc_supported(A));
             const auto expected = host_snapshot(A);
-            const auto got = apxchol::detail::gpu_initial_owned_csc_for_test(A);
+            const auto got = apxchol::detail::gpu_initial_owned_csc_for_test(apxchol::detail::eigen_csc(A));
             ASSERT_TRUE(got.eligible);
             expect_same_snapshot(got.initial, expected);
             EXPECT_EQ(got.sddm, std::any_of(expected.excess.begin(), expected.excess.end(),
@@ -296,7 +313,7 @@ TEST(GpuDirectCsc, ExcessUsesOriginalOrderedDoublesAndStrictThresholdBeforeRegul
     EXPECT_GT(expected.excess[4], 1.0);
     for (double reg : {0.0, 0.5e-12, 2e-12}) {
         SCOPED_TRACE(reg);
-        const auto got = apxchol::detail::gpu_initial_owned_csc_for_test(A, reg);
+        const auto got = apxchol::detail::gpu_initial_owned_csc_for_test(apxchol::detail::eigen_csc(A), reg);
         ASSERT_TRUE(got.eligible);
         expect_same_snapshot(got.initial, host_snapshot(A, reg));
         EXPECT_TRUE(got.sddm);
@@ -307,7 +324,7 @@ TEST(GpuDirectCsc, ExcessUsesOriginalOrderedDoublesAndStrictThresholdBeforeRegul
     ordered.coeffRef(0,0) = 0x1p40 + 16.0;
     const auto want = host_snapshot(ordered);
     EXPECT_EQ(want.excess[0], 12.0);
-    expect_same_snapshot(apxchol::detail::gpu_initial_owned_csc_for_test(ordered).initial, want);
+    expect_same_snapshot(apxchol::detail::gpu_initial_owned_csc_for_test(apxchol::detail::eigen_csc(ordered)).initial, want);
 #endif
 }
 
@@ -324,13 +341,13 @@ TEST(GpuDirectCsc, InvalidNumericalInputsFailWithoutPublishingAnInitialSnapshot)
         if (fault == 1) A.coeffRef(0,0) = std::numeric_limits<double>::infinity();
         if (fault == 2) A.coeffRef(1,0) = 1.0; // Negative canonical graph weight.
         SCOPED_TRACE(fault);
-        ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(A));
+        ASSERT_TRUE(gpu_owned_csc_supported(A));
         const double reg = fault == 3 ? std::numeric_limits<double>::infinity() : 0.0;
-        EXPECT_THROW((void)apxchol::detail::gpu_initial_owned_csc_for_test(A, reg), std::invalid_argument);
+        EXPECT_THROW((void)apxchol::detail::gpu_initial_owned_csc_for_test(apxchol::detail::eigen_csc(A), reg), std::invalid_argument);
     }
     const double overflow = 2.0 * static_cast<double>(std::numeric_limits<float>::max());
     auto A = make_matrix(2, {{0,1,overflow}});
-    EXPECT_THROW((void)apxchol::detail::gpu_initial_owned_csc_for_test(A), std::invalid_argument);
+    EXPECT_THROW((void)apxchol::detail::gpu_initial_owned_csc_for_test(apxchol::detail::eigen_csc(A)), std::invalid_argument);
 #endif
 }
 
@@ -342,14 +359,14 @@ TEST(GpuDirectCsc, FirstSelectorHasCorrectCandidatesAndIndependentProgress) {
     scoped_omp_threads serial(1);
     const auto A = selector_matrix();
     const auto graph = apxchol::make_graph(A);
-    ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(A));
+    ASSERT_TRUE(gpu_owned_csc_supported(A));
     std::vector<node_index> active(graph.n()); std::iota(active.begin(),active.end(),node_index{0});
     for (bool ties : {false, true}) for (double quantile : {0.0, 0.3, 0.8}) {
         SCOPED_TRACE(ties);
         SCOPED_TRACE(quantile);
         apxchol::detail::gpu_round_shadow_session owner(true);
         std::unique_ptr<apxchol::detail::gpu_block_frontend> direct;
-        owner.initialize_owned_csc(apxchol::detail::gpu_owned_csc_host_buffers(A), direct);
+        owner.initialize_owned_csc(apxchol::detail::gpu_owned_csc_host_buffers(apxchol::detail::eigen_csc(A)), direct);
         apxchol::partition_options options;
         options.degree_quantile = quantile;
         const auto got = direct->prepare(active, options, 42, 0, ties);
@@ -413,8 +430,8 @@ TEST(GpuDirectCsc, InitialOwnerOutlivesInputAndRetiresEveryBorrowedSelectorRead)
         const auto graph = apxchol::make_graph(original);
         {
             auto temporary = original;
-            ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(temporary));
-            owner->initialize_owned_csc(apxchol::detail::gpu_owned_csc_host_buffers(temporary), direct);
+            ASSERT_TRUE(gpu_owned_csc_supported(temporary));
+            owner->initialize_owned_csc(apxchol::detail::gpu_owned_csc_host_buffers(apxchol::detail::eigen_csc(temporary)), direct);
             temporary.setZero(); // The owner must retain neither values nor index pointers.
         }
         std::vector<node_index> active(graph.n()); std::iota(active.begin(),active.end(),node_index{0});

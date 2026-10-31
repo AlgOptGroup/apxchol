@@ -307,8 +307,14 @@ TEST_F(SolverArchive, SharedReconstructionReversesBothCoordinatePermutations) {
             entries.emplace_back(perm[e.row()], perm[e.col()], e.value());
     Eigen::SparseMatrix<double, Eigen::RowMajor> stored(expected.rows(), expected.cols());
     stored.setFromTriplets(entries.begin(), entries.end());
-    const auto restored = detail::archive_operator_csc(static_cast<int>(expected.rows()),
-        stored.outerIndexPtr(), stored.innerIndexPtr(), stored.valuePtr(), perm);
+    // The row-major arrays are the CSC arrays of the transpose.
+    Sparse transposed(expected.rows(), expected.cols());
+    transposed.resizeNonZeros(static_cast<int>(stored.nonZeros()));
+    std::copy_n(stored.outerIndexPtr(), stored.rows() + 1, transposed.outerIndexPtr());
+    std::copy_n(stored.innerIndexPtr(), stored.nonZeros(), transposed.innerIndexPtr());
+    std::copy_n(stored.valuePtr(), stored.nonZeros(), transposed.valuePtr());
+    const detail::eigen_csc input(transposed);
+    const auto restored = detail::to_eigen(detail::archive_operator_csc(input.ref(), perm).ref());
     EXPECT_EQ(restored.nonZeros(), expected.nonZeros());
     EXPECT_EQ((restored - expected).norm(), 0.0);
 }

@@ -1,16 +1,10 @@
 #pragma once
+#include "apxchol/detail/dense.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
 
 namespace apxchol::detail::gpu_scaling {
-
-// Use the stable reduction when the sum of squares is outside the normal range.
-template <class Vector>
-auto norm(const Vector& v) {
-    const auto squared = v.squaredNorm();
-    return std::isnormal(squared) ? std::sqrt(squared) : v.stableNorm();
-}
 
 // Bring a finite, positive maximum into [1, 2), capping the scale for the
 // smallest inputs. Power-of-two scaling preserves representable significands.
@@ -19,26 +13,44 @@ inline double pow2_scale(double max_abs) {
     return std::ldexp(1.0, exponent);
 }
 
+// Norm of scale * v without overflow or underflow in the sum of squares: the
+// ordinary sum when it is normal, otherwise the sum of squares of v scaled
+// into [1, 2) by a power of two, unscaled after the square root.
+inline double scaled_norm(const_matrix_ref v, double scale) {
+    const double squared = scale == 1 ? vec::squared_norm(v) : vec::scaled_squared_norm(v, scale);
+    if (std::isnormal(squared)) return std::sqrt(squared);
+    const double maximum = vec::max_abs(v) * scale;
+    if (maximum == 0 || !std::isfinite(maximum)) return maximum;
+    const double stable = pow2_scale(maximum);
+    double sum = 0;
+    for (std::int64_t i = 0; i < v.rows(); ++i) {
+        const double x = (scale * v[i]) * stable;
+        sum += x * x;
+    }
+    return std::sqrt(sum) / stable;
+}
+
+// Use the stable reduction when the sum of squares is outside the normal range.
+inline double norm(const_matrix_ref v) { return scaled_norm(v, 1.0); }
+
 // Keep ratios and scaled norms representable even when the true norm overflows.
 struct norm_reference {
     double value = 0, scale = 1;
 
     norm_reference() = default;
-    template<class Vector>
-    explicit norm_reference(const Vector& v) : value(norm(v)) {
+    explicit norm_reference(const_matrix_ref v) : value(norm(v)) {
         if (std::isinf(value)) {
-            scale = pow2_scale(v.cwiseAbs().maxCoeff());
-            value = norm(v * scale);
+            scale = pow2_scale(vec::max_abs(v));
+            value = scaled_norm(v, scale);
         }
     }
-    template<class Vector>
-    double relative(const Vector& v) const {
+    double relative(const_matrix_ref v) const {
         const double length = norm(v);
         if (!std::isinf(length)) return (length / value) * scale;
-        const double maximum = v.cwiseAbs().maxCoeff();
+        const double maximum = vec::max_abs(v);
         if (!std::isfinite(maximum)) return length;
         const double reduction = pow2_scale(maximum);
-        return norm(v * reduction) / (value * (reduction / scale));
+        return scaled_norm(v, reduction) / (value * (reduction / scale));
     }
     double scaled(double factor) const {
         return scale == 1 ? value * factor : value * (factor / scale);

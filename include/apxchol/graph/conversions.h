@@ -5,6 +5,8 @@
 ///   make_graph(L) — Eigen Laplacian → graph
 
 #include "apxchol/csc_work.h"
+#include "apxchol/detail/csc_matrix.h"
+#include "apxchol/detail/eigen_boundary.h"
 #include "apxchol/detail/operator_options.h"
 #include "apxchol/graph/graph.h"
 #include <Eigen/Sparse>
@@ -51,11 +53,11 @@ namespace detail {
 /// length) cache misses per entry, landing in the hub columns of power-law and
 /// IPM operators. Pass false whenever that proof is not at hand; the result is
 /// identical either way, only the work differs.
-inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
+inline graph make_graph_from_operator(csc_ref<double> L,
                            bool triangles_bit_identical, double regularization = 0) {
     validate_regularization(regularization);
-    const auto n = static_cast<node_index>(L.rows());
-    const auto outer = static_cast<node_index>(L.outerSize());
+    const node_index n = L.n;
+    const node_index outer = L.n;
     graph g(n);
 
     std::vector<double> diag(n, 0.0);
@@ -73,14 +75,14 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
     // A full symmetric CSC already lists every incidence of a vertex in its
     // column. Give that column one writer instead of atomically counting and
     // appending both endpoints of each lower-triangle entry, then sorting.
-    // The general path below remains authoritative for uncompressed storage,
-    // duplicate indices, and one-triangle/asymmetric stored patterns.
+    // The general path below remains authoritative for duplicate indices
+    // and one-triangle/asymmetric stored patterns.
     bool built_from_columns = false;
     {
-        if (L.isCompressed() && L.rows() == L.cols()) {
-            const int* ptr = L.outerIndexPtr();
-            const int* idx = L.innerIndexPtr();
-            const double* val = L.valuePtr();
+        {
+            const edge_index* ptr = L.ptr;
+            const node_index* idx = L.idx;
+            const double* val = L.val;
             std::vector<node_index> incoming(static_cast<size_t>(n), 0);
             bool unique_sorted = true;
             // Columns are split by stored entries, not by count: with hub
@@ -93,10 +95,10 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
                 ptr, n, omp_get_thread_num(), omp_get_num_threads());
             for (node_index col = col_lo; col < col_hi; ++col) {
                 node_index count = 0;
-                for (int p = ptr[col]; p < ptr[col + 1]; ++p) {
+                for (edge_index p = ptr[col]; p < ptr[col + 1]; ++p) {
                     if (p > ptr[col] && idx[p - 1] >= idx[p])
                         unique_sorted = false;
-                    if (idx[p] == static_cast<int>(col)) diag[col] = val[p];
+                    if (idx[p] == col) diag[col] = val[p];
                     else ++count;
                 }
                 incoming[col] = count;
@@ -116,21 +118,19 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
                     ptr, n, omp_get_thread_num(), omp_get_num_threads());
                 for (node_index col = col_lo; col < col_hi; ++col) {
                     node_index offset = 0;
-                    for (int p = ptr[col]; p < ptr[col + 1]; ++p) {
-                        const int row = idx[p];
-                        if (row == static_cast<int>(col)) continue;
+                    for (edge_index p = ptr[col]; p < ptr[col + 1]; ++p) {
+                        const node_index row = idx[p];
+                        if (row == col) continue;
                         double weight = -val[p];
-                        if (row < static_cast<int>(col) && triangles_bit_identical) {
+                        if (row < col && triangles_bit_identical) {
                             // Proven bit-identical triangles: val[p] IS the
                             // canonical lower value, and its partner exists.
                             ++upper;
-                        } else if (row < static_cast<int>(col)) {
+                        } else if (row < col) {
                             ++upper;
-                            const int* mate = std::lower_bound(
-                                idx + ptr[row], idx + ptr[row + 1],
-                                static_cast<int>(col));
-                            if (mate == idx + ptr[row + 1] ||
-                                *mate != static_cast<int>(col)) {
+                            const node_index* mate = std::lower_bound(
+                                idx + ptr[row], idx + ptr[row + 1], col);
+                            if (mate == idx + ptr[row + 1] || *mate != col) {
                                 paired = false;
                             } else {
                                 // Like the general builder, both incidences
@@ -141,8 +141,7 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
                         } else {
                             ++lower;
                         }
-                        g.adj_write_reserved_directed_at(
-                            col, offset++, static_cast<node_index>(row), weight);
+                        g.adj_write_reserved_directed_at(col, offset++, row, weight);
                     }
                     g.adj_commit_reserved_directed(col, offset);
                 }
@@ -162,9 +161,8 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
         // Split both column passes by stored entries across the actual team.
         // Atomic counts and endpoint writes are independent of that split;
         // sorting each touched slab restores deterministic neighbor order.
-        // Outer pointers also bound column storage when L is uncompressed.
         const int nt = std::max(1, omp_get_max_threads());
-        const int* outer_ptr = L.outerIndexPtr();
+        const edge_index* outer_ptr = L.ptr;
         std::vector<node_index> incoming(static_cast<size_t>(n), 0);
 
         // PASS 1: atomic count of incoming + collect diag.
@@ -172,12 +170,13 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
         {
             const auto [col_lo, col_hi] = detail::work_balanced_range(outer_ptr, outer);
             for (node_index k = col_lo; k < col_hi; ++k) {
-                for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it) {
-                    if (it.row() > it.col()) {
-                        std::atomic_ref(incoming[it.row()]).fetch_add(1, std::memory_order_relaxed);
-                        std::atomic_ref(incoming[it.col()]).fetch_add(1, std::memory_order_relaxed);
-                    } else if (it.row() == it.col()) {
-                        diag[k] = it.value();
+                for (edge_index p = L.ptr[k]; p < L.ptr[k + 1]; ++p) {
+                    const node_index row = L.idx[p];
+                    if (row > k) {
+                        std::atomic_ref(incoming[row]).fetch_add(1, std::memory_order_relaxed);
+                        std::atomic_ref(incoming[k]).fetch_add(1, std::memory_order_relaxed);
+                    } else if (row == k) {
+                        diag[k] = L.val[p];
                     }
                 }
             }
@@ -225,12 +224,11 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
             {
                 const auto [col_lo, col_hi] = detail::work_balanced_range(outer_ptr, outer);
                 for (node_index k = col_lo; k < col_hi; ++k)
-                    for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it) {
-                        if (it.row() > it.col()) {
-                            const auto u = static_cast<node_index>(it.row());
-                            const auto v = static_cast<node_index>(it.col());
-                            g.adj_atomic_push_directed(u, v, -it.value());
-                            g.adj_atomic_push_directed(v, u, -it.value());
+                    for (edge_index p = L.ptr[k]; p < L.ptr[k + 1]; ++p) {
+                        const node_index u = L.idx[p];
+                        if (u > k) {
+                            g.adj_atomic_push_directed(u, k, -L.val[p]);
+                            g.adj_atomic_push_directed(k, u, -L.val[p]);
                         }
                     }
             }
@@ -253,7 +251,7 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
     // L is symmetric (Laplacian/SDDM contract), so column v contains every
     // neighbor of v: summing −L(u,v) over the full column yields each
     // vertex's exact weighted degree with a fixed accumulation order
-    // (Eigen's sorted inner order) — deterministic across thread counts
+    // (the stored column order) — deterministic across thread counts
     // and identical for all storage backends. Per-column work is
     // independent → safe in parallel.
     //
@@ -267,13 +265,12 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
     bool invalid_excess = false;
     #pragma omp parallel if(n > 16384) reduction(||:invalid_excess)
     {
-        const auto [col_lo, col_hi] =
-            detail::work_balanced_range(L.outerIndexPtr(), outer);
+        const auto [col_lo, col_hi] = detail::work_balanced_range(L.ptr, outer);
         for (node_index k = col_lo; k < col_hi; ++k) {
             double wdeg = 0.0;
-            for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it)
-                if (it.row() != it.col())
-                    wdeg -= it.value();
+            for (edge_index p = L.ptr[k]; p < L.ptr[k + 1]; ++p)
+                if (L.idx[p] != k)
+                    wdeg -= L.val[p];
             double excess = diag[k] - wdeg;
             excess = excess > diag[k] * 1e-12 ? excess : 0.0;
             if (regularization > 0.0)
@@ -296,7 +293,9 @@ inline graph make_graph_from_operator(const Eigen::SparseMatrix<double>& L,
 /// Any excess diagonal (row sum > 0, i.e. SDDM) is stored
 /// per-vertex in graph::excess() for use during factorization.
 inline graph make_graph(const Eigen::SparseMatrix<double>& L) {
-    return detail::make_graph_from_operator(L, /*triangles_bit_identical=*/false);
+    const detail::eigen_csc input(L);
+    if (!input.square()) throw std::invalid_argument("make_graph: matrix must be square");
+    return detail::make_graph_from_operator(input, /*triangles_bit_identical=*/false);
 }
 
 } // namespace apxchol

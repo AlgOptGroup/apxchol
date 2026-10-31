@@ -1,6 +1,6 @@
 #pragma once
 #include "apxchol/solver/detail/cpu_parallel.h"
-#include <Eigen/Core>
+#include <cstdint>
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -32,11 +32,11 @@ inline constexpr int kPartStride = 8;
 
 /// Contiguous chunk of [0, n) owned by thread `tid` of `nt`: the first
 /// (n mod nt) threads get one extra element, exactly like schedule(static).
-inline std::pair<Eigen::Index, Eigen::Index>
-static_chunk(Eigen::Index n, int tid, int nt) noexcept {
-    const Eigen::Index base = n / nt, rem = n % nt;
-    const Eigen::Index lo = static_cast<Eigen::Index>(tid) * base
-                          + std::min<Eigen::Index>(tid, rem);
+inline std::pair<std::int64_t, std::int64_t>
+static_chunk(std::int64_t n, int tid, int nt) noexcept {
+    const std::int64_t base = n / nt, rem = n % nt;
+    const std::int64_t lo = static_cast<std::int64_t>(tid) * base
+                          + std::min<std::int64_t>(tid, rem);
     return {lo, lo + base + (tid < rem ? 1 : 0)};
 }
 
@@ -65,7 +65,7 @@ inline double reduce_parts(const double* part, int nt, int slot = 0, int stride 
 /// Deterministic parallel Σ v[i], i in [0, n). `part` must hold
 /// part_capacity() doubles. Fixed 4-way accumulator split per chunk.
 template<int Columns>
-std::array<double, Columns> det_sum_columns(const double* v, Eigen::Index n, double* part) {
+std::array<double, Columns> det_sum_columns(const double* v, std::int64_t n, double* part) {
     static_assert(Columns > 0 && Columns <= kPartStride);
     int nt_used = 1;
     const int workers = cpu_solve_threads(n);
@@ -75,7 +75,7 @@ std::array<double, Columns> det_sum_columns(const double* v, Eigen::Index n, dou
         if (tid == 0) nt_used = nt;
         const auto [lo, hi] = static_chunk(n, tid, nt);
         std::array<double, Columns> s0{}, s1{}, s2{}, s3{};
-        Eigen::Index i = lo;
+        std::int64_t i = lo;
         for (; i + 4 <= hi; i += 4)
             for (int c = 0; c < Columns; ++c) {
                 s0[c] += v[(i + 0) * Columns + c];
