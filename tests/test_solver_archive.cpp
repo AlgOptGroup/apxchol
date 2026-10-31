@@ -348,9 +348,14 @@ TEST_F(SolverArchive, ReleasedFactorsAreRejected) {
 }
 
 TEST_F(SolverArchive, NewArchivesFollowTheUmask) {
-    const mode_t previous = umask(022);
-    save_solver(directory / "shared.apxchol", original);
-    umask(previous);
+    struct umask_guard {
+        mode_t previous = umask(022);
+        ~umask_guard() { umask(previous); }
+    };
+    {
+        const umask_guard guard;
+        save_solver(directory / "shared.apxchol", original);
+    }
     struct stat info {};
     ASSERT_EQ(stat((directory / "shared.apxchol").c_str(), &info), 0);
     EXPECT_EQ(info.st_mode & 0777, 0644);

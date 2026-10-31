@@ -27,7 +27,7 @@ The MATLAB/Octave loader accepts the normal constructor options and uses CPU,
 as with ordinary construction. Set `keep_factor=true` when loading to save the
 restored solver again.
 
-Saving requires retained factor values. It writes `<path>.tmp`, flushes it to disk and renames it onto `<path>`, so an existing file is replaced and readers never see a partial archive. If `<path>.tmp` already exists, another save to the same path is running or an earlier save was interrupted; saving fails and names that file, which must be removed. The `.apxchol` extension is a convention; loading checks the file contents.
+Saving requires retained factor values. It writes `<path>.tmp`, flushes it to disk and renames it onto `<path>`, so an existing file is replaced and readers never see a partial archive. If `<path>.tmp` already exists, another save to the same path is running or an earlier save was interrupted; saving fails and names that file. Remove it only when no save to that path is running. The `.apxchol` extension is a convention; loading checks the file contents.
 
 The original operator is reconstructed from the solver’s owned data when saving, without keeping another permanent matrix copy. CUDA saving downloads that operator to the host. The file preserves the coefficients used by the solver; duplicate entries and tolerated differences between the input’s two triangles have already been normalized.
 
