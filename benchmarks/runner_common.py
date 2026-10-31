@@ -14,13 +14,11 @@ sweep_fair.py / parac_runner.py / thread_scaling.py:
                    status set as a PARAMETER (the per-runner sets deliberately
                    differ: parac_runner retries failed/timeout, sweep_fair doesn't).
   - parse_csv/classify  the benchmark-binary CSV row -> metrics dict + status.
-  - VramSampler    nvidia-smi peak-VRAM sidecar thread (GPU axis), parameterized
-                   by the compute-process name to match.
   - ParAC constants + the AMD-reorder cache path helper.
 
 All runners (sweep_fair, thread_scaling, parac_runner) import these helpers rather than carrying their own copies.
 """
-import functools, hashlib, json, math, os, re, shlex, signal, subprocess, tempfile, threading
+import functools, hashlib, json, math, os, re, shlex, signal, subprocess, tempfile
 from pathlib import Path
 
 try:
@@ -714,6 +712,43 @@ def parse_cuda_init(stderr):
     return float(match.group(1)) / 1000.0 if match else None
 
 
+_GPU_MEMORY_RE = re.compile(
+    r'^\[bench\]\s+gpu_memory\s+pid=(\d+)\s+bus_id=(\S+)\s+baseline_mib=(?:([0-9.]+)|'
+    r'unavailable reason=(.+?))\s+other_processes=(\d+|unknown)\s+other_mib=([0-9.]+|unknown)\s*$',
+    re.M)
+
+def _gpu_memory_receipt(stderr):
+    """The binary's per-process NVML baseline receipt, or None (no GPU route ran)."""
+    m = _GPU_MEMORY_RE.search(stderr or "")
+    if not m:
+        return None
+    pid, bus, baseline, reason, others, other_mib = m.groups()
+    return dict(pid=int(pid), bus_id=bus.upper(),
+                baseline=float(baseline) if baseline else None, unavailable=reason,
+                others=None if others == "unknown" else int(others),
+                other_mib=None if other_mib == "unknown" else float(other_mib))
+
+
+def parse_gpu_memory(stderr):
+    """Cell metrics from the binary's `[bench] gpu_memory` receipt.
+
+    `vram_baseline_mb` is this process's NVML device memory right after CUDA context
+    creation (None, with `vram_unavailable` naming why, when NVML cannot attribute
+    memory to the process). `gpu_shared` flags a device on which other compute
+    processes held memory when the run started; their count and MiB are kept too.
+    Returns {} when no GPU route ran.
+    """
+    r = _gpu_memory_receipt(stderr)
+    if r is None:
+        return {}
+    out = dict(vram_baseline_mb=r["baseline"], gpu_other_processes=r["others"],
+               gpu_other_mb=r["other_mib"],
+               gpu_shared=None if r["others"] is None else r["others"] > 0)
+    if r["unavailable"]:
+        out["vram_unavailable"] = r["unavailable"]
+    return out
+
+
 def _readelf(path, *args):
     """readelf output for `path`, or "" if it cannot be read."""
     try:
@@ -826,13 +861,18 @@ def parse_csv(out):
                 v = float(f[11])
                 if v >= 0: d["solve_rss_mb"] = v
             except ValueError: pass
-        # NOTE: the binary also emits solve_vram_mb (col 12), but per-process solve-phase
-        # VRAM can't be cleanly isolated (whole-device cudaMemGetInfo is desktop+context
-        # contaminated and doesn't span the separate amgcl TU), so we DON'T store it. The
-        # reliable VRAM metric is peak per-process from the nvidia-smi sidecar (max_vram_mb).
-        if len(f) >= 16:
-            d.update(retained_repeats=int(f[13]), representative_repeat=int(f[14]),
-                     max_repeat_rel_res=float(f[15]))
+        # solve_vram_mb / setup_vram_mb (cols 12/13): this process's NVML device memory
+        # above its post-context baseline; < 0 = unavailable, absent rather than zero.
+        # Binaries before setup_vram_mb emit 16 fields and a device-wide solve_vram_mb
+        # (cudaMemGetInfo total - free), which is not stored.
+        tail = 13
+        if len(f) >= 17:
+            for col, key in ((12, "solve_vram_mb"), (13, "setup_vram_mb")):
+                if float(f[col]) >= 0: d[key] = float(f[col])
+            tail = 14
+        if len(f) >= tail + 3:
+            d.update(retained_repeats=int(f[tail]), representative_repeat=int(f[tail + 1]),
+                     max_repeat_rel_res=float(f[tail + 2]))
         return d
     except (ValueError, IndexError):
         return None
@@ -990,54 +1030,6 @@ def cell_done(family, mid, solver, config, threads, device,
         return False
     status = cell["status"]
     return status in terminal and not (rerun_timeouts and status in ("timeout", "exceeded_cap"))
-
-
-# ── peak-VRAM sidecar (GPU axis) ────────────────────────────────────────────────
-class VramSampler:
-    """Background thread polling `nvidia-smi --query-compute-apps` for the device
-    memory of processes whose name contains `proc_match`, keeping the max -> the
-    whole-run PEAK VRAM (device analog of /usr/bin/time -%M peak RSS; the solver's
-    own cudaMemGetInfo emits the exact solve-phase VRAM). One heavy task runs at a
-    time, so the matched processes belong to this solver. enabled=False = no-op
-    (CPU axis). accounting.mode is Disabled on this box; live polling is the route.
-    """
-    def __init__(self, proc_match, enabled=True, period=0.05):
-        self.proc_match = proc_match; self.enabled = enabled; self.period = period
-        self.peak = 0.0; self._stop = threading.Event(); self._t = None
-
-    def _query(self):
-        try:
-            out = subprocess.run(
-                "nvidia-smi --query-compute-apps=process_name,used_memory --format=csv,noheader,nounits",
-                shell=True, capture_output=True, text=True, timeout=10).stdout
-        except Exception:
-            return None
-        total = 0.0; seen = False
-        for ln in out.splitlines():
-            parts = [x.strip() for x in ln.split(",")]
-            if len(parts) < 2: continue
-            if self.proc_match in parts[0]:
-                try: total += float(parts[1]); seen = True
-                except ValueError: pass
-        return total if seen else 0.0
-
-    def _loop(self):
-        while not self._stop.is_set():
-            v = self._query()
-            if v and v > self.peak: self.peak = v
-            self._stop.wait(self.period)
-
-    def __enter__(self):
-        if self.enabled:
-            self._t = threading.Thread(target=self._loop, daemon=True); self._t.start()
-        return self
-
-    def __exit__(self, *a):
-        self._stop.set()
-        if self._t: self._t.join(timeout=1.0)
-
-    def peak_mb(self):
-        return round(self.peak, 1) if (self.enabled and self.peak > 0) else None
 
 
 # ── ParAC (external checkout) constants ─────────────────────────────────────────

@@ -564,7 +564,7 @@ void detail::metal_route::impl::setup(const Eigen::SparseMatrix<double>& A, chec
     static_assert(std::is_same_v<Eigen::SparseMatrix<double>::StorageIndex, int>);
     laplacian = !F.sddm;
     const auto m = static_cast<std::uint32_t>(laplacian ? n - 1 : n);
-    if (F.L.outerIndexPtr()[m] > static_cast<edge_index>(std::numeric_limits<int>::max()))
+    if (F.L.col_ptrs()[m] > static_cast<edge_index>(std::numeric_limits<int>::max()))
         throw std::length_error("Metal: the factor exceeds the device's 32-bit offsets");
 
     if (cp) { cp->descend("setup"); cp->tick(); }
@@ -599,7 +599,7 @@ void detail::metal_route::impl::setup(const Eigen::SparseMatrix<double>& A, chec
         // Keep compensated dropping in the shared FP64 host implementation.
         // Both backends consume the CSR factor without a level-permuted value copy.
         backward = detail::gpu_factor_prep::build_L11_csc_int<float>(F.L, m);
-        F.L.release_values();
+        detail::sparse_csc_access::release_values(F.L);
         // An installed factor keeps its storage, scales and values as given.
         installed = F.storage != factor_storage_type::automatic;
         if (installed) {
@@ -837,13 +837,16 @@ factorization detail::metal_route::installed_factor() const {
     const auto* ptr = static_cast<const unsigned*>([s.bwd.ptr contents]);
     const auto* idx = static_cast<const unsigned*>([s.bwd.idx contents]);
     const edge_index nnz = m ? ptr[m] : 0;
-    F.L.resize(n, n);
-    F.L.resizeNonZeros(nnz);
-    for (node_index j = 0; j < n; ++j) F.L.outer_[j + 1] = j < m ? ptr[j + 1] : nnz;
-    std::copy(idx, idx + nnz, F.L.inner_.begin());
+    using access = detail::sparse_csc_access;
+    access::resize(F.L, n);
+    access::resize_nonzeros(F.L, nnz);
+    auto& outer = access::outer(F.L);
+    auto& vals = access::vals(F.L);
+    for (node_index j = 0; j < n; ++j) outer[j + 1] = j < m ? ptr[j + 1] : nnz;
+    std::copy(idx, idx + nnz, access::inner(F.L).begin());
     if (!s.factor_fp16) {
         const auto* val = static_cast<const float*>([s.bwd.val contents]);
-        std::copy(val, val + nnz, F.L.vals_.begin());
+        std::copy(val, val + nnz, vals.begin());
         return F;
     }
     const auto* val = static_cast<const _Float16*>([s.bwd.val contents]);
@@ -852,7 +855,7 @@ factorization detail::metal_route::installed_factor() const {
     for (node_index j = 0; j < m; ++j) {
         F.scale[j] = metadata[j].scale;
         for (auto p = ptr[j]; p < ptr[j + 1]; ++p)
-            F.L.vals_[p] = p == ptr[j] ? metadata[j].scaled_diagonal : static_cast<float>(val[p]);
+            vals[p] = p == ptr[j] ? metadata[j].scaled_diagonal : static_cast<float>(val[p]);
     }
     return F;
 }

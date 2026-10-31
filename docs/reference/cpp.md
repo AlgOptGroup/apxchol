@@ -34,7 +34,9 @@ use them when tolerance and iteration-budget arguments are omitted.
 ### Solve options
 
 These defaults apply to each solve. A call may override the tolerance and
-iteration budget without rebuilding the factor.
+iteration budget without rebuilding the factor; an omitted or `std::nullopt`
+argument keeps the default, and an explicit invalid value throws
+`std::invalid_argument`.
 
 ```{doxygenstruct} apxchol::solve_options
 :members: tol, max_iter, factor_opts, backend, num_threads
@@ -69,7 +71,7 @@ argument of `factorize`. Storage precision is separate from construction
 precision and exported values; see the [precision guide](../precision.md).
 
 ```{doxygenstruct} apxchol::factor_options
-:members: seed, regularization, lump_max_mass, factor_storage, drop_tolerance, partition, sampler, is_select, verbose
+:members: seed, regularization, lump_max_mass, factor_storage, drop_tolerance, partition, partitioner, sampler, verbose, experimental
 :undoc-members:
 ```
 
@@ -79,49 +81,33 @@ precision and exported values; see the [precision guide](../precision.md).
 ```{doxygenenum} apxchol::clique_sampler
 ```
 
+```{doxygenenum} apxchol::partitioner_kind
+```
+
 ### Candidate selection
 
 The partitioner chooses independent vertices for elimination. Its degree
 controls live in `factor_options::partition`.
 
 ```{doxygenstruct} apxchol::partition_options
-:members: degree_quantile, degree_multiplier, degree_tiebreak
+:members: degree_quantile, degree_multiplier
 ```
 
-### Advanced controls
+### Experimental controls
 
-These change scheduling, how factorization finishes the remaining graph, or
-sampling rules. Keep their defaults unless comparing a specific alternative.
-GPU construction supports a subset; see [backend selection](../usage.md).
+`factor_options::experimental` holds research controls for scheduling, how
+factorization finishes the remaining graph, and sampling rules. They are
+outside the [1.x compatibility promise](../api.md) and may change in any
+release. Keep their defaults unless comparing a specific alternative.
+GPU routes require the defaults of `cpu_schedule`, `exact_clique_max_degree`,
+`exact_core_max_h` and `double_cycle_min_h`; Metal also requires
+`degree_tiebreak`. See [backend selection](../usage.md).
 
-```{doxygenvariable} apxchol::factor_options::cpu_schedule
-```
-
-```{doxygenvariable} apxchol::factor_options::min_is_fraction
-```
-
-```{doxygenvariable} apxchol::factor_options::omp_threshold
-```
-
-```{doxygenvariable} apxchol::factor_options::parallel_residual_threshold
-```
-
-```{doxygenvariable} apxchol::factor_options::residual_peel
-```
-
-```{doxygenvariable} apxchol::factor_options::exact_clique_max_degree
-```
-
-```{doxygenvariable} apxchol::factor_options::exact_core_max_h
-```
-
-```{doxygenvariable} apxchol::factor_options::double_cycle_min_h
+```{doxygenstruct} apxchol::experimental_options
+:members: cpu_schedule, degree_tiebreak, min_is_fraction, omp_threshold, parallel_residual_threshold, exact_clique_max_degree, exact_core_max_h, double_cycle_min_h
 ```
 
 ```{doxygenenum} apxchol::cpu_sptrsv_schedule
-```
-
-```{doxygenenum} apxchol::residual_peel_strategy
 ```
 
 ## Constructing and reusing a factor
@@ -144,6 +130,13 @@ position. With S = diag(`scale`), or S = I when `scale` is empty, the
 preconditioner is M = Pᵀ L S² Lᵀ P. Keep `L`, the permutation, operator
 kind, round metadata, `storage` and `scale` together when handing a factor to
 another solver.
+
+```{doxygenclass} apxchol::sparse_csc
+:members: rows, cols, nonZeros, has_values, col_ptrs, row_indices, values
+```
+
+`sparse_csc` is a read-only view: `col_ptrs()`, `row_indices()` and `values()`
+return spans over the factor's own arrays.
 
 `storage` distinguishes two forms. `factorize()` returns a construction
 factor (`automatic`): a solver that adopts it applies its own

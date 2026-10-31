@@ -27,6 +27,8 @@
 #include <utility>
 #include <vector>
 
+using csc_access = apxchol::detail::sparse_csc_access;
+
 namespace {
 
 using Sparse = Eigen::SparseMatrix<double>;
@@ -420,7 +422,7 @@ TEST_F(MetalDevice, FourColumnPlansReuseStorageAfterScalarAndWarmSolves) {
         apxchol::solver resident(A, options);
         std::vector<unsigned> row_sizes(A.rows());
         const auto factor = resident.factor();
-        for (auto row : factor.L.inner_) ++row_sizes[row];
+        for (auto row : csc_access::inner(factor.L)) ++row_sizes[row];
         ASSERT_TRUE(std::ranges::any_of(factor.rounds, [&](const auto& round) {
             const auto first = row_sizes.begin() + A.rows() - round.active;
             return round.is_size > 128 &&
@@ -442,7 +444,7 @@ TEST_F(MetalDevice, LongRowMatrixSolvesMatchScalarColumns) {
         apxchol::solver owner(A, options);
         std::vector<unsigned> row_sizes(A.rows());
         const auto factor = owner.factor();
-        for (auto row : factor.L.inner_)
+        for (auto row : csc_access::inner(factor.L))
             if (row + 1 < row_sizes.size()) ++row_sizes[row];
         ASSERT_GT(*std::max_element(row_sizes.begin(), row_sizes.end()), 64u);
         for (const int width : {4, 5}) {
@@ -551,17 +553,17 @@ TEST_F(MetalDevice, SyntheticHeavyFactorAgreesWithSerialDoubleReference) {
         for (int t = 0; t < 60; ++t)
             cols[above(rng)].emplace_back(i, static_cast<float>(-0.01 * std::pow(10.0, mag(rng))));
     }
-    F.L.n_ = n;
-    F.L.outer_.assign(n + 1, 0);
+    csc_access::n(F.L) = n;
+    csc_access::outer(F.L).assign(n + 1, 0);
     for (node_index j = 0; j < n; ++j) {
         auto& c = cols[j];
         std::sort(c.begin() + 1, c.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
         c.erase(std::unique(c.begin() + 1, c.end(), [](const auto& a, const auto& b) { return a.first == b.first; }),
                 c.end());
-        F.L.outer_[j + 1] = F.L.outer_[j] + static_cast<apxchol::edge_index>(c.size());
+        csc_access::outer(F.L)[j + 1] = csc_access::outer(F.L)[j] + static_cast<apxchol::edge_index>(c.size());
         for (const auto& [i, v] : c) {
-            F.L.inner_.push_back(i);
-            F.L.vals_.push_back(v);
+            csc_access::inner(F.L).push_back(i);
+            csc_access::vals(F.L).push_back(v);
         }
     }
     F.perm.resize(n);
@@ -937,10 +939,10 @@ TEST_F(MetalDevice, TinyFactorOffDiagonalsRemainUsable) {
                         -std::numeric_limits<float>::denorm_min()}) {
         SCOPED_TRACE(value);
         apxchol::factorization F;
-        F.L.n_ = 2;
-        F.L.outer_ = {0, 2, 3};
-        F.L.inner_ = {0, 1, 1};
-        F.L.vals_ = {1.0f, value, 1.0f};
+        csc_access::n(F.L) = 2;
+        csc_access::outer(F.L) = {0, 2, 3};
+        csc_access::inner(F.L) = {0, 1, 1};
+        csc_access::vals(F.L) = {1.0f, value, 1.0f};
         F.perm = {0, 1};
         F.sddm = true;
         apxchol::solver solver(A, std::move(F), gpu_options());
@@ -1035,11 +1037,11 @@ TEST_F(MetalDevice, StatisticsDescribeTheSetup) {
     EXPECT_GT(st.levels_backward, 0u);
     EXPECT_GT(st.steps_forward, 0u);
     EXPECT_FALSE(st.device.empty());
-    EXPECT_FALSE(slv.factor().L.vals_.empty());
+    EXPECT_FALSE(csc_access::vals(slv.factor().L).empty());
     EXPECT_EQ(slv.rows(), A.rows());
     EXPECT_EQ(slv.factor().perm.size(), static_cast<std::size_t>(A.rows()));
     // The route keeps no host copy of the factor; factor() reads the device.
-    EXPECT_TRUE(metal(slv).factor().L.vals_.empty());
+    EXPECT_TRUE(csc_access::vals(metal(slv).factor().L).empty());
 }
 
 TEST_F(MetalDevice, ReusesFactorAcrossDifferentRightHandSides) {
@@ -1048,17 +1050,17 @@ TEST_F(MetalDevice, ReusesFactorAcrossDifferentRightHandSides) {
     dense.diagonal().setConstant(129.0);
     const Sparse A = dense.sparseView();
     apxchol::solver solver(A, gpu_options(keep_opts()));
-    const auto ptr = solver.factor().L.outer_;
-    const auto idx = solver.factor().L.inner_;
-    const auto vals = solver.factor().L.vals_;
+    const auto ptr = csc_access::outer(solver.factor().L);
+    const auto idx = csc_access::inner(solver.factor().L);
+    const auto vals = csc_access::vals(solver.factor().L);
     for (unsigned salt : {2u, 5u, 2u}) {
         const Eigen::VectorXd b = rhs(A.rows(), salt, false);
         const auto result = solver.solve(b, 1e-9, 400);
         EXPECT_EQ(result.backend, apxchol::solve_backend::gpu);
         EXPECT_LT(true_residual(A, b, result.x), 1e-9);
-        EXPECT_EQ(solver.factor().L.outer_, ptr);
-        EXPECT_EQ(solver.factor().L.inner_, idx);
-        EXPECT_EQ(solver.factor().L.vals_, vals);
+        EXPECT_EQ(csc_access::outer(solver.factor().L), ptr);
+        EXPECT_EQ(csc_access::inner(solver.factor().L), idx);
+        EXPECT_EQ(csc_access::vals(solver.factor().L), vals);
     }
 }
 
@@ -1117,7 +1119,7 @@ TEST_F(MetalDevice, CommonSolverAdoptsHostFactorWithCpuOnlyOptions) {
     EXPECT_EQ(adopted.backend(), apxchol::solve_backend::gpu);
     options.backend = apxchol::solve_backend::automatic;
     EXPECT_EQ(apxchol::solver(A, F, options).backend(), apxchol::solve_backend::cpu);
-    options.factor_opts.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+    options.factor_opts.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
     EXPECT_EQ(apxchol::solver(A, F, options).backend(), apxchol::solve_backend::cpu);
     options.backend = apxchol::solve_backend::gpu;
     EXPECT_THROW(apxchol::solver(A, F, options), std::invalid_argument);
@@ -1140,7 +1142,7 @@ TEST_F(MetalDevice, PerSolverPreparationOptionsAreIndependent) {
     EXPECT_THROW(apxchol::solver(near, gpu_options(options)), std::invalid_argument);
     options.factor_opts.lump_max_mass = 0.25;
     EXPECT_EQ(apxchol::solver(near, gpu_options(options)).factor().lumped_offdiag, 2);
-    options.factor_opts.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+    options.factor_opts.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
     EXPECT_THROW(apxchol::solver(A, gpu_options(options)), std::invalid_argument);
 }
 
@@ -1266,7 +1268,7 @@ TEST_F(MetalDevice, ScalarAndPanelOutputsRejectInputAliasing) {
     EXPECT_THROW(owner.solve(B, B), std::invalid_argument);
     EXPECT_EQ(B, X);
     const apxchol::const_matrix_view guess(X);
-    EXPECT_THROW(owner.solve(B, X, -1, -1, &guess), std::invalid_argument);
+    EXPECT_THROW(owner.solve(B, X, std::nullopt, std::nullopt, &guess), std::invalid_argument);
     EXPECT_EQ(X, B);
     Eigen::MatrixXd wrong(A.rows() - 1, 4);
     EXPECT_THROW(owner.solve(B, wrong), std::invalid_argument);
@@ -1301,7 +1303,7 @@ TEST_F(MetalDevice, Float16InstalledFactorIsReadoptedExactly) {
     options.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
     options.factor_opts.drop_tolerance = 0;
     apxchol::solver again(A, installed, gpu_options(options));
-    EXPECT_EQ(again.factor().L.vals_, installed.L.vals_);
+    EXPECT_EQ(csc_access::vals(again.factor().L), csc_access::vals(installed.L));
     EXPECT_EQ(again.factor().scale, installed.scale);
     const auto b = rhs(A.rows(), 3, false);
     EXPECT_EQ(again.apply(b), half.apply(b));
@@ -1316,10 +1318,10 @@ TEST_F(MetalDevice, Float16TinyColumnScaleKeepsFinitePreconditioning) {
     for (float value : {-0x1p-40f, -0x1p-80f, -0x1p-99f, -0x1p-101f, -0x1p-110f, -0x1p-125f, -1e-40f,
                         -std::numeric_limits<float>::denorm_min()}) {
         apxchol::factorization F;
-        F.L.n_ = 2;
-        F.L.outer_ = {0, 2, 3};
-        F.L.inner_ = {0, 1, 1};
-        F.L.vals_ = {1.0f, value, 1.0f};
+        csc_access::n(F.L) = 2;
+        csc_access::outer(F.L) = {0, 2, 3};
+        csc_access::inner(F.L) = {0, 1, 1};
+        csc_access::vals(F.L) = {1.0f, value, 1.0f};
         F.perm = {0, 1};
         F.sddm = true;
         apxchol::solver solver(A, F, gpu_options(options));
@@ -1331,7 +1333,7 @@ TEST_F(MetalDevice, Float16TinyColumnScaleKeepsFinitePreconditioning) {
     }
     for (float diagonal : {0x1p-101f, 0x1p101f}) {
         auto F = apxchol::factorize(A);
-        F.L.vals_[0] = diagonal;
+        csc_access::vals(F.L)[0] = diagonal;
         EXPECT_THROW(apxchol::solver(A, F, gpu_options(options)), std::domain_error);
     }
 }
@@ -1343,9 +1345,9 @@ TEST(MetalOptions, ResidentSetupRejectsUnsupportedOptionsAndLayouts) {
     options.factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
     EXPECT_THROW(apxchol::solver(A, options), std::invalid_argument);
     options.factor_opts.sampler = apxchol::clique_sampler::gks;
-    options.factor_opts.is_select = "priority_greedy";
+    options.factor_opts.partitioner = apxchol::partitioner_kind::priority_greedy;
     EXPECT_THROW(apxchol::solver(A, options), std::invalid_argument);
-    options.factor_opts.is_select = "block_greedy";
+    options.factor_opts.partitioner = apxchol::partitioner_kind::block_greedy;
     if (!apxchol::backend_available(apxchol::solve_backend::gpu)) GTEST_SKIP() << "no usable Metal device";
     Sparse lower = A.triangularView<Eigen::Lower>();
     EXPECT_THROW(apxchol::solver(lower, options), std::invalid_argument);
@@ -1431,8 +1433,8 @@ TEST_F(MetalDevice, ResidentOwnerKeepsNoHostFactorValues) {
         const auto expected = emulate_apply(exported.factor(), b, options.factor_opts);
         EXPECT_LT((exported.apply(b) - expected).norm() / expected.norm(), 2e-5);
         apxchol::solver resident(A, gpu_options(options));
-        EXPECT_TRUE(metal(resident).factor().L.inner_.empty());
-        EXPECT_TRUE(metal(resident).factor().L.vals_.empty());
+        EXPECT_TRUE(csc_access::inner(metal(resident).factor().L).empty());
+        EXPECT_TRUE(csc_access::vals(metal(resident).factor().L).empty());
         EXPECT_GT(metal(resident).factor().L.nonZeros(), 0);
         for (unsigned salt : {1u, 2u, 3u}) {
             const auto rhs_value = rhs(A.rows(), salt, laplacian);
@@ -1466,8 +1468,8 @@ TEST_F(MetalDevice, ExportedRoundsAreIndependentCpuLevels) {
         }
         ASSERT_EQ(first, levels.size());
         for (std::size_t col = 0; col < levels.size(); ++col)
-            for (auto p = F.L.outer_[col] + 1; p < F.L.outer_[col + 1]; ++p)
-                EXPECT_GT(levels[F.L.inner_[p]], levels[col]);
+            for (auto p = csc_access::outer(F.L)[col] + 1; p < csc_access::outer(F.L)[col + 1]; ++p)
+                EXPECT_GT(levels[csc_access::inner(F.L)[p]], levels[col]);
 
         apxchol::solver grouped(A, F);
         auto ungrouped = F;

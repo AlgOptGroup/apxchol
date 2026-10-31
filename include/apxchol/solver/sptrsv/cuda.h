@@ -362,14 +362,14 @@ public:
         std::vector<int> ptr(m + 1), idx(nnz);
         APXCHOL_CUDA_CHECK(cudaMemcpy(ptr.data(), data_.LT_row_ptr, ptr.size() * sizeof(int), cudaMemcpyDeviceToHost));
         APXCHOL_CUDA_CHECK(cudaMemcpy(idx.data(), data_.LT_col_idx, idx.size() * sizeof(int), cudaMemcpyDeviceToHost));
-        L.resize(n, n);
-        L.resizeNonZeros(static_cast<edge_index>(nnz));
-        for (std::size_t j = 0; j <= m; ++j) L.outer_[j] = static_cast<edge_index>(ptr[j]);
-        std::fill(L.outer_.begin() + m + 1, L.outer_.end(), static_cast<edge_index>(nnz));
-        std::copy(idx.begin(), idx.end(), L.inner_.begin());
+        detail::sparse_csc_access::resize(L, n);
+        detail::sparse_csc_access::resize_nonzeros(L, static_cast<edge_index>(nnz));
+        for (std::size_t j = 0; j <= m; ++j) detail::sparse_csc_access::outer(L)[j] = static_cast<edge_index>(ptr[j]);
+        std::fill(detail::sparse_csc_access::outer(L).begin() + m + 1, detail::sparse_csc_access::outer(L).end(), static_cast<edge_index>(nnz));
+        std::copy(idx.begin(), idx.end(), detail::sparse_csc_access::inner(L).begin());
         scale.clear();
         if (!data_.fp16) {
-            APXCHOL_CUDA_CHECK(cudaMemcpy(L.vals_.data(), data_.LT_values, nnz * sizeof(float), cudaMemcpyDeviceToHost));
+            APXCHOL_CUDA_CHECK(cudaMemcpy(detail::sparse_csc_access::vals(L).data(), data_.LT_values, nnz * sizeof(float), cudaMemcpyDeviceToHost));
             return;
         }
         // unique_ptr rather than vector: nvcc rejects std::vector<_Float16>.
@@ -381,7 +381,7 @@ public:
         APXCHOL_CUDA_CHECK(cudaMemcpy(scale.data(), data_.scale, m * sizeof(float), cudaMemcpyDeviceToHost));
         for (std::size_t j = 0; j < m; ++j)
             for (int p = ptr[j]; p < ptr[j + 1]; ++p)
-                L.vals_[p] = p == ptr[j] ? diag[j] : static_cast<float>(half[p]);
+                detail::sparse_csc_access::vals(L)[p] = p == ptr[j] ? diag[j] : static_cast<float>(half[p]);
     }
 
 private:
@@ -786,7 +786,7 @@ public:
 private:
     static void validate_options(const factor_options& options) {
         detail::validate_factor_options(options);
-        if (options.cpu_schedule != cpu_sptrsv_schedule::automatic)
+        if (options.experimental.cpu_schedule != cpu_sptrsv_schedule::automatic)
             throw std::invalid_argument("CPU triangular-solve schedules are unavailable on CUDA");
     }
 

@@ -49,6 +49,7 @@
 #include <set>
 #include <thread>
 #include <utility>
+#include <optional>
 
 #if defined(__linux__)
 #include <sched.h>
@@ -66,7 +67,9 @@
 #endif
 
 #ifdef APXCHOL_USE_CUDA
-#include <cuda_runtime.h>   // cudaMemGetInfo for read_vram_mb().
+#include <cuda_runtime.h>
+#include <unistd.h>         // getpid for the GPU memory receipt.
+#include "gpu_memory.h"
 #endif
 
 #include <Eigen/Core>
@@ -99,42 +102,42 @@
 #ifdef HAVE_APXCHOL_V1
 struct V1Combo {
     const char* name;
-    std::string is;
+    apxchol::partitioner_kind partitioner;
     size_t exact_clique_max_degree = 0; // 0 = off; emit exact clique when deg <= this
     double degree_mult = 0.0;           // 0 = use fopts default (2.0); else override the IS cap
     apxchol::clique_sampler sampler = apxchol::clique_sampler::gks; // gks | trace_cycle
-    size_t exact_core_max_h = apxchol::exact_core_by_route;  // trace_cycle: exact clique on heavy cores with h <= this (sentinel = library default)
+    std::optional<size_t> exact_core_max_h;  // trace_cycle: exact clique on heavy cores with h <= this (unset = library default)
     size_t double_cycle_min_h = 0;      // trace_cycle: two cycles on heavy cores with h >= this
 };
 static const V1Combo v1_combos[] = {
-    {.name="bg+tree[vec_pool_aos]", .is="block_greedy"},
-    {.name="bk+tree[vec_pool_aos]", .is="baumann_kyng"},
-    {.name="greedy+tree[vec_pool_aos]", .is="priority_greedy"},
+    {.name="bg+tree[vec_pool_aos]", .partitioner=apxchol::partitioner_kind::block_greedy},
+    {.name="bk+tree[vec_pool_aos]", .partitioner=apxchol::partitioner_kind::baumann_kyng},
+    {.name="greedy+tree[vec_pool_aos]", .partitioner=apxchol::partitioner_kind::priority_greedy},
     // Cycle-core samplers on the headline storage (2026-09-18). /ec5 = exact
     // clique on heavy cores of <= 5 vertices; /dc32 = two cycles on cores of
     // >= 32 vertices; /ec5dc32 = both. See factor_options for the rationale.
-    {.name="bg+trace_cycle[vec_pool_aos]", .is="block_greedy",
+    {.name="bg+trace_cycle[vec_pool_aos]", .partitioner=apxchol::partitioner_kind::block_greedy,
      .sampler=apxchol::clique_sampler::trace_cycle},
-    {.name="bg+trace_cycle/ec5[vec_pool_aos]", .is="block_greedy",
+    {.name="bg+trace_cycle/ec5[vec_pool_aos]", .partitioner=apxchol::partitioner_kind::block_greedy,
      .sampler=apxchol::clique_sampler::trace_cycle, .exact_core_max_h=5},
-    {.name="bg+trace_cycle/dc32[vec_pool_aos]", .is="block_greedy",
+    {.name="bg+trace_cycle/dc32[vec_pool_aos]", .partitioner=apxchol::partitioner_kind::block_greedy,
      .sampler=apxchol::clique_sampler::trace_cycle, .double_cycle_min_h=32},
-    {.name="bg+trace_cycle/ec5dc32[vec_pool_aos]", .is="block_greedy",
+    {.name="bg+trace_cycle/ec5dc32[vec_pool_aos]", .partitioner=apxchol::partitioner_kind::block_greedy,
      .sampler=apxchol::clique_sampler::trace_cycle, .exact_core_max_h=5, .double_cycle_min_h=32},
     // Quality levers: exact full clique at low degree (xcN), relaxed IS degree cap (capN).
-    {.name="bg+tree/xc4[vec_pool_aos]",  .is="block_greedy", .exact_clique_max_degree=4},
-    {.name="bg+tree/xc8[vec_pool_aos]",  .is="block_greedy", .exact_clique_max_degree=8},
-    {.name="bg+tree/xc16[vec_pool_aos]", .is="block_greedy", .exact_clique_max_degree=16},
-    {.name="bg+tree/cap4[vec_pool_aos]", .is="block_greedy", .degree_mult=4.0},
+    {.name="bg+tree/xc4[vec_pool_aos]",  .partitioner=apxchol::partitioner_kind::block_greedy, .exact_clique_max_degree=4},
+    {.name="bg+tree/xc8[vec_pool_aos]",  .partitioner=apxchol::partitioner_kind::block_greedy, .exact_clique_max_degree=8},
+    {.name="bg+tree/xc16[vec_pool_aos]", .partitioner=apxchol::partitioner_kind::block_greedy, .exact_clique_max_degree=16},
+    {.name="bg+tree/cap4[vec_pool_aos]", .partitioner=apxchol::partitioner_kind::block_greedy, .degree_mult=4.0},
 };
 
 static apxchol::factor_options v1_factor_options(const V1Combo& combo,
                                                 apxchol::factor_options opts) {
-    opts.is_select = combo.is;
+    opts.partitioner = combo.partitioner;
     opts.sampler = combo.sampler;
-    opts.exact_clique_max_degree = combo.exact_clique_max_degree;
-    opts.exact_core_max_h = combo.exact_core_max_h;
-    opts.double_cycle_min_h = combo.double_cycle_min_h;
+    opts.experimental.exact_clique_max_degree = combo.exact_clique_max_degree;
+    opts.experimental.exact_core_max_h = combo.exact_core_max_h;
+    opts.experimental.double_cycle_min_h = combo.double_cycle_min_h;
     if (combo.degree_mult > 0) {
         opts.partition.degree_quantile = 0;
         opts.partition.degree_multiplier = combo.degree_mult;
@@ -565,21 +568,18 @@ static double read_vmrss_mb() {
     return -1.0;
 }
 
-// Device memory in use (MB), the GPU analog of read_vmrss_mb: total - free from
-// cudaMemGetInfo. Includes the CUDA context (~300-600MB) + caching-allocator footprint,
-// so it overcounts the minimal working set the same way VmRSS overcounts host -- read at
-// solve end to record the SOLVE-held VRAM (operator + factor + SpSV bufs + PCG vectors).
-// Returns -1 when CUDA isn't compiled in or the query fails (CPU solvers stay unmeasured).
-// [[maybe_unused]]: BOTH call sites sit inside `#ifdef APXCHOL_USE_CUDA` blocks, so a
-// CPU build defines this and never calls it. Conditionally used, not dead -- deleting it
-// breaks the CUDA build.
+// Device memory (MiB) this process holds above the post-context baseline, the GPU
+// analog of read_vmrss_mb (see gpu_memory.h). Read after setup and at solve end while
+// the solver still holds its memory, outside the timed intervals. Returns -1 when CUDA
+// isn't compiled in or NVML cannot attribute memory to this process.
+// [[maybe_unused]]: every call site sits inside an `#ifdef APXCHOL_USE_CUDA` block, so
+// a CPU build defines this and never calls it.
 [[maybe_unused]] static double read_vram_mb() {
 #ifdef APXCHOL_USE_CUDA
-    size_t mf = 0, mt = 0;
-    if (cudaMemGetInfo(&mf, &mt) == cudaSuccess && mt >= mf)
-        return (mt - mf) / (1024.0 * 1024.0);
-#endif
+    return gpu_memory_above_baseline_mib();
+#else
     return -1.0;
+#endif
 }
 
 // Diagnostic only: stored diagonals are optional for zero rows. Subtracting the
@@ -605,6 +605,21 @@ static void warm_up_cuda_once() {
         std::chrono::high_resolution_clock::now() - begin).count();
     std::cerr << "[bench] cuda_init (once, before any timed solver): "
               << std::fixed << std::setprecision(1) << init_ms << " ms\n";
+    // GPU memory baseline: this process after context creation, before any solver
+    // allocates. The runner's untimed peak sampler matches this pid and bus id.
+    const auto& memory = record_gpu_memory_baseline();
+    std::cerr << "[bench] gpu_memory pid=" << getpid()
+              << " bus_id=" << (memory.bus_id.empty() ? "unknown" : memory.bus_id)
+              << " baseline_mib=";
+    if (memory.unavailable.empty()) std::cerr << memory.self_mib;
+    else std::cerr << "unavailable reason=" << memory.unavailable;
+    std::cerr << " other_processes=";
+    if (memory.other_processes < 0) std::cerr << "unknown";
+    else std::cerr << memory.other_processes;
+    std::cerr << " other_mib=";
+    if (memory.other_mib < 0) std::cerr << "unknown";
+    else std::cerr << memory.other_mib;
+    std::cerr << '\n';
     initialized = true;
 }
 #endif
@@ -626,7 +641,7 @@ static void print_result_pretty(const BenchResult& r) {
 }
 
 static void print_csv_header() {
-    std::cout << "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz,solve_rss_mb,solve_vram_mb,retained_repeats,representative_repeat,max_repeat_rel_res,stop_contract,solve_passes,stop_check_s,execution_route\n";
+    std::cout << "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz,solve_rss_mb,solve_vram_mb,setup_vram_mb,retained_repeats,representative_repeat,max_repeat_rel_res,stop_contract,solve_passes,stop_check_s,execution_route\n";
 }
 
 static void print_result_csv(const BenchResult& r) {
@@ -643,6 +658,7 @@ static void print_result_csv(const BenchResult& r) {
               << r.us_per_nnz << ","
               << std::setprecision(1) << r.solve_rss_mb << ","
               << std::setprecision(1) << r.solve_vram_mb << ","
+              << std::setprecision(1) << r.setup_vram_mb << ","
               << r.retained_repeats << "," << r.representative_repeat << ","
               << std::scientific << std::setprecision(17)
               << r.max_repeat_rel_residual << "," << bench_stop::contract << ","
@@ -754,6 +770,7 @@ static BenchResult run_apxchol_v1(
     };
 
     const auto t_wall_start = std::chrono::high_resolution_clock::now();
+    double memory_read_s = 0; // GPU memory reads, removed from the wall interval
     apxchol::solve_result res;
     apxchol::detail::checkpoint timings;
     Eigen::initParallel();
@@ -762,6 +779,16 @@ static BenchResult run_apxchol_v1(
     apxchol::solver solver = apxchol::detail::solver_access::with_timings(L, opts, timings);
     const bool gpu_route = solver.backend() == apxchol::solve_backend::gpu;
     r.execution_route = gpu_route ? "gpu" : "cpu";
+#if defined(APXCHOL_USE_CUDA)
+    const auto read_vram = [&] {
+        const auto begin = std::chrono::high_resolution_clock::now();
+        const double mib = read_vram_mb();
+        memory_read_s += std::chrono::duration<double>(
+            std::chrono::high_resolution_clock::now() - begin).count();
+        return mib;
+    };
+    if (gpu_route) r.setup_vram_mb = read_vram();
+#endif
     {
         Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
             [&](double request, int remaining, bool warm, Eigen::VectorXd& current) {
@@ -774,10 +801,13 @@ static BenchResult run_apxchol_v1(
         res.iterations = r.iterations;
         capture_fill(solver);
         r.solve_rss_mb = read_vmrss_mb();
+#if defined(APXCHOL_USE_CUDA)
+        if (gpu_route) r.solve_vram_mb = read_vram(); // the solver still holds its device state
+#endif
     }
     const auto t_wall_end = std::chrono::high_resolution_clock::now();
     const double wall_total =
-        std::chrono::duration<double>(t_wall_end - t_wall_start).count();
+        std::chrono::duration<double>(t_wall_end - t_wall_start).count() - memory_read_s;
 
     // Honest accounting:
     //   setup_time   — preconditioner build (from checkpoint, accurate)
@@ -791,9 +821,6 @@ static BenchResult run_apxchol_v1(
     r.solve_time = wall_total - r.setup_time;
     if (r.solve_time < 0.0) r.solve_time = 0.0;
     r.total_time = wall_total;
-    r.solve_vram_mb = res.solve_vram_mb; // sampled INSIDE apxchol::solve (the GPU-resident
-                                         // PCG frees all device state before returning);
-                                         // -1 on CPU builds / host-PCG paths.
     r.iterations = static_cast<int>(res.iterations);
     // Independently grade the returned solution against the original operator and RHS.
     {
@@ -1115,7 +1142,7 @@ static Args parse_args(int argc, char** argv) {
         else if (arg == "--factor-storage")
             a.v1_options.factor_opts.factor_storage = apxchol::detail::parse_factor_storage(next());
         else if (arg == "--cpu-schedule")
-            a.v1_options.factor_opts.cpu_schedule = apxchol::detail::parse_cpu_schedule(next());
+            a.v1_options.factor_opts.experimental.cpu_schedule = apxchol::detail::parse_cpu_schedule(next());
         else if (arg == "--factor-drop") a.v1_options.factor_opts.drop_tolerance = std::stod(next());
         else if (arg == "--regularization") a.v1_options.factor_opts.regularization = std::stod(next());
         else if (arg == "--lump-max-mass") a.v1_options.factor_opts.lump_max_mass = std::stod(next());
@@ -1833,7 +1860,7 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
     bool unavailable = false;
     long long measured_offdiag = 0;
     bool measured_fill = true;
-    double rss=0, vram=-1;   // combined solve-held RSS/VRAM = MAX over components (peak
+    double rss=0, vram=-1, setup_vram=-1;   // combined solve-held RSS/VRAM = MAX over components (peak
                              // resident during the largest sub-solve); else the combined
                              // cell loses these and shows blank on the memory heatmaps.
     const bool dbg = std::getenv("SPLIT_DEBUG") != nullptr;
@@ -1876,6 +1903,7 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
         if (rc.factor_offdiag >= 0) measured_offdiag += rc.factor_offdiag;
         if (rc.solve_rss_mb > rss) rss = rc.solve_rss_mb;       // peak over components
         if (rc.solve_vram_mb > vram) vram = rc.solve_vram_mb;
+        if (rc.setup_vram_mb > setup_vram) setup_vram = rc.setup_vram_mb;
         // Adapters normalize by one when the component RHS is zero. Undo that
         // same normalization; multiplying by zero would hide a failed solve.
         const double sbn=subb.norm(); const double rnc = rc.rel_residual*(sbn>0?sbn:1.0);
@@ -1920,7 +1948,7 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
     r.iterations=unavailable?-1:it;
     r.rel_residual = unavailable?-1.0:std::sqrt(res2)/(bn>0?bn:1.0);
     r.us_per_nnz = r.total_time/std::max(1,r.nnz)*1e6;
-    r.solve_rss_mb = rss; r.solve_vram_mb = vram;   // carry peak over components
+    r.solve_rss_mb = rss; r.solve_vram_mb = vram; r.setup_vram_mb = setup_vram;   // carry peak over components
     if (!r.execution_route.empty()) {
         r.factor_offdiag = measured_fill ? measured_offdiag : -1;
         const long long adj_nnz = stored_offdiagonal_entries(L);
@@ -2524,6 +2552,7 @@ static BenchResult run_hypre_boomeramg_gpu(
     std::vector<double> x_host(m);
     hypre_array<double> x_out(x_host.data(), x_host.size());
     r.setup_time = t.elapsed();
+    r.setup_vram_mb = read_vram_mb();   // outside both timers
 
     t.start();
     Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
@@ -2544,7 +2573,7 @@ static BenchResult run_hypre_boomeramg_gpu(
 
     r.fillin = 0;
     r.us_per_nnz = r.total_time / r.nnz * 1e6;
-    r.solve_vram_mb = read_vram_mb();   // device VRAM held at solve end (GPU AMG hierarchy
+    r.solve_vram_mb = read_vram_mb();   // device memory held at solve end (GPU AMG hierarchy
                                         // + ParCSR operator + PCG vectors), before destroy.
 
     if (is_laplacian)

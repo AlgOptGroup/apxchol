@@ -1,5 +1,6 @@
 #pragma once
 #include <limits>
+#include <optional>
 #include "apxchol/solver/factor_options.h"
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 #include "apxchol/solver/detail/metal_schedule.h"
@@ -25,19 +26,20 @@ inline bool metal_setup_regularization_supported(double regularization,
     return true;
 }
 
-inline double metal_degree_quantile(double quantile) {
-    return quantile == degree_quantile_by_route ? 0.2 : quantile;
+inline double metal_degree_quantile(std::optional<double> quantile) {
+    return quantile.value_or(degree_quantile_host_default);
 }
 
 inline bool metal_setup_options_supported(const factor_options &options) {
     const double quantile = metal_degree_quantile(options.partition.degree_quantile);
     return sizeof(node_index) == sizeof(std::uint32_t) &&
-           options.cpu_schedule == cpu_sptrsv_schedule::automatic &&
-           options.is_select == "block_greedy" &&
-           options.sampler == clique_sampler::gks && options.exact_clique_max_degree == 0 &&
-           exact_core_or_off(options.exact_core_max_h) == 0 && options.double_cycle_min_h == 0 &&
-           options.partition.degree_tiebreak &&
-           options.residual_peel == residual_peel_strategy::natural &&
+           options.experimental.cpu_schedule == cpu_sptrsv_schedule::automatic &&
+           options.partitioner == partitioner_kind::block_greedy &&
+           options.sampler == clique_sampler::gks &&
+           options.experimental.exact_clique_max_degree == 0 &&
+           options.experimental.exact_core_max_h.value_or(0) == 0 &&
+           options.experimental.double_cycle_min_h == 0 &&
+           options.experimental.degree_tiebreak &&
            quantile > 0 && quantile < 1;
 }
 

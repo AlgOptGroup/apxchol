@@ -11,6 +11,8 @@
 #include <span>
 #include <vector>
 
+using csc_access = apxchol::detail::sparse_csc_access;
+
 namespace {
 // An exact FP32 factor preconditions PCG to at most three iterations.
 // FP16 storage rounding may require one more iteration on this fixture.
@@ -189,12 +191,12 @@ TEST(FactorExport, InstalledFactorIsAlwaysAvailable) {
     apxchol::solver owner(L, opts);
     const auto F = owner.factor();
     EXPECT_EQ(F.storage, apxchol::factor_storage_type::fp32);
-    EXPECT_EQ(F.L.vals_.size(), size_t(F.L.nonZeros()));
-    EXPECT_EQ(F.L.inner_.size(), size_t(F.L.nonZeros()));
+    EXPECT_EQ(csc_access::vals(F.L).size(), size_t(F.L.nonZeros()));
+    EXPECT_EQ(csc_access::inner(F.L).size(), size_t(F.L.nonZeros()));
     // A Laplacian's installed factor has an empty last row and column.
     const auto n = F.L.rows();
-    EXPECT_EQ(F.L.outer_[n - 1], F.L.outer_[n]);
-    for (auto row : F.L.inner_) EXPECT_LT(row, n - 1);
+    EXPECT_EQ(csc_access::outer(F.L)[n - 1], csc_access::outer(F.L)[n]);
+    for (auto row : csc_access::inner(F.L)) EXPECT_LT(row, n - 1);
 }
 
 TEST(InitialGuess, ExactX0ConvergesImmediately) {
@@ -273,7 +275,7 @@ TEST(SetFactor, ReleasedFactorIsRejected) {
     auto L = grid_laplacian(10, 10);
     apxchol::solver slv(L, on_cpu);
     auto F = slv.factor();
-    F.L.release_values();
+    csc_access::release_values(F.L);
 
     EXPECT_THROW(apxchol::solver(L, F, on_cpu),
                  std::invalid_argument);

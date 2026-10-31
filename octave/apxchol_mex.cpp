@@ -105,8 +105,14 @@ apxchol::solve_options setup_options(const mxArray* options) {
             if (value == nullptr) fail("apxchol:badInput", "option '" + name + "' is empty");
             if (name == "num_threads") result.num_threads = integer_option<int>(value, name.c_str());
             else if (name == "seed") result.factor_opts.seed = integer_option<unsigned>(value, name.c_str());
-            else if (name == "cpu_schedule")
-                result.factor_opts.cpu_schedule = apxchol::detail::parse_cpu_schedule(string_option(value, name.c_str()));
+            else if (name == "partitioner")
+                result.factor_opts.partitioner = apxchol::detail::parse_option_name(
+                    apxchol::detail::partitioner_names, string_option(value, name.c_str()), name);
+            else if (name == "sampler")
+                result.factor_opts.sampler = apxchol::detail::parse_option_name(
+                    apxchol::detail::clique_sampler_names, string_option(value, name.c_str()), name);
+            else if (name == "degree_quantile") result.factor_opts.partition.degree_quantile = scalar_option(value, name.c_str());
+            else if (name == "degree_multiplier") result.factor_opts.partition.degree_multiplier = scalar_option(value, name.c_str());
             else if (name == "factor_storage")
                 result.factor_opts.factor_storage = apxchol::detail::parse_factor_storage(string_option(value, name.c_str()));
             else if (name == "drop_tolerance") result.factor_opts.drop_tolerance = scalar_option(value, name.c_str());
@@ -256,11 +262,11 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                      "usage: [x,iters,resid,conv,seconds] = apxchol_mex('solve', h, b, tol, maxiter, x0)");
             auto& s = get_solver(prhs[1]);
             const auto B = mx_to_rhs(prhs[2], s.rows(), "b");
-            const double tol = mxIsDouble(prhs[3]) && mxIsEmpty(prhs[3])
-                ? apxchol::default_tol : scalar_option(prhs[3], "rtol");
-            const int maxiter = mxIsDouble(prhs[4]) && mxIsEmpty(prhs[4])
-                ? apxchol::default_max_iter : integer_option<int>(prhs[4], "maxiter");
-            apxchol::detail::validate_solve_parameters(tol, maxiter);
+            std::optional<double> tol;
+            std::optional<int> maxiter;
+            if (!(mxIsDouble(prhs[3]) && mxIsEmpty(prhs[3]))) tol = scalar_option(prhs[3], "rtol");
+            if (!(mxIsDouble(prhs[4]) && mxIsEmpty(prhs[4])))
+                maxiter = integer_option<int>(prhs[4], "maxiter");
             std::optional<apxchol::const_matrix_view> X0;
             if (nrhs == 6 && !(mxIsDouble(prhs[5]) && mxIsEmpty(prhs[5]))) {
                 const auto guess = mx_to_rhs(prhs[5], s.rows(), "x0");
