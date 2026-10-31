@@ -1282,7 +1282,7 @@ TEST(Grounding, PublicApplyIsIndependentOfCallOrderAndPanelWidth) {
         SCOPED_TRACE(repeat);
         const Eigen::VectorXd scalar = owner.apply(rhs);
         EXPECT_TRUE((scalar.array() == expected.array()).all());
-        EXPECT_GT(owner.solve(rhs, -1, 2).iterations, 0);
+        EXPECT_GT(owner.solve(rhs, std::nullopt, 2).iterations, 0);
         owner.apply(panel, output);
         EXPECT_LE((output.col(0) - expected).norm(), tolerance);
         EXPECT_LE((output.col(1) - 2 * expected).norm(), 2 * tolerance);

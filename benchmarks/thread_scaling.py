@@ -171,6 +171,7 @@ def run_cpp(margs, solver, config, reg, t, mid="matrix"):
     m["raw_stderr"] = f"raw/{stem}.stderr"
     init = rc.parse_cuda_init(p.stderr)
     if init is not None: m["cuda_init_s"] = init
+    m.update(rc.parse_gpu_memory(p.stderr))
     m["repeat_receipts"] = [line for line in p.stderr.splitlines() if line.startswith("BENCH_REPEAT ")]
     if expired:
         return "timeout", m
