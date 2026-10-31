@@ -85,6 +85,30 @@ class CompleteRouteRunnerTest(unittest.TestCase):
     def test_gpu_plan_contains_no_host_selector_ablations(self):
         self.assertEqual(sweep_fair.APX_GPU, [("apxchol_v1", sweep_fair.APX_DEFAULT_CONFIG)])
 
+    def test_metal_axis_requests_the_device_route_and_needs_a_metal_receipt(self):
+        output = "v1,m,2,4,1e-3,2e-3,3e-3,2,1e-9,1,750,original-v1,1,0.001,metal\n"
+        for actual in ("metal", "gpu"):
+            repeats = "\n".join(f"BENCH_REPEAT phase=retained index={i} execution_route={actual}"
+                                 for i in range(1, 4))
+            stderr = repeats + "\n[bench] metal_init (once, before any timed solver): 120.0 ms\n"
+            with mock.patch.object(sweep_fair, "DEVICE", "metal"), \
+                 mock.patch.object(sweep_fair, "REPS", 3), \
+                 mock.patch.object(sweep_fair, "WARMUP", 0), \
+                 mock.patch.object(rc, "benchmark_openmp_env", return_value={}), \
+                 mock.patch.object(rc, "taskset_prefix", return_value=""), \
+                 mock.patch.object(sweep_fair, "sh", return_value=subprocess.CompletedProcess(
+                     "benchmark", 0, output, stderr)) as run:
+                status, metrics = sweep_fair.run_cpp("", "apxchol_v1", rc.APXCHOL_DEFAULT_CONFIG, False)
+            self.assertIn("--v1-backend gpu", run.call_args.args[0])
+            self.assertIn(rc.BIN["metal"], run.call_args.args[0])
+            self.assertEqual(status, "complete" if actual == "metal" else "failed")
+            self.assertEqual(metrics["metal_init_s"], 0.12)
+
+    def test_metal_plan_is_apxchol_only(self):
+        with mock.patch.object(sweep_fair, "PARAC_ONLY", False):
+            self.assertEqual(sweep_fair.planned_cell_count([("m", {})] * 3, "metal"), 3)
+        self.assertEqual(sweep_fair.APX_METAL, [("apxchol_v1", sweep_fair.APX_DEFAULT_CONFIG)])
+
 
 class GpuTimingIsolationTest(unittest.TestCase):
     def test_cpp_timing_does_not_start_memory_poller(self):

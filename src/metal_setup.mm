@@ -170,6 +170,7 @@ resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double
         out.backward = std::move(finalized.backward);
         out.metadata = finalized.metadata;
         out.half = half;
+        out.drop = finalized.drop;
         if (!options.keep_factor) {
             F.perm.assign(static_cast<unsigned *>(finalized.permutation.contents),
                           static_cast<unsigned *>(finalized.permutation.contents) + n);
