@@ -36,6 +36,8 @@
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 #endif
 
+using csc_access = apxchol::detail::sparse_csc_access;
+
 // ── Helpers ──────────────────────────────────────────
 
 static apxchol::factorization factorize_controlled(
@@ -106,9 +108,9 @@ TEST(EliminationDedup, PooledLocalHashPreservesOrderSumsAndEpochReuse) {
 // Convert the owned sparse_csc factor to an Eigen::SparseMatrix for tests
 // (the library no longer stores Eigen factors).
 static Eigen::SparseMatrix<double> factor_to_eigen(const apxchol::sparse_csc& L) {
-    const auto* outer = L.outerIndexPtr();
-    const auto* inner = L.innerIndexPtr();
-    const auto* vals  = L.valuePtr();
+    const auto* outer = L.col_ptrs().data();
+    const auto* inner = L.row_indices().data();
+    const auto* vals  = L.values().data();
     std::vector<Eigen::Triplet<double>> trips;
     trips.reserve(static_cast<size_t>(L.nonZeros()));
     for (apxchol::node_index c = 0; c < L.cols(); ++c)
@@ -132,9 +134,9 @@ perm_to_eigen(const std::vector<apxchol::node_index>& perm) {
 
 // L(i,i): scan column i of the CSC factor for the diagonal entry.
 static double factor_diag(const apxchol::sparse_csc& L, int i) {
-    const auto* outer = L.outerIndexPtr();
-    const auto* inner = L.innerIndexPtr();
-    const auto* vals  = L.valuePtr();
+    const auto* outer = L.col_ptrs().data();
+    const auto* inner = L.row_indices().data();
+    const auto* vals  = L.values().data();
     for (apxchol::edge_index p = outer[i]; p < outer[i + 1]; ++p)
         if (static_cast<int>(inner[p]) == i) return apxchol::widen(vals[p]);
     return 0.0;
@@ -284,9 +286,9 @@ TEST_F(FactorizeTest, LowerTriangular) {
     auto F = this->factorize_with(L);
 
     const int m = F.L.rows() - 1;
-    const auto* outer = F.L.outerIndexPtr();
-    const auto* inner = F.L.innerIndexPtr();
-    for (int k = 0; k < static_cast<int>(F.L.outerSize()) && k < m; ++k)
+    const auto* outer = F.L.col_ptrs().data();
+    const auto* inner = F.L.row_indices().data();
+    for (int k = 0; k < static_cast<int>(F.L.cols()) && k < m; ++k)
         for (apxchol::edge_index p = outer[k]; p < outer[k + 1]; ++p) {
             const int row = static_cast<int>(inner[p]);
             const int col = k;
@@ -352,13 +354,13 @@ void expect_same_factor(const apxchol::factorization& a,
     ASSERT_EQ(a.L.nonZeros(), b.L.nonZeros()) << what << ": factor nnz differs";
     const std::size_t nc = static_cast<std::size_t>(a.L.cols()) + 1;
     const std::size_t nz = static_cast<std::size_t>(a.L.nonZeros());
-    EXPECT_EQ(std::memcmp(a.L.outerIndexPtr(), b.L.outerIndexPtr(),
+    EXPECT_EQ(std::memcmp(a.L.col_ptrs().data(), b.L.col_ptrs().data(),
                           nc * sizeof(apxchol::edge_index)), 0)
         << what << ": column pointers differ";
-    EXPECT_EQ(std::memcmp(a.L.innerIndexPtr(), b.L.innerIndexPtr(),
+    EXPECT_EQ(std::memcmp(a.L.row_indices().data(), b.L.row_indices().data(),
                           nz * sizeof(apxchol::node_index)), 0)
         << what << ": row indices differ (factor STRUCTURE is not reproducible)";
-    EXPECT_EQ(std::memcmp(a.L.valuePtr(), b.L.valuePtr(),
+    EXPECT_EQ(std::memcmp(a.L.values().data(), b.L.values().data(),
                           nz * sizeof(apxchol::factor_value_t)), 0)
         << what << ": factor values differ";
 }
@@ -377,10 +379,10 @@ void expect_valid_rebuilt_laplacian_factor(
     ASSERT_FALSE(F.sddm);
     ASSERT_EQ(F.L.rows(), n);
     ASSERT_EQ(F.perm.size(), n);
-    ASSERT_EQ(F.L.outer_.size(), static_cast<std::size_t>(n) + 1);
-    ASSERT_EQ(F.L.outer_.front(), 0u);
-    ASSERT_EQ(F.L.inner_.size(), F.L.nonZeros());
-    ASSERT_EQ(F.L.vals_.size(), F.L.nonZeros());
+    ASSERT_EQ(csc_access::outer(F.L).size(), static_cast<std::size_t>(n) + 1);
+    ASSERT_EQ(csc_access::outer(F.L).front(), 0u);
+    ASSERT_EQ(csc_access::inner(F.L).size(), F.L.nonZeros());
+    ASSERT_EQ(csc_access::vals(F.L).size(), F.L.nonZeros());
     std::vector<bool> seen(n, false);
     for (const auto v : F.perm) {
         ASSERT_LT(v, n);
@@ -388,18 +390,18 @@ void expect_valid_rebuilt_laplacian_factor(
         seen[v] = true;
     }
     for (apxchol::node_index col = 0; col < n; ++col) {
-        const auto begin = F.L.outer_[col], end = F.L.outer_[col + 1];
+        const auto begin = csc_access::outer(F.L)[col], end = csc_access::outer(F.L)[col + 1];
         ASSERT_LE(begin, end);
         ASSERT_LE(end, F.L.nonZeros());
         if (col + 1 < n) {
             ASSERT_LT(begin, end);
-            EXPECT_EQ(F.L.inner_[begin], col);
-            EXPECT_GT(F.L.vals_[begin], 0.0f);
+            EXPECT_EQ(csc_access::inner(F.L)[begin], col);
+            EXPECT_GT(csc_access::vals(F.L)[begin], 0.0f);
         }
         for (auto p = begin; p < end; ++p) {
-            EXPECT_GE(F.L.inner_[p], col);
-            EXPECT_LT(F.L.inner_[p], n);
-            EXPECT_TRUE(std::isfinite(F.L.vals_[p]));
+            EXPECT_GE(csc_access::inner(F.L)[p], col);
+            EXPECT_LT(csc_access::inner(F.L)[p], n);
+            EXPECT_TRUE(std::isfinite(csc_access::vals(F.L)[p]));
         }
     }
     if (::testing::Test::HasFailure()) return;
@@ -605,9 +607,9 @@ TEST(FactorAssembly, SerialAndParallelInvariantScansMatchByteForByte) {
     ASSERT_EQ(serial.L.cols(), n);
     ASSERT_EQ(serial.L.nonZeros(),
               static_cast<apxchol::edge_index>(2 * n - 1));
-    const auto* outer = serial.L.outerIndexPtr();
-    const auto* inner = serial.L.innerIndexPtr();
-    const auto* values = serial.L.valuePtr();
+    const auto* outer = serial.L.col_ptrs().data();
+    const auto* inner = serial.L.row_indices().data();
+    const auto* values = serial.L.values().data();
     for (apxchol::node_index i = 0; i < n; ++i) {
         EXPECT_EQ(serial.perm[vertex_at(i)], i);
         EXPECT_EQ(outer[i], static_cast<apxchol::edge_index>(2) * i);
@@ -1886,10 +1888,10 @@ static apxchol::factorization custom_factor_for_adoption() {
     apxchol::factorization F;
     F.sddm = true;
     F.perm = {2, 0, 1};
-    F.L.n_ = 3;
-    F.L.outer_ = {0, 4, 6, 7};
-    F.L.inner_ = {0, 2, 1, 2, 1, 2, 2}; // Unsorted, duplicate off-diagonals are valid.
-    F.L.vals_ = {2, -0.1f, -0.25f, -0.15f, 3, -0.5f, 4};
+    csc_access::n(F.L) = 3;
+    csc_access::outer(F.L) = {0, 4, 6, 7};
+    csc_access::inner(F.L) = {0, 2, 1, 2, 1, 2, 2}; // Unsorted, duplicate off-diagonals are valid.
+    csc_access::vals(F.L) = {2, -0.1f, -0.25f, -0.15f, 3, -0.5f, 4};
     return F;
 }
 
@@ -1899,16 +1901,16 @@ TEST(FactorAdoption, RejectsMalformedArraysPermutationAndRounds) {
         {"short permutation", [](F& f) { f.perm.pop_back(); }},
         {"duplicate permutation", [](F& f) { f.perm[1] = f.perm[0]; }},
         {"out-of-range permutation", [](F& f) { f.perm[0] = 3; }},
-        {"short outer array", [](F& f) { f.L.outer_.pop_back(); }},
-        {"nonzero first offset", [](F& f) { f.L.outer_[0] = 1; }},
-        {"decreasing offsets", [](F& f) { f.L.outer_[1] = 7; }},
-        {"excess final offset", [](F& f) { ++f.L.outer_.back(); }},
-        {"short values", [](F& f) { f.L.vals_.pop_back(); }},
-        {"missing diagonal", [](F& f) { f.L.inner_[0] = 1; }},
-        {"zero diagonal", [](F& f) { f.L.vals_[0] = 0; }},
-        {"out-of-range row", [](F& f) { f.L.inner_[1] = 3; }},
-        {"upper-triangle entry", [](F& f) { f.L.inner_[5] = 0; }},
-        {"nonfinite value", [](F& f) { f.L.vals_[1] = std::numeric_limits<float>::infinity(); }},
+        {"short outer array", [](F& f) { csc_access::outer(f.L).pop_back(); }},
+        {"nonzero first offset", [](F& f) { csc_access::outer(f.L)[0] = 1; }},
+        {"decreasing offsets", [](F& f) { csc_access::outer(f.L)[1] = 7; }},
+        {"excess final offset", [](F& f) { ++csc_access::outer(f.L).back(); }},
+        {"short values", [](F& f) { csc_access::vals(f.L).pop_back(); }},
+        {"missing diagonal", [](F& f) { csc_access::inner(f.L)[0] = 1; }},
+        {"zero diagonal", [](F& f) { csc_access::vals(f.L)[0] = 0; }},
+        {"out-of-range row", [](F& f) { csc_access::inner(f.L)[1] = 3; }},
+        {"upper-triangle entry", [](F& f) { csc_access::inner(f.L)[5] = 0; }},
+        {"nonfinite value", [](F& f) { csc_access::vals(f.L)[1] = std::numeric_limits<float>::infinity(); }},
         {"oversized round", [](F& f) { f.rounds = {{3, 4, 0, 0, 0}}; }},
         {"dependent round", [](F& f) { f.rounds = {{3, 2, 0, 0, 0}}; }},
     };
@@ -1931,8 +1933,8 @@ TEST(FactorAdoption, PreservesCustomEntriesAndRoundMetadata) {
     factor.rounds = {{3, 0, 0, 0, 0}, {3, 1, 0, 0, 0}, {2, 1, 0, 0, 0}};
     Eigen::Matrix3d lower = Eigen::Matrix3d::Zero();
     for (int col = 0; col < 3; ++col)
-        for (auto p = factor.L.outer_[col]; p < factor.L.outer_[col + 1]; ++p)
-            lower(factor.L.inner_[p], col) += factor.L.vals_[p];
+        for (auto p = csc_access::outer(factor.L)[col]; p < csc_access::outer(factor.L)[col + 1]; ++p)
+            lower(csc_access::inner(factor.L)[p], col) += csc_access::vals(factor.L)[p];
     const Eigen::Matrix3d permuted = lower * lower.transpose();
     Eigen::Matrix3d A;
     for (int row = 0; row < 3; ++row)
@@ -1942,8 +1944,8 @@ TEST(FactorAdoption, PreservesCustomEntriesAndRoundMetadata) {
     preconditioner.set_keep_factor(true);
     preconditioner.set_options({.drop_tolerance = 0});
     ASSERT_NO_THROW(preconditioner.set_factor(factor));
-    EXPECT_EQ(preconditioner.factor().L.inner_, factor.L.inner_);
-    EXPECT_EQ(preconditioner.factor().L.vals_, factor.L.vals_);
+    EXPECT_EQ(csc_access::inner(preconditioner.factor().L), csc_access::inner(factor.L));
+    EXPECT_EQ(csc_access::vals(preconditioner.factor().L), csc_access::vals(factor.L));
     EXPECT_EQ(preconditioner.factor().rounds.size(), factor.rounds.size());
     const Eigen::Vector3d b(1, 2, -3);
     const Eigen::Vector3d x = preconditioner.solve(b);
@@ -1954,9 +1956,9 @@ TEST(FactorAdoption, GroundedColumnMayBeEmptyOrZero) {
     for (bool empty : {false, true}) {
         apxchol::factorization factor;
         factor.perm = {0};
-        factor.L.n_ = 1;
-        factor.L.outer_ = {0, apxchol::edge_index(!empty)};
-        if (!empty) { factor.L.inner_ = {0}; factor.L.vals_ = {0}; }
+        csc_access::n(factor.L) = 1;
+        csc_access::outer(factor.L) = {0, apxchol::edge_index(!empty)};
+        if (!empty) { csc_access::inner(factor.L) = {0}; csc_access::vals(factor.L) = {0}; }
         apxchol::apx_cholesky preconditioner;
         ASSERT_NO_THROW(preconditioner.set_factor(std::move(factor)));
         const Eigen::VectorXd result = preconditioner.solve(Eigen::VectorXd::Zero(1));
@@ -1972,10 +1974,10 @@ TEST(GpuSptrsvConfiguration, UsesDataflowWithEitherStorage) {
         const bool fp16 = storage != apxchol::factor_storage_type::fp32;
         EXPECT_EQ(apxchol::cuda_sptrsv::fp16_resolved(storage), fp16);
         apxchol::sparse_csc factor;
-        factor.n_ = 1;
-        factor.outer_ = {0, 1};
-        factor.inner_ = {0};
-        factor.vals_ = {2.0f};
+        csc_access::n(factor) = 1;
+        csc_access::outer(factor) = {0, 1};
+        csc_access::inner(factor) = {0};
+        csc_access::vals(factor) = {2.0f};
         apxchol::cuda_sptrsv trsv;
         ASSERT_NO_THROW(trsv.setup(factor, 1, {.factor_storage = storage}));
         EXPECT_STREQ(trsv.backend_name(), "dataflow");
