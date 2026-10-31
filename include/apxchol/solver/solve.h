@@ -75,7 +75,8 @@ struct batch_solve_result {
 /// they are non-const. Concurrent non-const calls on one object are not allowed:
 /// use a copy per thread, or batch the right-hand sides
 /// (see "Thread safety" in docs/usage.md). An overlapping call throws.
-/// Copies of a CPU solver share its factor and operator; GPU solvers cannot be copied.
+/// Copies share the factor and operator, on CUDA in device memory; Metal
+/// solvers cannot be copied.
 /// Every solve verifies the returned residual against the original operator/RHS.
 /// Supplied factors use CPU in automatic mode; an explicit GPU request uploads them.
 class solver {

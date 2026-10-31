@@ -1,7 +1,9 @@
 #pragma once
 // Metal route of solver: PCG with reusable factor, operator and workspace.
 // solver validates options and arguments, selects the route and rejects
-// overlapping calls; the route trusts its arguments. It cannot be copied.
+// overlapping calls; the route trusts its arguments. It cannot be copied:
+// impl holds the factor, operator, lane plans (built on first four-column
+// solve), command queue and PCG buffers together.
 #include "apxchol/detail/checkpoint.h"
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"

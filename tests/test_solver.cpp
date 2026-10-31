@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -941,7 +942,7 @@ TEST(Solver, CudaOwnerReusesOwnedInputAndAppliesFactor) {
 #endif
 }
 
-TEST(Solver, CudaOwnerRejectsOverlappingCallsAndCopies) {
+TEST(Solver, CudaOwnerRejectsOverlappingCalls) {
 #if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
     GTEST_SKIP() << "32-bit-node CUDA owner required";
 #else
@@ -965,13 +966,86 @@ TEST(Solver, CudaOwnerRejectsOverlappingCallsAndCopies) {
         owner.solve(panel, x);
         EXPECT_EQ(x, expected_panel);
     });
-    try {
-        const apxchol::solver copy(owner);
-        ADD_FAILURE() << "GPU solver was copied";
-    } catch (const std::runtime_error& error) {
-        EXPECT_NE(std::string(error.what()).find("GPU solver cannot be copied"), std::string::npos);
-    }
+    // A copy has its own guard, which rejects overlap on the copy alone.
+    apxchol::solver copy(owner);
+    expect_overlap_rejected([&] { EXPECT_EQ(copy.solve(rhs).x, solved); });
     EXPECT_EQ(owner.solve(rhs).x, solved);
+#endif
+}
+
+TEST(Solver, CudaCopiesShareTheDeviceFactorAndSolveConcurrently) {
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA owner required";
+#else
+    if (!apxchol::backend_available(apxchol::solve_backend::gpu))
+        GTEST_SKIP() << "GPU unavailable";
+    using session = apxchol::detail::gpu_solve_session;
+    const auto route = [](const apxchol::solver& owner) -> const session& {
+        return std::get<session>(apxchol::detail::solver_access::route(owner));
+    };
+    Sparse laplacian = operator_matrix(20000);
+    for (int i = 0; i < laplacian.rows(); ++i) laplacian.coeffRef(i, i) = 4.0;
+    for (const Sparse& matrix : {operator_matrix(20000), laplacian}) {
+        auto options = cpu_options();
+        options.backend = apxchol::solve_backend::gpu;
+        std::optional<apxchol::solver> original(std::in_place, matrix, options);
+        ASSERT_EQ(original->backend(), apxchol::solve_backend::gpu);
+        constexpr int callers = 4;
+        std::vector<Eigen::VectorXd> rhs, solved, applied;
+        for (int t = 0; t < callers; ++t) {
+            rhs.push_back(Eigen::VectorXd::LinSpaced(matrix.rows(), t + 1.0, -2.0 * t));
+            solved.push_back(original->solve(rhs.back()).x);
+            applied.push_back(original->apply(rhs.back()));
+        }
+        // Five columns run a four-column panel, whose lane plan the copies
+        // build on first use, then a scalar solve.
+        Eigen::MatrixXd panel(matrix.rows(), 5);
+        for (int q = 0; q < panel.cols(); ++q)
+            panel.col(q) = Eigen::VectorXd::LinSpaced(matrix.rows(), q - 2.0, 1.0 + q);
+
+        std::vector<apxchol::solver> owners(callers, *original);
+        for (int t = 0; t < callers; ++t) {
+            EXPECT_EQ(&route(owners[t]).factor(), &route(*original).factor());
+            EXPECT_EQ(route(owners[t]).trsv().device_factor_values(),
+                      route(*original).trsv().device_factor_values());
+            EXPECT_EQ(route(owners[t]).pcg().device_operator_values(),
+                      route(*original).pcg().device_operator_values());
+            EXPECT_NE(route(owners[t]).pcg().stream(), route(*original).pcg().stream());
+        }
+        const auto run = [&](std::vector<apxchol::solver>& copies) {
+            std::vector<Eigen::VectorXd> x(callers), z(callers);
+            std::vector<Eigen::MatrixXd> batch(callers, Eigen::MatrixXd(matrix.rows(), 5));
+            std::vector<std::thread> workers;
+            for (int t = 0; t < callers; ++t)
+                workers.emplace_back([&, t] {
+                    for (int round = 0; round < 3; ++round) {
+                        copies[t].solve(panel, batch[t]);
+                        x[t] = copies[t].solve(rhs[t]).x;
+                        z[t] = copies[t].apply(rhs[t]);
+                    }
+                });
+            for (auto& worker : workers) worker.join();
+            return std::tuple(x, z, batch);
+        };
+        const auto [x, z, batch] = run(owners);
+        Eigen::MatrixXd expected_panel(matrix.rows(), 5);
+        original->solve(panel, expected_panel);
+        for (int t = 0; t < callers; ++t) {
+            EXPECT_EQ(x[t], solved[t]);
+            EXPECT_EQ(z[t], applied[t]);
+            EXPECT_EQ(batch[t], expected_panel);
+        }
+        // The copies keep the shared device arrays alive.
+        original.reset();
+        owners.push_back(owners[0]);
+        const auto [x2, z2, batch2] = run(owners);
+        for (int t = 0; t < callers; ++t) {
+            EXPECT_EQ(x2[t], solved[t]);
+            EXPECT_EQ(z2[t], applied[t]);
+            EXPECT_EQ(batch2[t], expected_panel);
+        }
+        EXPECT_EQ(owners.back().solve(rhs[0]).x, solved[0]);
+    }
 #endif
 }
 

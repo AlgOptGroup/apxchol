@@ -439,3 +439,12 @@ TEST(SolveRoutes, GpuSingletonSddmAndUnsupportedEmptyFactorAreExplicit) {
     EXPECT_TRUE(automatic.x.isZero(0.0));
 #endif
 }
+
+#if defined(APXCHOL_USE_CUDA)
+TEST(SolveRoutes, CudaTriangularSolveWithoutFactorThrows) {
+    const apxchol::detail::cuda_sptrsv empty;
+    std::vector<double> x(1, 1.0);
+    EXPECT_THROW(empty.solve_LLt(x.data(), x.data()), std::logic_error);
+    EXPECT_THROW(empty.solve_LLt_dev<1>(x.data(), x.data()), std::logic_error);
+}
+#endif
