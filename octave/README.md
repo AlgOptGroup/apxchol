@@ -128,8 +128,8 @@ cd octave
 octave --no-gui --eval "addpath(pwd); run('tests/test_apxchol.m')"
 ```
 
-The extension links the shared native CMake target. Eigen3 is found or fetched
-by the native build helpers; zlib must be installed. A root build is not required.
+The extension links the shared native CMake target; zlib must be installed. A
+root build is not required.
 `CMAKE_BUILD_PARALLEL_LEVEL` sets the build worker count (default: 2).
 The MEX file goes to `octave/private/`, so only the `apxchol_*` wrappers can call it.
 

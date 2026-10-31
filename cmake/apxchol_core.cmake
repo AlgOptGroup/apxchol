@@ -26,7 +26,6 @@ if (NOT APXCHOL_INDEX_WIDTH MATCHES "^(32|64_EDGES|64)$")
     message(FATAL_ERROR "APXCHOL_INDEX_WIDTH must be 32, 64_EDGES or 64")
 endif()
 
-include(${CMAKE_CURRENT_LIST_DIR}/apxchol_eigen.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_arch.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_openmp.cmake)
 
@@ -53,7 +52,7 @@ function(_apxchol_configure_core target)
         ${root}/src/solve.cpp
         ${root}/src/solver_archive.cpp
     )
-    target_link_libraries(${target} PUBLIC Eigen3::Eigen OpenMP::OpenMP_CXX PRIVATE ZLIB::ZLIB)
+    target_link_libraries(${target} PUBLIC OpenMP::OpenMP_CXX PRIVATE ZLIB::ZLIB)
     target_compile_features(${target} PUBLIC cxx_std_23)
     set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
     target_compile_options(${target} PRIVATE
@@ -61,8 +60,6 @@ function(_apxchol_configure_core target)
     if (_APXCHOL_ARCH_FLAG)
         target_compile_options(${target} PRIVATE "${_APXCHOL_ARCH_FLAG}")
     endif()
-    target_compile_definitions(${target} PUBLIC
-        EIGEN_MAX_ALIGN_BYTES=${_APXCHOL_EIGEN_ALIGN_BYTES} EIGEN_MALLOC_ALREADY_ALIGNED=0)
 
     set(APXCHOL_GIT_SHA "unknown")
     execute_process(COMMAND git -C "${root}" rev-parse --show-toplevel

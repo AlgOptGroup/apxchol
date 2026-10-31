@@ -5,8 +5,8 @@ title: "apxchol: scalable approximate Cholesky preconditioning for Laplacian and
 abstract: >-
   A C++23 library implementing a parallel approximate-Cholesky preconditioner
   (Kyng-Sachdeva-style elimination with tree-based clique sampling) for graph
-  Laplacian and SDDM linear systems, with an Eigen-compatible interface, OpenMP,
-  CUDA and Apple Metal backends, a CLI solver, and Python and Octave bindings.
+  Laplacian and SDDM linear systems, with OpenMP, CUDA and Apple Metal
+  backends, a CLI solver, and Python and Octave bindings.
 authors:
   - family-names: Kulkov
     given-names: Oleksandr

@@ -66,7 +66,7 @@ preconditioner with another iterative solver; see [integration and factor reuse]
 Standalone [CLI archives](docs/install.md#cli-archives) for Linux CPU and
 Apple-silicon CPU/Metal need no Python.
 
-A source build needs CMake, GCC or Clang with C++23 and OpenMP, and Eigen.
+A source build needs CMake, GCC or Clang with C++23 and OpenMP, and zlib.
 See [building from source](docs/building.md) for dependencies, GPU builds
 and CMake integration.
 
