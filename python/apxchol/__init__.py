@@ -433,7 +433,9 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
         `residual_peel` ("natural" | "min_degree" | "bk_serial"),
         `cpu_schedule` ("auto" | "levels"),
         `drop_tolerance` (in [0, 1]; 0 disables dropping),
-        `regularization` (nonnegative diagonal fraction; 0 disables),
+        `regularization` (minimum diagonal excess of the preconditioner, as a
+        fraction of each diagonal after lumping; excess below 1e-12 of the
+        diagonal counts as zero first; 0 disables),
         `lump_max_mass` (fraction in [0, 1]; 0 rejects positive off-diagonals),
         and `verbose` (default False).
 
