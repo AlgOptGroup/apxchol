@@ -354,7 +354,7 @@ def test_positive_offdiagonals_on_a_positive_diagonal_are_lumped_not_rejected():
     assert (A.diagonal() > 0).all()
 
     s = apxchol.factorize(A)
-    assert s.lumped == 2         # both triangles of the one pair
+    assert s.lumped_offdiag == 2         # both triangles of the one pair
     # the caller's matrix is untouched
     assert (A != before).nnz == 0
 
@@ -367,7 +367,7 @@ def test_positive_offdiagonals_on_a_positive_diagonal_are_lumped_not_rejected():
 
 def test_a_pure_laplacian_reports_no_lumping():
     s = apxchol.factorize(grid2d_laplacian(10))
-    assert s.lumped == 0
+    assert s.lumped_offdiag == 0
 
 
 def test_mixed_sign_operator_with_positive_diagonal_still_solves():
@@ -540,7 +540,7 @@ def test_input_matrix_is_not_mutated():
 # ── factor export ────────────────────────────────────────────────────────────
 
 def test_factor_export_algebra_sddm():
-    """G G^T reproduces the permuted matrix; L D L^T reproduces G G^T exactly."""
+    """G G^T reproduces the permuted matrix."""
     A = grid2d_sddm(30)
     slv = apxchol.factorize(A, seed=7)
     assert slv.sddm
@@ -549,22 +549,17 @@ def test_factor_export_algebra_sddm():
     GGt = (slv.chol() @ slv.chol().T).tocsc()
     # G is an APPROXIMATE (sampled) factor — loose bound only.
     assert spnorm(A_perm - GGt) / spnorm(A_perm) < 0.5
-    # L D L^T == G G^T is an exact algebraic identity (up to fp round-off).
-    LDLt = (slv.L @ sp.diags(slv.D) @ slv.L.T).tocsc()
-    assert spnorm(LDLt - GGt) / spnorm(GGt) < 1e-6
 
 
 def test_factor_export_algebra_laplacian():
-    """Same identities for a singular Laplacian, plus the placeholder column."""
+    """Same identity for a singular Laplacian, plus the placeholder column."""
     A = grid2d_laplacian(20)
     n = A.shape[0]
     slv = apxchol.factorize(A, seed=7)
     assert not slv.sddm
     G = slv.chol()
     assert G.shape == (n, n)
-    assert G.dtype == slv.L.dtype == slv.D.dtype == np.float32
-    assert slv.L.shape == (n, n)
-    assert slv.D.shape == (n,)
+    assert G.dtype == np.float32
 
     # One connected component => exactly one placeholder column, the last one
     # eliminated: a bare diagonal 1.0 standing in for the dropped rank.
@@ -572,7 +567,6 @@ def test_factor_export_algebra_laplacian():
     single = np.flatnonzero(np.diff(Gc.indptr) == 1)
     assert single.tolist() == [n - 1]
     assert Gc[n - 1, n - 1] == 1.0
-    assert slv.D[n - 1] == 1.0
 
     # The G G^T identity holds on the rank-(n−1) subspace: check the leading
     # block, which excludes the placeholder's row/column.
@@ -582,9 +576,6 @@ def test_factor_export_algebra_laplacian():
     lead = slice(0, n - 1)
     assert (spnorm(A_perm[lead, lead] - GGt[lead, lead])
             / spnorm(A_perm[lead, lead])) < 0.5
-    # L D L^T == G G^T stays exact in the singular case too.
-    LDLt = (slv.L @ sp.diags(slv.D) @ slv.L.T).tocsc()
-    assert spnorm(LDLt - GGt) / spnorm(GGt) < 1e-6
 
 
 def test_export_supports_float32_triangular_solve():
@@ -766,8 +757,6 @@ def test_keep_factor_false_disables_export():
     A = grid2d_sddm(15)
     slv = apxchol.factorize(A, keep_factor=False)
     with pytest.raises(RuntimeError):
-        slv.L
-    with pytest.raises(RuntimeError):
         slv.chol()
     assert slv.factor_nnz > 0            # column pointers survive the release
     # solving still works with the factor values released
@@ -775,10 +764,9 @@ def test_keep_factor_false_disables_export():
     assert slv.solve(b).converged
 
 
-def test_fill_ratio_and_version():
+def test_factor_nnz_and_version():
     A = grid2d_sddm(20)
     slv = apxchol.factorize(A)
-    assert slv.fill_ratio > 0.0
     assert slv.factor_nnz > A.shape[0]
     assert isinstance(apxchol.__version__, str) and apxchol.__version__
     assert "Solver" in repr(slv)

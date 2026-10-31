@@ -4,7 +4,8 @@ Starting with v1.0, apxchol preserves documented source-level use of these
 interfaces throughout the 1.x series:
 
 - C++ solve and factorize operations, their options and their results,
-  including the read-only `sparse_csc` factor view.
+  including the read-only `sparse_csc` factor view and `solver::save` and
+  `solver::load` for [saved solvers](serialization.md).
 - [Python](../python/README.md) names exported through `__all__` and their
   documented methods and arguments.
 - Documented [MATLAB/Octave wrappers](../octave/README.md) and CLI options.

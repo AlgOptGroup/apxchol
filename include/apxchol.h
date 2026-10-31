@@ -9,7 +9,6 @@
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/preconditioner.h"
 #include "apxchol/solver/solve.h"
-#include "apxchol/solver/archive.h"
 #if defined(APXCHOL_USE_METAL)
 #include "apxchol/solver/metal_solver.h"
 #endif

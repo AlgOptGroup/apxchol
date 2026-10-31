@@ -52,7 +52,7 @@ public:
     solve_result solve(const Eigen::VectorXd& b, std::optional<double> tol = std::nullopt,
                        std::optional<int> max_iter = std::nullopt,
                        const Eigen::VectorXd* x0 = nullptr) const;
-    /// Append solve timings to an existing result, as cpu_solver does.
+    /// Append solve timings to an existing result, as solver does.
     void solve(const Eigen::VectorXd& b, solve_result& result,
                std::optional<double> tol = std::nullopt,
                std::optional<int> max_iter = std::nullopt,

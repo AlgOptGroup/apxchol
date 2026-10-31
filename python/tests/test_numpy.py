@@ -47,7 +47,7 @@ def test_unsorted_duplicates_use_shared_canonical_import():
         indptr.append(len(data))
     raw = apxchol.Solver.from_csc(data, indices, indptr, backend="cpu", seed=1)
     canonical = apxchol.Solver.from_csc(DATA, INDICES, INDPTR, backend="cpu", seed=1)
-    assert raw.fill_ratio == canonical.fill_ratio
+    assert raw.factor_nnz == canonical.factor_nnz
     np.testing.assert_array_equal(raw.P, canonical.P)
     np.testing.assert_allclose(raw.solve(A @ np.ones(3)).x, np.ones(3))
 

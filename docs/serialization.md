@@ -3,14 +3,14 @@
 Save the matrix and retained factor together, then load them on a CPU or GPU without repeating factorization:
 
 ```cpp
-#include <apxchol/solver/archive.h>
+#include <apxchol/solver/solve.h>
 
 apxchol::solve_options options;
 options.keep_factor_values = true;
 apxchol::solver prepared(A, options);
-apxchol::save_solver("system.apxchol", prepared);
+prepared.save("system.apxchol");
 
-auto restored = apxchol::load_solver("system.apxchol", options);
+auto restored = apxchol::solver::load("system.apxchol", options);
 auto result = restored.solve(b);
 ```
 

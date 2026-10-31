@@ -32,13 +32,13 @@ int main() {
     auto F_tree = apxchol::factorize(L, opts);
 
     // Custom rule: factorize with our eliminator (the graph is built
-    // internally), then hand the factorization to cpu_solver (or
+    // internally), then hand the factorization to apxchol::solver (or
     // apx_cholesky::set_factor) for PCG.
     auto F = apxchol::factorize(L, exact_clique_eliminator{}, opts);
     std::printf("nnz(L): tree-sampled %zu, exact-clique %zu\n",
                 size_t(F_tree.L.nonZeros()), size_t(F.L.nonZeros()));
 
-    apxchol::cpu_solver slv(L, std::move(F));
+    apxchol::solver slv(L, std::move(F));
     auto res = slv.solve(b);
     std::printf("exact-clique factor: %ld iterations, residual %.2e\n",
                 long(res.iterations), res.residual);
