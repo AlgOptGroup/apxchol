@@ -415,6 +415,11 @@ struct detail::metal_route::impl {
 
     id<MTLComputeCommandEncoder> encoder = nil;
 
+    // PCG iterations per command buffer. A wait costs about 270 us; a skipped
+    // iteration after convergence up to about 220 us, because every dataflow
+    // stage is still dispatched. 8 was fastest or within 1% from 40k to 4M rows.
+    static constexpr unsigned batch_iterations = 8;
+
     template<class Record>
     bool submit(bool first, Record&& record) {
         with_pool([&] {

@@ -574,7 +574,7 @@ TEST(GpuSolveHonesty, FinalResidualChecksReturnedScalarAndPairOnReuse) {
 
         // A breakdown after progress must not start another solve attempt: one
         // attempt enqueues one batch, whose later iterations the device skips.
-        constexpr unsigned one_batch = apxchol::detail::gpu_pcg::kBatchIterations;
+        constexpr unsigned one_batch = apxchol::detail::cuda_pcg::batch_iterations;
         preconditioner.breakdown = false;
         preconditioner.breakdown_after = 1;
         preconditioner.calls = 0;

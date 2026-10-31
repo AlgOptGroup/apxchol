@@ -33,6 +33,11 @@ class cuda_route;
 class cuda_pcg {
     friend class cuda_route;
 public:
+    /// PCG iterations per host wait. A wait costs about 10 us and a skipped
+    /// iteration after convergence 18-25 us; batches of 2-8 were within noise
+    /// of each other and 16-32 slowed small systems.
+    static constexpr unsigned batch_iterations = 4;
+
     cuda_pcg() = default;
     /// Shares the device operator, which is read-only after setup, and
     /// allocates its own vectors and stream, so copies solve concurrently.
@@ -272,6 +277,7 @@ private:
 
     template<class Precond, unsigned Columns>
     struct iteration {
+        static constexpr unsigned batch_iterations = cuda_pcg::batch_iterations;
         cuda_pcg& s;
         const Precond& precond;
         std::array<double, Columns> bnorm;
