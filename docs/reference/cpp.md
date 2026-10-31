@@ -1,7 +1,7 @@
 # C++ reference
 
 Include `apxchol.h` and link `apxchol::core`. Start with the
-[usage guide](../usage.md) or [CMake integration](../building.md).
+[usage guide](../usage.md) or [CMake integration](../cpp.md).
 This page lists the existing public controls; the [API policy](../api.md)
 defines their compatibility guarantees.
 

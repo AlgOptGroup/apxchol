@@ -10,7 +10,7 @@ also runs the examples. Run one test while iterating with
 `./build/tests/unit_tests --gtest_filter='FactorizeTest.PermutationIsValid'`.
 
 CI builds `tests/cmake_consumer` to check the
-[CMake consumer](docs/building.md#use-from-cmake) requirements with warnings as errors. The root-embedding
+[CMake consumer](docs/cpp.md#use-from-cmake) requirements with warnings as errors. The root-embedding
 consumer reuses the same alignment and original-residual checks:
 
 ```sh
@@ -63,6 +63,9 @@ python -m http.server 8000 --directory build/docs
 The site reuses the repository guides, selected C++ comments, Python docstrings
 and the CLI's `--help`. Generated files stay in `build/docs`. To use another
 CLI or output directory, pass them as positional arguments to `docs/build.py`.
+To add a page, list it in `GUIDES` in `docs/build.py` and in a `docs/index.md`
+toctree. Development builds show a banner naming the release from the
+changelog's `Unreleased (since vX.Y.Z)` heading.
 Documentation CI uploads an HTML preview for review. Successful main builds
 publish development documentation at `/dev/`. Each stable GitHub release saves
 its rendered HTML as `documentation.tar.gz`; reruns retain the existing snapshot.

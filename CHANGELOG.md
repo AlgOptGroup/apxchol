@@ -80,6 +80,9 @@
 - GPU memory is now this process's NVML usage above its post-context baseline, measured the same way for apxchol, AMGCL and Hypre, with a new `setup_vram_mb` column; other compute processes are reported separately and flagged as shared.
 - The benchmark builds on macOS with a Metal route for apxchol (`--device metal`), with Metal warm-up excluded from setup and the factor-drop statistics in `--report-fill`.
 
+### Documentation
+- The website separates user and developer guides, adds installation, quick start, examples, changelog and citing pages, and marks development pages with a banner.
+
 ### Fixes
 - Reported residuals are now correct on early solve exits.
 - Fixed SDDM misclassification of exact Laplacians.
@@ -89,6 +92,6 @@
 - The CLI rejects an empty matrix and RHS files with no rows or columns with an error (exit 2); it used to crash.
 - Breaking: saving a solver replaces an existing file instead of refusing. It writes `<path>.tmp`, flushes it, renames it into place and syncs the directory, so readers never see a partial archive and the new file survives a power loss, and the new file gets the usual umask permissions (for example 0644) instead of always 0600.
 
-Full history: https://github.com/AlgOptGroup/apxchol/compare/v0.2.2...main
+Full history: <https://github.com/AlgOptGroup/apxchol/compare/v0.2.2...main>
 
 0.1.0–0.2.0 were published before the public history was squashed and have no source tag.

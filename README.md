@@ -14,11 +14,11 @@ conjugate gradients (PCG) to compute the solution.
 
 ## Quick start
 
-For an unreleased checkout, use a
-[source installation](docs/building.md#python-source-installation) with the `scipy` extra.
-For the latest published package, see [PyPI](https://pypi.org/project/apxchol/)
-for that version's API and install with:
+Until the next release, `pip` installs 0.2.2, which solves one right-hand
+side per call and has no `as_operator`. To run this example, install the
+development version [from source](python/README.md#build-from-source).
 
+<!-- quickstart -->
 ```bash
 python -m pip install "apxchol[scipy]"
 ```
@@ -40,19 +40,11 @@ B = np.column_stack((np.ones(n), np.arange(n)))
 batch = solver.solve(B)
 assert batch.converged.all()           # solutions are in batch.x
 ```
+<!-- /quickstart -->
 
-**No GPU is required.** Wheels built by this project include the CPU solver plus
-CUDA on Linux or Metal on macOS.
-GPU execution needs a compatible device and driver, but using the wheels
-requires neither the CUDA Toolkit nor Homebrew.
-
-| Wheel builds | Minimum platform | Included backends |
-|---|---|---|
-| CPython 3.11–3.15 / PyPy 7.3.23, Linux | x86-64-v2 CPU, glibc 2.28 | CPU + CUDA |
-| CPython 3.11–3.15 / PyPy 7.3.23, macOS | macOS 15, Apple silicon | CPU + Metal |
-
-PyPy wheels use Python 3.11 (`pp73`). On PyPy, use the
-[NumPy-only interface](python/README.md#numpy-only-input).
+Wheels run on CPU without a GPU and include CUDA (Linux) or Metal (macOS).
+See [installation](docs/install.md) for the latest release, CLI archives and
+source builds.
 
 `solver.backend` reports which backend was selected. Use `backend="cpu"`
 or `backend="gpu"` in `factorize` to choose explicitly.
@@ -71,11 +63,11 @@ preconditioner with another iterative solver; see [integration and factor reuse]
 
 ## Build and run
 
-Standalone [CLI archives](docs/building.md#cli-archives) are built by CI for Linux CPU
-and Apple-silicon CPU/Metal; new releases attach these downloads. Python is not required.
+Standalone [CLI archives](docs/install.md#cli-archives) for Linux CPU and
+Apple-silicon CPU/Metal need no Python.
 
 A source build needs CMake, GCC or Clang with C++23 and OpenMP, and Eigen.
-See [building and installation](docs/building.md) for dependencies, GPU builds
+See [building from source](docs/building.md) for dependencies, GPU builds
 and CMake integration.
 
 ```bash
@@ -88,19 +80,19 @@ ctest --test-dir build --output-on-failure
 The CLI reads the matrix as `A`; `--convert-input` forms the Laplacian of an
 adjacency matrix. An `--rhs` file with several columns is solved as one batch.
 `--random-rhs` generates a test RHS;
-[`--help`](docs/building.md#command-line-use) lists the available controls.
+the [command-line guide](docs/cli.md) lists the available controls.
 
 ## Performance
 
-See [performance results and methodology](docs/performance.md) and
-[batching and factor reuse](docs/batching.md) for measured examples and guidance.
+Cross-solver results are in preparation for 1.0; see [performance](docs/performance.md)
+for the methodology and the measured [batching case study](docs/batching.md).
 
 ## Learn more
 
-- [Building and installation](docs/building.md)
+- [Installation](docs/install.md) and [building from source](docs/building.md)
 - [Choosing a backend, reusing factors and checking results](docs/usage.md)
 - [Precision](docs/precision.md) and [API compatibility](docs/api.md)
-- [Custom algorithms](docs/extending.md), [examples](examples/) and [contributing](CONTRIBUTING.md)
+- [Examples](docs/examples.md), [custom algorithms](docs/extending.md) and [contributing](CONTRIBUTING.md)
 - [Benchmarking and reproducibility](benchmarks/README.md)
 
 Based on Kyng–Sachdeva ([2016](https://arxiv.org/abs/1605.02353)),
@@ -108,7 +100,7 @@ Gao–Kyng–Spielman ([2023](https://arxiv.org/abs/2303.00709)) and
 Baumann–Kyng ([2024](https://dl.acm.org/doi/10.1145/3626183.3659987)).
 
 Developed at ETH Zürich. Contact: <apxchol@inf.ethz.ch>.
-[License](LICENSE) · [Citation](CITATION.cff).
+[License](LICENSE) · [Citing apxchol](docs/citing.md) · [Changelog](CHANGELOG.md).
 
 ## Acknowledgements
 

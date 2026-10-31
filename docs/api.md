@@ -14,7 +14,7 @@ interfaces throughout the 1.x series:
 - The input conversion `apxchol.as_operator`, `apxchol_as_operator` and the
   CLI's `--convert-input`, with the [rule](usage.md#converting-input-to-an-operator)
   they share.
-- `apxchol::core` and the [documented CMake integration](building.md#use-from-cmake).
+- `apxchol::core` and the [documented CMake integration](cpp.md#use-from-cmake).
 - Reading [solver archives](serialization.md) written by any earlier 1.x release.
 
 The [partitioner and eliminator extension contracts](extending.md), and the
