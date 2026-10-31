@@ -1334,15 +1334,17 @@ detail::csc_matrix<double> detail::cpu_route::original_operator() const {
 
 #if defined(APXCHOL_USE_CUDA)
 detail::csc_matrix<double> detail::cuda_route::original_operator() const {
-    static_assert(sizeof(node_index) == sizeof(int) && sizeof(edge_index) == sizeof(int),
-                  "the CUDA operator uses 32-bit indices");
+    static_assert(sizeof(node_index) == sizeof(int), "GPU routes require 32-bit vertices");
     const auto& pcg = gpcg_;
     const cuda_device_scope device(pcg.device_, cuda_device_scope::checked{});
     const auto& op = *pcg.op_;
     const int n = static_cast<int>(pcg.n_), nnz = op.matrix.nnz;
     csc_matrix<double> stored(static_cast<node_index>(n), static_cast<edge_index>(nnz));
     std::vector<node_index> inverse(n);
-    check_cuda(cudaMemcpy(stored.ptr(), op.matrix.row_ptr, (static_cast<std::size_t>(n) + 1) * sizeof(int), cudaMemcpyDeviceToHost), "download archive offsets");
+    // The device keeps 32-bit offsets; 64_EDGES builds widen them here.
+    std::vector<int> offsets(static_cast<std::size_t>(n) + 1);
+    check_cuda(cudaMemcpy(offsets.data(), op.matrix.row_ptr, offsets.size() * sizeof(int), cudaMemcpyDeviceToHost), "download archive offsets");
+    std::copy(offsets.begin(), offsets.end(), stored.ptr());
     check_cuda(cudaMemcpy(stored.idx(), op.matrix.col_idx, static_cast<std::size_t>(nnz) * sizeof(int), cudaMemcpyDeviceToHost), "download archive indices");
     if (op.matrix.fp32) {
         std::vector<float> narrow(nnz);
