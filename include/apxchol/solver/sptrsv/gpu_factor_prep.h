@@ -194,7 +194,7 @@ struct fp16_scaled_arrays {
     std::vector<float>               diag;       // m
     std::vector<double>              inv_scale2; // m; squaring in fp32 can overflow
     std::uint64_t flushed   = 0;   // stored off-diagonals with v != 0 stored as zero
-    std::uint64_t subnormal = 0;   // stored off-diagonals that are fp16 subnormals (0: they are always flushed)
+    std::uint64_t subnormal = 0;   // stored fp16-subnormal off-diagonals: 0 when narrowing, which flushes them; an exact install keeps them
 };
 
 template <class Val>

@@ -233,6 +233,29 @@ void finish(id<MTLCommandBuffer> cb) {
 
 using prepared_tri = metal_setup::triangle;
 
+// True when F's rounds partition the factor's columns into rounds whose
+// dependencies all lie in earlier rounds, as resident setup's round plans need.
+bool round_plans_apply(const factorization& F, const gpu_factor_prep::csr_int<float>& backward) {
+    const std::size_t n = F.perm.size(), m = static_cast<std::size_t>(backward.m);
+    std::vector<unsigned> round(n);
+    std::size_t begin = 0;
+    for (std::size_t r = 0; r < F.rounds.size(); ++r) {
+        const auto& info = F.rounds[r];
+        if (info.active != n - begin || info.is_size > info.active) return false;
+        std::fill_n(round.begin() + begin, info.is_size, unsigned(r));
+        begin += info.is_size;
+    }
+    if (F.rounds.empty()) return false;
+    // Vertices no round eliminated (the final pivot) form one last round.
+    std::fill(round.begin() + begin, round.end(), unsigned(F.rounds.size()));
+    for (std::size_t j = 0; j < m; ++j)
+        for (int p = backward.ptr[j]; p < backward.ptr[j + 1]; ++p) {
+            const auto i = static_cast<std::size_t>(backward.idx[p]);
+            if (i != j && (i >= m || round[i] <= round[j])) return false;
+        }
+    return true;
+}
+
 void install_schedule(context& ctx, prepared_tri& out, metal_schedule::schedule schedule,
                        unsigned m) {
     auto& packed = schedule.tasks;
@@ -450,7 +473,8 @@ struct detail::metal_route::impl {
     void prepare_device(detail::gpu_factor_prep::csr_int<float> backward,
                         const std::vector<float>& scales,
                         const std::vector<float>& hi, const std::vector<float>& lo, unsigned m,
-                        detail::metal_setup::resident_factor* resident = nullptr);
+                        detail::metal_setup::resident_factor* resident,
+                        const detail::metal_setup::resident_factor* device_operator);
 
     void allocate_workspace(unsigned count);
     void select_columns(unsigned count) {
@@ -547,9 +571,12 @@ void detail::metal_route::impl::setup(const Eigen::SparseMatrix<double>& A, chec
     detail::gpu_factor_prep::csr_int<float> backward;
     std::vector<float> scales, hi, lo;
     bool exact;
-    if (resident) {
+    // Resident setup and installed factors multiply by the same device operator,
+    // so a reloaded solver reproduces the original solves bit for bit.
+    std::optional<detail::metal_setup::resident_factor> device_operator;
+    auto adopt_device_operator = [&](const detail::metal_setup::resident_factor& source) {
         original_operator = A;
-        if (!resident->operator_triangles_identical) {
+        if (!source.operator_triangles_identical) {
             #pragma omp parallel
             {
                 const auto [first, last] = detail::work_balanced_range(A.outerIndexPtr(), A.rows(),
@@ -562,9 +589,12 @@ void detail::metal_route::impl::setup(const Eigen::SparseMatrix<double>& A, chec
                             A.innerIndexPtr()[p], p, paired);
             }
         }
-        exact = resident->operator_exact;
-        arguments.spmv_lanes = resident->max_operator_row > 256 ? kTreeLanes : 1;
-        arguments.preconditioner_scale = resident->preconditioner_scale;
+        exact = source.operator_exact;
+        arguments.spmv_lanes = source.max_operator_row > 256 ? kTreeLanes : 1;
+        arguments.preconditioner_scale = source.preconditioner_scale;
+    };
+    if (resident) {
+        adopt_device_operator(*resident);
     } else {
         // Keep compensated dropping in the shared FP64 host implementation.
         // Both backends consume the CSR factor without a level-permuted value copy.
@@ -583,6 +613,13 @@ void detail::metal_route::impl::setup(const Eigen::SparseMatrix<double>& A, chec
         std::vector<float>().swap(F.scale);
         if (cp) (*cp)("metal_factor_prep");
 
+        if (installed)
+            with_pool([&] {
+                device_operator = detail::metal_setup::prepare_input_operator(
+                    shared().device, A, F.perm, opts.factor_opts.lump_max_mass);
+            });
+        if (device_operator) adopt_device_operator(*device_operator);
+        else {
         Eigen::SparseMatrix<double> compressed;
         if (!A.isCompressed()) {
             compressed = A;
@@ -631,10 +668,12 @@ void detail::metal_route::impl::setup(const Eigen::SparseMatrix<double>& A, chec
             const int shift = static_cast<int>(std::floor(exponent_sum / 4.0));
             arguments.preconditioner_scale = std::scalbn(1.0f, shift);
         }
+        }
         if (cp) (*cp)("metal_operator");
 
     }
-    prepare_device(std::move(backward), scales, hi, lo, m, resident);
+    prepare_device(std::move(backward), scales, hi, lo, m, resident,
+                   device_operator ? &*device_operator : resident);
 
     stats.n = static_cast<Eigen::Index>(n);
     stats.levels_forward = fwd.levels;
@@ -650,24 +689,25 @@ void detail::metal_route::impl::setup(const Eigen::SparseMatrix<double>& A, chec
 void detail::metal_route::impl::prepare_device(detail::gpu_factor_prep::csr_int<float> backward,
                                        const std::vector<float>& scales,
                                        const std::vector<float>& hi, const std::vector<float>& lo,
-                                       unsigned m, detail::metal_setup::resident_factor* resident) {
+                                       unsigned m, detail::metal_setup::resident_factor* resident,
+                                       const detail::metal_setup::resident_factor* device_operator) {
     context& ctx = shared();
     this->ctx = &ctx;
     arguments.n = static_cast<std::uint32_t>(n);
     arguments.m = m;
     arguments.groups = (arguments.n + kTreeRows - 1) / kTreeRows;
-    const auto nnz = resident ? 0 : op.ptr.back();
-    operator_df = resident ? !resident->operator_exact : !lo.empty();
+    const auto nnz = device_operator ? 0 : op.ptr.back();
+    operator_df = device_operator ? !device_operator->operator_exact : !lo.empty();
     with_pool([&] {
         id<MTLDevice> dev = ctx.device;
         queue = [dev newCommandQueue];
         if (queue == nil) throw std::runtime_error("Metal command queue creation failed");
-        if (resident) {
-            device_op_ptr = resident->operator_ptr;
-            device_op_col = resident->operator_idx;
-            operator_row_map = resident->operator_row_map;
-            op_hi = resident->operator_hi;
-            op_lo = resident->operator_lo;
+        if (device_operator) {
+            device_op_ptr = device_operator->operator_ptr;
+            device_op_col = device_operator->operator_idx;
+            operator_row_map = device_operator->operator_row_map;
+            op_hi = device_operator->operator_hi;
+            op_lo = device_operator->operator_lo;
         } else {
         device_op_ptr = upload(dev, op.ptr.data(), (n + 1) * sizeof(std::uint32_t), "operator pointers");
         device_op_col = upload(dev, op.idx.get(), nnz * sizeof(std::uint32_t), "operator indices");
@@ -682,10 +722,28 @@ void detail::metal_route::impl::prepare_device(detail::gpu_factor_prep::csr_int<
         bwd = std::move(resident->backward);
         factor_metadata = resident->metadata;
     } else {
+    // An installed factor with valid elimination rounds gets the round plans its
+    // resident setup used, so a reloaded solver solves in the same order.
+    const bool round_plans = installed && round_plans_apply(F, backward);
     auto install = [&]<class Value>(const detail::gpu_factor_prep::csr_int<Value>& bt, std::span<const float> diag = {}) {
         const auto ft = detail::gpu_factor_prep::transpose_csr(bt);
-        fwd = prepare_tri(ctx, ft, true, diag);
-        bwd = prepare_tri(ctx, bt, false, diag);
+        if (!round_plans) {
+            fwd = prepare_tri(ctx, ft, true, diag);
+            bwd = prepare_tri(ctx, bt, false, diag);
+            return;
+        }
+        auto upload_tri = [&](const detail::gpu_factor_prep::csr_int<Value>& a) {
+            prepared_tri out;
+            with_pool([&] {
+                out.ptr = upload(ctx.device, a.ptr.data(), (a.m + 1) * sizeof(unsigned), "factor pointers");
+                out.idx = upload(ctx.device, a.idx.get(), a.nnz * sizeof(unsigned), "factor indices");
+                out.val = upload(ctx.device, a.vals.get(), a.nnz * sizeof(Value), "factor values");
+            });
+            return out;
+        };
+        fwd = upload_tri(ft);
+        bwd = upload_tri(bt);
+        with_pool([&] { detail::metal_setup::prepare_round_plans(ctx.device, F, fwd, bwd); });
     };
     if (factor_fp16) {
         auto narrow = installed ? detail::gpu_factor_prep::installed_fp16_arrays(backward, scales)

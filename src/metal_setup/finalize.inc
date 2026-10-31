@@ -7,6 +7,7 @@ enum Stage : unsigned {
     stage_count_transpose = 3,
     stage_initialize_cursor = 4,
     stage_emit_transpose = 5,
+    stage_sort_transpose = 6,
 };
 
 struct Metadata { float scale, diagonal, scaled_diagonal; };
@@ -99,6 +100,35 @@ template<class Memory>
 APXCHOL_GPU_FUNCTION void transpose_count(Memory s, unsigned row) {
     if (row >= s.shape.m) return;
     for (unsigned p = s.ptr[row]; p < s.ptr[row + 1]; ++p) s.increment_count(s.idx[p]);
+}
+
+template<class Index, class Value>
+APXCHOL_GPU_FUNCTION void sift_down(Index idx, Value val, unsigned root, unsigned end) {
+    while (2 * root + 1 < end) {
+        unsigned child = 2 * root + 1;
+        if (child + 1 < end && idx[child + 1] > idx[child]) ++child;
+        if (idx[root] >= idx[child]) return;
+        const auto i = idx[root]; idx[root] = idx[child]; idx[child] = i;
+        const auto v = val[root]; val[root] = val[child]; val[child] = v;
+        root = child;
+    }
+}
+
+// Atomic slots leave each forward row's off-diagonals in thread order. Sort
+// them by column, as the host transpose orders them, so the solve's summation
+// order is deterministic and an installed copy of the factor reproduces it.
+template<class Memory>
+APXCHOL_GPU_FUNCTION void transpose_sort(Memory s, unsigned row) {
+    if (row >= s.shape.m) return;
+    const unsigned begin = s.transpose_ptr[row], count = s.transpose_ptr[row + 1] - 1 - begin;
+    auto idx = s.transpose_idx + begin;
+    auto val = s.transpose_val + begin;
+    for (unsigned root = count / 2; root-- > 0;) sift_down(idx, val, root, count);
+    for (unsigned end = count; end > 1; --end) {
+        const auto i = idx[0]; idx[0] = idx[end - 1]; idx[end - 1] = i;
+        const auto v = val[0]; val[0] = val[end - 1]; val[end - 1] = v;
+        sift_down(idx, val, 0, end - 1);
+    }
 }
 
 template<class Memory>

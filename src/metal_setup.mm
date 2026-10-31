@@ -79,10 +79,12 @@ pipelines& pipelines_for(id<MTLDevice> device) {
 
 } // namespace
 
-void prepare_lane_plans(id<MTLDevice> device, const factorization& factor,
-                        triangle& forward, triangle& backward) {
+namespace {
+template<unsigned Lanes>
+void prepare_plans_from_rounds(id<MTLDevice> device, const factorization& factor,
+                               triangle& forward, triangle& backward) {
     const unsigned n = factor.perm.size();
-    auto rounds = buffer(device, (factor.rounds.size() + 1) * sizeof(unsigned));
+    auto rounds = buffer(device, (factor.rounds.size() + 2) * sizeof(unsigned));
     auto* bounds = static_cast<unsigned*>(rounds.contents);
     bounds[0] = 0;
     for (std::size_t r = 0; r < factor.rounds.size(); ++r) {
@@ -91,11 +93,47 @@ void prepare_lane_plans(id<MTLDevice> device, const factorization& factor,
                 "invalid resident Metal round boundaries");
         bounds[r + 1] = bounds[r] + unsigned(round.is_size);
     }
-    require(bounds[factor.rounds.size()] == n, "incomplete resident Metal rounds");
+    // Vertices no round eliminated (the final pivot) form one last round.
+    unsigned count = unsigned(factor.rounds.size());
+    if (bounds[count] < n) bounds[++count] = n;
     auto status = buffer(device, sizeof(unsigned));
     *static_cast<unsigned*>(status.contents) = 0;
-    pipelines_for(device).finalizer.prepare_plans<8>(forward, backward, n - !factor.sddm,
-        rounds, 0, unsigned(factor.rounds.size()), status);
+    pipelines_for(device).finalizer.prepare_plans<Lanes>(forward, backward, n - !factor.sddm,
+        rounds, 0, count, status);
+}
+} // namespace
+
+void prepare_lane_plans(id<MTLDevice> device, const factorization& factor,
+                        triangle& forward, triangle& backward) {
+    prepare_plans_from_rounds<8>(device, factor, forward, backward);
+}
+
+void prepare_round_plans(id<MTLDevice> device, const factorization& factor,
+                         triangle& forward, triangle& backward) {
+    prepare_plans_from_rounds<detail::gpu_dataflow::lanes>(device, factor, forward, backward);
+}
+
+std::optional<resident_factor> prepare_input_operator(id<MTLDevice> device,
+    const Eigen::SparseMatrix<double>& A, const std::vector<node_index>& perm,
+    double lump_max_mass) {
+    @autoreleasepool {
+        std::size_t offdiagonals = 0;
+        if (!gpu_owned_csc_layout_supported(A, offdiagonals) || !gpu_owned_csc_paired(A))
+            return std::nullopt;
+        const operator_view validated(A, lump_max_mass);
+        const auto input = upload(device, A);
+        const unsigned n = unsigned(A.rows());
+        resident_factor out;
+        out.operator_exact = input.operator_exact;
+        out.max_operator_row = input.max_operator_row;
+        out.preconditioner_scale = input.preconditioner_scale;
+        out.operator_triangles_identical = validated.scan().triangles_bit_identical;
+        auto permutation = buffer(device, std::size_t(n) * sizeof(unsigned));
+        std::copy(perm.begin(), perm.end(), static_cast<unsigned*>(permutation.contents));
+        pipelines_for(device).finalizer.prepare_operator(input.ptr, input.idx, input.values,
+                                                         permutation, n, unsigned(A.nonZeros()), out);
+        return out;
+    }
 }
 
 resident_factor factorize(id<MTLDevice> device, const Eigen::SparseMatrix<double> &A,

@@ -600,21 +600,11 @@ TEST_F(SolverArchive, CpuAndGpuFactorsCrossAdopt) {
                         EXPECT_EQ(restored.factor().rounds[i].is_size, F.rounds[i].is_size);
                     check_solve_modes(input, restored, laplacian, checked_rhs);
                     if (origin == target) {
-                        // A reloaded factor is the same preconditioner: bit for bit on
-                        // CPU and CUDA; Metal's resident setup and reinstall build
-                        // their device arrays separately and agree to FP32 rounding.
+                        // A reloaded factor is the same preconditioner, bit for bit.
                         Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(input.rows(), -1.0, 2.0);
                         if (laplacian) b.array() -= b.mean();
-                        const Eigen::VectorXd za = resident.apply(b), zb = restored.apply(b);
-#if defined(APXCHOL_USE_METAL)
-                        if (target == solve_backend::gpu)
-                            EXPECT_LT((za - zb).norm() / za.norm(), 1e-6);
-                        else
-#endif
-                        {
-                            EXPECT_EQ(za, zb);
-                            EXPECT_EQ(resident.solve(b, 1e-9, 500).x, restored.solve(b, 1e-9, 500).x);
-                        }
+                        EXPECT_EQ(resident.apply(b), restored.apply(b));
+                        EXPECT_EQ(resident.solve(b, 1e-9, 500).x, restored.solve(b, 1e-9, 500).x);
                     }
                     if (target == solve_backend::gpu) {
                         const auto adopted = directory / ("adopted-" + std::to_string(resaves++) + ".apxchol");

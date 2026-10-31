@@ -460,9 +460,12 @@ solver solver::load(const std::filesystem::path& path, const solve_options& opti
     }
     F.perm = archive.read_vector<node_index>(perm);
     const auto sizes = archive.read_vector<std::uint64_t>(rounds);
+    std::uint64_t eliminated = 0;
     for (auto count : sizes) {
-        if (count > n) invalid("invalid elimination round size");
-        F.rounds.push_back({0, static_cast<std::size_t>(count)});
+        if (count > n - eliminated) invalid("invalid elimination round size");
+        // A round's active count is what earlier rounds left.
+        F.rounds.push_back({static_cast<std::size_t>(n - eliminated), static_cast<std::size_t>(count)});
+        eliminated += count;
     }
     solver restored(A, std::move(F), options);
     detail::solver_access::finish_load(restored, static_cast<Eigen::Index>(input_entries), started);

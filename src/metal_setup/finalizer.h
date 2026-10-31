@@ -94,6 +94,8 @@ template <class Value> void run_final(FinalMemory<Value> s, unsigned row) {
         s.cursor[row] = s.transpose_ptr[row];
     if (phase == rf::stage_emit_transpose)
         rf::transpose_emit(s, row);
+    if (phase == rf::stage_sort_transpose)
+        rf::transpose_sort(s, row);
 }
 kernel void finalize_stage(device const resident_setup::Column* columns [[buffer(0)]],
                           device resident_setup::Edge* entries [[buffer(1)]],
@@ -262,7 +264,7 @@ class Finalizer {
     id<MTLDevice> device;
     id<MTLCommandQueue> queue;
     id<MTLLibrary> library;
-    std::array<std::array<id<MTLComputePipelineState>, 6>, 2> final_pipes;
+    std::array<std::array<id<MTLComputePipelineState>, 7>, 2> final_pipes;
     id<MTLComputePipelineState> structure, scan_blocks, scan_add, operator_emit;
     std::array<id<MTLComputePipelineState>, 2> count{}, emit{};
     std::once_flag lane_plan_once;
@@ -329,7 +331,7 @@ class Finalizer {
         NSError *error = nil;
         library = metal::compile_library(device, finalizer_source).library;
         for (unsigned half = 0; half < 2; ++half)
-            for (unsigned stage = 0; stage < 6; ++stage) {
+            for (unsigned stage = 0; stage < final_pipes[0].size(); ++stage) {
                 const bool h = half;
                 auto constants = [MTLFunctionConstantValues new];
                 [constants setConstantValue:&stage type:MTLDataTypeUInt atIndex:0];
@@ -498,6 +500,7 @@ class Finalizer {
         scan(cb, out.forward.ptr, m + 1, scan_scratch);
         encode(cb, rf::stage_initialize_cursor);
         encode(cb, rf::stage_emit_transpose);
+        encode(cb, rf::stage_sort_transpose);
         finish(cb, status);
         rows = nil;
         cursor = nil;
