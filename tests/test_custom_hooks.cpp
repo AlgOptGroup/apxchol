@@ -10,6 +10,8 @@
 #include <span>
 #include <vector>
 
+using csc_access = apxchol::detail::sparse_csc_access;
+
 namespace {
 // An exact FP32 factor preconditions PCG to at most three iterations.
 // FP16 storage rounding may require one more iteration on this fixture.
@@ -188,13 +190,13 @@ TEST(KeepFactor, ValuesSurviveWhenRequested) {
     opts.backend = apxchol::solve_backend::cpu;
 
     apxchol::solver released(L, opts);
-    EXPECT_TRUE(released.factor().L.vals_.empty());
+    EXPECT_TRUE(csc_access::vals(released.factor().L).empty());
 
     opts.keep_factor_values = true;
     apxchol::solver kept(L, opts);
     const auto& FL = kept.factor().L;
-    EXPECT_EQ(FL.vals_.size(), size_t(FL.nonZeros()));
-    EXPECT_EQ(FL.inner_.size(), size_t(FL.nonZeros()));
+    EXPECT_EQ(csc_access::vals(FL).size(), size_t(FL.nonZeros()));
+    EXPECT_EQ(csc_access::inner(FL).size(), size_t(FL.nonZeros()));
 }
 
 TEST(InitialGuess, ExactX0ConvergesImmediately) {

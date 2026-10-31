@@ -346,8 +346,8 @@ public:
     }
 
     /// Same analysis, but the SpTRSV CONSUMES L: its row/value arrays are
-    /// released (sparse_csc::release_values) at the first point setup no longer
-    /// reads them, instead of surviving until the caller frees them after setup.
+    /// released (detail::sparse_csc_access::release_values) at the first point
+    /// setup no longer reads them, instead of surviving until the caller frees them after setup.
     /// On the Laplacian path (m == n-1) that is right after the L11 copy, so
     /// the setup transient -- L11 + the transpose bucket + CSR (+ CSC) -- no
     /// longer sits on top of a dead full copy of the factor (nnz*(4+sizeof
@@ -415,15 +415,15 @@ private:
         if (m == L.rows()) {
             // SDDM full matrix: alias L (assume already compressed by
             // assemble_csc). Pointer copies only — nominally ~0 ms.
-            L11_outer = L.outerIndexPtr();
-            L11_inner = L.innerIndexPtr();
-            L11_vals  = L.valuePtr();
+            L11_outer = L.col_ptrs().data();
+            L11_inner = L.row_indices().data();
+            L11_vals  = L.values().data();
             nnz = L.nonZeros();
         } else {
             // Parallel build of L11 = L.topLeftCorner(m, m).
-            const edge_index* L_outer = L.outerIndexPtr();
-            const node_index* L_inner = L.innerIndexPtr();
-            const factor_value_t* L_vals = L.valuePtr();
+            const edge_index* L_outer = L.col_ptrs().data();
+            const node_index* L_inner = L.row_indices().data();
+            const factor_value_t* L_vals = L.values().data();
             const node_index drop_row = L.rows() - 1;
             // PASS 1 (parallel): per-column count of entries with row < m.
             // Both passes split columns by stored entries.
@@ -467,7 +467,7 @@ private:
             L11_inner = L11_inner_local.get();
             L11_vals  = L11_vals_local.get();
             // L11 is a full copy: the input factor is dead from here on.
-            if (consumed) consumed->release_values();
+            if (consumed) detail::sparse_csc_access::release_values(*consumed);
         }
         mark("L11_alias_or_copy");
 
@@ -565,7 +565,7 @@ private:
                 // SDDM path: L11 aliased the input factor, which the compacted
                 // copy has just replaced -- the input is dead now.
                 if (consumed && m == L.rows())
-                    consumed->release_values();
+                    detail::sparse_csc_access::release_values(*consumed);
             }
             if (factor_drop_rel > 0.0) mark("factor_drop");
         }
@@ -672,7 +672,7 @@ private:
         // transpose and level sets below use only the SpTRSV's own arrays, so
         // release all three sources HERE rather than at return (nnz-sized;
         // swap-with-empty / reset, since `v = {}` / clear() keep the capacity).
-        if (consumed) consumed->release_values();
+        if (consumed) detail::sparse_csc_access::release_values(*consumed);
         std::vector<edge_index>().swap(L11_outer_local);
         L11_inner_local.reset();
         L11_vals_local.reset();
@@ -685,7 +685,7 @@ private:
         if constexpr (kScaled)
             transpose(csc_col_ptr_.data(), csc_row_idx_.data(), csc_vals.data());
 
-        build_schedule(options.cpu_schedule, mark);
+        build_schedule(options.experimental.cpu_schedule, mark);
         ready_ = true;
     }
 

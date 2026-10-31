@@ -6,7 +6,6 @@
 #include "apxchol/types.h"
 #include <Eigen/Sparse>
 #include <algorithm>
-#include <bit>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -109,7 +108,7 @@ inline bool try_build_permuted_symmetric_csr(
 // Build sorted, full-symmetric CSR of P L P^T from L's canonical lower triangle.
 // Requires compressed square storage and a valid permutation; the caller must
 // ensure that the expanded operator fits int offsets. Duplicate entries remain
-// separate, ordered by value bits. fp32_exact reports lossless FP32 storage.
+// separate, ordered by value. fp32_exact reports lossless FP32 storage.
 inline permuted_operator_csr build_permuted_full_symmetric_csr(
     const Eigen::SparseMatrix<double>& L,
     const std::vector<node_index>& perm)
@@ -124,10 +123,6 @@ inline permuted_operator_csr build_permuted_full_symmetric_csr(
             out.idx = std::make_unique_for_overwrite<int[]>(count);
             out.vals = std::make_unique_for_overwrite<double[]>(count);
             return std::pair{out.idx.get(), out.vals.get()};
-        },
-        [](const auto& a, const auto& b) {
-            if (a.first != b.first) return a.first < b.first;
-            return std::bit_cast<std::uint64_t>(a.second) < std::bit_cast<std::uint64_t>(b.second);
         });
     return out;
 }

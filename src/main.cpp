@@ -70,6 +70,10 @@ int main(int argc, char* argv[]) try {
         spdlog::error("matrix must be square, got {}x{}", L.rows(), L.cols());
         return 2;
     }
+    if (L.rows() == 0) {
+        spdlog::error("matrix is empty (0x0)");
+        return 2;
+    }
 
     // The file is the operator; --convert-input applies the as_operator rule
     // (see src/mtx_input.h). Validation errors are logged by the handler
@@ -79,9 +83,8 @@ int main(int argc, char* argv[]) try {
     const bool graph = cfg.convert_input && detail::is_graph_adjacency(L);
     spdlog::info("{}", describe_input(graph, scan,
                                       !cfg.convert_input ? "the default"
-                                      : graph ? "--convert-input: not a valid operator, "
-                                                "no negative off-diagonal"
-                                              : "--convert-input: already a valid operator"));
+                                      : graph ? "--convert-input: no negative off-diagonal"
+                                              : "--convert-input: not a graph adjacency matrix"));
     if (graph)
         L = detail::adjacency_laplacian(L);
 
@@ -90,14 +93,24 @@ int main(int argc, char* argv[]) try {
     Eigen::VectorXd b;
     if (cfg.rhs_path) {
         spdlog::debug("loading RHS from {}", *cfg.rhs_path);
+        // Check the shape before reading: the reader divides by the row count.
+        fast_matrix_market::matrix_market_header rhs_header;
+        {
+            std::ifstream f(*cfg.rhs_path);
+            fast_matrix_market::read_header(f, rhs_header);
+        }
+        if (rhs_header.nrows != L.rows()) {
+            spdlog::error("RHS length {} does not match n = {}", rhs_header.nrows, L.rows());
+            return 2;
+        }
+        if (rhs_header.ncols == 0) {
+            spdlog::error("RHS file has no columns");
+            return 2;
+        }
         Eigen::MatrixXd B;
         {
             std::ifstream f(*cfg.rhs_path);
             fast_matrix_market::read_matrix_market_eigen_dense(f, B);
-        }
-        if (B.rows() != L.rows()) {
-            spdlog::error("RHS length {} does not match n = {}", B.rows(), L.rows());
-            return 2;
         }
         if (B.cols() > 1)
             return solve_batch(L, B, cfg, graph, scan);

@@ -29,16 +29,20 @@ inline void validate_adopted_operator(const Eigen::SparseMatrix<double>& A,
     }
 }
 
-// External factors expose mutable arrays. Validate them before setup or
-// permutation indexing; internally generated factors do not need this scan.
+// External factors have caller-editable permutations and rounds, and may have
+// released values. Validate them before setup or permutation indexing;
+// internally generated factors do not need this scan.
 inline void validate_adopted_factor(const factorization& factor) {
     const auto& L = factor.L;
+    const auto outer = L.col_ptrs();
+    const auto inner = L.row_indices();
+    const auto vals = L.values();
     const std::size_t n = L.rows();
     if (n == 0 || n == std::numeric_limits<std::size_t>::max() ||
-        L.outer_.size() != n + 1 || factor.perm.size() != n)
+        outer.size() != n + 1 || factor.perm.size() != n)
         throw std::invalid_argument("adopted factor has invalid dimensions");
-    if (L.outer_.front() != 0 || L.outer_.back() != L.inner_.size() ||
-        L.inner_.size() != L.vals_.size())
+    if (outer.front() != 0 || outer.back() != inner.size() ||
+        inner.size() != vals.size())
         throw std::invalid_argument("adopted factor has invalid or released CSC arrays");
 
     std::vector<bool> seen(n, false);
@@ -57,18 +61,18 @@ inline void validate_adopted_factor(const factorization& factor) {
     const std::size_t m = n - !factor.sddm;
     std::size_t round = 0, round_end = 0;
     for (std::size_t col = 0; col < n; ++col) {
-        const auto first = L.outer_[col], last = L.outer_[col + 1];
-        if (first > last || last > L.vals_.size())
+        const auto first = outer[col], last = outer[col + 1];
+        if (first > last || last > vals.size())
             throw std::invalid_argument("adopted factor column pointers are invalid");
-        if (col < m && (first == last || L.inner_[first] != col || !(L.vals_[first] > 0)))
+        if (col < m && (first == last || inner[first] != col || !(vals[first] > 0)))
             throw std::invalid_argument("adopted factor requires a positive first diagonal");
         while (col >= round_end && round < factor.rounds.size())
             round_end += factor.rounds[round++].is_size;
         const auto dependency_begin = std::min(m, std::max(col + 1, round_end));
         for (auto p = first; p < last; ++p) {
-            const auto row = L.inner_[p];
+            const auto row = inner[p];
             if (row >= n || row < col || (p > first && row == col) ||
-                !std::isfinite(L.vals_[p]))
+                !std::isfinite(vals[p]))
                 throw std::invalid_argument("adopted factor must be finite and lower triangular");
             if (row > col && row < dependency_begin)
                 throw std::invalid_argument("adopted factor has a dependency within one round");
