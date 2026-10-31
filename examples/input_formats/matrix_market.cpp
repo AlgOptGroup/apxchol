@@ -35,6 +35,11 @@ int main(int argc, char** argv) {
     std::vector<std::int32_t> row, col;
     std::vector<double> val;
     fmm::read_matrix_market_triplet(in, rows, cols, row, col, val);
+    if (rows != cols || rows == 0) {
+        std::fprintf(stderr, "expected a nonempty square matrix, got %lld x %lld\n",
+                     static_cast<long long>(rows), static_cast<long long>(cols));
+        return 2;
+    }
 
     // Order the triplets by column, then row, and sum duplicates.
     std::vector<std::size_t> order(val.size());
