@@ -57,13 +57,35 @@ solver make_solver(const Eigen::SparseMatrix<double>& L, const run_config& cfg,
         : solver(L, cfg.solve_opts);
 }
 
+// The --x0 file must have the RHS's shape. The header is checked before the
+// body: the reader divides by the row count.
+std::optional<Eigen::MatrixXd> read_initial_guess(const run_config& cfg, Eigen::Index rows,
+                                                  Eigen::Index cols) {
+    if (!cfg.x0_path) return std::nullopt;
+    fast_matrix_market::matrix_market_header header;
+    {
+        std::ifstream f(*cfg.x0_path);
+        fast_matrix_market::read_header(f, header);
+    }
+    if (header.nrows != rows || header.ncols != cols)
+        throw std::invalid_argument(fmt::format(
+            "x0 is {}x{}, but the RHS is {}x{}", header.nrows, header.ncols, rows, cols));
+    Eigen::MatrixXd X0;
+    std::ifstream f(*cfg.x0_path);
+    fast_matrix_market::read_matrix_market_eigen_dense(f, X0);
+    return X0;
+}
+
 // An n x k RHS file: one reusable solver, one batched solve over its columns.
 int solve_batch(const Eigen::SparseMatrix<double>& L, const Eigen::MatrixXd& B,
                 const run_config& cfg, bool graph, const input_scan& scan) {
+    const auto X0 = read_initial_guess(cfg, B.rows(), B.cols());
     detail::checkpoint timings;
     solver owner = make_solver(L, cfg, timings);
     Eigen::MatrixXd X(B.rows(), B.cols());
-    const auto res = owner.solve(B, X, cfg.tol, cfg.max_iter);
+    const std::optional<const_matrix_view> warm =
+        X0 ? std::optional<const_matrix_view>(*X0) : std::nullopt;
+    const auto res = owner.solve(B, X, cfg.tol, cfg.max_iter, warm ? &*warm : nullptr);
 
     spdlog::info("backend:    {}", owner.backend() == solve_backend::gpu ? "gpu" : "cpu");
     spdlog::info("columns:    {}", B.cols());
@@ -165,9 +187,11 @@ int main(int argc, char* argv[]) try {
         }
     }
 
+    const auto X0 = read_initial_guess(cfg, L.rows(), 1);
+    const Eigen::VectorXd x0 = X0 ? Eigen::VectorXd(X0->col(0)) : Eigen::VectorXd();
     detail::checkpoint timings;
     solver owner = make_solver(L, cfg, timings);
-    const auto res = owner.solve(b, cfg.tol, cfg.max_iter);
+    const auto res = owner.solve(b, cfg.tol, cfg.max_iter, X0 ? &x0 : nullptr);
 
     spdlog::info("backend:    {}", res.backend == solve_backend::gpu ? "gpu" : "cpu");
     spdlog::info("iterations: {}", res.iterations);

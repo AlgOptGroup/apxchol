@@ -164,8 +164,8 @@ private:
     std::unique_ptr<impl> impl_;
 };
 
-/// One-shot solve: factorize A, then solve Ax = b via PCG, with tol and
-/// max_iter as in solver::solve.
+/// One-shot solve: factorize A, then solve Ax = b via PCG, with tol,
+/// max_iter and the initial guess x0 as in solver::solve.
 /// Automatic selects GPU when the compiled backend is available and compatible,
 /// otherwise CPU. Explicit GPU selects device-owned CUDA or Metal setup and solve,
 /// according to the build.
@@ -174,6 +174,7 @@ solve_result solve(const Eigen::SparseMatrix<double>& A,
                    const Eigen::VectorXd& b,
                    std::optional<double> tol = std::nullopt,
                    std::optional<int> max_iter = std::nullopt,
+                   const Eigen::VectorXd* x0 = nullptr,
                    const solve_options& opts = {});
 
 } // namespace apxchol

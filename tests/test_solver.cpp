@@ -574,7 +574,7 @@ TEST(Solver, ReportsSetupAndSolveSeconds) {
     EXPECT_EQ(copy.setup_seconds(), setup);
     const apxchol::solver adopted(matrix, apxchol::factorize(matrix), cpu_options());
     EXPECT_TRUE(positive(adopted.setup_seconds())) << adopted.setup_seconds();
-    const auto one_shot = apxchol::solve(matrix, b, std::nullopt, std::nullopt, cpu_options());
+    const auto one_shot = apxchol::solve(matrix, b, std::nullopt, std::nullopt, nullptr, cpu_options());
     EXPECT_TRUE(one_shot.converged);
     EXPECT_TRUE(positive(one_shot.solve_seconds)) << one_shot.solve_seconds;
 }
@@ -792,13 +792,13 @@ TEST(Solver, RejectsInvalidOptionsAndLimits) {
         EXPECT_THROW(owner.solve(b, tol), std::invalid_argument);
         EXPECT_THROW(owner.solve(B, X, tol), std::invalid_argument);
         EXPECT_THROW(owner.solve(empty, empty_output, tol), std::invalid_argument);
-        EXPECT_THROW(apxchol::solve(matrix, b, tol, std::nullopt, defaults),
+        EXPECT_THROW(apxchol::solve(matrix, b, tol, std::nullopt, nullptr, defaults),
                      std::invalid_argument);
     }
     for (int max_iter : {-1, -7}) {
         EXPECT_THROW(owner.solve(b, std::nullopt, max_iter), std::invalid_argument);
         EXPECT_THROW(owner.solve(B, X, std::nullopt, max_iter), std::invalid_argument);
-        EXPECT_THROW(apxchol::solve(matrix, b, std::nullopt, max_iter, defaults),
+        EXPECT_THROW(apxchol::solve(matrix, b, std::nullopt, max_iter, nullptr, defaults),
                      std::invalid_argument);
     }
     EXPECT_TRUE(owner.solve(b).converged);
@@ -827,7 +827,7 @@ TEST(Solver, OmittedLimitsUseLibraryDefaults) {
     for (std::size_t c = 0; c < batch.columns.size(); ++c)
         same(batch.columns[c], explicit_batch.columns[c]);
     EXPECT_TRUE(same_bytes(X.data(), Y.data(), X.size()));
-    const auto one_shot = apxchol::solve(matrix, b, std::nullopt, std::nullopt, cpu_options());
+    const auto one_shot = apxchol::solve(matrix, b, std::nullopt, std::nullopt, nullptr, cpu_options());
     same(implicit, one_shot);
 }
 

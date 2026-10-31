@@ -19,6 +19,7 @@
 - CUDA and Metal solvers can be copied: copies share the device factor and operator, and solve concurrently on their own streams or command queues and workspace.
 
 ### API and CLI changes
+- Breaking: the C++ one-shot `solve(A, b, tol, max_iter, x0, opts)` takes an optional initial guess before the options, like the reusable solver, Python and MATLAB/Octave; the CLI reads one with `--x0 FILE`, shaped like the right-hand side.
 - Breaking: runtime environment variables are replaced by explicit solver options.
 - Breaking: the CUDA build no longer uses cuSPARSE or cuBLAS, and the level-set GPU triangular solve is removed.
 - Breaking: forward-star and indexed pooled graph storage and the standalone analysis/setup tools are retired.

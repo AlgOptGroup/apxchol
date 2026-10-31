@@ -1,0 +1,7 @@
+%%MatrixMarket matrix array real general
+% A 4 x 1 initial guess, too short for path5.
+4 1
+1
+0
+0
+-1

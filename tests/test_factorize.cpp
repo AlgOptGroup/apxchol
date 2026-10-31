@@ -649,7 +649,7 @@ TEST(FactorRegularization, AcceptsRepresentableExtremesAndGroundedDefaults) {
         apxchol::solve_options opts;
         opts.backend = apxchol::solve_backend::cpu;
         opts.factor_opts.regularization = regularization;
-        const auto result = apxchol::solve(L, b, std::nullopt, std::nullopt, opts);
+        const auto result = apxchol::solve(L, b, std::nullopt, std::nullopt, nullptr, opts);
         EXPECT_TRUE(result.converged);
         EXPECT_LT((L * result.x - b).norm() / b.norm(), apxchol::default_tol);
     }
@@ -1036,7 +1036,7 @@ protected:
         const Eigen::SparseMatrix<double>& L,
         const Eigen::VectorXd& b,
         double tol = 1e-6, int max_iter = 500) {
-        return apxchol::solve(L, b, tol, max_iter, {.factor_opts = {.seed = 42}});
+        return apxchol::solve(L, b, tol, max_iter, nullptr, {.factor_opts = {.seed = 42}});
     }
 };
 
@@ -1361,7 +1361,7 @@ TEST_P(StrategyConvergenceTest, GridConverges) {
     auto L = grid_laplacian(15, 15);
     auto b = apxchol::test::random_rhs(225);
     auto res = apxchol::solve(L, b, 1e-6, 1000,
-        {.factor_opts = {.seed = 42, .partitioner = is}});
+        nullptr, {.factor_opts = {.seed = 42, .partitioner = is}});
     EXPECT_LT(res.residual, 1e-4)
         << "strategy " << name << " failed: iters=" << res.iterations
         << " residual=" << res.residual;
@@ -1372,7 +1372,7 @@ TEST_P(StrategyConvergenceTest, SDDMConverges) {
     auto M = sddm_grid(10, 10, 2.0);
     Eigen::VectorXd b = Eigen::VectorXd::Random(100);
     auto res = apxchol::solve(M, b, 1e-6, 1000,
-        {.factor_opts = {.seed = 42, .partitioner = is}});
+        nullptr, {.factor_opts = {.seed = 42, .partitioner = is}});
     EXPECT_LT(res.residual, 1e-4)
         << "strategy " << name << " failed on SDDM: iters=" << res.iterations
         << " residual=" << res.residual;
@@ -1436,9 +1436,9 @@ TEST(ExactCliqueOption, Grid40_FewerItersThanSampled) {
     apxchol::factor_options opts;
     opts.seed = 42;
     opts.partitioner = apxchol::partitioner_kind::block_greedy;
-    auto sampled = apxchol::solve(L, b, 1e-8, 200, {.factor_opts = opts});
+    auto sampled = apxchol::solve(L, b, 1e-8, 200, nullptr, {.factor_opts = opts});
     opts.experimental.exact_clique_max_degree = 8;
-    auto exact = apxchol::solve(L, b, 1e-8, 200, {.factor_opts = opts});
+    auto exact = apxchol::solve(L, b, 1e-8, 200, nullptr, {.factor_opts = opts});
     EXPECT_LT(exact.residual, 1e-6);
     EXPECT_LE(exact.iterations, sampled.iterations)
         << "exact low-degree cliques should not need more PCG iterations: "
@@ -1648,7 +1648,7 @@ TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
         if (::testing::Test::HasFatalFailure()) return;
 
         // And it is still a usable preconditioner.
-        const auto res = apxchol::solve(L, b, 1e-8, 200, {.factor_opts = with_loop});
+        const auto res = apxchol::solve(L, b, 1e-8, 200, nullptr, {.factor_opts = with_loop});
         EXPECT_LT(res.residual, 1e-8) << "seed " << seed;
     }
 }

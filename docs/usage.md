@@ -80,8 +80,9 @@ host factor with a GPU solver. See [factor handoff](extending.md#reusing-a-custo
 
 Each interface spells the stable options as follows. Setup options are
 `solve_options` fields in C++, keywords in Python and struct fields in
-MATLAB/Octave. The tolerance and iteration budget are arguments of each solve
-call in every library interface; omitted, they take the
+MATLAB/Octave. The tolerance, iteration budget and initial guess are arguments
+of each solve call in every library interface; omitted, the initial guess is
+zero and the others take the
 [native defaults](reference/cpp.md#solve-defaults).
 
 | C++ | CLI | Python | MATLAB/Octave |
@@ -90,6 +91,7 @@ call in every library interface; omitted, they take the
 | `solve_options::num_threads` | `--threads` | `num_threads` | `num_threads` |
 | `tol` (solve argument) | `--tol` | `rtol` (solve argument) | `rtol` (solve argument) |
 | `max_iter` (solve argument) | `--max-iter` | `maxiter` (solve argument) | `maxiter` (solve argument) |
+| `x0`, initial guess, default zero (solve argument) | `--x0` | `x0` (solve argument) | `x0` (solve argument) |
 | `factor_options::seed` | `--seed` | `seed` | `seed` |
 | `factor_options::partitioner` | `--partitioner` | `partitioner` | `partitioner` |
 | `factor_options::sampler` | `--sampler` | `sampler` | `sampler` |
@@ -119,7 +121,7 @@ columns.
 A **warm start** is an initial guess `x0`, often the solution of a related
 system. Without one, the solver starts from zero. A useful guess can reduce
 iterations; a poor guess need not help. C++, Python and MATLAB/Octave support
-vector and matrix initial guesses. See the [Python](../python/README.md) and
+vector and matrix initial guesses, and the CLI reads one with `--x0`. See the [Python](../python/README.md) and
 [MATLAB/Octave](../octave/README.md) examples.
 
 For C++:
@@ -134,7 +136,7 @@ Eigen::MatrixXd X(B.rows(), B.cols());
 auto batch = solver.solve(B, X);
 ```
 
-One-shot `apxchol::solve(A, b, tol, max_iter, opts)` uses the same backend
+One-shot `apxchol::solve(A, b, tol, max_iter, x0, opts)` uses the same backend
 selection. For explicit CPU execution, set
 `solve_options.backend = solve_backend::cpu`.
 

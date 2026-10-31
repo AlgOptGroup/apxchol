@@ -3233,7 +3233,7 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::gpu;
         options.factor_opts = factor_options;
-        const auto solved = apxchol::solve(A, b, 1e-8, 1000, options);
+        const auto solved = apxchol::solve(A, b, 1e-8, 1000, nullptr, options);
         EXPECT_LE((A * solved.x - b).norm() / b.norm(), 1e-8);
     }
 #endif
@@ -3517,7 +3517,7 @@ TEST(GpuCycleSampler, OwnedSolveReturnsOriginalSystemSolution) {
         opts.factor_opts.verbose = true;
         opts.factor_opts.sampler=sampler;opts.factor_opts.partition.degree_quantile=.8;
         testing::internal::CaptureStderr();
-        const auto result=apxchol::solve(A, b, 1e-8, 1000, opts);
+        const auto result=apxchol::solve(A, b, 1e-8, 1000, nullptr, opts);
         const auto trace=testing::internal::GetCapturedStderr();
         EXPECT_LE((A*result.x-b).norm()/b.norm(),1e-8);
         EXPECT_NE(trace.find("[gpu-owned-factorization] complete rounds="),std::string::npos);

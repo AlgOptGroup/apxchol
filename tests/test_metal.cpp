@@ -1260,7 +1260,7 @@ TEST_F(MetalDevice, VerbosityIsPerSolver) {
         options.factor_opts.verbose = verbose;
         testing::internal::CaptureStderr();
         apxchol::solve_result result;
-        try { result = apxchol::solve(A, b, std::nullopt, std::nullopt, options); }
+        try { result = apxchol::solve(A, b, std::nullopt, std::nullopt, nullptr, options); }
         catch (...) { (void)testing::internal::GetCapturedStderr(); throw; }
         const auto output = testing::internal::GetCapturedStderr();
         EXPECT_EQ(output.find("[apxchol] Metal PCG") != std::string::npos, verbose) << output;

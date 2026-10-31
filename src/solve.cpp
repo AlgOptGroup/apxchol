@@ -1449,12 +1449,12 @@ double solver::setup_seconds() const { return impl_->setup_seconds; }
 
 solve_result solve(const Eigen::SparseMatrix<double>& A, const Eigen::VectorXd& b,
                    std::optional<double> tol, std::optional<int> max_iter,
-                   const solve_options& opts) {
+                   const Eigen::VectorXd* x0, const solve_options& opts) {
     ensure_eigen_parallel();
     // Reject invalid limits before paying for setup.
     resolve_solve_parameters(tol, max_iter);
     solver owner(A, opts);
-    return owner.solve(b, tol, max_iter);
+    return owner.solve(b, tol, max_iter, x0);
 }
 
 } // namespace apxchol

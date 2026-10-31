@@ -528,7 +528,7 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
         EXPECT_GT(preconditioner.factor().rounds.size(),2u);
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::gpu;
-        const auto solved = apxchol::solve(A, b, 1e-8, 1000, options);
+        const auto solved = apxchol::solve(A, b, 1e-8, 1000, nullptr, options);
         ASSERT_EQ(solved.x.size(),n);
         EXPECT_LE((A*solved.x-b).norm()/b.norm(),1e-8);
     }

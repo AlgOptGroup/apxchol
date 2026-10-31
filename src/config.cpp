@@ -42,7 +42,7 @@ run_config parse_args(int argc, char* argv[]) {
     run_config cfg;
     bool quiet   = false;
     bool verbose = false;
-    std::string rhs_str, output_str;
+    std::string rhs_str, x0_str, output_str;
 
     CLI::App app{"Solve a Laplacian or SDDM system Ax = b via approximate Cholesky + PCG. "
                  "The input .mtx is the operator A; for a graph adjacency/pattern matrix, "
@@ -85,6 +85,10 @@ run_config parse_args(int argc, char* argv[]) {
     rhs_opt->excludes(rand_flag);
     rand_flag->excludes(rhs_opt);
     rhs_group->require_option(1);
+    app.add_option("--x0", x0_str,
+                   "Initial guess in dense MatrixMarket format, shaped like the RHS "
+                   "(default: zero)")
+        ->check(CLI::ExistingFile);
 
     // ── how to read the input matrix ──
     app.add_flag("--convert-input", cfg.convert_input,
@@ -163,6 +167,7 @@ run_config parse_args(int argc, char* argv[]) {
     }
 
     if (!rhs_str.empty())    cfg.rhs_path     = rhs_str;
+    if (!x0_str.empty())     cfg.x0_path      = x0_str;
     if (!output_str.empty()) cfg.output_path  = output_str;
     cfg.solve_opts.factor_opts.verbose = verbose;
     detail::validate_solve_parameters(cfg.tol, cfg.max_iter);

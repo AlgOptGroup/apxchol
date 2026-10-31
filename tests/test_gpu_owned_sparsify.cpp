@@ -426,7 +426,7 @@ TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneDeviceAttempt) {
     apxchol::solve_result solved;
     testing::internal::CaptureStderr();
     try {
-        solved = apxchol::solve(original, rhs, 1e-8, 1000, options);
+        solved = apxchol::solve(original, rhs, 1e-8, 1000, nullptr, options);
         EXPECT_EQ(solved.backend, apxchol::solve_backend::gpu);
     } catch (...) {
         const auto failure = testing::internal::GetCapturedStderr();

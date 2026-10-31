@@ -219,12 +219,20 @@ if (APXCHOL_BUILD_CLI)
             "-DCLI=$<TARGET_FILE:apxchol>"
             "-DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/path5_sddm.mtx"
             "-DRHS=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${rhs}.mtx"
-            "-DEXPECT_STATUS=2" "-DEXPECT_OUTPUT=${output}"
+            "-DEXPECT_STATUS=2" "-DEXPECT_OUTPUT=${output}" "-DCLI_ARGS=${ARGN}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/check_cli.cmake")
         set_tests_properties(${name} PROPERTIES TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=4")
     endfunction()
     apxchol_cli_rhs_error_test(cli_rhs_without_columns path5_rhs_no_columns "RHS file has no columns")
     apxchol_cli_rhs_error_test(cli_rhs_without_rows rhs_no_rows "RHS length 0 does not match n = 5")
+    # --x0: the solution as the guess needs no iterations; a wrong shape is rejected.
+    apxchol_cli_rhs_test(cli_x0_solution_needs_no_iterations path5_rhs1 0
+        "iterations: 0\n" "array real general\n5 1\n"
+        --x0 "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/path5_x0.mtx")
+    apxchol_cli_rhs_error_test(cli_x0_wrong_shape path5_rhs1 "x0 is 4x1, but the RHS is 5x1"
+        --x0 "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/path5_x0_short.mtx")
+    apxchol_cli_rhs_error_test(cli_x0_must_match_batch path5_rhs3 "x0 is 5x1, but the RHS is 5x3"
+        --x0 "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/path5_x0.mtx")
     apxchol_cli_test(cli_empty_matrix empty 2 "matrix is empty")
     string(TOLOWER "${APXCHOL_DEVICE}" cli_device)
     apxchol_cli_test(cli_build_backend path5_sddm 0 "device: ${cli_device}" --version)

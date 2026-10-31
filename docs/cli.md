@@ -22,6 +22,9 @@ Pass exactly one of:
 - `--random-rhs`: a random right-hand side for experiments, compatible with
   each connected component of a Laplacian.
 
+`--x0 FILE` reads an initial guess shaped like the right-hand side (`n` by
+`k`); without it the solve starts from zero.
+
 `-o FILE` writes the solution as a dense `n` by `k` Matrix Market array.
 The CLI prints the selected backend, iterations and residual for each column;
 `-v` adds a timing breakdown and `-q` prints errors only. The exit status is 0 when
