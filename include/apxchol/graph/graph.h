@@ -268,11 +268,27 @@ private:
         if (samples == 0) return {};
         unsigned long long multi_total = 0;
         unsigned long long distinct_total = 0;
-        long double weight_total = 0.0L;
-        long double strongest_total = 0.0L;
+        // long double sums go to per-thread slots summed in thread order: an
+        // OpenMP reduction on them needs 16-byte atomics (libatomic).
+        // Allocated before the region: a throwing allocation inside it would
+        // escape the team.
+#ifdef _OPENMP
+        std::vector<std::array<long double, 2>> totals(
+            static_cast<std::size_t>(std::max(1, omp_get_max_threads())));
+#else
+        std::vector<std::array<long double, 2>> totals(1);
+#endif
         detail::parallel_exception error;
-        #pragma omp parallel reduction(+:multi_total,distinct_total,weight_total,strongest_total)
+        #pragma omp parallel num_threads(static_cast<int>(totals.size())) \
+            reduction(+:multi_total,distinct_total)
         {
+#ifdef _OPENMP
+            const std::size_t tid = static_cast<std::size_t>(omp_get_thread_num());
+#else
+            const std::size_t tid = 0;
+#endif
+            long double& weight_total = totals[tid][0];
+            long double& strongest_total = totals[tid][1];
             std::vector<std::pair<node_index, double>> neighbors;
             #pragma omp for schedule(static)
             for (std::size_t s = 0; s < samples; ++s) error.run([&] {
@@ -305,6 +321,11 @@ private:
             });
         }
         error.rethrow();
+        long double weight_total = 0.0L, strongest_total = 0.0L;
+        for (const auto& [weight, strongest] : totals) {
+            weight_total += weight;
+            strongest_total += strongest;
+        }
         active_sparsify_sample result;
         result.sampled_vertices = samples;
         result.duplicate_ratio = distinct_total
