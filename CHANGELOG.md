@@ -32,7 +32,7 @@
 - The v1 API compatibility scope is documented.
 - The partitioner and eliminator extension interfaces are experimental in 1.x and may change in minor releases.
 - Python wheels for CPython 3.11+ on Linux and macOS arm64 (GPU wheels select the backend at runtime), standalone CLI archives, and MATLAB/Octave batched solves with save/load.
-- Wheels declare one `License-Expression` shared by all wheel variants (BSD-3-Clause, MPL-2.0, Apache-2.0 WITH LLVM-exception, Zlib and the NVIDIA CUDA EULA; every wheel ships each license text, so macOS and CPU-only wheels also carry the CUDA EULA) and take the root LICENSE at build time; minimum scikit-build-core is 0.11.
+- Wheels declare a `License-Expression` that matches their contents (BSD-3-Clause, MPL-2.0, Apache-2.0 WITH LLVM-exception and Zlib; Linux CUDA wheels add the NVIDIA CUDA EULA and ship its text) and take the root LICENSE at build time; minimum scikit-build-core is 0.12.
 - Relicensed from BSD-4-Clause to BSD-3-Clause.
 - Breaking: `solver::solve()` and `solver::apply()` are non-const because they use the solver's workspace; concurrent non-const calls on one solver are not allowed.
 

@@ -1,21 +1,12 @@
 [build-system]
-requires = ["scikit-build-core>=0.11", "pybind11>=3.1"]
+requires = ["scikit-build-core>=0.12", "pybind11>=3.1"]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "apxchol"
-dynamic = ["version"]
+dynamic = ["version", "license"]
 description = "Approximate-Cholesky preconditioner for graph-Laplacian / SDDM linear systems"
 readme = "README.md"
-# Wheels also contain Eigen (MPL-2.0), pybind11 (BSD-3-Clause), the LLVM
-# OpenMP runtime (Apache-2.0 WITH LLVM-exception) and zlib's notice; Linux
-# wheels add the CUDA runtime (NVIDIA CUDA EULA) and CCCL. Each license text
-# is under the wheel's .dist-info/licenses. One expression covers every
-# wheel: per-wheel metadata would need a local metadata provider, which
-# scikit-build-core accepts only with `experimental = true`. So every wheel
-# ships LICENSE.cuda.txt, the cuda-cudart 13.4 license committed next to this
-# file, including macOS and CPU-only wheels that contain no CUDA code.
-license = "BSD-3-Clause AND MPL-2.0 AND Apache-2.0 WITH LLVM-exception AND Zlib AND LicenseRef-NVIDIA-CUDA-EULA"
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.21"]
 authors = [
@@ -48,11 +39,25 @@ scipy = ["scipy>=1.7"]
 test = ["pytest>=7"]
 
 [tool.scikit-build]
-minimum-version = "0.11"
+minimum-version = "0.12"
 cmake.version = ">=3.20"
 wheel.packages = ["apxchol"]
 build-dir = "build/{wheel_tag}"
 wheel.license-files = ["LICENSE*"]
+
+# Wheels also contain Eigen (MPL-2.0), pybind11 (BSD-3-Clause), the LLVM
+# OpenMP runtime (Apache-2.0 WITH LLVM-exception) and zlib's notice. CUDA
+# builds add the CUDA runtime under the NVIDIA CUDA EULA, plus CCCL; the Linux
+# wheel job copies both license texts from the installed toolkit. Each license
+# text is under the wheel's .dist-info/licenses.
+[tool.scikit-build.metadata.license]
+provider = "scikit_build_core.metadata.template"
+result = "BSD-3-Clause AND MPL-2.0 AND Apache-2.0 WITH LLVM-exception AND Zlib"
+
+[[tool.scikit-build.overrides]]
+if.env.CMAKE_ARGS = ".*-DAPXCHOL_DEVICE=CUDA.*"
+metadata.license.provider = "scikit_build_core.metadata.template"
+metadata.license.result = "BSD-3-Clause AND MPL-2.0 AND Apache-2.0 WITH LLVM-exception AND Zlib AND LicenseRef-NVIDIA-CUDA-EULA"
 
 [tool.scikit-build.metadata.version]
 provider = "scikit_build_core.metadata.regex"
@@ -79,6 +84,7 @@ printf '%s  %s\n' d540ba01f160addbd3dd5e18eda9bd34005591b095c09ac8ae9d0a1b655e7e
 tar -xzf /tmp/apxchol-ccache.tar.gz --strip-components=1 -C /usr/local/bin ccache-4.14.2-linux-x86_64-musl-static/ccache
 dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
 dnf install -y cuda-nvcc-13-4 cuda-cudart-devel-13-4
+cp /usr/share/licenses/cuda-cudart-13-4/LICENSE "{package}/LICENSE.cuda.txt"
 cp /usr/share/licenses/cccl-13-4/LICENSE "{package}/LICENSE.cccl.txt"
 '''
 manylinux-x86_64-image = "manylinux_2_28"
