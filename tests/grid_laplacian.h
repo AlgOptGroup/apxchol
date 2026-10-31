@@ -4,14 +4,14 @@
 namespace apxchol::test {
 
 inline Eigen::SparseMatrix<double> grid_laplacian(int rows, int cols) {
-    apxchol::graph G(rows * cols);
+    apxchol::detail::graph G(rows * cols);
     auto id = [cols](int r, int c) { return r * cols + c; };
     for (int r = 0; r < rows; ++r)
         for (int c = 0; c < cols; ++c) {
             if (r + 1 < rows) G.add_edge(id(r, c), id(r + 1, c), 1.0);
             if (c + 1 < cols) G.add_edge(id(r, c), id(r, c + 1), 1.0);
         }
-    return apxchol::laplacian(G);
+    return apxchol::detail::laplacian(G);
 }
 
 } // namespace apxchol::test
