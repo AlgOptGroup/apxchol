@@ -123,8 +123,8 @@ restored = apxchol.Solver.load("system.apxchol", backend="cpu")
 result = restored.solve(b)
 ```
 
-Saving requires `keep_factor=True`, the reusable solver's default. It creates
-a new file and refuses to replace an existing one. The archive stores the
+Saving requires `keep_factor=True`, the reusable solver's default. It replaces
+an existing file, writing to `<path>.tmp` first and renaming it into place. The archive stores the
 original operator and FP32 factor; RHSs, initial guesses and device workspace
 are not saved. Loading adopts the factor without repeating factorization.
 

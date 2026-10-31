@@ -15,6 +15,7 @@
 #include <system_error>
 #include <vector>
 #include <barrier>
+#include <sys/stat.h>
 
 using csc_access = apxchol::detail::sparse_csc_access;
 
@@ -319,14 +320,48 @@ TEST_F(SolverArchive, AutomaticAdoptionUsesCpu) {
     EXPECT_EQ(restored.factor_storage(), factor_storage_type::fp32);
 }
 
-TEST_F(SolverArchive, ExistingFilesAndReleasedFactorsAreRejected) {
-    const auto before = read_bytes(directory / "original.apxchol");
-    EXPECT_THROW(save_solver(directory / "original.apxchol", original), std::runtime_error);
-    EXPECT_EQ(read_bytes(directory / "original.apxchol"), before);
+TEST_F(SolverArchive, SavingReplacesAnExistingFile) {
+    const auto path = directory / "replaced.apxchol";
+    write_bytes(path, Bytes{'o', 'l', 'd'});
+    save_solver(path, original);
+    EXPECT_EQ(read_bytes(path), read_bytes(directory / "original.apxchol"));
+    EXPECT_FALSE(std::filesystem::exists(path.string() + ".tmp"));
+}
+
+TEST_F(SolverArchive, LeftoverTemporaryFileIsReportedAndKept) {
+    const auto path = directory / "busy.apxchol";
+    const auto temporary = path.string() + ".tmp";
+    write_bytes(temporary, Bytes{'x'});
+    try {
+        save_solver(path, original);
+        FAIL() << "expected the leftover temporary file to block the save";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find(temporary), std::string::npos) << e.what();
+    }
+    EXPECT_TRUE(std::filesystem::exists(temporary));
+    EXPECT_FALSE(std::filesystem::exists(path));
+}
+
+TEST_F(SolverArchive, ReleasedFactorsAreRejected) {
     auto opts = options(); opts.keep_factor_values = false;
     solver released(A, opts);
     EXPECT_THROW(save_solver(directory / "released.apxchol", released), std::invalid_argument);
     EXPECT_FALSE(std::filesystem::exists(directory / "released.apxchol"));
+}
+
+TEST_F(SolverArchive, NewArchivesFollowTheUmask) {
+    struct umask_guard {
+        mode_t previous = umask(022);
+        ~umask_guard() { umask(previous); }
+    };
+    {
+        const umask_guard guard;
+        save_solver(directory / "shared.apxchol", original);
+    }
+    struct stat info {};
+    ASSERT_EQ(stat((directory / "shared.apxchol").c_str(), &info), 0);
+    EXPECT_EQ(info.st_mode & 0777, 0644);
+    EXPECT_FALSE(std::filesystem::exists((directory / "shared.apxchol").string() + ".tmp"));
 }
 
 TEST_F(SolverArchive, RejectsNullCharactersInPaths) {
@@ -536,24 +571,30 @@ TEST_F(SolverArchive, PreservesLumpingAndRegularizationWithoutReapplyingThem) {
     EXPECT_LT((positive * result.x - b).norm() / b.norm(), 1e-10);
 }
 
-TEST_F(SolverArchive, DoesNotReplaceSymlinksOrConcurrentWriters) {
+TEST_F(SolverArchive, ReplacesSymlinksAndSerializesConcurrentWriters) {
+    // A symlink destination is replaced by the archive; its target is untouched.
     const auto link = directory / "dangling.apxchol";
     std::filesystem::create_symlink(directory / "missing", link);
-    EXPECT_THROW(save_solver(link, original), std::runtime_error);
-    EXPECT_TRUE(std::filesystem::is_symlink(link));
+    save_solver(link, original);
+    EXPECT_FALSE(std::filesystem::is_symlink(link));
     EXPECT_FALSE(std::filesystem::exists(directory / "missing"));
+    EXPECT_EQ(load_solver(link).rows(), A.rows());
+    // Overlapping saves to one path never interleave: a save that finds the
+    // other's temporary file fails and names it.
     const auto path = directory / "concurrent.apxchol";
     std::barrier start(2);
     auto write = [&] {
         start.arrive_and_wait();
         try { save_solver(path, original); return 1; }
-        catch (const std::runtime_error&) { return 0; }
+        catch (const std::runtime_error& e) {
+            EXPECT_NE(std::string(e.what()).find(".tmp"), std::string::npos) << e.what();
+            return 0;
+        }
     };
     auto first = std::async(std::launch::async, write);
     auto second = std::async(std::launch::async, write);
-    EXPECT_EQ(first.get() + second.get(), 1);
+    EXPECT_GE(first.get() + second.get(), 1);
     EXPECT_EQ(load_solver(path).rows(), A.rows());
-    for (const auto& entry : std::filesystem::directory_iterator(directory))
-        EXPECT_FALSE(entry.path().filename().string().starts_with(".apxchol-"));
+    EXPECT_FALSE(std::filesystem::exists(path.string() + ".tmp"));
 }
 } // namespace
