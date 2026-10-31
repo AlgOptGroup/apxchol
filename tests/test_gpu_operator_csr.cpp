@@ -824,17 +824,14 @@ TEST(GpuSolveHonesty, ZeroIterationSessionReportsRelativeResidualOnReuse) {
     }
     Eigen::SparseMatrix<double> A(n, n);
     A.setFromTriplets(entries.begin(), entries.end());
-    apxchol::solve_result result;
-    apxchol::solver solver(A, {.backend = apxchol::solve_backend::gpu}, &result.timings);
+    apxchol::solver solver(A, {.backend = apxchol::solve_backend::gpu});
     ASSERT_TRUE(session(solver).trsv().adopted_device_factor());
-    EXPECT_THROW(solver.solve(Eigen::VectorXd::Zero(n - 1), result, 1e-8, 0),
+    EXPECT_THROW(solver.solve(Eigen::VectorXd::Zero(n - 1), 1e-8, 0),
                  std::invalid_argument);
     for (double scale : {1e-12, 0.0, 1e6}) {
         SCOPED_TRACE(scale);
         const Eigen::VectorXd b = Eigen::VectorXd::Constant(n, scale);
-        result.iterations = 7;
-        result.residual = std::numeric_limits<double>::quiet_NaN();
-        solver.solve(b, result, 1e-8, 0);
+        const auto result = solver.solve(b, 1e-8, 0);
         EXPECT_EQ(result.backend, apxchol::solve_backend::gpu);
         ASSERT_EQ(result.x.size(), n);
         EXPECT_TRUE(result.x.isZero(0.0));
@@ -872,7 +869,6 @@ TEST(GpuOperatorCsr, ReusableOwnersFollowTheirSetupDeviceAcrossThreads) {
     options.num_threads = 1;
     options.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
     options.keep_factor = true;
-    options.collect_timings = false;
     const auto host_factor = apxchol::factorize(A);
     for (const bool adopt : {false, true}) {
         SCOPED_TRACE(adopt);

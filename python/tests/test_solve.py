@@ -1,3 +1,4 @@
+import copy
 import inspect
 import platform
 import warnings
@@ -111,6 +112,27 @@ def test_factor_reused_across_many_b():
         res = solver.solve(b, rtol=1e-8, maxiter=500)
         assert res.converged
         assert res.residual <= 1e-8
+
+
+def test_setup_and_solve_seconds_are_reported(tmp_path):
+    L = grid2d_laplacian(20)
+    solver = apxchol.factorize(L, backend="cpu")
+    setup = solver.setup_seconds
+    assert isinstance(setup, float) and np.isfinite(setup) and setup > 0.0
+    b = np.linspace(-1.0, 1.0, L.shape[0]); b -= b.mean()
+    for rhs in (b, np.column_stack((b, -b))):
+        res = solver.solve(rhs)
+        assert isinstance(res.solve_seconds, float)
+        assert np.isfinite(res.solve_seconds) and res.solve_seconds > 0.0
+    solver.apply(b)
+    assert solver.setup_seconds == setup
+    assert copy.copy(solver).setup_seconds == setup
+    one_shot = apxchol.solve(L, b, backend="cpu")
+    assert np.isfinite(one_shot.solve_seconds) and one_shot.solve_seconds > 0.0
+    path = tmp_path / "system.apxchol"
+    solver.save(path)
+    restored = apxchol.Solver.load(path, backend="cpu")
+    assert np.isfinite(restored.setup_seconds) and restored.setup_seconds > 0.0
 
 
 def test_overlapping_calls_on_one_solver_raise():

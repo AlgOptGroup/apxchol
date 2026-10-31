@@ -9,7 +9,7 @@
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/elimination/elimination.h"
 #include "apxchol/graph/graph.h"
-#include "apxchol/checkpoint.h"
+#include "apxchol/detail/checkpoint.h"
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -299,9 +299,8 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
 
 // Public factorization returns an exportable CPU factor.
 factorization factorize(const Eigen::SparseMatrix<double>& L,
-                        const factor_options& opts,
-                        checkpoint* cp) {
-    return detail::factorize_for_solver(L, opts, cp);
+                        const factor_options& opts) {
+    return detail::factorize_for_solver(L, opts, nullptr);
 }
 
 } // namespace apxchol

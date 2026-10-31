@@ -88,6 +88,7 @@
 #include "apxchol/operator_class.h"
 
 #ifdef HAVE_APXCHOL_V1
+#include "apxchol/detail/checkpoint.h"
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/detail/solver_route.h"
 #include "apxchol/solver/detail/solve_backend.h"
@@ -768,10 +769,11 @@ static BenchResult run_apxchol_v1(
     const auto t_wall_start = std::chrono::high_resolution_clock::now();
     double memory_read_s = 0; // GPU memory reads, removed from the wall interval
     apxchol::solve_result res;
+    apxchol::detail::checkpoint timings;
     Eigen::initParallel();
     // The solver selects its route once, under setup.backend_selection;
     // retries reuse the same concrete owner.
-    apxchol::solver solver(L, opts, &res.timings);
+    apxchol::solver solver = apxchol::detail::solver_access::with_timings(L, opts, timings);
     const bool gpu_route = solver.backend() == apxchol::solve_backend::gpu;
     r.execution_route = gpu_route ? "gpu" : "cpu";
 #if defined(APXCHOL_USE_CUDA)
@@ -788,7 +790,7 @@ static BenchResult run_apxchol_v1(
         Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
             [&](double request, int remaining, bool warm, Eigen::VectorXd& current) {
                 // GPU retries restart cold, as they always have.
-                solver.solve(b, res, request, remaining, warm && !gpu_route ? &current : nullptr);
+                res = solver.solve(b, request, remaining, warm && !gpu_route ? &current : nullptr);
                 current = std::move(res.x);
                 return static_cast<int>(res.iterations);
             });
@@ -812,7 +814,7 @@ static BenchResult run_apxchol_v1(
     //   triangular forward/back), which was UNDER-REPORTING solve time by
     //   the full PCG SpMV cost — making our v1 numbers look ~2× better
     //   than reality vs Eigen-CG-based competitors. Fixed 2026-05-24.
-    r.setup_time = res.timings.total("setup");
+    r.setup_time = timings.total("setup");
     r.solve_time = wall_total - r.setup_time;
     if (r.solve_time < 0.0) r.solve_time = 0.0;
     r.total_time = wall_total;
@@ -845,7 +847,7 @@ static BenchResult run_apxchol_v1(
     r.us_per_nnz = r.total_time / r.nnz * 1e6;
     if (dump_profile) {
         std::cerr << "\n--- profile: " << combo_name << " ---\n";
-        res.timings.report(std::cerr);
+        timings.report(std::cerr);
         std::cerr << std::flush;
     }
     return r;

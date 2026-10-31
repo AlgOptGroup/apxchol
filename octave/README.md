@@ -14,8 +14,15 @@ res2 = s.solve(b2, 1e-10, 1000);   % tolerance and iteration budget for this cal
 ```
 
 For one solve, use `apxchol_solve(A, b)`. Results contain `x`, `iters`,
-`residual` and `converged`. The built-in solver always checks the returned
-solution against the original matrix and RHS.
+`residual`, `converged` and `solve_seconds`. The built-in solver always checks
+the returned solution against the original matrix and RHS.
+
+`s.setup_seconds` is the wall-clock time of the native setup (or `load`),
+excluding the conversion of `A` before it, and `res.solve_seconds` that of one
+solve call, for all columns of a batch. Over `k` separate one-RHS calls each
+costs `setup_seconds / k + solve_seconds` on average, and one batched call of
+`k` columns costs `(setup_seconds + solve_seconds) / k` per RHS; see
+[judging whether reuse pays off](../docs/usage.md#judging-whether-reuse-pays-off).
 
 Pass an `n`-by-`k` matrix to solve or apply the preconditioner to `k` RHSs
 through the native batched path. Results have `k` columns; `iters`, `residual`

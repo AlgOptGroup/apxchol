@@ -376,6 +376,7 @@ void solver::save(const std::filesystem::path& path) const {
 }
 
 solver solver::load(const std::filesystem::path& path, const solve_options& options) {
+    const auto started = std::chrono::steady_clock::now();
     detail::validate_solve_options(options);
     check_path(path);
     reader archive(path);
@@ -426,7 +427,7 @@ solver solver::load(const std::filesystem::path& path, const solve_options& opti
         F.rounds.push_back({0, static_cast<std::size_t>(count)});
     }
     solver restored(A, std::move(F), options);
-    detail::solver_access::restore_input_entries(restored, static_cast<Eigen::Index>(input_entries));
+    detail::solver_access::finish_load(restored, static_cast<Eigen::Index>(input_entries), started);
     return restored;
 }
 

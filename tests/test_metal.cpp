@@ -6,6 +6,7 @@
 
 #include "apxchol/solver/detail/metal_host.h"
 #include "apxchol/solver/factorization.h"
+#include "apxchol/detail/checkpoint.h"
 #include "apxchol/solver/detail/solver_route.h"
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/sptrsv/factor_drop.h"
@@ -1062,12 +1063,13 @@ TEST_F(MetalDevice, CommonSolverApiRespectsBackendSelection) {
                               apxchol::solve_backend::automatic,
                               apxchol::solve_backend::gpu}) {
         options.backend = backend;
-        const auto result = apxchol::solve(A, b, options);
+        apxchol::detail::checkpoint timings;
+        const auto result = apxchol::detail::solver_access::with_timings(A, options, timings).solve(b);
         EXPECT_EQ(result.backend, backend == apxchol::solve_backend::gpu
             ? apxchol::solve_backend::gpu : apxchol::solve_backend::cpu);
         EXPECT_LT(true_residual(A, b, result.x), options.tol);
-        EXPECT_GT(result.timings.total("setup"), 0.0);
-        EXPECT_GT(result.timings.total("pcg"), 0.0);
+        EXPECT_GT(timings.total("setup"), 0.0);
+        EXPECT_GT(timings.total("pcg"), 0.0);
     }
     Sparse large(32769, 32769);
     large.setIdentity();
@@ -1224,14 +1226,13 @@ TEST_F(MetalDevice, TinyPositiveDropMatchesHostReference) {
     }
 }
 
-TEST_F(MetalDevice, VerbosityAndTimingsArePerSolver) {
+TEST_F(MetalDevice, VerbosityIsPerSolver) {
     const Sparse A = grid(7, 9, 0.25);
     const auto b = rhs(A.rows(), 4, false);
     for (bool verbose : {false, true, false}) {
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::gpu;
         options.factor_opts.verbose = verbose;
-        options.collect_timings = false;
         testing::internal::CaptureStderr();
         apxchol::solve_result result;
         try { result = apxchol::solve(A, b, options); }
@@ -1240,8 +1241,6 @@ TEST_F(MetalDevice, VerbosityAndTimingsArePerSolver) {
         EXPECT_EQ(output.find("[apxchol] Metal PCG") != std::string::npos, verbose) << output;
         EXPECT_TRUE(result.converged);
         EXPECT_LE(true_residual(A, b, result.x), options.tol);
-        EXPECT_EQ(result.timings.total("setup"), 0.0);
-        EXPECT_EQ(result.timings.total("pcg"), 0.0);
     }
 }
 
@@ -1249,15 +1248,9 @@ TEST_F(MetalDevice, ScalarAndPanelOutputsRejectInputAliasing) {
     const Sparse A = grid(4, 5, 0.25);
     const auto b = rhs(A.rows(), 3, false);
     apxchol::solver direct(A, gpu_options());
-    apxchol::solve_result result;
-    result.x = b;
-    EXPECT_THROW(direct.solve(result.x, result), std::invalid_argument);
-    EXPECT_EQ(result.x, b);
-    EXPECT_THROW(direct.solve(b, result, std::nullopt, std::nullopt, &result.x), std::invalid_argument);
-    EXPECT_EQ(result.x, b);
-    result.x.resize(1);
-    EXPECT_THROW(direct.solve(b, result, 0), std::invalid_argument);
-    EXPECT_EQ(result.x.size(), 1);
+    Eigen::VectorXd x = b;
+    EXPECT_THROW(direct.solve(x, x), std::invalid_argument);
+    EXPECT_EQ(x, b);
 
     apxchol::solve_options options;
     options.backend = apxchol::solve_backend::gpu;

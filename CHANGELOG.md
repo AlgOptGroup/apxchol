@@ -42,6 +42,9 @@
 - Breaking: `solve_options::keep_factor_values` is renamed `keep_factor`, matching Python and MATLAB/Octave.
 - Breaking: the `APXCHOL_POOL_FP32` build option is removed; graph weights are always stored in FP32, as in default builds.
 - Breaking: `apxchol::generate_test_rhs` is removed; build the right-hand side in the caller.
+- Breaking: the per-stage timing tree leaves the public API: `checkpoint`, `solve_options::collect_timings`, the `timings` members of `solve_result` and `batch_solve_result`, the `checkpoint*` parameters of the `solver` constructors and `factorize`, and the `solver::solve(b, solve_result&, ...)` overload are removed.
+- Breaking: the CLI prints the timing tree only with `-v` and drops `--no-timings`.
+- `solver::setup_seconds()`, `solve_result::solve_seconds` and `batch_solve_result::solve_seconds` report wall-clock setup and solve time, also as `Solver.setup_seconds` and `SolveResult.solve_seconds` in Python and as `s.setup_seconds` and `res.solve_seconds` in MATLAB/Octave.
 - Breaking: the `APXCHOL_SPTRSV_BACKEND` macro is removed from `apxchol/version.h`; CLI `--version` prints the device (`cpu`, `cuda` or `metal`) instead.
 - Breaking: CLI `--random-rhs` uses a new generator, so its values change; they are now the same on every platform for a given `--seed`.
 - Breaking: the CLI and bindings no longer accept an adjacency matrix as if it were the operator. Previously both solved adjacency input as the operator and failed without a clear error; now validation rejects it and the error suggests the conversion.

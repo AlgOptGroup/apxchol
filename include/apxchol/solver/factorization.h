@@ -16,13 +16,13 @@
 
 namespace apxchol {
 
+namespace detail {
 struct checkpoint;
 #if defined(APXCHOL_USE_CUDA)
-namespace detail {
 class cuda_sptrsv_device_factor;
 struct factorization_access;
-}
 #endif
+}
 
 /// Approximate Cholesky preconditioner: P^T L L^T P approximates the operator
 /// used for construction, including any lumping or regularization.
@@ -100,8 +100,7 @@ factorization factorize_operator(const Eigen::SparseMatrix<double>& L,
 /// The default overloads build the tree_elimination rule from `opts`.
 template<typename Partitioner = detail::block_greedy_partitioner, eliminator E>
 factorization factorize(const Eigen::SparseMatrix<double>& L, const E& elim,
-                        const factor_options& opts = {},
-                        checkpoint* cp = nullptr);
+                        const factor_options& opts = {});
 
 /// Partitioner-instance overloads: pass a configured (possibly stateful)
 /// partitioner — the seam for custom independent-set selection and custom
@@ -111,19 +110,16 @@ factorization factorize(const Eigen::SparseMatrix<double>& L, const E& elim,
 /// to inspect it post-run.
 template<partitioner P>
 factorization factorize(const Eigen::SparseMatrix<double>& L, P part,
-                        const factor_options& opts = {},
-                        checkpoint* cp = nullptr);
+                        const factor_options& opts = {});
 
 template<partitioner P, eliminator E>
 factorization factorize(const Eigen::SparseMatrix<double>& L, P part,
                         const E& elim,
-                        const factor_options& opts = {},
-                        checkpoint* cp = nullptr);
+                        const factor_options& opts = {});
 
 /// Matrix-level factorization using the built-in AoS graph and named partitioner.
 factorization factorize(const Eigen::SparseMatrix<double>& L,
-                        const factor_options& opts = {},
-                        checkpoint* cp = nullptr);
+                        const factor_options& opts = {});
 
 namespace detail {
 

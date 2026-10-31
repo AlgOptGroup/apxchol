@@ -1,6 +1,7 @@
 #pragma once
 // CUDA route of solver: device-owned factor, triangular solves and PCG.
 #include "apxchol/solver/solve.h"
+#include "apxchol/detail/checkpoint.h"
 #include "apxchol/solver/cuda_context.h"
 #include "apxchol/solver/pcg_cuda.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"

@@ -124,8 +124,6 @@ run_config parse_args(int argc, char* argv[]) {
     app.add_option("--lump-max-mass", cfg.solve_opts.factor_opts.lump_max_mass,
                    "Maximum positive off-diagonal mass fraction allowed for lumping")
         ->capture_default_str();
-    app.add_flag_callback("--no-timings", [&] { cfg.solve_opts.collect_timings = false; },
-                          "Disable solver timing collection");
     app.add_option("--tol", cfg.solve_opts.tol, "Relative residual tolerance")
         ->capture_default_str();
     app.add_option("--max-iter", cfg.solve_opts.max_iter, "Maximum PCG iterations")
@@ -154,7 +152,7 @@ run_config parse_args(int argc, char* argv[]) {
 
     // ── verbosity (mutually exclusive) ──
     auto* q_flag = app.add_flag("-q,--quiet", quiet, "Suppress non-error output");
-    auto* v_flag = app.add_flag("-v,--verbose", verbose, "Verbose output");
+    auto* v_flag = app.add_flag("-v,--verbose", verbose, "Verbose output, including the timing tree");
     q_flag->excludes(v_flag);
     v_flag->excludes(q_flag);
 

@@ -78,6 +78,8 @@ function test_archive()
   original = apxchol_solver(sparse([2 -1; -1 2]), struct('keep_factor', true));
   original.save(path);
   default_loaded = apxchol_solver.load(path);
+  assert(isfinite(default_loaded.setup_seconds) && default_loaded.setup_seconds > 0, ...
+         'loaded setup_seconds: %g', default_loaded.setup_seconds);
   result = default_loaded.solve([1; -1]);
   assert(result.converged);
   retained = apxchol_solver.load(path, struct('keep_factor', true));

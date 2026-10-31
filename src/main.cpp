@@ -1,5 +1,7 @@
 #include "apxchol.h"
+#include "apxchol/detail/checkpoint.h"
 #include "apxchol/operator_class.h"
+#include "apxchol/solver/detail/solver_route.h"
 #include "config.h"
 #include "mtx_input.h"
 #include <fast_matrix_market/app/Eigen.hpp>
@@ -47,11 +49,19 @@ void write_solution(const std::string& path, const Dense& x) {
     spdlog::info("solution written to {}", path);
 }
 
+// -v attaches the internal timing tree, which is printed after the solve.
+solver make_solver(const Eigen::SparseMatrix<double>& L, const run_config& cfg,
+                   detail::checkpoint& timings) {
+    return cfg.solve_opts.factor_opts.verbose
+        ? detail::solver_access::with_timings(L, cfg.solve_opts, timings)
+        : solver(L, cfg.solve_opts);
+}
+
 // An n x k RHS file: one reusable solver, one batched solve over its columns.
 int solve_batch(const Eigen::SparseMatrix<double>& L, const Eigen::MatrixXd& B,
                 const run_config& cfg, bool graph, const input_scan& scan) {
-    checkpoint setup;
-    solver owner(L, cfg.solve_opts, cfg.solve_opts.collect_timings ? &setup : nullptr);
+    detail::checkpoint timings;
+    solver owner = make_solver(L, cfg, timings);
     Eigen::MatrixXd X(B.rows(), B.cols());
     const auto res = owner.solve(B, X);
 
@@ -64,8 +74,8 @@ int solve_batch(const Eigen::SparseMatrix<double>& L, const Eigen::MatrixXd& B,
                      col.residual, col.converged ? "" : " (did not converge)");
         failed += !col.converged;
     }
-    if (cfg.solve_opts.collect_timings)
-        spdlog::info("timings:\n{}\n{}", setup.report(), res.timings.report());
+    if (cfg.solve_opts.factor_opts.verbose)
+        spdlog::info("timings:\n{}", timings.report());
 
     if (cfg.output_path)
         write_solution(*cfg.output_path, X);
@@ -155,13 +165,15 @@ int main(int argc, char* argv[]) try {
         }
     }
 
-    auto res = solve(L, b, cfg.solve_opts);
+    detail::checkpoint timings;
+    solver owner = make_solver(L, cfg, timings);
+    const auto res = owner.solve(b);
 
     spdlog::info("backend:    {}", res.backend == solve_backend::gpu ? "gpu" : "cpu");
     spdlog::info("iterations: {}", res.iterations);
     spdlog::info("residual:   {}", res.residual);
-    if (cfg.solve_opts.collect_timings)
-        spdlog::info("timings:\n{}", res.timings.report());
+    if (cfg.solve_opts.factor_opts.verbose)
+        spdlog::info("timings:\n{}", timings.report());
 
     if (cfg.output_path)
         write_solution(*cfg.output_path, res.x);

@@ -1,5 +1,6 @@
 #pragma once
 #include "apxchol/solver/detail/metal_schedule.h"
+#include "apxchol/detail/checkpoint.h"
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"
 #import <Metal/Metal.h>

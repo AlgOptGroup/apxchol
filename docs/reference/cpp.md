@@ -16,7 +16,7 @@ Inspect `converged`; reaching the iteration limit is not an exception.
 A warm start is an initial solution estimate supplied through `x0`.
 
 ```{doxygenclass} apxchol::solver
-:members: solver, solve, apply, factor, rows, operator_nnz, backend, factor_storage, save, load
+:members: solver, solve, apply, factor, rows, operator_nnz, backend, factor_storage, setup_seconds, save, load
 :undoc-members:
 ```
 
@@ -39,7 +39,7 @@ argument keeps the default, and an explicit invalid value throws
 `std::invalid_argument`.
 
 ```{doxygenstruct} apxchol::solve_options
-:members: tol, max_iter, keep_factor, factor_opts, backend, num_threads, collect_timings
+:members: tol, max_iter, keep_factor, factor_opts, backend, num_threads
 :undoc-members:
 ```
 
@@ -50,15 +50,17 @@ argument keeps the default, and an explicit invalid value throws
 
 Scalar solves return the solution in `x`, unless the caller supplied output
 storage. Matrix solves write into the caller's output matrix and return one
-status record per RHS column.
+status record per RHS column. `solve_seconds` is the wall-clock time of the
+call; compare it with `solver::setup_seconds()` to judge whether reusing the
+factor pays off ([usage guide](../usage.md#judging-whether-reuse-pays-off)).
 
 ```{doxygenstruct} apxchol::solve_result
-:members: x, iterations, residual, converged, timings, backend
+:members: x, iterations, residual, converged, solve_seconds, backend
 :undoc-members:
 ```
 
 ```{doxygenstruct} apxchol::batch_solve_result
-:members: columns, timings
+:members: columns, solve_seconds
 :undoc-members:
 ```
 
@@ -114,7 +116,7 @@ GPU routes require the defaults of `cpu_schedule`, `exact_clique_max_degree`,
 Custom partitioner and eliminator overloads are described in the
 [extension guide](../extending.md).
 
-```{doxygenfunction} apxchol::factorize(const Eigen::SparseMatrix<double> &, const factor_options &, checkpoint *)
+```{doxygenfunction} apxchol::factorize(const Eigen::SparseMatrix<double> &, const factor_options &)
 ```
 
 ```{doxygenstruct} apxchol::factorization

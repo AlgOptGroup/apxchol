@@ -11,6 +11,7 @@ Public API:
     Solver.from_csc(data, indices, indptr, **opts) -> Solver
     Solver.save(path) / Solver.load(path, **opts) -> portable archive / Solver
     Solver.lumped_offdiag            ->  int  (positive off-diagonals lumped)
+    Solver.setup_seconds             ->  float  (wall-clock setup time)
     Solver.aslinearoperator()        ->  scipy LinearOperator
     Solver.P / Solver.chol()         ->  factor export
 """
@@ -37,13 +38,17 @@ class SolveResult:
 
     ``residual`` is checked against the original matrix and RHS. For a
     matrix RHS, ``iters``, ``residual`` and ``converged`` contain one entry
-    per column; for a vector RHS they are scalars.
+    per column; for a vector RHS they are scalars. ``solve_seconds`` is the
+    wall-clock time of the native solve, for all columns together; compare
+    it with :attr:`Solver.setup_seconds` to judge whether reusing a factor
+    pays off.
     """
 
     x: np.ndarray
     iters: int | np.ndarray
     residual: float | np.ndarray
     converged: bool | np.ndarray
+    solve_seconds: float
 
 
 def _solver_options(*, backend="auto", num_threads=0, seed=None, partitioner=None,
@@ -213,6 +218,15 @@ class Solver:
     def backend(self) -> str:
         """Backend selected at construction: ``"cpu"`` or ``"gpu"``."""
         return self._impl.backend()
+
+    @property
+    def setup_seconds(self) -> float:
+        """Wall-clock seconds of the native setup.
+
+        Covers factorization and backend preparation, or for :meth:`load`
+        reading and adopting the archive. Copies keep the original's value.
+        """
+        return self._impl.setup_seconds()
 
     @property
     def sddm(self) -> bool:

@@ -75,7 +75,7 @@ apxchol::solve_backend parse_backend(const std::string& name) {
 }
 
 apxchol::solve_options parse_options(const py::dict& d) {
-    apxchol::solve_options so{.collect_timings = false};
+    apxchol::solve_options so;
     for (auto item : d) {
         const std::string key = py::str(item.first).cast<std::string>();
         const py::handle v = item.second;
@@ -141,6 +141,7 @@ public:
     }
 
     Eigen::Index rows() const { return slv_.rows(); }
+    double setup_seconds() const { return slv_.setup_seconds(); }
     const char* backend() const {
         return slv_.backend() == apxchol::solve_backend::cpu ? "cpu" : "gpu";
     }
@@ -214,6 +215,7 @@ public:
             out["iters"] = static_cast<int>(res.iterations);
             out["residual"] = res.residual;
             out["converged"] = res.converged;
+            out["solve_seconds"] = res.solve_seconds;
         } else {
             apxchol::batch_solve_result res;
             auto x = mutable_matrix(output);
@@ -238,6 +240,7 @@ public:
             out["iters"] = iters;
             out["residual"] = residual;
             out["converged"] = converged;
+            out["solve_seconds"] = res.solve_seconds;
         }
         return out;
     }
@@ -386,6 +389,7 @@ PYBIND11_MODULE(_apxchol, m) {
              py::arg("x0") = py::none(), py::arg("out") = py::none())
         .def("apply", &Solver::apply, py::arg("r"))
         .def("rows", &Solver::rows)
+        .def("setup_seconds", &Solver::setup_seconds)
         .def("backend", &Solver::backend)
         .def("sddm", &Solver::sddm)
         .def("factor_storage_dtype", &Solver::factor_storage_dtype)
