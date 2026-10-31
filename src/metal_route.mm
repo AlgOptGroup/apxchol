@@ -411,6 +411,9 @@ struct detail::metal_route::device_state {
         const bool original = original_operator.rows() != 0;
         const std::ptrdiff_t rows = static_cast<std::ptrdiff_t>(n);
         const auto run = [&](const auto* ptr, const auto* col, const double* val) {
+            // Apple Clang rejects the inner lambda naming spmv's parameter
+            // inside the OpenMP region, so it reads this local instead.
+            const detail::const_matrix_ref input = x;
             #pragma omp parallel
             {
                 const int tid = omp_get_thread_num(), nt = omp_get_num_threads();
@@ -418,7 +421,7 @@ struct detail::metal_route::device_state {
                 for (std::ptrdiff_t i = lo; i < hi; ++i) {
                     y[original ? F.perm[i] : i] = detail::sparse_row_product<1>(
                         col, val, std::ptrdiff_t(ptr[i]), std::ptrdiff_t(ptr[i + 1]),
-                        [&](auto row, int) { return x[std::ptrdiff_t(row)]; })[0];
+                        [&](auto row, int) { return input[std::ptrdiff_t(row)]; })[0];
                 }
             }
         };
