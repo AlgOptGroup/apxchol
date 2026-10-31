@@ -72,6 +72,10 @@ template<class Value> struct FinalMemory {
     void fail(unsigned value) const {atomic_fetch_or_explicit(status,value,memory_order_relaxed);}
     void increment_count(unsigned row) const {atomic_fetch_add_explicit((device atomic_uint*)(transpose_ptr+row),1u,memory_order_relaxed);}
     unsigned reserve(unsigned row) const {return atomic_fetch_add_explicit((device atomic_uint*)(cursor+row),1u,memory_order_relaxed);}
+    // After the transpose the cursors are free: cursor[m] counts the queued rows.
+    void queue_long_row(unsigned row) const {
+        cursor[atomic_fetch_add_explicit((device atomic_uint*)(cursor+shape.m),1u,memory_order_relaxed)] = row;
+    }
 };
 constant unsigned phase [[function_constant(0)]];
 constant bool half_storage [[function_constant(1)]];
@@ -90,8 +94,8 @@ template <class Value> void run_final(FinalMemory<Value> s, unsigned row) {
         rf::emit(s, math, row);
     if (phase == rf::stage_count_transpose)
         rf::transpose_count(s, row);
-    if (phase == rf::stage_initialize_cursor && row < s.shape.m)
-        s.cursor[row] = s.transpose_ptr[row];
+    if (phase == rf::stage_initialize_cursor && row <= s.shape.m)
+        s.cursor[row] = row < s.shape.m ? s.transpose_ptr[row] : 0;
     if (phase == rf::stage_emit_transpose)
         rf::transpose_emit(s, row);
     if (phase == rf::stage_sort_transpose)
@@ -143,6 +147,35 @@ kernel void finalize_stage(device const resident_setup::Column* columns [[buffer
             cursor,
             status
         }, row);
+}
+// One threadgroup sorts each queued long forward row by column, with the
+// ascending-only bitonic network, which skips partners past the row's end.
+template<class Value>
+void sort_row(device const unsigned* rows, device const unsigned* tptr, device unsigned* tidx,
+              device Value* tval, unsigned group, unsigned lane, unsigned lanes) {
+    const unsigned row = rows[group], begin = tptr[row], count = tptr[row + 1] - 1 - begin;
+    device unsigned* idx = tidx + begin;
+    device Value* val = tval + begin;
+    unsigned size = 1;
+    while (size < count) size <<= 1;
+    for (unsigned k = 2; k <= size; k <<= 1)
+        for (unsigned j = k >> 1; j > 0; j >>= 1) {
+            for (unsigned i = lane; i < size; i += lanes) {
+                const unsigned l = j == k >> 1 ? (i ^ (k - 1)) : (i ^ j);
+                if (l > i && l < count && idx[i] > idx[l]) {
+                    const unsigned x = idx[i]; idx[i] = idx[l]; idx[l] = x;
+                    const Value v = val[i]; val[i] = val[l]; val[l] = v;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_device);
+        }
+}
+kernel void sort_long_rows(device const unsigned* rows [[buffer(0)]], device const unsigned* tptr [[buffer(1)]],
+                           device unsigned* tidx [[buffer(2)]], device uchar* tval [[buffer(3)]],
+                           uint group [[threadgroup_position_in_grid]], uint lane [[thread_position_in_threadgroup]],
+                           uint lanes [[threads_per_threadgroup]]) {
+    if (half_storage) sort_row(rows, tptr, tidx, (device half*)tval, group, lane, lanes);
+    else sort_row(rows, tptr, tidx, (device float*)tval, group, lane, lanes);
 }
 struct PlanMemory {
     unsigned n; bool reverse; unsigned rounds;
@@ -266,7 +299,7 @@ class Finalizer {
     id<MTLLibrary> library;
     std::array<std::array<id<MTLComputePipelineState>, 7>, 2> final_pipes;
     id<MTLComputePipelineState> structure, scan_blocks, scan_add, operator_emit;
-    std::array<id<MTLComputePipelineState>, 2> count{}, emit{};
+    std::array<id<MTLComputePipelineState>, 2> count{}, emit{}, sort_long{};
     std::once_flag lane_plan_once;
     id<MTLComputePipelineState> pipeline(NSString *name, unsigned lanes = 0) {
         NSError *error = nil;
@@ -346,6 +379,15 @@ class Finalizer {
                 if (!final_pipes[half][stage])
                     throw std::runtime_error(describe(error));
             }
+        for (unsigned half = 0; half < 2; ++half) {
+            const bool h = half;
+            auto constants = [MTLFunctionConstantValues new];
+            [constants setConstantValue:&h type:MTLDataTypeBool atIndex:1];
+            auto fn = [library newFunctionWithName:@"sort_long_rows" constantValues:constants error:&error];
+            if (!fn) throw std::runtime_error(describe(error));
+            sort_long[half] = [device newComputePipelineStateWithFunction:fn error:&error];
+            if (!sort_long[half]) throw std::runtime_error(describe(error));
+        }
         structure = pipeline(@"plan_structure");
         count[0] = pipeline(@"plan_count", gd::lanes);
         emit[0] = pipeline(@"plan_emit", gd::lanes);
@@ -463,7 +505,7 @@ class Finalizer {
         out.permutation = allocate(n * sizeof(unsigned));
         if (half) out.metadata = allocate(m * sizeof(rf::Metadata));
         auto rows = allocate(m * sizeof(rf::Row));
-        auto status = allocate(sizeof(unsigned)), cursor = allocate(m * sizeof(unsigned));
+        auto status = allocate(sizeof(unsigned)), cursor = allocate((m + 1) * sizeof(unsigned));
         *static_cast<unsigned *>(status.contents) = 0;
         out.backward.ptr = allocate((m + 1) * sizeof(unsigned));
         out.forward.ptr = allocate((m + 1) * sizeof(unsigned));
@@ -502,6 +544,16 @@ class Finalizer {
         encode(cb, rf::stage_emit_transpose);
         encode(cb, rf::stage_sort_transpose);
         finish(cb, status);
+        if (const unsigned long_rows = static_cast<unsigned *>(cursor.contents)[m]) {
+            cb = [queue commandBuffer];
+            auto enc = encoder(cb, sort_long[half],
+                               {cursor, out.forward.ptr, out.forward.idx, out.forward.val});
+            const unsigned lanes = std::min<unsigned>(256, sort_long[half].maxTotalThreadsPerThreadgroup);
+            [enc dispatchThreadgroups:MTLSizeMake(long_rows, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(lanes, 1, 1)];
+            [enc endEncoding];
+            finish(cb, status);
+        }
         rows = nil;
         cursor = nil;
         scan_scratch = nil;
