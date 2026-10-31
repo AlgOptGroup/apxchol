@@ -212,13 +212,10 @@ private:
             bnorm[q] = 1; // Inactive zero columns never divide by a zero norm.
             if (max_b[q] == 0) continue;
             scales[q] = detail::gpu_scaling::fp32_scale(std::max(max_b[q], max_x0[q]));
-            if (scales[q] != 1) packed.col(q) *= scales[q];
-            if constexpr (Columns == 1) bnorm[q] = detail::gpu_scaling::norm(packed);
-            else {
-                // Retain the contiguous scalar norm fold for each packed column.
-                const Eigen::VectorXd rhs_column = packed.col(q);
-                bnorm[q] = detail::gpu_scaling::norm(rhs_column);
-            }
+            // packed stays unchanged until the stream syncs: the upload above
+            // may still read it. Fold the scaled column's norm contiguously.
+            const Eigen::VectorXd rhs_column = packed.col(q) * scales[q];
+            bnorm[q] = detail::gpu_scaling::norm(rhs_column);
             if (!std::isnormal(bnorm[q] * bnorm[q]))
                 throw std::invalid_argument("CUDA solve: RHS and initial guess exceed the common scaling range");
             auto& st = h_state_[q];
@@ -233,14 +230,16 @@ private:
         if (laplacian && n_)
             APXCHOL_PCG_CUDA_CHECK(cudaMemsetAsync(vectors_.z + (n_ - 1) * Columns, 0, Columns * sizeof(double), stream_));
         iteration<Precond, Columns> commands{*this, precond, bnorm};
+        host_panel warm;
         if (any_warm) {
+            warm.resize(n_, Columns);
             for (int64_t v = 0; v < n_; ++v)
                 for (unsigned q = 0; q < Columns; ++q)
-                    packed(perm[v], q) = h_state_[q].alpha ? (*x0)(v, q) * scales[q] : 0;
+                    warm(perm[v], q) = h_state_[q].alpha ? (*x0)(v, q) * scales[q] : 0;
             if (laplacian)
                 for (unsigned q = 0; q < Columns; ++q)
-                    if (h_state_[q].alpha) packed.col(q).array() -= packed.col(q).mean();
-            APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(vectors_.p, packed.data(), vector_bytes, cudaMemcpyHostToDevice, stream_));
+                    if (h_state_[q].alpha) warm.col(q).array() -= warm.col(q).mean();
+            APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(vectors_.p, warm.data(), vector_bytes, cudaMemcpyHostToDevice, stream_));
             // alpha=1 only for warm columns; cold p=0 and alpha=0. Their
             // iteration-zero convergence check is suppressed by finalize.
             commands.step(detail::gpu_pcg::operation::multiply);

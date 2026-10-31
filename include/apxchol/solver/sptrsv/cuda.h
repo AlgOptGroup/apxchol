@@ -665,6 +665,7 @@ public:
     /// Reads x_in[0..m-1] from host, writes result to x_out[0..m-1] on host.
     /// x_in and x_out may alias (ping-pong stays on GPU). Runs on stream.
     void solve_LLt(const double* x_in, double* x_out, cudaStream_t stream = nullptr) const {
+        require_ready();
         const detail::cuda_device_scope device(data_->cuda_device, detail::cuda_device_scope::checked{});
         double max_abs = 0;
         for (int64_t i = 0; i < data_->m; ++i) {
@@ -692,6 +693,7 @@ public:
     void solve_LLt_dev(const double* d_in, double* d_out, const unsigned* active = nullptr,
                        unsigned active_stride = 1, cudaStream_t stream = nullptr) const {
         static_assert(Columns == 1 || Columns == 2 || Columns == 4);
+        require_ready();
         constexpr unsigned RhsLanes = Columns == 4 ? 4 : 1;
         if constexpr (Columns > 1) reserve_panel_workspace<Columns>();
         if constexpr (RhsLanes == 4) reserve_lane_plan();
@@ -699,6 +701,9 @@ public:
     }
 
     bool ready() const { return data_ && data_->ready; }
+    void require_ready() const {
+        if (!ready()) throw std::logic_error("CUDA triangular solve has no installed factor");
+    }
     /// What the compacting drop did at the last setup() (factor_drop.h): rel /
     /// nnz_factor / nnz_stored / dropped*.
     const factor_drop_stats& drop_stats() const { return shared().stats; }
