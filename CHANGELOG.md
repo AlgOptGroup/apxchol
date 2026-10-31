@@ -54,7 +54,7 @@
 - Parallel factorization handles a shrinking OpenMP team, and parallel vertex selection on the same graph is reproducible at a fixed thread count.
 - Concurrent calls on one solver no longer corrupt each other's results: a call made while another thread uses the same `solver`, `cpu_solver` or `apx_cholesky` throws. CPU solvers can be copied cheaply, sharing the factor, for one solver per thread (`copy.copy` in Python), and Python releases the GIL during factorization, `solve` and `apply`.
 - The CLI rejects an empty matrix and RHS files with no rows or columns with an error (exit 2); it used to crash.
-- Breaking: saving a solver replaces an existing file instead of refusing. It writes `<path>.tmp`, flushes it and renames it into place, so readers never see a partial archive, and the new file gets the usual umask permissions (for example 0644) instead of always 0600.
+- Breaking: saving a solver replaces an existing file instead of refusing. It writes `<path>.tmp`, flushes it, renames it into place and syncs the directory, so readers never see a partial archive and the new file survives a power loss, and the new file gets the usual umask permissions (for example 0644) instead of always 0600.
 
 Full history: https://github.com/AlgOptGroup/apxchol/compare/v0.2.2...main
 

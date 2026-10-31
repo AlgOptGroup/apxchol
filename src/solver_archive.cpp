@@ -187,6 +187,17 @@ public:
         if (std::rename(temporary_.name.c_str(), destination_.c_str()) != 0)
             throw std::system_error(errno, std::generic_category(), "publish solver archive");
         temporary_.published = true;
+        // Sync the directory so the rename itself survives a power loss.
+        const auto parent = destination_.parent_path();
+        const int directory = ::open(parent.empty() ? "." : parent.c_str(),
+                                     O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (directory < 0)
+            throw std::system_error(errno, std::generic_category(), "open archive directory");
+        const int synced = ::fsync(directory);
+        const int error = errno;
+        (void)::close(directory);
+        if (synced != 0)
+            throw std::system_error(error, std::generic_category(), "sync archive directory");
     }
 };
 
