@@ -229,6 +229,12 @@ if (APXCHOL_BUILD_CLI)
     apxchol_cli_rhs_test(cli_x0_solution_needs_no_iterations path5_rhs1 0
         "iterations: 0\n" "array real general\n5 1\n"
         --x0 "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/path5_x0.mtx")
+    apxchol_cli_rhs_test(cli_x0_batch_solutions_need_no_iterations path5_rhs3 0
+        "column 0: iterations 0,.*column 1: iterations 0,.*column 2: iterations 0,"
+        "array real general\n5 3\n"
+        --x0 "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/path5_x0_rhs3.mtx")
+    apxchol_cli_test(cli_x0_with_random_rhs path5_sddm 0 "iterations: [0-9]+"
+        --x0 "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/path5_x0.mtx")
     apxchol_cli_rhs_error_test(cli_x0_wrong_shape path5_rhs1 "x0 is 4x1, but the RHS is 5x1"
         --x0 "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/path5_x0_short.mtx")
     apxchol_cli_rhs_error_test(cli_x0_must_match_batch path5_rhs3 "x0 is 5x1, but the RHS is 5x3"

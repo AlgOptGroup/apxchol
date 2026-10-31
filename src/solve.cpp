@@ -1451,8 +1451,11 @@ solve_result solve(const Eigen::SparseMatrix<double>& A, const Eigen::VectorXd& 
                    std::optional<double> tol, std::optional<int> max_iter,
                    const Eigen::VectorXd* x0, const solve_options& opts) {
     ensure_eigen_parallel();
-    // Reject invalid limits before paying for setup.
+    // Reject invalid limits and lengths before paying for setup.
     resolve_solve_parameters(tol, max_iter);
+    if (b.size() != A.rows()) throw std::invalid_argument("apxchol: RHS length does not match the operator");
+    if (x0 && x0->size() != A.rows())
+        throw std::invalid_argument("apxchol: initial guess length does not match the operator");
     solver owner(A, opts);
     return owner.solve(b, tol, max_iter, x0);
 }
