@@ -47,6 +47,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 
 ## Determinism and numerical invariants
 
+- Run-to-run reproducibility at a fixed thread count is a default, not a constraint. A change may give it up for measured speed or memory without losing precision; the PR says so and updates `docs/precision.md`, `docs/serialization.md` where reloads are affected, and `CHANGELOG.md`.
 - Public solver preconditioner application rejects non-finite inputs and centers Laplacian input/output on every call; only internal PCG uses periodic centering. All backends derive `converged` from the original-system exit residual and effective tolerance, with verification included in Solve timing.
 - Solves stop on verified tolerance, the iteration budget or numerical breakdown. A failed original-residual check after apparent convergence can continue within the remaining budget; breakdown does not restart. Residual growth or a temporary plateau is not a stopping condition.
 - Canonical neighbors sort by weight, then vertex. Preserve ordered duplicate sums, exact cumulative weights, `upper_bound` sampling and per-elimination random streams.
