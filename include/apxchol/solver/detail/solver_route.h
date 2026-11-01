@@ -9,13 +9,16 @@
 #elif defined(APXCHOL_USE_METAL)
 #include "apxchol/solver/detail/metal_route.h"
 #endif
+#include "apxchol/detail/eigen_boundary.h"
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <variant>
 
 namespace apxchol::detail {
 
-// Every route is constructed from (A, opts, cp, F) and provides solve_widths,
+// Every route is constructed from (A, opts, cp, F), A a square csc_ref, and
+// provides solve_widths,
 // apply_widths, solve_columns, apply_columns, factor (metadata),
 // installed_factor, factor_nnz, factor_storage and original_operator.
 using solver_route = std::variant<cpu_route
@@ -33,9 +36,15 @@ struct solver_access {
     // under "pcg". The tree must outlive the solver; copies start without one.
     static solver with_timings(const Eigen::SparseMatrix<double>& A,
                                const solve_options& opts, checkpoint& timings);
+    // A solver adopting F for an operator in the library's own storage.
+    static solver make(csc_ref<double> A, factorization F, const solve_options& opts);
+    // A converted public input as the route's operator; throws the route's
+    // errors for a matrix that is not square.
+    static const csc_ref<double>& solver_input(const eigen_csc& input,
+                                               const solve_options& opts, bool adopted);
     static void save(const std::filesystem::path& path, const solver& owner);
     // started is when load() began, so setup_seconds includes reading the file.
-    static void finish_load(solver& owner, Eigen::Index entries,
+    static void finish_load(solver& owner, std::int64_t entries,
                             std::chrono::steady_clock::time_point started);
 };
 

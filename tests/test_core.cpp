@@ -544,7 +544,7 @@ TEST(DirectedCscGraph, BitIdenticalProofBuildsTheSameGraph) {
     using G = apxchol::detail::graph;
     auto same_graph = [&] {
         const G searched = apxchol::detail::make_graph(L);
-        const G proven = apxchol::detail::make_graph_from_operator(L, true);
+        const G proven = apxchol::detail::make_graph_from_operator(apxchol::detail::eigen_csc(L), true);
         ASSERT_EQ(searched.n(), proven.n());
         ASSERT_EQ(searched.m(), proven.m());
         for (apxchol::node_index v = 0; v < searched.n(); ++v) {

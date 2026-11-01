@@ -233,7 +233,7 @@ void build_csc(factorization& result,
 
 } // namespace detail
 
-factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
+factorization detail::factorize_for_solver(csc_ref<double> L,
                                           const factor_options& opts_in,
                                           checkpoint* cp,
                                           setup_route route) {
@@ -263,7 +263,7 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
         return F;
     };
 
-    const Eigen::SparseMatrix<double>& A = op.matrix();
+    const csc_ref<double> A = op.matrix();
     if (route == setup_route::gpu) {
 #if defined(APXCHOL_USE_CUDA)
         if (opts.partitioner != partitioner_kind::block_greedy ||
@@ -288,7 +288,7 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
     // transfers to A only when nothing was lumped, i.e. when A IS that matrix;
     // make_graph then skips its per-entry transpose-partner search.
     const bool triangles_bit_identical =
-        &A == &L && op.scan().triangles_bit_identical;
+        op.lumped() == 0 && op.scan().triangles_bit_identical;
     auto G = detail::make_graph_from_operator(A, triangles_bit_identical, opts.regularization);
     return do_factorize(std::move(G));
 }
@@ -296,7 +296,8 @@ factorization detail::factorize_for_solver(const Eigen::SparseMatrix<double>& L,
 // Public factorization returns an exportable CPU factor.
 factorization factorize(const Eigen::SparseMatrix<double>& L,
                         const factor_options& opts) {
-    return detail::factorize_for_solver(L, opts, nullptr);
+    const detail::eigen_csc input(L);
+    return detail::factorize_for_solver(detail::factorize_input(input, opts), opts, nullptr);
 }
 
 } // namespace apxchol

@@ -370,7 +370,7 @@ struct detail::metal_route::device_state {
     // The permuted operator A' = P A P^T (canonical lower values) in fp64:
     // the host residuals run on it.
     detail::permuted_operator_csr op;
-    Eigen::SparseMatrix<double> original_operator;
+    detail::csc_matrix<double> original_operator;
     statistics stats;
 
     context* ctx = nullptr;
@@ -393,7 +393,7 @@ struct detail::metal_route::device_state {
         factor_fp16 = detail::resolve_fp16_storage(opts.factor_opts.factor_storage, false);
     }
 
-    void setup(const Eigen::SparseMatrix<double>& A, checkpoint* cp,
+    void setup(detail::csc_ref<double> A, checkpoint* cp,
                detail::metal_setup::resident_factor* resident = nullptr);
     void prepare_device(detail::gpu_factor_prep::csr_int<float> backward,
                         const std::vector<float>& scales,
@@ -407,29 +407,36 @@ struct detail::metal_route::device_state {
     void prepare_lane_plans() const;
 
     // x follows the retained operator's ordering; y is factor-permuted.
-    template<class Vector>
-    void spmv(const Vector& x, Eigen::VectorXd& y) const {
+    void spmv(detail::const_matrix_ref x, detail::buffer<double>& y) const {
         const bool original = original_operator.rows() != 0;
-        const int* ptr = original ? original_operator.outerIndexPtr() : op.ptr.data();
-        const int* col = original ? original_operator.innerIndexPtr() : op.idx.get();
-        const double* val = original ? original_operator.valuePtr() : op.vals.get();
         const std::ptrdiff_t rows = static_cast<std::ptrdiff_t>(n);
-        #pragma omp parallel
-        {
-            const int tid = omp_get_thread_num(), nt = omp_get_num_threads();
-            const auto [lo, hi] = detail::work_balanced_range(ptr, rows, tid, nt);
-            for (std::ptrdiff_t i = lo; i < hi; ++i) {
-                y[original ? F.perm[i] : i] = detail::sparse_row_product<1>(
-                    col, val, ptr[i], ptr[i + 1], [&](int row, int) { return x[row]; })[0];
+        const auto run = [&](const auto* ptr, const auto* col, const double* val) {
+            // Apple Clang rejects the inner lambda naming spmv's parameter
+            // inside the OpenMP region, so it reads this local instead.
+            const detail::const_matrix_ref input = x;
+            #pragma omp parallel
+            {
+                const int tid = omp_get_thread_num(), nt = omp_get_num_threads();
+                const auto [lo, hi] = detail::work_balanced_range(ptr, rows, tid, nt);
+                for (std::ptrdiff_t i = lo; i < hi; ++i) {
+                    y[original ? F.perm[i] : i] = detail::sparse_row_product<1>(
+                        col, val, std::ptrdiff_t(ptr[i]), std::ptrdiff_t(ptr[i + 1]),
+                        [&](auto row, int) { return input[std::ptrdiff_t(row)]; })[0];
+                }
             }
-        }
+        };
+        if (original)
+            run(original_operator.ptr(), original_operator.idx(), original_operator.val());
+        else
+            run(op.ptr.data(), op.idx.get(), op.vals.get());
     }
 
-    template<class Vector>
-    double relative_residual(const Eigen::VectorXd& bp, const Vector& xp,
-                             Eigen::VectorXd& work, const mh::norm_reference& bnorm) const {
+    // work receives bp - A x.
+    double relative_residual(const detail::buffer<double>& bp, detail::const_matrix_ref xp,
+                             detail::buffer<double>& work, const mh::norm_reference& bnorm) const {
         spmv(xp, work);
-        return bnorm.relative(bp - work);
+        for (std::size_t i = 0; i < n; ++i) work[i] = bp[i] - work[i];
+        return bnorm.relative(detail::const_matrix_ref(work.data(), std::int64_t(n)));
     }
 };
 
@@ -558,24 +565,27 @@ struct detail::metal_route::impl {
     }
 
     template<unsigned Columns>
-    void solve_columns(const_matrix_view B, matrix_view X, std::span<solve_result> results,
-                       checkpoint* cp, double tol, int max_iter, const const_matrix_view* X0);
+    void solve_columns(detail::const_matrix_ref B, detail::matrix_ref X, std::span<solve_result> results,
+                       checkpoint* cp, double tol, int max_iter, const detail::const_matrix_ref* X0);
     template<unsigned Columns>
-    std::array<bool, Columns> solve_columns_once(const_matrix_view B, matrix_view X,
+    std::array<bool, Columns> solve_columns_once(detail::const_matrix_ref B, detail::matrix_ref X,
                        std::span<solve_result> results, checkpoint* cp, double tol,
-                       int max_iter, const const_matrix_view* X0);
+                       int max_iter, const detail::const_matrix_ref* X0);
 
-    template<class Vector>
-    void centre(Vector& x) const { x.array() -= x.mean(); }
+    static void centre(detail::matrix_ref x) {
+        const double mean = detail::vec::mean(x);
+        for (std::int64_t i = 0; i < x.rows(); ++i) x[i] -= mean;
+    }
 };
 
-void detail::metal_route::device_state::setup(const Eigen::SparseMatrix<double>& A, checkpoint* cp,
+void detail::metal_route::device_state::setup(detail::csc_ref<double> A, checkpoint* cp,
                                               detail::metal_setup::resident_factor* resident) {
-    n = static_cast<std::size_t>(A.rows());
-    // Eigen's int StorageIndex keeps n and the operator's stored count within
-    // the device's 32-bit indices; the factor and the two-triangle permuted
-    // operator are checked here.
-    static_assert(std::is_same_v<Eigen::SparseMatrix<double>::StorageIndex, int>);
+    n = static_cast<std::size_t>(A.n);
+    // n and the operator's stored count must fit the device's 32-bit indices;
+    // the factor and the two-triangle permuted operator are checked below.
+    if (static_cast<std::uint64_t>(A.n) > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
+        static_cast<std::uint64_t>(A.nnz()) > static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
+        throw std::length_error("Metal: the operator exceeds the device's 32-bit indices");
     laplacian = !F.sddm;
     const auto m = static_cast<std::uint32_t>(laplacian ? n - 1 : n);
     if (F.L.col_ptrs()[m] > static_cast<edge_index>(std::numeric_limits<int>::max()))
@@ -589,18 +599,17 @@ void detail::metal_route::device_state::setup(const Eigen::SparseMatrix<double>&
     // so a reloaded solver reproduces the original solves bit for bit.
     std::optional<detail::metal_setup::resident_factor> device_operator;
     auto adopt_device_operator = [&](const detail::metal_setup::resident_factor& source) {
-        original_operator = A;
+        original_operator = detail::csc_cast<double>(A);
         if (!source.operator_triangles_identical) {
             #pragma omp parallel
             {
-                const auto [first, last] = detail::work_balanced_range(A.outerIndexPtr(), A.rows(),
+                const auto [first, last] = detail::work_balanced_range(A.ptr, std::int64_t(A.n),
                     omp_get_thread_num(), omp_get_num_threads());
                 bool paired = true;
                 for (auto row = first; row < last; ++row)
-                    for (int p = A.outerIndexPtr()[row]; p < A.outerIndexPtr()[row + 1]; ++p)
-                        original_operator.valuePtr()[p] = detail::canonical_lower_value(
-                            A.outerIndexPtr(), A.innerIndexPtr(), A.valuePtr(), int(row),
-                            A.innerIndexPtr()[p], p, paired);
+                    for (edge_index p = A.ptr[row]; p < A.ptr[row + 1]; ++p)
+                        original_operator.val()[p] = detail::canonical_lower_value(
+                            A.ptr, A.idx, A.val, row, std::int64_t(A.idx[p]), std::int64_t(p), paired);
             }
         }
         exact = source.operator_exact;
@@ -636,17 +645,11 @@ void detail::metal_route::device_state::setup(const Eigen::SparseMatrix<double>&
             });
         if (device_operator) adopt_device_operator(*device_operator);
         else {
-        Eigen::SparseMatrix<double> compressed;
-        if (!A.isCompressed()) {
-            compressed = A;
-            compressed.makeCompressed();
-        }
-        const auto& src = A.isCompressed() ? A : compressed;
         // Both triangles are stored: up to twice the stored entries of one triangle.
-        if (src.nonZeros() > std::numeric_limits<int>::max() / 2)
+        if (A.nnz() > static_cast<edge_index>(std::numeric_limits<int>::max() / 2))
             throw std::invalid_argument("Metal: operators with 2^30 or more stored entries exceed the "
                                     "device's 32-bit offsets");
-        op = detail::build_permuted_full_symmetric_csr(src, F.perm);
+        op = detail::build_permuted_full_symmetric_csr(A, F.perm);
         int max_row = 0;
         double min_diagonal = std::numeric_limits<double>::infinity(), max_diagonal = 0;
         #pragma omp parallel for schedule(static) reduction(min : min_diagonal) reduction(max : max_diagonal, max_row)
@@ -691,7 +694,7 @@ void detail::metal_route::device_state::setup(const Eigen::SparseMatrix<double>&
     prepare_device(std::move(backward), scales, hi, lo, m, resident,
                    device_operator ? &*device_operator : resident);
 
-    stats.n = static_cast<Eigen::Index>(n);
+    stats.n = static_cast<std::int64_t>(n);
     stats.levels_forward = fwd.levels;
     stats.levels_backward = bwd.levels;
     stats.steps_forward = fwd.stages.size() + unsigned(m != 0);
@@ -833,7 +836,7 @@ void detail::metal_route::impl::allocate_workspace(unsigned count) {
     });
 }
 
-detail::metal_route::metal_route(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
+detail::metal_route::metal_route(csc_ref<double> A, const solve_options& opts,
                                  checkpoint* cp, factorization* F) {
     auto state = std::make_shared<device_state>(opts);
     if (F) {
@@ -860,11 +863,16 @@ detail::metal_route::~metal_route() = default;
 detail::metal_route::metal_route(metal_route&&) noexcept = default;
 detail::metal_route& detail::metal_route::operator=(metal_route&&) noexcept = default;
 
-Eigen::SparseMatrix<double> detail::metal_route::original_operator() const {
+detail::csc_matrix<double> detail::metal_route::original_operator() const {
     const auto& data = impl_->d;
     if (data.original_operator.rows()) return data.original_operator;
-    return archive_operator_csc(static_cast<int>(data.n), data.op.ptr.data(),
-        data.op.idx.get(), data.op.vals.get(), data.F.perm);
+    // The permuted operator's int arrays in the library's index widths.
+    const auto nnz = static_cast<edge_index>(data.op.ptr.back());
+    csc_matrix<double> stored(static_cast<node_index>(data.n), nnz);
+    std::copy(data.op.ptr.begin(), data.op.ptr.end(), stored.ptr());
+    std::copy_n(data.op.idx.get(), nnz, stored.idx());
+    std::copy_n(data.op.vals.get(), nnz, stored.val());
+    return archive_operator_csc(stored.ref(), data.F.perm);
 }
 
 const factorization& detail::metal_route::factor() const { return impl_->d.F; }
@@ -913,9 +921,9 @@ std::uint64_t detail::metal_route::factor_nnz() const {
 detail::metal_route::statistics detail::metal_route::stats() const { return impl_->d.stats; }
 
 template<unsigned Columns>
-void detail::metal_route::impl::solve_columns(const_matrix_view B, matrix_view X,
+void detail::metal_route::impl::solve_columns(detail::const_matrix_ref B, detail::matrix_ref X,
                                        std::span<solve_result> results, checkpoint* cp,
-                                       double tol, int max_iter, const const_matrix_view* X0) {
+                                       double tol, int max_iter, const detail::const_matrix_ref* X0) {
     auto stopped = solve_columns_once<Columns>(B, X, results, cp, tol, max_iter, X0);
     for (unsigned q = 0; q < Columns; ++q) {
         auto& result = results[q];
@@ -925,27 +933,32 @@ void detail::metal_route::impl::solve_columns(const_matrix_view B, matrix_view X
                                        progress, max_iter - result.iterations);
         };
         if (!restart()) continue;
-        Eigen::VectorXd initial = X.col(q);
-        const const_matrix_view warm(initial);
+        const auto output = X.col(q);
+        detail::buffer<double> initial(d.n);
+        const auto copy_output = [&] {
+            for (std::size_t i = 0; i < d.n; ++i) initial[i] = output[std::int64_t(i)];
+        };
+        copy_output();
+        const detail::const_matrix_ref warm(initial.data(), std::int64_t(d.n));
         while (restart()) {
             solve_result attempt;
-            const auto next = solve_columns_once<1>(B.middleCols(q, 1), X.middleCols(q, 1),
+            const auto next = solve_columns_once<1>(B.middle_cols(q, 1), X.middle_cols(q, 1),
                 {&attempt, 1}, cp, tol, max_iter - result.iterations, &warm);
             progress = attempt.iterations;
             result.iterations += progress;
             result.residual = attempt.residual;
             result.converged = attempt.converged;
             stopped[q] = next[0];
-            initial = X.col(q);
+            copy_output();
         }
     }
 }
 
 template<unsigned Columns>
 std::array<bool, Columns> detail::metal_route::impl::solve_columns_once(
-                                       const_matrix_view B, matrix_view X,
+                                       detail::const_matrix_ref B, detail::matrix_ref X,
                                        std::span<solve_result> results, checkpoint* cp,
-                                       double tol, int max_iter, const const_matrix_view* X0) {
+                                       double tol, int max_iter, const detail::const_matrix_ref* X0) {
     if (cp) { cp->descend("pcg"); cp->tick(); }
     select_columns(Columns);
     const auto n = d.n;
@@ -953,10 +966,12 @@ std::array<bool, Columns> detail::metal_route::impl::solve_columns_once(
     const bool laplacian = d.laplacian;
     auto* states = static_cast<solve_state*>([state_buffer contents]);
     std::fill_n(states, Columns, solve_state{});
-    X.setZero();
+    for (std::int64_t j = 0; j < X.cols(); ++j)
+        for (std::int64_t i = 0; i < X.rows(); ++i) X(i, j) = 0.0;
     const bool permuted = d.original_operator.rows() == 0;
-    std::array<Eigen::VectorXd, Columns> bp;
-    Eigen::VectorXd work;
+    std::array<detail::buffer<double>, Columns> bp;
+    detail::buffer<double> work;
+    const auto work_ref = [&] { return detail::matrix_ref(work.data(), std::int64_t(n)); };
     std::array<mh::norm_reference, Columns> bnorm;
     std::array<double, Columns> scale{};
     std::array<bool, Columns> check{}, ran{};
@@ -968,7 +983,7 @@ std::array<bool, Columns> detail::metal_route::impl::solve_columns_once(
         result.backend = solve_backend::gpu;
         bnorm[q] = mh::norm_reference(B.col(q));
         if (bnorm[q].value == 0.0) continue;
-        if (max_iter == 0 && (X0 == nullptr || X0->col(q).isZero(0.0))) {
+        if (max_iter == 0 && (X0 == nullptr || detail::vec::is_zero(X0->col(q)))) {
             result.residual = 1.0;
             continue;
         }
@@ -983,15 +998,15 @@ std::array<bool, Columns> detail::metal_route::impl::solve_columns_once(
         }
         if (X0) {
             d.spmv(xp, work);
-            work = bp[q] - work;
-        } else work = bp[q];
-        const double initial = X0 ? bnorm[q].relative(work) : 1.0;
+            for (std::size_t i = 0; i < n; ++i) work[i] = bp[q][i] - work[i];
+        } else std::copy_n(bp[q].data(), n, work.data());
+        const double initial = X0 ? bnorm[q].relative(work_ref()) : 1.0;
         if (initial < tol || max_iter == 0) continue;
         if (laplacian) {
-            centre(work);
-            if (X0 && bnorm[q].relative(work) < tol) continue;
+            centre(work_ref());
+            if (X0 && bnorm[q].relative(work_ref()) < tol) continue;
         }
-        const double max_abs = work.cwiseAbs().maxCoeff();
+        const double max_abs = detail::vec::max_abs(work_ref());
         if (max_abs == 0.0) continue;
         scale[q] = mh::pow2_scale(max_abs);
         auto* packed = static_cast<df32*>([r contents]);
@@ -1034,7 +1049,8 @@ std::array<bool, Columns> detail::metal_route::impl::solve_columns_once(
             #pragma omp parallel for schedule(static)
             for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i)
                 work[i] = xp[F.perm[i]];
-            xp = work;
+            for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i)
+                xp[i] = work[i];
         }
     }
     for (auto& result : results) result.converged = result.residual < tol;
@@ -1047,8 +1063,8 @@ std::array<bool, Columns> detail::metal_route::impl::solve_columns_once(
     return stopped;
 }
 
-void detail::metal_route::solve_columns(const_matrix_view B, matrix_view X,
-                                        const const_matrix_view* X0,
+void detail::metal_route::solve_columns(const_matrix_ref B, matrix_ref X,
+                                        const const_matrix_ref* X0,
                                         std::span<solve_result> results, checkpoint* timings,
                                         double tol, int max_iter) const {
     if (B.cols() == 4)
@@ -1063,22 +1079,25 @@ factor_storage_type detail::metal_route::factor_storage() const {
     return impl_->d.factor_fp16 ? factor_storage_type::fp16 : factor_storage_type::fp32;
 }
 
-void detail::metal_route::apply_columns(const_matrix_view R, matrix_view Z) const {
+void detail::metal_route::apply_columns(const_matrix_ref R, matrix_ref Z) const {
     impl& s = *impl_;
-    const Eigen::VectorXd r = R.col(0);
+    const std::int64_t size = R.rows();
+    buffer<double> r(static_cast<std::size_t>(size));
+    for (std::int64_t i = 0; i < size; ++i) r[i] = R(i, 0);
     s.select_columns(1);
     const auto& perm = s.d.F.perm;
-    const double mean = s.d.laplacian ? r.mean() : 0;
-    const double max_abs = (r.array() - mean).abs().maxCoeff();
-    Eigen::VectorXd z = Eigen::VectorXd::Zero(r.size());
+    const double mean = s.d.laplacian ? vec::mean(const_matrix_ref(r.data(), size)) : 0;
+    double max_abs = 0;
+    for (std::int64_t i = 0; i < size; ++i) max_abs = std::max(max_abs, std::abs(r[i] - mean));
+    const auto output = Z.col(0);
     if (max_abs == 0.0) {
-        Z.col(0) = z;
+        for (std::int64_t i = 0; i < size; ++i) output[i] = 0.0;
         return;
     }
     const double scale = mh::pow2_scale(max_abs);
     auto* packed = static_cast<df32*>([s.r contents]);
     #pragma omp parallel for schedule(static)
-    for (Eigen::Index i = 0; i < r.size(); ++i)
+    for (std::int64_t i = 0; i < size; ++i)
         packed[perm[i]] = mh::split(scale * (r[i] - mean));
     auto& cs = *static_cast<solve_state*>([s.state_buffer contents]);
     cs = {};
@@ -1086,11 +1105,12 @@ void detail::metal_route::apply_columns(const_matrix_view R, matrix_view Z) cons
     s.submit(false, [&] { s.precondition(); });
     const float* applied = static_cast<float*>([s.z contents]);
     const double mean_z = s.d.laplacian
-        ? Eigen::Map<const Eigen::VectorXf>(applied, s.d.n).cast<double>().mean() : 0;
+        ? vec::ordered_sum(std::int64_t(s.d.n), [applied](std::int64_t i) { return double(applied[i]); })
+              / double(s.d.n)
+        : 0;
     #pragma omp parallel for schedule(static)
-    for (Eigen::Index i = 0; i < r.size(); ++i)
-        z[i] = (double(applied[perm[i]]) - mean_z) / scale;
-    Z.col(0) = z;
+    for (std::int64_t i = 0; i < size; ++i)
+        output[i] = (double(applied[perm[i]]) - mean_z) / scale;
 }
 
 }  // namespace apxchol

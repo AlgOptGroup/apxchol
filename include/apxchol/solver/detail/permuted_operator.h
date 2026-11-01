@@ -4,7 +4,6 @@
 #include "apxchol/csc_work.h"
 #include "apxchol/solver/detail/lower_triangle_csr.h"
 #include "apxchol/types.h"
-#include <Eigen/Sparse>
 #include <algorithm>
 #include <cstdint>
 #include <limits>
@@ -27,21 +26,20 @@ struct permuted_operator_csr {
 // symmetric CSR, avoiding atomic scatter. Values and fp32_exact use only the
 // canonical lower triangle, even when upper values differ within tolerance.
 //
-// Return false for uncompressed, unsorted, duplicate or unpaired storage so
-// the caller can choose a fallback. On false, out.ptr is scratch and the other
-// members are unchanged.
+// Return false for unsorted, duplicate or unpaired storage so the caller can
+// choose a fallback. On false, out.ptr is scratch and the other members are
+// unchanged.
 inline bool try_build_permuted_symmetric_csr(
-        const Eigen::SparseMatrix<double>& L,
+        csc_ref<double> L,
         const std::vector<node_index>& perm,
         permuted_operator_csr& out) {
-    if (!L.isCompressed() || L.rows() != L.cols() ||
-        L.rows() > std::numeric_limits<int>::max() ||
-        L.nonZeros() > std::numeric_limits<int>::max())
+    if (static_cast<std::uint64_t>(L.n) > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
+        static_cast<std::uint64_t>(L.nnz()) > static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
         return false;
-    const int n = static_cast<int>(L.rows());
-    const int* outer = L.outerIndexPtr();
-    const int* inner = L.innerIndexPtr();
-    const double* input = L.valuePtr();
+    const int n = static_cast<int>(L.n);
+    const edge_index* outer = L.ptr;
+    const node_index* inner = L.idx;
+    const double* input = L.val;
     auto& row_ptr = out.ptr;
     row_ptr.assign(static_cast<std::size_t>(n) + 1, 0);
     bool eligible = true, exact = true;
@@ -52,10 +50,10 @@ inline bool try_build_permuted_symmetric_csr(
         const auto [c_lo, c_hi] = work_balanced_range(
             outer, n, omp_get_thread_num(), omp_get_num_threads());
         for (int col = c_lo; col < c_hi; ++col) {
-            row_ptr[perm[col] + 1] = outer[col + 1] - outer[col];
-            for (int p = outer[col]; p < outer[col + 1]; ++p) {
-                const int row = inner[p];
-                if (p > outer[col] && inner[p - 1] >= row) eligible = false;
+            row_ptr[perm[col] + 1] = static_cast<int>(outer[col + 1] - outer[col]);
+            for (edge_index p = outer[col]; p < outer[col + 1]; ++p) {
+                const int row = static_cast<int>(inner[p]);
+                if (p > outer[col] && static_cast<int>(inner[p - 1]) >= row) eligible = false;
                 if (row < col) {
                     ++upper;
                 } else {
@@ -83,8 +81,8 @@ inline bool try_build_permuted_symmetric_csr(
         for (int col = c_lo; col < c_hi; ++col) {
             entries.clear();
             entries.reserve(static_cast<std::size_t>(outer[col + 1] - outer[col]));
-            for (int p = outer[col]; p < outer[col + 1]; ++p) {
-                const int row = inner[p];
+            for (edge_index p = outer[col]; p < outer[col + 1]; ++p) {
+                const int row = static_cast<int>(inner[p]);
                 const double value = canonical_lower_value(outer, inner, input, col, row, p, paired);
                 entries.emplace_back(static_cast<int>(perm[row]), value);
             }
@@ -106,19 +104,19 @@ inline bool try_build_permuted_symmetric_csr(
 }
 
 // Build sorted, full-symmetric CSR of P L P^T from L's canonical lower triangle.
-// Requires compressed square storage and a valid permutation; the caller must
-// ensure that the expanded operator fits int offsets. Duplicate entries remain
-// separate, ordered by value. fp32_exact reports lossless FP32 storage.
+// Requires a valid permutation; the caller must ensure that the expanded
+// operator fits int offsets. Duplicate entries remain separate, ordered by
+// value. fp32_exact reports lossless FP32 storage.
 inline permuted_operator_csr build_permuted_full_symmetric_csr(
-    const Eigen::SparseMatrix<double>& L,
+    csc_ref<double> L,
     const std::vector<node_index>& perm)
 {
     permuted_operator_csr out;
     if (try_build_permuted_symmetric_csr(L, perm, out))
         return out;
-    out.ptr.resize(static_cast<std::size_t>(L.rows()) + 1);
-    out.fp32_exact = reflect_lower_to_csr<true>(L, out.ptr,
-        [p = perm.data()](Eigen::Index i) { return static_cast<int>(p[i]); },
+    out.ptr.resize(static_cast<std::size_t>(L.n) + 1);
+    out.fp32_exact = reflect_lower_to_csr<true>(L, std::span<int>(out.ptr),
+        [p = perm.data()](std::int64_t i) { return static_cast<int>(p[i]); },
         [&](int count) {
             out.idx = std::make_unique_for_overwrite<int[]>(count);
             out.vals = std::make_unique_for_overwrite<double[]>(count);

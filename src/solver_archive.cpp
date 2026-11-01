@@ -333,19 +333,35 @@ private:
     }
 };
 
-void check_operator_structure(const Eigen::SparseMatrix<double>& A) {
-    if (A.rows() == 0 || A.rows() != A.cols() || !A.isCompressed()) invalid("operator must be nonempty square compressed CSC");
-    const auto n = A.rows(), nnz = A.nonZeros();
-    if (A.outerIndexPtr()[0] != 0 || A.outerIndexPtr()[n] != nnz) invalid("invalid operator offsets");
-    for (Eigen::Index col = 0; col < n; ++col) {
-        const auto first = A.outerIndexPtr()[col], last = A.outerIndexPtr()[col + 1];
-        if (first < 0 || first > last || last > nnz) invalid("invalid operator offsets");
-        int previous = -1;
+// nnz is the allocated entry count of the arrays behind A.
+void check_operator_structure(detail::csc_ref<double> A, std::uint64_t nnz) {
+    if (A.n == 0) invalid("operator must be nonempty square compressed CSC");
+    const std::uint64_t n = A.n;
+    if (A.ptr[0] != 0 || A.ptr[n] != nnz) invalid("invalid operator offsets");
+    for (std::uint64_t col = 0; col < n; ++col) {
+        const std::uint64_t first = A.ptr[col], last = A.ptr[col + 1];
+        if (first > last || last > nnz) invalid("invalid operator offsets");
         for (auto p = first; p < last; ++p) {
-            const auto row = A.innerIndexPtr()[p];
-            if (row <= previous || row >= n) invalid("operator rows must be sorted, unique and in range");
-            previous = row;
+            const std::uint64_t row = A.idx[p];
+            if ((p > first && row <= A.idx[p - 1]) || row >= n)
+                invalid("operator rows must be sorted, unique and in range");
         }
+    }
+}
+
+// The format stores signed 32-bit operator indices (docs/serialization.md).
+// 32-bit unsigned indices below 2^31 have the same bytes and are written in
+// place; wider ones are narrowed into `narrowed`.
+template<class Index>
+std::span<const int> int32_indices(std::span<const Index> values, std::vector<int>& narrowed) {
+    for (const Index value : values)
+        if (value > static_cast<Index>(std::numeric_limits<int>::max()))
+            invalid("operator exceeds the format's 32-bit indices");
+    if constexpr (sizeof(Index) == sizeof(int)) {
+        return {reinterpret_cast<const int*>(values.data()), values.size()};
+    } else {
+        narrowed.assign(values.begin(), values.end());
+        return narrowed;
     }
 }
 
@@ -359,20 +375,17 @@ template<class T> void require_extent(const array_info& info, std::uint64_t expe
 
 } // namespace
 
-void detail::save_solver_data(const std::filesystem::path& path, const Eigen::SparseMatrix<double>& A,
-                              const factorization& F, Eigen::Index input_entries) {
+void detail::save_solver_data(const std::filesystem::path& path, csc_ref<double> A,
+                              const factorization& F, std::int64_t input_entries) {
     using access = detail::sparse_csc_access;
-    if (A.rows() != static_cast<Eigen::Index>(F.L.rows())) invalid("operator/factor dimension mismatch");
+    if (A.n != F.L.rows()) invalid("operator/factor dimension mismatch");
     if (F.storage == factor_storage_type::automatic) invalid("only an installed factor can be saved");
     detail::validate_adopted_factor(F);
     if (F.rounds.size() > F.L.rows()) invalid("too many elimination rounds");
-    Eigen::SparseMatrix<double> compressed;
-    const auto* op = &A;
-    if (!A.isCompressed()) { compressed = A; compressed.makeCompressed(); op = &compressed; }
-    check_operator_structure(*op);
-    detail::validate_adopted_operator(*op, F, 1.0);
-    const auto n = static_cast<std::size_t>(op->rows());
-    const auto annz = static_cast<std::size_t>(op->nonZeros());
+    check_operator_structure(A, A.nnz());
+    detail::validate_adopted_operator(A, F, 1.0);
+    const auto n = static_cast<std::size_t>(A.n);
+    const auto annz = static_cast<std::size_t>(A.nnz());
     if (F.lumped_offdiag < 0) invalid("negative lumped entry count");
     const bool fp16 = F.storage == factor_storage_type::fp16;
     const std::array<std::uint64_t, metadata_count> metadata{1, n, F.sddm, annz, access::vals(F.L).size(),
@@ -396,9 +409,12 @@ void detail::save_solver_data(const std::filesystem::path& path, const Eigen::Sp
     }
     writer archive(path);
     archive.add(array_id::metadata, std::span<const std::uint64_t>(metadata));
-    archive.add(array_id::operator_offsets, std::span<const int>(op->outerIndexPtr(), n + 1));
-    archive.add(array_id::operator_indices, std::span<const int>(op->innerIndexPtr(), annz));
-    archive.add(array_id::operator_values, std::span<const double>(op->valuePtr(), annz));
+    std::vector<int> narrowed_offsets, narrowed_indices;
+    archive.add(array_id::operator_offsets,
+                int32_indices(std::span<const edge_index>(A.ptr, n + 1), narrowed_offsets));
+    archive.add(array_id::operator_indices,
+                int32_indices(std::span<const node_index>(A.idx, annz), narrowed_indices));
+    archive.add(array_id::operator_values, std::span<const double>(A.val, annz));
     archive.add(array_id::factor_offsets, std::span<const edge_index>(access::outer(F.L)));
     archive.add(array_id::factor_indices, std::span<const node_index>(access::inner(F.L)));
     if (fp16) archive.add(array_id::factor_values, std::span<const binary16>(half));
@@ -433,7 +449,7 @@ solver solver::load(const std::filesystem::path& path, const solve_options& opti
         annz > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
         input_entries > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
         lnnz > std::numeric_limits<edge_index>::max() ||
-        lumped > static_cast<std::uint64_t>(std::numeric_limits<Eigen::Index>::max())) invalid("dimensions do not fit this build");
+        lumped > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) invalid("dimensions do not fit this build");
     const auto ao = archive.inspect(array_id::operator_offsets), ai = archive.inspect(array_id::operator_indices), av = archive.inspect(array_id::operator_values);
     const auto lo = archive.inspect(array_id::factor_offsets), li = archive.inspect(array_id::factor_indices), lv = archive.inspect(array_id::factor_values);
     const auto perm = archive.inspect(array_id::permutation), rounds = archive.inspect(array_id::round_sizes);
@@ -445,23 +461,18 @@ solver solver::load(const std::filesystem::path& path, const solve_options& opti
     require_extent<node_index>(perm, n);
     if (rounds.count > n) invalid("too many elimination rounds");
     require_extent<std::uint64_t>(rounds, rounds.count);
-    Eigen::SparseMatrix<double> A;
-    {
-        auto outer = archive.read_vector<int>(ao);
-        if (outer.front() != 0 || outer.back() != static_cast<int>(annz) || !std::is_sorted(outer.begin(), outer.end()))
-            invalid("invalid operator offsets");
-        A.resize(static_cast<int>(n), static_cast<int>(n));
-        A.resizeNonZeros(static_cast<int>(annz));
-        std::copy(outer.begin(), outer.end(), A.outerIndexPtr());
-    }
-    archive.read(ai, std::span<int>(A.innerIndexPtr(), annz));
-    archive.read(av, std::span<double>(A.valuePtr(), annz));
-    check_operator_structure(A);
+    detail::csc_matrix<double> A(static_cast<node_index>(n), static_cast<edge_index>(annz));
+    archive.read(ao, std::span<edge_index>(A.ptr(), n + 1));
+    if (A.ptr()[0] != 0 || A.ptr()[n] != annz || !std::is_sorted(A.ptr(), A.ptr() + n + 1))
+        invalid("invalid operator offsets");
+    archive.read(ai, std::span<node_index>(A.idx(), annz));
+    archive.read(av, std::span<double>(A.val(), annz));
+    check_operator_structure(A.ref(), annz);
     factorization F;
     using access = detail::sparse_csc_access;
     access::n(F.L) = static_cast<node_index>(n);
     F.sddm = sddm;
-    F.lumped_offdiag = static_cast<Eigen::Index>(lumped);
+    F.lumped_offdiag = static_cast<decltype(F.lumped_offdiag)>(lumped);
     access::outer(F.L) = archive.read_vector<edge_index>(lo);
     access::inner(F.L) = archive.read_vector<node_index>(li);
     if (access::outer(F.L).front() != 0 || access::outer(F.L).back() != lnnz || !std::is_sorted(access::outer(F.L).begin(), access::outer(F.L).end()))
@@ -489,8 +500,8 @@ solver solver::load(const std::filesystem::path& path, const solve_options& opti
         F.rounds.push_back({static_cast<std::size_t>(n - eliminated), static_cast<std::size_t>(count)});
         eliminated += count;
     }
-    solver restored(A, std::move(F), options);
-    detail::solver_access::finish_load(restored, static_cast<Eigen::Index>(input_entries), started);
+    solver restored = detail::solver_access::make(A.ref(), std::move(F), options);
+    detail::solver_access::finish_load(restored, static_cast<std::int64_t>(input_entries), started);
     return restored;
 }
 

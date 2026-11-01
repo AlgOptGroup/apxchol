@@ -6,9 +6,9 @@ namespace apxchol::detail {
 
 // Four independent sums preserve the CPU SpMV's accumulation order.
 // x(row, column) supports both packed panels and strided vector views.
-template<int C, class S, class Index, class Entry>
+template<int C, class S, class Index, class Offset, class Entry>
 std::array<double, C> sparse_row_product(const Index* col, const S* val,
-                                         Index k, Index end, Entry x) {
+                                         Offset k, Offset end, Entry x) {
     std::array<double, C> a{}, b{}, c{}, d{};
     for (; end - k >= 4; k += 4)
         for (int q = 0; q < C; q++) {

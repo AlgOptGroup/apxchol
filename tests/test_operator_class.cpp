@@ -14,6 +14,7 @@
 //     is the load-bearing test: PCG must keep applying the operator the caller
 //     passed, or the residual it reports is for a different system.
 #include <gtest/gtest.h>
+#include "csc_test_util.h"
 #include "grid_laplacian.h"
 #include "test_rhs.h"
 
@@ -36,7 +37,6 @@
 #include "apxchol/solver/detail/cpu_route.h"
 
 using apxchol::kDefaultLumpMassCeiling;
-using apxchol::detail::lump_positive_offdiagonals;
 using apxchol::detail::operator_scan;
 using apxchol::detail::operator_view;
 using apxchol::detail::require_operator;
@@ -46,6 +46,9 @@ namespace {
 
 using Sparse = Eigen::SparseMatrix<double>;
 using Trip   = Eigen::Triplet<double>;
+using apxchol::test::to_csc;
+
+Eigen::Index lump_positive_offdiagonals(Sparse& A) { return apxchol::test::lump_in_place(A); }
 
 /// Assembled Laplacian of a rows x cols 4-neighbour grid, both triangles
 /// stored. Pure Laplacian: every row sums to zero.
@@ -175,11 +178,13 @@ struct raw_snapshot {
 apxchol::solve_result unvalidated_route_check(const Sparse& A, apxchol::factorization F,
                                               const Eigen::VectorXd& b,
                                               const Eigen::VectorXd& x0) {
-    const apxchol::detail::cpu_route route(A, {}, nullptr, &F);
+    const auto input = to_csc(A);
+    const apxchol::detail::cpu_route route(input, {}, nullptr, &F);
     apxchol::solve_result result;
     Eigen::VectorXd x(b.size());
-    const apxchol::const_matrix_view initial(x0);
-    route.solve_columns(b, x, &initial, {&result, 1}, nullptr, 1e-15, 0);
+    const auto initial = apxchol::detail::dense_of(x0);
+    route.solve_columns(apxchol::detail::dense_of(b), apxchol::detail::dense_of(x), &initial,
+                        {&result, 1}, nullptr, 1e-15, 0);
     return result;
 }
 
@@ -422,7 +427,8 @@ TEST(OperatorContract, PositiveOffDiagonalsAreLumpedNotRejected) {
     EXPECT_EQ(s.offdiag_pos, 10);
     EXPECT_LT(s.positive_mass_fraction(), kDefaultLumpMassCeiling);
 
-    const operator_view op(A);
+    const auto input = to_csc(A);
+    const operator_view op(input);
     EXPECT_EQ(op.lumped(), 10);
     EXPECT_EQ(scan_operator(op.matrix()).offdiag_pos, 0);
     // ... and the caller's matrix is untouched.
@@ -454,9 +460,10 @@ TEST(OperatorContract, RefusesPastTheLumpMassCeiling) {
 
 TEST(OperatorContract, LumpingCeilingIsExplicitPerCall) {
     const auto A = nearly_sddm(6, 6, 1);
-    EXPECT_THROW(operator_view(A, 0), std::invalid_argument);
-    EXPECT_EQ(operator_view(A).lumped(), 2);
-    EXPECT_THROW(operator_view(A, 0), std::invalid_argument);
+    const auto input = to_csc(A);
+    EXPECT_THROW(operator_view(input, 0), std::invalid_argument);
+    EXPECT_EQ(operator_view(input).lumped(), 2);
+    EXPECT_THROW(operator_view(input, 0), std::invalid_argument);
 
     apxchol::factor_options options;
     options.lump_max_mass = 0;
@@ -478,6 +485,7 @@ TEST(OperatorContract, RegularizationIsExplicitPerFactorization) {
 
 TEST(OperatorContract, NumericalOptionsRejectInvalidValues) {
     const Sparse empty;
+    const auto empty_csc = to_csc(empty);
     for (double value : {-1.0, std::numeric_limits<double>::infinity(),
                          std::numeric_limits<double>::quiet_NaN()}) {
         SCOPED_TRACE(value);
@@ -487,9 +495,9 @@ TEST(OperatorContract, NumericalOptionsRejectInvalidValues) {
         options = {};
         options.lump_max_mass = value;
         EXPECT_THROW(apxchol::factorize(empty, options), std::invalid_argument);
-        EXPECT_THROW(operator_view(empty, value), std::invalid_argument);
+        EXPECT_THROW(operator_view(empty_csc, value), std::invalid_argument);
     }
-    EXPECT_THROW(operator_view(empty, 1.01), std::invalid_argument);
+    EXPECT_THROW(operator_view(empty_csc, 1.01), std::invalid_argument);
 }
 
 TEST(OperatorContract, MassNotCountIsWhatTheCeilingMeasures) {

@@ -10,18 +10,18 @@
 namespace apxchol::detail {
 
 // Operator checks shared by adoption and portable archive creation.
-inline void validate_adopted_operator(const Eigen::SparseMatrix<double>& A,
+inline void validate_adopted_operator(csc_ref<double> A,
                                       const factorization& F, double lump_max_mass) {
-    if (A.rows() == 0 || A.rows() != A.cols() || static_cast<Eigen::Index>(F.L.rows()) != A.rows())
+    if (A.n == 0 || F.L.rows() != A.n)
         throw std::invalid_argument("apxchol: factor dimension does not match the operator");
     require_operator(A, lump_max_mass);
     if (!F.sddm) {
-        for (Eigen::Index col = 0; col < A.cols(); ++col) {
+        for (node_index col = 0; col < A.n; ++col) {
             double diagonal = 0, positive = 0, degree = 0;
-            for (Eigen::SparseMatrix<double>::InnerIterator entry(A, col); entry; ++entry)
-                if (entry.row() == entry.col()) diagonal = entry.value();
-                else if (entry.value() > 0) positive += entry.value();
-                else degree -= entry.value();
+            for (edge_index p = A.ptr[col]; p < A.ptr[col + 1]; ++p)
+                if (A.idx[p] == col) diagonal = A.val[p];
+                else if (A.val[p] > 0) positive += A.val[p];
+                else degree -= A.val[p];
             diagonal += positive;
             if (diagonal - degree > diagonal * 1e-12)
                 throw std::invalid_argument("a Laplacian factor cannot precondition an SDDM operator");

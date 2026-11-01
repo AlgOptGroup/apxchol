@@ -1,7 +1,10 @@
 #pragma once
 // CUDA route of solver: device-owned factor, triangular solves and PCG.
 #include "apxchol/solver/solve.h"
+#include "apxchol/detail/buffer.h"
 #include "apxchol/detail/checkpoint.h"
+#include "apxchol/detail/csc_matrix.h"
+#include "apxchol/detail/dense.h"
 #include "apxchol/solver/cuda_context.h"
 #include "apxchol/solver/pcg_cuda.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"
@@ -28,7 +31,7 @@ public:
     /// Factorizes A on the device, or uploads the host factor F when it is
     /// not null (exactly, if F is an installed factor). cp receives setup
     /// timings and is not retained.
-    cuda_route(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
+    cuda_route(csc_ref<double> A, const solve_options& opts,
                       checkpoint* cp, factorization* F)
         : opts_(opts.factor_opts) {
         auto factor = std::make_shared<factorization>();
@@ -62,7 +65,7 @@ public:
 
     /// Solves the columns of B, a panel of one of solve_widths, into X.
     /// timings, when not null, receives the PCG checkpoints.
-    void solve_columns(const_matrix_view B, matrix_view X, const const_matrix_view* X0,
+    void solve_columns(const_matrix_ref B, matrix_ref X, const const_matrix_ref* X0,
                        std::span<solve_result> results, checkpoint* timings,
                        double tol, int max_iter) {
         if (timings) { timings->descend("pcg"); timings->tick(); }
@@ -86,10 +89,12 @@ public:
 
     /// z = M^{-1} r for one column, through host-side permutation and centering:
     /// Laplacian center → P → L^{-1} → L^{-T} → P^{-1} → center; SDDM skips centering.
-    void apply_columns(const_matrix_view R, matrix_view Z) {
-        const Eigen::Index n = R.rows();
-        const Eigen::VectorXd b = R.col(0);
-        Eigen::VectorXd z(n);
+    void apply_columns(const_matrix_ref R, matrix_ref Z) {
+        const std::int64_t n = R.rows();
+        const auto size = static_cast<std::size_t>(n);
+        buffer<double> b(size), z(size);
+        const auto r = R.col(0);
+        for (std::int64_t v = 0; v < n; ++v) b[v] = r[v];
         const node_index* P = F_->perm.data();
         const bool center = !F_->sddm;
         const int workers = cpu_solve_threads(n);
@@ -99,7 +104,7 @@ public:
         const double mean = center
             ? det_sum_columns<1>(b.data(), n, part_.data())[0] / static_cast<double>(n) : 0.0;
         #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
-        for (Eigen::Index v = 0; v < n; ++v)
+        for (std::int64_t v = 0; v < n; ++v)
             z[P[v]] = b[v] - (center ? mean : 0.0);
         trsv_.solve_LLt(z.data(), scratch_.data(), gpcg_.stream());
         double* out = scratch_.data();
@@ -107,9 +112,10 @@ public:
         const double shift = center
             ? det_sum_columns<1>(out, n, part_.data())[0] / static_cast<double>(n) : 0.0;
         #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
-        for (Eigen::Index v = 0; v < n; ++v)
+        for (std::int64_t v = 0; v < n; ++v)
             z[v] = out[P[v]] - shift;
-        Z.col(0) = z;
+        const auto column = Z.col(0);
+        for (std::int64_t v = 0; v < n; ++v) column[v] = z[v];
     }
 
     /// Shares the factor, the device triangular-solve storage and the device
@@ -140,10 +146,10 @@ public:
     const cuda_sptrsv& trsv() const { return trsv_; }
     const cuda_pcg& pcg() const { return gpcg_; }
     /// The original operator in FP64 CSC, downloaded from the device.
-    Eigen::SparseMatrix<double> original_operator() const;
+    csc_matrix<double> original_operator() const;
 
 private:
-    void factorize(factorization& F, const Eigen::SparseMatrix<double>& A, checkpoint* cp) {
+    void factorize(factorization& F, csc_ref<double> A, checkpoint* cp) {
         [[maybe_unused]] const auto factorize_install_begin =
             gpu_setup_diagnostic_clock::now(opts_.verbose);
         cuda_context::prewarm();
@@ -221,7 +227,7 @@ private:
     cuda_sptrsv trsv_;
     cuda_pcg gpcg_;
     // Host workspace of apply_columns.
-    Eigen::VectorXd scratch_;
+    buffer<double> scratch_;
     std::vector<double> part_;
 };
 } // namespace apxchol::detail

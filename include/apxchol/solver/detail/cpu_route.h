@@ -1,6 +1,9 @@
 #pragma once
 #include "apxchol/solver/solve.h"
+#include "apxchol/detail/buffer.h"
 #include "apxchol/detail/checkpoint.h"
+#include "apxchol/detail/csc_matrix.h"
+#include "apxchol/detail/dense.h"
 #include "apxchol/solver/sptrsv/omp.h"
 #include <array>
 #include <cstdint>
@@ -25,7 +28,7 @@ public:
     /// storage), and scheduling and solve options always apply. A is the
     /// PCG operator, read through its lower triangle. cp receives setup
     /// timings and is not retained.
-    cpu_route(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
+    cpu_route(csc_ref<double> A, const solve_options& opts,
               checkpoint* cp, factorization* F);
 
     /// Copies share the factor, triangular-solve structures and operator, and
@@ -35,11 +38,11 @@ public:
 
     /// Solves the columns of B, a panel of one of solve_widths, into X.
     /// timings, when not null, receives the PCG checkpoints.
-    void solve_columns(const_matrix_view B, matrix_view X, const const_matrix_view* X0,
+    void solve_columns(const_matrix_ref B, matrix_ref X, const const_matrix_ref* X0,
                        std::span<solve_result> results, checkpoint* timings,
                        double tol, int max_iter) const;
     /// Z = M^{-1} R for a panel of one of apply_widths.
-    void apply_columns(const_matrix_view R, matrix_view Z) const;
+    void apply_columns(const_matrix_ref R, matrix_ref Z) const;
 
     /// Permutation, rounds and flags; L keeps only its construction column
     /// pointers once installed.
@@ -51,7 +54,7 @@ public:
     factor_storage_type factor_storage() const;
     const omp_sptrsv& trsv() const { return installed_->trsv; }
     /// The original operator in FP64 CSC, rebuilt from the owned SpMV operator.
-    Eigen::SparseMatrix<double> original_operator() const;
+    csc_matrix<double> original_operator() const;
 
 private:
     // Read-only once installed; copies share it.
@@ -66,19 +69,19 @@ private:
     /// lossless). A full symmetric CSC is copied in its already-compatible CSR
     /// array layout; other stored patterns use the general lower-reflection
     /// fallback.
-    void build_operator(const Eigen::SparseMatrix<double>& L, checkpoint* cp);
+    void build_operator(csc_ref<double> L, checkpoint* cp);
 
     template<int Columns, class Run>
-    void with_packed_panel(const_matrix_view B, matrix_view X, const const_matrix_view* X0,
+    void with_packed_panel(const_matrix_ref B, matrix_ref X, const const_matrix_ref* X0,
                            checkpoint* timings, Run run) const;
     template<int Columns>
     void solve_panel(const double* b, double* x, solve_result* results, checkpoint* timings,
                      double tol, int max_iter, const double* x0) const;
     template<int Columns>
-    void finish_solution(const_matrix_view B, double* x, solve_result* results,
+    void finish_solution(const_matrix_ref B, double* x, solve_result* results,
                          checkpoint* timings, double tol, int max_iter) const;
     template<int Columns>
-    void check_solution(const_matrix_view B, const double* x, solve_result* results,
+    void check_solution(const_matrix_ref B, const double* x, solve_result* results,
                         checkpoint* timings, double tol) const;
 
     // Preconditioner application z = M^{-1} b on contiguous RHS lanes.
@@ -100,19 +103,19 @@ private:
     // losslessly). It cannot map constructor input: a reusable solver may
     // outlive it. Read-only after setup; copies share it.
     struct pcg_operator {
-        Eigen::SparseMatrix<double, Eigen::RowMajor> Lrm;
-        Eigen::SparseMatrix<float, Eigen::RowMajor>  Lrm_f;
+        csc_matrix<double> Lrm;
+        csc_matrix<float>  Lrm_f;
         bool fp32 = false;
     };
 
     solve_options opts_;
     std::shared_ptr<const installed> installed_;
     std::shared_ptr<const pcg_operator> op_;
-    Eigen::Index n_ = 0;
+    std::int64_t n_ = 0;
     // Per-copy workspace, resized when the panel width changes; solver
     // rejects overlapping calls on one instance. scratch2_ receives the
     // transpose-solve output so the final unpermute gathers straight from it.
-    mutable Eigen::VectorXd r_, z_, p_, Ap_, panel_x_, scratch_, scratch2_;
+    mutable buffer<double> r_, z_, p_, Ap_, panel_x_, scratch_, scratch2_;
     // Per-thread partial sums of the deterministic reductions (one cache line
     // per thread; sized to the max team on use).
     mutable std::vector<double> part_;

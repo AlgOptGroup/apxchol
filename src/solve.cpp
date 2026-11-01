@@ -9,6 +9,8 @@
 #include "apxchol/solver/detail/gpu_scaling.h"
 #include "apxchol/solver/detail/pcg_restart.h"
 #include "apxchol/csc_work.h"
+#include "apxchol/detail/dense.h"
+#include "apxchol/detail/eigen_boundary.h"
 #include "apxchol/operator_class.h"
 #include "host_spmv.h"
 #include "solver_archive_internal.h"
@@ -73,20 +75,23 @@ std::pair<double, int> resolve_solve_parameters(std::optional<double> tol,
     return resolved;
 }
 
-void check_matrix_views(const_matrix_view B, matrix_view X, Eigen::Index rows,
-                        const const_matrix_view* X0 = nullptr) {
+using detail::const_matrix_ref;
+using detail::matrix_ref;
+
+void check_matrix_views(const_matrix_ref B, matrix_ref X, std::int64_t rows,
+                        const const_matrix_ref* X0 = nullptr) {
     if (B.rows() != rows || X.rows() != rows || X.cols() != B.cols() ||
         (X0 && (X0->rows() != rows || X0->cols() != B.cols())))
         throw std::invalid_argument("apxchol: RHS, output and warm-start shapes must match");
     const auto extent = [](const auto &value) {
         if (!value.size())
             return std::pair<std::uintptr_t, std::uintptr_t>{0, 0};
-        const auto row = (value.rows() - 1) * value.innerStride();
-        const auto col = (value.cols() - 1) * value.outerStride();
+        const auto row = (value.rows() - 1) * value.row_stride();
+        const auto col = (value.cols() - 1) * value.col_stride();
         const auto first =
-            value.data() + std::min<Eigen::Index>(0, row) + std::min<Eigen::Index>(0, col);
+            value.data() + std::min<std::int64_t>(0, row) + std::min<std::int64_t>(0, col);
         const auto last =
-            value.data() + std::max<Eigen::Index>(0, row) + std::max<Eigen::Index>(0, col) + 1;
+            value.data() + std::max<std::int64_t>(0, row) + std::max<std::int64_t>(0, col) + 1;
         return std::pair{reinterpret_cast<std::uintptr_t>(first),
                          reinterpret_cast<std::uintptr_t>(last)};
     };
@@ -99,23 +104,6 @@ void check_matrix_views(const_matrix_view B, matrix_view X, Eigen::Index rows,
         throw std::invalid_argument("apxchol: output must not overlap RHS or warm start");
 }
 
-// Contiguous columns take Eigen's vectorized scan; a strided view cannot.
-bool all_finite(const_matrix_view M) {
-    if (M.innerStride() != 1) return M.allFinite();
-    for (Eigen::Index c = 0; c < M.cols(); ++c)
-        if (!Eigen::Map<const Eigen::VectorXd>(M.col(c).data(), M.rows()).allFinite())
-            return false;
-    return true;
-}
-
-// Eigen's parallel SpMV requires Eigen::initParallel() to be called
-// once per process before any threaded operation.  Calling it from a
-// function-local static keeps it lazy and thread-safe.
-inline void ensure_eigen_parallel() {
-    static const bool dummy = []{ Eigen::initParallel(); return true; }();
-    (void)dummy;
-}
-
 template<solve_backend Route>
 void print_sptrsv_banner(bool fp16, bool verbose) {
     constexpr const char* backend = Route == solve_backend::gpu ? "GPU/dataflow" : "CPU/omp";
@@ -125,35 +113,28 @@ void print_sptrsv_banner(bool fp16, bool verbose) {
                      fp16 ? std::size_t(2) : sizeof(detail::sptrsv_value_t));
 }
 
-// One O(nnz) parallel storage scan resolves both direct-copy prerequisites.
-// Besides the fp32 test, explicitly check the nondecreasing-inner-index
-// property used by equal_range below. Eigen's normal insertion paths preserve
-// it, but its low-level unordered compressed API does not, and makeCompressed()
-// is a no-op for an already-compressed matrix.
+// One O(nnz) parallel storage scan resolves both direct-copy prerequisites:
+// lossless fp32 values and nondecreasing row indices inside each column (used
+// by equal_range below; callers' compressed arrays need not keep them).
 struct operator_storage_properties {
     bool fp32_exact = true;
     bool inner_indices_sorted = true;
 };
 
-inline operator_storage_properties scan_operator_storage(
-        const Eigen::SparseMatrix<double>& L) {
-    const double* v = L.valuePtr();
-    const int* outer = L.outerIndexPtr();
-    const int* inner = L.innerIndexPtr();
+inline operator_storage_properties scan_operator_storage(detail::csc_ref<double> L) {
+    const double* v = L.val;
+    const edge_index* outer = L.ptr;
+    const node_index* inner = L.idx;
     bool exact = true;
     bool sorted = true;
-    const Eigen::Index n = L.outerSize();
+    const std::int64_t n = L.n;
     #pragma omp parallel reduction(&& : exact, sorted)
     {
-        // An uncompressed matrix has slack inside its column ranges, so the
-        // outer pointers still bound (over-estimate) each column's work.
         const auto [lo, hi] = detail::work_balanced_range(outer, n);
-        for (Eigen::Index col = lo; col < hi; ++col) {
-            const int begin = outer[col];
-            const int end = L.isCompressed()
-                ? outer[col + 1]
-                : begin + L.innerNonZeroPtr()[col];
-            for (int p = begin; p < end; ++p) {
+        for (std::int64_t col = lo; col < hi; ++col) {
+            const edge_index begin = outer[col];
+            const edge_index end = outer[col + 1];
+            for (edge_index p = begin; p < end; ++p) {
                 if (static_cast<double>(static_cast<float>(v[p])) != v[p])
                     exact = false;
                 if (p > begin && inner[p - 1] > inner[p])
@@ -174,7 +155,7 @@ inline operator_storage_properties scan_operator_storage(
 //
 // The destination owns all three arrays. The CPU route is reusable and may
 // outlive (or be used after mutation of) the constructor's L, so a persistent
-// Eigen::Map over the caller's storage would be a lifetime bug.
+// view of the caller's storage would be a lifetime bug.
 //
 // Returns false when the full stored pattern is not symmetric. The caller then
 // rebuilds from the lower triangle, e.g. for explicit zeros stored in one
@@ -183,23 +164,21 @@ inline operator_storage_properties scan_operator_storage(
 // rebuild.
 template<class S>
 bool copy_symmetric_csc_as_owned_csr(
-        const Eigen::SparseMatrix<double>& L,
-        Eigen::SparseMatrix<S, Eigen::RowMajor>& Lrm,
+        detail::csc_ref<double> L,
+        detail::csc_matrix<S>& Lrm,
         bool inner_indices_sorted) {
-    if (!L.isCompressed() || L.rows() != L.cols() || !inner_indices_sorted)
+    if (!inner_indices_sorted)
         return false;
 
-    const Eigen::Index n = L.rows();
-    const Eigen::Index nnz = L.nonZeros();
-    const int* src_outer = L.outerIndexPtr();
-    const int* src_inner = L.innerIndexPtr();
-    const double* src_vals = L.valuePtr();
+    const std::int64_t n = L.n;
+    const edge_index* src_outer = L.ptr;
+    const node_index* src_inner = L.idx;
+    const double* src_vals = L.val;
 
-    Lrm.resize(n, n);
-    Lrm.resizeNonZeros(nnz);
-    int* dst_outer = Lrm.outerIndexPtr();
-    int* dst_inner = Lrm.innerIndexPtr();
-    S* dst_vals = Lrm.valuePtr();
+    Lrm.resize(L.n, L.nnz());
+    edge_index* dst_outer = Lrm.ptr();
+    node_index* dst_inner = Lrm.idx();
+    S* dst_vals = Lrm.val();
 
     // Fast path. The pairing loop below searches the transpose partner of every
     // upper entry so that the copy stores the canonical LOWER value: about
@@ -214,19 +193,17 @@ bool copy_symmetric_csc_as_owned_csr(
     // difference falls through to the pairing loop, which overwrites every entry.
     {
         std::uint64_t hash_lower = 0, hash_upper = 0;
-        Eigen::Index direct_lower = 0, direct_upper = 0;
+        std::int64_t direct_lower = 0, direct_upper = 0;
         #pragma omp parallel reduction(+ : hash_lower, hash_upper, direct_lower, direct_upper)
         {
             const auto [lo, hi] = detail::work_balanced_range(src_outer, n);
-            for (Eigen::Index col = lo; col < hi; ++col) {
+            for (std::int64_t col = lo; col < hi; ++col) {
                 dst_outer[col] = src_outer[col];
-                const int col_i = static_cast<int>(col);
-                int previous_row = -1;
+                const auto col_i = static_cast<node_index>(col);
                 std::uint64_t run = 0;
-                for (int p = src_outer[col]; p < src_outer[col + 1]; ++p) {
-                    const int row = src_inner[p];
-                    run = row == previous_row ? run + 1 : 0;
-                    previous_row = row;
+                for (edge_index p = src_outer[col]; p < src_outer[col + 1]; ++p) {
+                    const node_index row = src_inner[p];
+                    run = p > src_outer[col] && row == src_inner[p - 1] ? run + 1 : 0;
                     dst_inner[p] = row;
                     dst_vals[p] = static_cast<S>(src_vals[p]);
                     if (row < col_i) {
@@ -247,25 +224,25 @@ bool copy_symmetric_csc_as_owned_csr(
         if (hash_lower == hash_upper && direct_lower == direct_upper) return true;
     }
 
-    Eigen::Index lower_nnz = 0;
-    Eigen::Index upper_nnz = 0;
+    std::int64_t lower_nnz = 0;
+    std::int64_t upper_nnz = 0;
     bool upper_is_paired = true;
     #pragma omp parallel reduction(+ : lower_nnz, upper_nnz) \
         reduction(&& : upper_is_paired)
     {
         const auto [lo, hi] = detail::work_balanced_range(src_outer, n);
-        for (Eigen::Index col = lo; col < hi; ++col) {
+        for (std::int64_t col = lo; col < hi; ++col) {
             dst_outer[col] = src_outer[col];
-            const int col_i = static_cast<int>(col);
-            for (int p = src_outer[col]; p < src_outer[col + 1];) {
-                const int row = src_inner[p];
-                int run_end = p + 1;
+            const auto col_i = static_cast<node_index>(col);
+            for (edge_index p = src_outer[col]; p < src_outer[col + 1];) {
+                const node_index row = src_inner[p];
+                edge_index run_end = p + 1;
                 while (run_end < src_outer[col + 1] &&
                        src_inner[run_end] == row)
                     ++run_end;
-                const int run_size = run_end - p;
+                const edge_index run_size = run_end - p;
 
-                for (int q = p; q < run_end; ++q) {
+                for (edge_index q = p; q < run_end; ++q) {
                     dst_inner[q] = row;
                     dst_vals[q] = static_cast<S>(src_vals[q]);
                 }
@@ -273,21 +250,21 @@ bool copy_symmetric_csc_as_owned_csr(
                     upper_nnz += run_size;
                     // Destination CSR(row=col, col=row) must use the canonical
                     // lower values L(col,row), found in source CSC column `row`.
-                    // Compressed Eigen matrices may contain duplicate sorted
-                    // inner indices, so require and copy the whole partner run
+                    // Compressed input may contain duplicate sorted inner
+                    // indices, so require and copy the whole partner run
                     // one-for-one. A mere lower_bound hit plus globally balanced
                     // triangle counts can accept opposite multiplicity errors on
                     // two coordinates and silently change the operator.
-                    const int begin = src_outer[row];
-                    const int end = src_outer[row + 1];
+                    const edge_index begin = src_outer[row];
+                    const edge_index end = src_outer[row + 1];
                     const auto partners = std::equal_range(
                         src_inner + begin, src_inner + end, col_i);
-                    const int partner_begin = static_cast<int>(
+                    const auto partner_begin = static_cast<edge_index>(
                         partners.first - src_inner);
-                    const int partner_size = static_cast<int>(
+                    const auto partner_size = static_cast<edge_index>(
                         partners.second - partners.first);
                     if (partner_size == run_size) {
-                        for (int offset = 0; offset < run_size; ++offset)
+                        for (edge_index offset = 0; offset < run_size; ++offset)
                             dst_vals[p + offset] = static_cast<S>(
                                 src_vals[partner_begin + offset]);
                     } else {
@@ -324,13 +301,13 @@ using detail::omp_ids;
 
 // RHS lanes are contiguous within a row. Scalar calls use the same loops with C=1.
 template <int C, int R, class S, class Entry>
-std::array<double, R> panel_spmv_reduce(const Eigen::SparseMatrix<S, Eigen::RowMajor> &A,
+std::array<double, R> panel_spmv_reduce(const detail::csc_matrix<S> &A,
                                       const double *x, double *y, double *part, Entry entry) {
     constexpr int stride = std::max(R, detail::kPartStride);
-    const Eigen::Index n = A.rows();
-    const auto *ptr = A.outerIndexPtr();
-    const auto *col = A.innerIndexPtr();
-    const auto *val = A.valuePtr();
+    const std::int64_t n = A.rows();
+    const edge_index *ptr = A.ptr();
+    const node_index *col = A.idx();
+    const S *val = A.val();
     int nt_used = 1;
     const int workers = detail::cpu_spmv_threads(n, ptr[n] - ptr[0]);
 #pragma omp parallel if (workers > 1) num_threads(workers) firstprivate(entry)
@@ -341,9 +318,12 @@ std::array<double, R> panel_spmv_reduce(const Eigen::SparseMatrix<S, Eigen::RowM
             nt_used = nt;
         const auto [lo, hi] = detail::work_balanced_range(ptr, n, tid, nt);
         std::array<double, R> reduced{};
-        for (Eigen::Index i = lo; i < hi; i++) {
-            const auto sum = detail::sparse_row_product<C>(col, val, ptr[i], ptr[i + 1],
-                [x](int row, int q) { return x[Eigen::Index(row) * C + q]; });
+        for (std::int64_t i = lo; i < hi; i++) {
+            // 64-bit entry offsets let the unrolled loads index without
+            // 32-bit wraparound arithmetic.
+            const auto sum = detail::sparse_row_product<C>(col, val,
+                static_cast<std::int64_t>(ptr[i]), static_cast<std::int64_t>(ptr[i + 1]),
+                [x](node_index row, int q) { return x[std::int64_t(row) * C + q]; });
             for (int q = 0; q < C; q++)
                 y[i * C + q] = sum[q];
             entry(i, x + i * C, sum, reduced);
@@ -358,10 +338,10 @@ std::array<double, R> panel_spmv_reduce(const Eigen::SparseMatrix<S, Eigen::RowM
 }
 
 template <int C, class S>
-std::array<double, C> panel_spmv(const Eigen::SparseMatrix<S, Eigen::RowMajor> &A, const double *x,
+std::array<double, C> panel_spmv(const detail::csc_matrix<S> &A, const double *x,
                                  double *y, double *part) {
     return panel_spmv_reduce<C, C>(A, x, y, part,
-        [](Eigen::Index, const double* input, const std::array<double, C>& product,
+        [](std::int64_t, const double* input, const std::array<double, C>& product,
            std::array<double, C>& xy) {
             for (int q = 0; q < C; q++) xy[q] += input[q] * product[q];
         });
@@ -370,7 +350,7 @@ std::array<double, C> panel_spmv(const Eigen::SparseMatrix<S, Eigen::RowMajor> &
 // Transform four rows together, then accumulate their squared norms and sums.
 // The four independent chains preserve the scalar reduction order.
 template <int C, class Entry>
-void panel_residual(Eigen::Index n, double *part, Entry entry, std::array<double, C> &rr,
+void panel_residual(std::int64_t n, double *part, Entry entry, std::array<double, C> &rr,
                     std::array<double, C> &rs) {
     static_assert(C > 0 && C <= 8);
     constexpr int stride = std::max(2 * C, detail::kPartStride);
@@ -384,7 +364,7 @@ void panel_residual(Eigen::Index n, double *part, Entry entry, std::array<double
             nt_used = nt;
         const auto [lo, hi] = detail::static_chunk(n, tid, nt);
         std::array<std::array<double, C>, 4> norms{}, sums{};
-        Eigen::Index i = lo;
+        std::int64_t i = lo;
         for (; i + 4 <= hi; i += 4) {
             const auto residuals = entry.template operator()<4>(i);
             for (int k = 0; k < 4; k++)
@@ -421,11 +401,11 @@ void panel_residual(Eigen::Index n, double *part, Entry entry, std::array<double
 template <int C>
 void panel_update_xr(double *x, const double *p, double *r, const double *Ap,
                      const std::array<double, C> &alpha, const std::array<bool, C> &active,
-                     Eigen::Index n, double *part, std::array<double, C> &rr,
+                     std::int64_t n, double *part, std::array<double, C> &rr,
                      std::array<double, C> &rs) {
     panel_residual<C>(
         n, part,
-        [=]<int Rows>(Eigen::Index first) {
+        [=]<int Rows>(std::int64_t first) {
             for (int k = 0; k < Rows; ++k)
                 for (int c = 0; c < C; ++c)
                     if (C == 1 || active[c]) {
@@ -447,9 +427,9 @@ void panel_update_xr(double *x, const double *p, double *r, const double *Ap,
 }
 
 template <int C>
-void panel_init_residual(double *r, const double *b, const double *Ax0, Eigen::Index n,
+void panel_init_residual(double *r, const double *b, const double *Ax0, std::int64_t n,
                          double *part, std::array<double, C> &rr, std::array<double, C> &rs) {
-    panel_residual<C>(n, part, [=]<int Rows>(Eigen::Index first) {
+    panel_residual<C>(n, part, [=]<int Rows>(std::int64_t first) {
         std::array<std::array<double, C>, Rows> residuals{};
         for (int k = 0; k < Rows; ++k)
             for (int c = 0; c < C; ++c) {
@@ -465,10 +445,10 @@ void panel_init_residual(double *r, const double *b, const double *Ax0, Eigen::I
 
 template <int C>
 void panel_update_p(double *p, const double *z, const std::array<double, C> &beta,
-                    const std::array<bool, C> &active, Eigen::Index n) {
+                    const std::array<bool, C> &active, std::int64_t n) {
     const int workers = detail::cpu_solve_threads(n);
 #pragma omp parallel for schedule(static) if (workers > 1) num_threads(workers)
-    for (Eigen::Index i = 0; i < n; i++)
+    for (std::int64_t i = 0; i < n; i++)
         for (int c = 0; c < C; c++)
             p[i * C + c] = active[c] ? z[i * C + c] + beta[c] * p[i * C + c] : 0.0;
 }
@@ -480,10 +460,9 @@ void panel_update_p(double *p, const double *z, const std::array<double, C> &bet
 // Checkpoint placement here defines the setup/solve timing split used by the
 // benchmark suite; keep the operation order and checkpoint labels stable.
 
-detail::cpu_route::cpu_route(const Eigen::SparseMatrix<double>& A,
+detail::cpu_route::cpu_route(csc_ref<double> A,
                              const solve_options& opts, checkpoint* cp, factorization* F)
-    : opts_(opts), n_(A.rows()) {
-    ensure_eigen_parallel();
+    : opts_(opts), n_(A.n) {
     if (F) {
         install_factor(std::move(*F), cp);
     } else {
@@ -551,8 +530,7 @@ void detail::cpu_route::install_factor(factorization F, checkpoint* cp) {
     barrier_ = installed_->trsv.make_workspace();
 }
 
-void detail::cpu_route::build_operator(const Eigen::SparseMatrix<double>& L,
-                                       checkpoint* cp) {
+void detail::cpu_route::build_operator(csc_ref<double> L, checkpoint* cp) {
     // Build an owned row-major FULL symmetric operator for parallel SpMV.
     // The common full-symmetric CSC needs no histogram/scatter/sort: its three
     // arrays already have the CSR layout. Other stored patterns take the
@@ -561,18 +539,7 @@ void detail::cpu_route::build_operator(const Eigen::SparseMatrix<double>& L,
     auto next = std::make_shared<pcg_operator>();
     auto& op = *next;
     {
-        // Direct array access needs compressed storage. Standard inputs already
-        // are compressed; keep the uncommon conversion local to setup so the
-        // solver still owns only its final CSR after this scope.
-        Eigen::SparseMatrix<double> compressed_L;
-        const Eigen::SparseMatrix<double>* src = &L;
-        if (!L.isCompressed()) {
-            compressed_L = L;
-            compressed_L.makeCompressed();
-            src = &compressed_L;
-        }
-        const Eigen::SparseMatrix<double>& Lcsc = *src;
-        const operator_storage_properties storage = scan_operator_storage(Lcsc);
+        const operator_storage_properties storage = scan_operator_storage(L);
 
         // Operator A storage precision: fp32 when every caller value
         // round-trips fp32 (lossless), else fp64. Resolve this BEFORE building
@@ -586,10 +553,8 @@ void detail::cpu_route::build_operator(const Eigen::SparseMatrix<double>& L,
         const auto t0 = std::chrono::high_resolution_clock::now();
         if (cp) { cp->descend("setup"); cp->tick(); }
         const bool copied = op.fp32
-            ? copy_symmetric_csc_as_owned_csr(
-                  Lcsc, op.Lrm_f, storage.inner_indices_sorted)
-            : copy_symmetric_csc_as_owned_csr(
-                  Lcsc, op.Lrm, storage.inner_indices_sorted);
+            ? copy_symmetric_csc_as_owned_csr(L, op.Lrm_f, storage.inner_indices_sorted)
+            : copy_symmetric_csc_as_owned_csr(L, op.Lrm, storage.inner_indices_sorted);
         bool fallback_needs_fp32_cast = false;
 
         if (!copied) {
@@ -597,17 +562,16 @@ void detail::cpu_route::build_operator(const Eigen::SparseMatrix<double>& L,
             // fallback. It handles the uncommon stored patterns without
             // taxing the full symmetric common path with atomics, a prefix
             // sum, or per-row sorting.
-            if (op.fp32)
-                Eigen::SparseMatrix<float, Eigen::RowMajor>().swap(op.Lrm_f);
+            if (op.fp32) op.Lrm_f.clear();
 
-            op.Lrm.resize(Lcsc.rows(), Lcsc.cols());
-            detail::reflect_lower_to_csr(Lcsc, {op.Lrm.outerIndexPtr(), std::size_t(Lcsc.rows()) + 1},
-                [](Eigen::Index i) { return static_cast<int>(i); },
-                [&](int nnz) {
-                    op.Lrm.resizeNonZeros(nnz);
-                    return std::pair{op.Lrm.innerIndexPtr(), op.Lrm.valuePtr()};
+            op.Lrm.resize(L.n, 0);
+            detail::reflect_lower_to_csr(L,
+                std::span<edge_index>(op.Lrm.ptr(), static_cast<std::size_t>(L.n) + 1),
+                [](std::int64_t i) { return static_cast<node_index>(i); },
+                [&](edge_index nnz) {
+                    op.Lrm.resize_nonzeros(nnz);
+                    return std::pair{op.Lrm.idx(), op.Lrm.val()};
                 });
-            op.Lrm.makeCompressed();
             fallback_needs_fp32_cast = op.fp32;
         }
 
@@ -621,8 +585,8 @@ void detail::cpu_route::build_operator(const Eigen::SparseMatrix<double>& L,
         // fallback: its fp32 cast was never part of spmv_lrm_build. The direct
         // path has no cast or transient fp64 matrix at all.
         if (fallback_needs_fp32_cast) {
-            op.Lrm_f = op.Lrm.cast<float>();
-            Eigen::SparseMatrix<double, Eigen::RowMajor>().swap(op.Lrm);
+            op.Lrm_f = csc_cast<float>(op.Lrm.ref());
+            op.Lrm.clear();
         }
     }
     op_ = std::move(next);
@@ -649,21 +613,19 @@ factorization detail::cpu_route::installed_factor() const {
 }
 
 template<int C>
-void detail::cpu_route::check_solution(const_matrix_view B, const double* x,
+void detail::cpu_route::check_solution(const_matrix_ref B, const double* x,
                                        solve_result* results, checkpoint* timings,
                                        double tol) const {
     if (timings) { timings->descend("pcg"); timings->tick(); }
-    auto* product = Ap_.data();
-    using Panel = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
-    Eigen::Map<Panel> residual(r_.data(), n_, C);
-    const Eigen::Map<const Panel> Ax(product, n_, C);
+    double* product = Ap_.data();
+    double* residual = r_.data();
     // Recompute the original-system residual and both norms during SpMV.
     // Retain Ax and r for the stable fallback when squared norms under/overflow.
-    const auto entry = [&](Eigen::Index i, const double*, const std::array<double, C>& row,
+    const auto entry = [&](std::int64_t i, const double*, const std::array<double, C>& row,
                            std::array<double, 2 * C>& squares) {
         for (int c = 0; c < C; ++c) {
             const double b = B(i, c), r = b - row[c];
-            residual(i, c) = r;
+            residual[i * C + c] = r;
             squares[2 * c] += b * b;
             squares[2 * c + 1] += r * r;
         }
@@ -677,16 +639,23 @@ void detail::cpu_route::check_solution(const_matrix_view B, const double* x,
             results[c].converged = results[c].residual < tol;
             continue;
         }
-        const detail::gpu_scaling::norm_reference reference(B.col(c));
+        // Column c of the row-interleaved residual and product panels.
+        const const_matrix_ref r_col(residual + c, n_, 1, C, n_ * C);
+        const const_matrix_ref ax_col(product + c, n_, 1, C, n_ * C);
+        const auto b_col = B.col(c);
+        const detail::gpu_scaling::norm_reference reference(b_col);
         double relative = reference.value == 0
-            ? (residual.col(c).isZero(0.0) ? 0.0 : std::numeric_limits<double>::infinity())
-            : reference.relative(residual.col(c));
+            ? (vec::is_zero(r_col) ? 0.0 : std::numeric_limits<double>::infinity())
+            : reference.relative(r_col);
         // Form an overflowing difference in scaled coordinates before subtracting.
-        if (!std::isfinite(relative) && reference.value > 0 && Ax.col(c).allFinite()) {
+        if (!std::isfinite(relative) && reference.value > 0 && vec::all_finite(ax_col)) {
             const double scale = detail::gpu_scaling::pow2_scale(std::max(
-                B.col(c).cwiseAbs().maxCoeff(), Ax.col(c).cwiseAbs().maxCoeff()));
-            relative = detail::gpu_scaling::norm(B.col(c) * scale - Ax.col(c) * scale)
-                     / detail::gpu_scaling::norm(B.col(c) * scale);
+                vec::max_abs(b_col), vec::max_abs(ax_col)));
+            buffer<double> difference(static_cast<std::size_t>(n_));
+            for (std::int64_t i = 0; i < n_; ++i)
+                difference[i] = b_col[i] * scale - ax_col[i] * scale;
+            relative = detail::gpu_scaling::norm(const_matrix_ref(difference.data(), n_))
+                     / detail::gpu_scaling::scaled_norm(b_col, scale);
         }
         results[c].residual = relative;
         results[c].converged = relative < tol;
@@ -695,7 +664,7 @@ void detail::cpu_route::check_solution(const_matrix_view B, const double* x,
 }
 
 template<int C>
-void detail::cpu_route::finish_solution(const_matrix_view B, double* x, solve_result* results,
+void detail::cpu_route::finish_solution(const_matrix_ref B, double* x, solve_result* results,
                                         checkpoint* timings, double tol, int max_iter) const {
     std::array<bool, C> tolerance_stops;
     for (int c = 0; c < C; ++c)
@@ -703,27 +672,29 @@ void detail::cpu_route::finish_solution(const_matrix_view B, double* x, solve_re
     check_solution<C>(B, x, results, timings, tol);
     for (int c = 0; c < C; ++c) {
         auto& result = results[c];
-        Eigen::Index progress = result.iterations;
+        auto progress = result.iterations;
         const auto restart = [&] {
             return detail::pcg_restart(tolerance_stops[c], result.converged,
                 result.residual, progress, max_iter - result.iterations);
         };
         if (!restart()) continue;
-        Eigen::VectorXd current(n_);
-        for (Eigen::Index i = 0; i < n_; ++i) current[i] = x[i * C + c];
+        buffer<double> current(static_cast<std::size_t>(n_));
+        for (std::int64_t i = 0; i < n_; ++i) current[i] = x[i * C + c];
+        const auto rhs = B.col(c);
         while (restart()) {
             solve_result attempt;
-            z_ = B.col(c);
+            z_.resize(static_cast<std::size_t>(n_));
+            for (std::int64_t i = 0; i < n_; ++i) z_[i] = rhs[i];
             solve_panel<1>(z_.data(), current.data(), &attempt, timings, tol,
                            max_iter - result.iterations, current.data());
             tolerance_stops[c] = std::isfinite(attempt.residual) && attempt.residual < tol;
-            check_solution<1>(B.col(c), current.data(), &attempt, timings, tol);
+            check_solution<1>(rhs, current.data(), &attempt, timings, tol);
             progress = attempt.iterations;
             result.iterations += progress;
             result.residual = attempt.residual;
             result.converged = attempt.converged;
         }
-        for (Eigen::Index i = 0; i < n_; ++i) x[i * C + c] = current[i];
+        for (std::int64_t i = 0; i < n_; ++i) x[i * C + c] = current[i];
     }
 }
 
@@ -731,26 +702,29 @@ template <int C>
 void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *results, checkpoint* timings, double tol,
                                     int max_iter, const double *x0) const {
     static_assert(C > 0 && C <= 8);
-    const Eigen::Index n = n_;
+    const std::int64_t n = n_;
     for (int c = 0; c < C; c++) {
         results[c].backend = solve_backend::cpu;
         results[c].iterations = 0;
     }
-    r_.resize(n * C);
-    z_.resize(n * C);
-    p_.resize(n * C);
-    Ap_.resize(n * C);
+    const auto panel = static_cast<std::size_t>(n * C);
+    r_.resize(panel);
+    z_.resize(panel);
+    p_.resize(panel);
+    Ap_.resize(panel);
     const auto part_size = detail::part_capacity() * (C > 4 ? 2 : 1);
     if (part_.size() < part_size) part_.resize(part_size);
     double *r = r_.data(), *z = z_.data(), *p = p_.data(), *Ap = Ap_.data(), *part = part_.data();
     const bool laplacian = !factor().sddm;
     std::array<double, C> norm{}, rr{}, rs{}, rz{};
     std::array<bool, C> active{}, warm{};
-    using Input = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+    // Column c of a row-interleaved panel.
+    const auto column = [n](const double* panel_data, int c) {
+        return const_matrix_ref(panel_data + c, n, 1, C, n * C);
+    };
     if (x0) {
-        const Eigen::Map<const Input> initial(x0, n, C);
         for (int c = 0; c < C; c++)
-            warm[c] = !initial.col(c).isZero(0.0);
+            warm[c] = !vec::is_zero(column(x0, c));
     }
     const bool any_warm = std::any_of(warm.begin(), warm.end(), [](bool v) { return v; });
     if (any_warm) {
@@ -762,15 +736,8 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
     }
     panel_init_residual<C>(r, b, any_warm ? Ap : nullptr, n, part, rr, rs);
     if (!any_warm) std::fill_n(x, n * C, 0.0);
-    const Eigen::Map<const Input> input(b, n, C);
-    for (int c = 0; c < C; c++) {
-        if (!warm[c])
-            norm[c] = std::sqrt(rr[c]);
-        else if constexpr (C == 1)
-            norm[c] = Eigen::Map<const Eigen::VectorXd>(b, n).norm();
-        else
-            norm[c] = input.col(c).norm();
-    }
+    for (int c = 0; c < C; c++)
+        norm[c] = warm[c] ? std::sqrt(vec::squared_norm(column(b, c))) : std::sqrt(rr[c]);
     // Only exceptional columns need scaling; ordinary panels reuse their workspace.
     std::array<double, C> scales;
     scales.fill(1.0);
@@ -778,26 +745,25 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
     for (int c = 0; c < C; ++c) {
         const double squared = warm[c] ? norm[c] * norm[c] : rr[c];
         if ((std::isnormal(squared) && std::isfinite(rr[c])) || n == 0) continue;
-        const auto rhs = input.col(c);
-        const Eigen::Map<const Input> initial(x0 ? x0 : b, n, C);
-        double maximum = rhs.cwiseAbs().maxCoeff();
+        const auto rhs = column(b, c);
+        double maximum = vec::max_abs(rhs);
         if (maximum == 0) continue;
-        if (x0) maximum = std::max(maximum, initial.col(c).cwiseAbs().maxCoeff());
+        if (x0) maximum = std::max(maximum, vec::max_abs(column(x0, c)));
         scales[c] = detail::gpu_scaling::pow2_scale(maximum);
-        if (scales[c] == 1.0 || !std::isnormal((rhs * scales[c]).squaredNorm()))
+        if (scales[c] == 1.0 || !std::isnormal(vec::scaled_squared_norm(rhs, scales[c])))
             throw std::invalid_argument("CPU solve: RHS and initial guess exceed the common scaling range");
         scaled = true;
     }
     if (scaled) {
-        Input scaled_b = input, scaled_x0;
-        if (x0) scaled_x0 = Eigen::Map<const Input>(x0, n, C);
-        for (int c = 0; c < C; ++c) {
-            scaled_b.col(c) *= scales[c];
-            if (x0) scaled_x0.col(c) *= scales[c];
-        }
+        buffer<double> scaled_b(panel), scaled_x0(x0 ? panel : 0);
+        for (std::int64_t i = 0; i < n; ++i)
+            for (int c = 0; c < C; ++c) {
+                scaled_b[i * C + c] = b[i * C + c] * scales[c];
+                if (x0) scaled_x0[i * C + c] = x0[i * C + c] * scales[c];
+            }
         solve_panel<C>(scaled_b.data(), x, results, timings, tol, max_iter,
                         x0 ? scaled_x0.data() : nullptr);
-        for (Eigen::Index i = 0; i < n; ++i)
+        for (std::int64_t i = 0; i < n; ++i)
             for (int c = 0; c < C; ++c) {
                 double& value = x[i * C + c];
                 const double restored = value / scales[c];
@@ -813,7 +779,7 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
         results[c].residual = norm[c] == 0 ? 0 : (warm[c] ? std::sqrt(rr[c]) / norm[c] : 1);
         active[c] = norm[c] != 0 && !(warm[c] && results[c].residual < tol);
         if (norm[c] == 0)
-            for (Eigen::Index i = 0; i < n; i++) {
+            for (std::int64_t i = 0; i < n; i++) {
                 x[i * C + c] = 0;
                 r[i * C + c] = 0;
             }
@@ -829,7 +795,7 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
             v /= static_cast<double>(n);
         const int workers = detail::cpu_solve_threads(n);
 #pragma omp parallel for schedule(static) if (workers > 1) num_threads(workers)
-        for (Eigen::Index i = 0; i < n; i++)
+        for (std::int64_t i = 0; i < n; i++)
             for (int c = 0; c < C; c++)
                 x[i * C + c] -= mean[c];
     };
@@ -846,9 +812,12 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
     apply_count_ = 0;
     rz = apply_fused<C>(r, rs, z, timings);
     if constexpr (C == 1) {
-        p_ = z_;
+        // The split panel_update_p uses, so its threads touch p's pages first.
+        const int workers = detail::cpu_solve_threads(n);
+#pragma omp parallel for schedule(static) if (workers > 1) num_threads(workers)
+        for (std::int64_t i = 0; i < n; i++) p[i] = z[i];
     } else {
-        for (Eigen::Index i = 0; i < n; i++)
+        for (std::int64_t i = 0; i < n; i++)
             for (int c = 0; c < C; c++)
                 p[i * C + c] = active[c] ? z[i * C + c] : 0;
     }
@@ -950,21 +919,21 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
 // Packed RHS values in z_ are consumed before the first preconditioner
 // application overwrites them.
 template<int C, class Run>
-void detail::cpu_route::with_packed_panel(const_matrix_view B, matrix_view X,
-                                          const const_matrix_view* X0,
+void detail::cpu_route::with_packed_panel(const_matrix_ref B, matrix_ref X,
+                                          const const_matrix_ref* X0,
                                           checkpoint* timings, Run run) const {
     if constexpr (C == 1) {
-        if (B.innerStride() == 1 && X.innerStride() == 1 && (!X0 || X0->innerStride() == 1)) {
+        if (B.row_stride() == 1 && X.row_stride() == 1 && (!X0 || X0->row_stride() == 1)) {
             run(B.data(), X.data(), X0 ? X0->data() : nullptr);
             return;
         }
     }
-    const Eigen::Index n = B.rows();
+    const std::int64_t n = B.rows();
     const int workers = detail::cpu_solve_threads(n);
-    z_.resize(n * C);
-    panel_x_.resize(n * C);
+    z_.resize(static_cast<std::size_t>(n * C));
+    panel_x_.resize(static_cast<std::size_t>(n * C));
 #pragma omp parallel for schedule(static) if (workers > 1) num_threads(workers)
-    for (Eigen::Index i = 0; i < n; ++i)
+    for (std::int64_t i = 0; i < n; ++i)
         for (int c = 0; c < C; ++c) {
             z_[i * C + c] = B(i, c);
             if (X0)
@@ -974,15 +943,15 @@ void detail::cpu_route::with_packed_panel(const_matrix_view B, matrix_view X,
         (*timings)("pack_rhs");
     run(z_.data(), panel_x_.data(), X0 ? panel_x_.data() : nullptr);
 #pragma omp parallel for schedule(static) if (workers > 1) num_threads(workers)
-    for (Eigen::Index i = 0; i < n; ++i)
+    for (std::int64_t i = 0; i < n; ++i)
         for (int c = 0; c < C; ++c)
             X(i, c) = panel_x_[i * C + c];
     if (timings)
         (*timings)("unpack_x");
 }
 
-void detail::cpu_route::solve_columns(const_matrix_view B, matrix_view X,
-                                      const const_matrix_view* X0,
+void detail::cpu_route::solve_columns(const_matrix_ref B, matrix_ref X,
+                                      const const_matrix_ref* X0,
                                       std::span<solve_result> results, checkpoint* timings,
                                       double tol, int max_iter) const {
     const auto run = [&]<int C>() {
@@ -1000,7 +969,7 @@ void detail::cpu_route::solve_columns(const_matrix_view B, matrix_view X,
     }
 }
 
-void detail::cpu_route::apply_columns(const_matrix_view R, matrix_view Z) const {
+void detail::cpu_route::apply_columns(const_matrix_ref R, matrix_ref Z) const {
     const auto run = [&]<int C>() {
         with_packed_panel<C>(R, Z, nullptr, nullptr,
             [&](const double* r, double* z, const double*) { apply_panel<C>(r, z); });
@@ -1046,11 +1015,11 @@ void detail::cpu_route::apply_core(const double* b, const std::array<double, C>&
     if (cp) { cp->descend("solve"); cp->tick(); }
     const auto& F = factor();
     const node_index* P = F.perm.data();
-    const Eigen::Index n = n_;
+    const std::int64_t n = n_;
     const int workers = detail::cpu_solve_threads(n);
     double* part = part_.data();
-    scratch_.resize(n * C);
-    scratch2_.resize(n * C);
+    scratch_.resize(static_cast<std::size_t>(n * C));
+    scratch2_.resize(static_cast<std::size_t>(n * C));
 
     std::array<double, C> mean{};
     for (int c = 0; c < C; ++c)
@@ -1059,7 +1028,7 @@ void detail::cpu_route::apply_core(const double* b, const std::array<double, C>&
 
     // perm[original] is the position in the factor; RHS columns are contiguous.
     #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
-    for (Eigen::Index v = 0; v < n; ++v)
+    for (std::int64_t v = 0; v < n; ++v)
         for (int c = 0; c < C; ++c)
             z[std::size_t(P[v]) * C + c] = b[v * C + c] - (center ? mean[c] : 0.0);
     if (cp) (*cp)("permute");
@@ -1085,14 +1054,14 @@ void detail::cpu_route::apply_core(const double* b, const std::array<double, C>&
         if (tid == 0) nt_used = nt;
         const auto [lo, hi] = detail::static_chunk(n, tid, nt);
         std::array<std::array<double, C>, 4> sums{};
-        auto gather = [&](Eigen::Index v, auto& sum) {
+        auto gather = [&](std::int64_t v, auto& sum) {
             for (int c = 0; c < C; ++c) {
                 const double value = out[std::size_t(P[v]) * C + c] - shift[c];
                 z[v * C + c] = value;
                 sum[c] += b[v * C + c] * value;
             }
         };
-        Eigen::Index v = lo;
+        std::int64_t v = lo;
         for (; v + 4 <= hi; v += 4) {
             std::array<std::array<double, C>, 4> values{};
             for (int k = 0; k < 4; ++k)
@@ -1119,18 +1088,18 @@ void detail::cpu_route::apply_core(const double* b, const std::array<double, C>&
 }
 
 solve_backend detail::select_solve_backend(const solve_options& opts,
-                                          const Eigen::SparseMatrix<double>* A) {
+                                          const csc_ref<double>* A) {
     if (opts.backend == solve_backend::cpu) return solve_backend::cpu;
     if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::gpu)
         throw std::invalid_argument("invalid solve backend");
     // Keep small solves on CPU unless it cannot honor the requested storage.
 #if defined(APXCHOL_USE_METAL)
-    constexpr Eigen::Index cpu_limit = 32 * 1024;
+    constexpr node_index cpu_limit = 32 * 1024;
 #else
-    constexpr Eigen::Index cpu_limit = 1;
+    constexpr node_index cpu_limit = 1;
 #endif
-    if (opts.backend == solve_backend::automatic && A && A->rows() <= cpu_limit) {
-        if (A->rows() == 1 || omp_sptrsv::fp16_supported() ||
+    if (opts.backend == solve_backend::automatic && A && A->n <= cpu_limit) {
+        if (A->n == 1 || omp_sptrsv::fp16_supported() ||
             !detail::resolve_fp16_storage(opts.factor_opts.factor_storage, false))
             return solve_backend::cpu;
     }
@@ -1185,8 +1154,8 @@ namespace {
 // Splits `columns` into panels of the widest width that fits, widest first;
 // every width list ends in 1.
 template<std::size_t K, class Run>
-void for_panels(Eigen::Index columns, const std::array<int, K>& widths, Run run) {
-    for (Eigen::Index first = 0; first < columns;) {
+void for_panels(std::int64_t columns, const std::array<int, K>& widths, Run run) {
+    for (std::int64_t first = 0; first < columns;) {
         const int width = *std::find_if(widths.begin(), widths.end(),
                                         [&](int w) { return w <= columns - first; });
         run(first, width);
@@ -1197,7 +1166,7 @@ void for_panels(Eigen::Index columns, const std::array<int, K>& widths, Run run)
 
 struct solver::impl {
     detail::solver_route route;
-    Eigen::Index operator_entries;
+    std::int64_t operator_entries;
     int num_threads;
     // Internal timing tree attached through solver_access; copies start without one.
     detail::checkpoint* timings = nullptr;
@@ -1213,12 +1182,12 @@ struct solver::impl {
         }, route);
     }
 
-    static detail::solver_route make_route(const Eigen::SparseMatrix<double>& A,
+    static detail::solver_route make_route(detail::csc_ref<double> A,
                                            const solve_options& opts, detail::checkpoint* cp,
                                            factorization* F) {
         detail::validate_solve_options(opts);
         const detail::thread_budget threads(opts.num_threads);
-        if (A.rows() == 0) throw std::invalid_argument("apxchol: empty operator");
+        if (A.n == 0) throw std::invalid_argument("apxchol: empty operator");
         if (F) {
             detail::validate_adopted_operator(A, *F, opts.factor_opts.lump_max_mass);
             detail::validate_adopted_factor(*F);
@@ -1249,9 +1218,9 @@ struct solver::impl {
         return detail::solver_route(std::in_place_type<detail::cpu_route>, A, opts, cp, F);
     }
 
-    impl(const Eigen::SparseMatrix<double>& A, const solve_options& opts,
+    impl(detail::csc_ref<double> A, const solve_options& opts,
          detail::checkpoint* cp, factorization* F)
-        : route(make_route(A, opts, cp, F)), operator_entries(A.nonZeros()),
+        : route(make_route(A, opts, cp, F)), operator_entries(static_cast<std::int64_t>(A.nnz())),
           num_threads(opts.num_threads), timings(cp) {
 #if defined(APXCHOL_USE_CUDA)
         if (const auto* gpu = std::get_if<detail::cuda_route>(&route))
@@ -1264,28 +1233,29 @@ struct solver::impl {
           num_threads(other.num_threads),
           setup_seconds(other.setup_seconds) {}
 
-    Eigen::Index rows() const {
+    std::int64_t rows() const {
         return std::visit([](const auto& owner) {
-            return static_cast<Eigen::Index>(owner.factor().perm.size());
+            return static_cast<std::int64_t>(owner.factor().perm.size());
         }, route);
     }
 
     // The only argument checks and panel loop of every solve: the routes
     // trust what reaches them. tol and max_iter are resolved. Returns the
     // wall-clock seconds since start, taken when the public call began.
-    double solve(const_matrix_view B, matrix_view X, const const_matrix_view* X0,
+    double solve(detail::const_matrix_ref B, detail::matrix_ref X,
+                 const detail::const_matrix_ref* X0,
                  std::span<solve_result> results, double tol, int max_iter,
                  std::chrono::steady_clock::time_point start) {
         const auto scope = calls.enter();
         const detail::thread_budget threads(num_threads);
         check_matrix_views(B, X, rows(), X0);
-        if (!all_finite(B) || (X0 && !all_finite(*X0)))
+        if (!detail::vec::all_finite_matrix(B) || (X0 && !detail::vec::all_finite_matrix(*X0)))
             throw std::invalid_argument("apxchol: RHS and initial guess must be finite");
         std::visit([&](auto& owner) {
-            for_panels(B.cols(), owner.solve_widths, [&](Eigen::Index first, int width) {
-                std::optional<const_matrix_view> initial;
-                if (X0) initial.emplace(X0->middleCols(first, width));
-                owner.solve_columns(B.middleCols(first, width), X.middleCols(first, width),
+            for_panels(B.cols(), owner.solve_widths, [&](std::int64_t first, int width) {
+                std::optional<detail::const_matrix_ref> initial;
+                if (X0) initial.emplace(X0->middle_cols(first, width));
+                owner.solve_columns(B.middle_cols(first, width), X.middle_cols(first, width),
                                     initial ? &*initial : nullptr,
                                     results.subspan(first, width), timings, tol, max_iter);
             });
@@ -1293,15 +1263,15 @@ struct solver::impl {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     }
 
-    void apply(const_matrix_view R, matrix_view Z) {
+    void apply(detail::const_matrix_ref R, detail::matrix_ref Z) {
         const auto scope = calls.enter();
         const detail::thread_budget threads(num_threads);
         check_matrix_views(R, Z, rows());
-        if (!all_finite(R))
+        if (!detail::vec::all_finite_matrix(R))
             throw std::invalid_argument("apxchol: preconditioner input must be finite");
         std::visit([&](auto& owner) {
-            for_panels(R.cols(), owner.apply_widths, [&](Eigen::Index first, int width) {
-                owner.apply_columns(R.middleCols(first, width), Z.middleCols(first, width));
+            for_panels(R.cols(), owner.apply_widths, [&](std::int64_t first, int width) {
+                owner.apply_columns(R.middle_cols(first, width), Z.middle_cols(first, width));
             });
         }, route);
     }
@@ -1315,60 +1285,81 @@ void detail::solver_access::save(const std::filesystem::path& path, const solver
     const thread_budget threads(owner.impl_->num_threads);
     const auto F = std::visit([](const auto& backend) { return backend.installed_factor(); },
                               owner.impl_->route);
-    auto A = std::visit([](const auto& backend) { return backend.original_operator(); },
-                        owner.impl_->route);
-    save_solver_data(path, A, F, owner.operator_nnz());
+    const auto A = std::visit([](const auto& backend) { return backend.original_operator(); },
+                              owner.impl_->route);
+    save_solver_data(path, A.ref(), F, owner.impl_->operator_entries);
 }
 
 solver detail::solver_access::with_timings(const Eigen::SparseMatrix<double>& A,
                                           const solve_options& opts, checkpoint& timings) {
-    return solver(A, nullptr, opts, &timings);
+    const eigen_csc input(A);
+    return solver(solver_input(input, opts, false), nullptr, opts, &timings);
 }
 
-void detail::solver_access::finish_load(solver& owner, Eigen::Index entries,
+solver detail::solver_access::make(csc_ref<double> A, factorization F, const solve_options& opts) {
+    return solver(A, &F, opts, nullptr);
+}
+
+const detail::csc_ref<double>& detail::solver_access::solver_input(
+        const eigen_csc& input, const solve_options& opts, bool adopted) {
+    // The checks the route performs first, for a matrix it cannot represent.
+    if (!input.square()) {
+        validate_solve_options(opts);
+        if (input.rows() == 0) throw std::invalid_argument("apxchol: empty operator");
+        if (adopted) throw std::invalid_argument("apxchol: factor dimension does not match the operator");
+        validate_lump_max_mass(opts.factor_opts.lump_max_mass);
+        throw_operator_not_square(input.rows(), input.cols());
+    }
+    return input.ref();
+}
+
+void detail::solver_access::finish_load(solver& owner, std::int64_t entries,
                                         std::chrono::steady_clock::time_point started) {
     owner.impl_->operator_entries = entries;
     owner.impl_->setup_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 }
 
-Eigen::SparseMatrix<double> detail::cpu_route::original_operator() const {
-    if (op_->fp32)
-        return archive_operator_csc(static_cast<int>(n_), op_->Lrm_f.outerIndexPtr(),
-            op_->Lrm_f.innerIndexPtr(), op_->Lrm_f.valuePtr());
-    return archive_operator_csc(static_cast<int>(n_), op_->Lrm.outerIndexPtr(),
-        op_->Lrm.innerIndexPtr(), op_->Lrm.valuePtr());
+detail::csc_matrix<double> detail::cpu_route::original_operator() const {
+    if (op_->fp32) return archive_operator_csc(op_->Lrm_f.ref());
+    return archive_operator_csc(op_->Lrm.ref());
 }
 
 #if defined(APXCHOL_USE_CUDA)
-Eigen::SparseMatrix<double> detail::cuda_route::original_operator() const {
+detail::csc_matrix<double> detail::cuda_route::original_operator() const {
+    static_assert(sizeof(node_index) == sizeof(int), "GPU routes require 32-bit vertices");
     const auto& pcg = gpcg_;
     const cuda_device_scope device(pcg.device_, cuda_device_scope::checked{});
     const auto& op = *pcg.op_;
     const int n = static_cast<int>(pcg.n_), nnz = op.matrix.nnz;
-    std::vector<int> outer(static_cast<std::size_t>(n) + 1), inner(nnz), inverse(n);
-    std::vector<double> values(nnz);
-    check_cuda(cudaMemcpy(outer.data(), op.matrix.row_ptr, outer.size() * sizeof(int), cudaMemcpyDeviceToHost), "download archive offsets");
-    check_cuda(cudaMemcpy(inner.data(), op.matrix.col_idx, inner.size() * sizeof(int), cudaMemcpyDeviceToHost), "download archive indices");
+    csc_matrix<double> stored(static_cast<node_index>(n), static_cast<edge_index>(nnz));
+    std::vector<node_index> inverse(n);
+    // The device keeps 32-bit offsets; 64_EDGES builds widen them here.
+    std::vector<int> offsets(static_cast<std::size_t>(n) + 1);
+    check_cuda(cudaMemcpy(offsets.data(), op.matrix.row_ptr, offsets.size() * sizeof(int), cudaMemcpyDeviceToHost), "download archive offsets");
+    std::copy(offsets.begin(), offsets.end(), stored.ptr());
+    check_cuda(cudaMemcpy(stored.idx(), op.matrix.col_idx, static_cast<std::size_t>(nnz) * sizeof(int), cudaMemcpyDeviceToHost), "download archive indices");
     if (op.matrix.fp32) {
         std::vector<float> narrow(nnz);
         check_cuda(cudaMemcpy(narrow.data(), op.matrix.values_f32, narrow.size() * sizeof(float), cudaMemcpyDeviceToHost), "download archive values");
-        std::copy(narrow.begin(), narrow.end(), values.begin());
+        std::copy(narrow.begin(), narrow.end(), stored.val());
     } else {
-        check_cuda(cudaMemcpy(values.data(), op.matrix.values_f64, values.size() * sizeof(double), cudaMemcpyDeviceToHost), "download archive values");
+        check_cuda(cudaMemcpy(stored.val(), op.matrix.values_f64, static_cast<std::size_t>(nnz) * sizeof(double), cudaMemcpyDeviceToHost), "download archive values");
     }
     // CUDA stores rows in original order and only columns in factor order.
-    for (int i = 0; i < n; ++i) inverse[op.perm[i]] = i;
-    for (auto& column : inner) column = inverse[column];
-    return archive_operator_csc(n, outer.data(), inner.data(), values.data());
+    for (int i = 0; i < n; ++i) inverse[op.perm[i]] = static_cast<node_index>(i);
+    for (edge_index p = 0; p < stored.nnz(); ++p) stored.idx()[p] = inverse[stored.idx()[p]];
+    return archive_operator_csc(stored.ref());
 }
 #endif
 
 solver::solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts)
-    : solver(A, nullptr, opts, nullptr) {}
+    : solver(detail::solver_access::solver_input(detail::eigen_csc(A), opts, false),
+             nullptr, opts, nullptr) {}
 solver::solver(const Eigen::SparseMatrix<double>& A, factorization F, const solve_options& opts)
-    : solver(A, &F, opts, nullptr) {}
-solver::solver(const Eigen::SparseMatrix<double>& A, factorization* F,
+    : solver(detail::solver_access::solver_input(detail::eigen_csc(A), opts, true),
+             &F, opts, nullptr) {}
+solver::solver(const detail::csc_ref<double>& A, factorization* F,
                const solve_options& opts, detail::checkpoint* timings) {
     const auto start = std::chrono::steady_clock::now();
     impl_ = std::make_unique<impl>(A, opts, timings, F);
@@ -1391,8 +1382,9 @@ solve_result solver::solve(const Eigen::VectorXd& b, std::optional<double> reque
     if (b.size() != rows()) throw std::invalid_argument("apxchol: RHS length does not match the operator");
     solve_result result;
     result.x.resize(rows());
-    const const_matrix_view initial(x0 ? *x0 : b);
-    result.solve_seconds = impl_->solve(b, result.x, x0 ? &initial : nullptr, {&result, 1},
+    const auto initial = detail::dense_of(x0 ? *x0 : b);
+    result.solve_seconds = impl_->solve(detail::dense_of(b), detail::dense_of(result.x),
+                                        x0 ? &initial : nullptr, {&result, 1},
                                         tol, max_iter, start);
     return result;
 }
@@ -1403,8 +1395,9 @@ solve_result solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd>
     const auto start = std::chrono::steady_clock::now();
     const auto [tol, max_iter] = resolve_solve_parameters(requested_tol, requested_max_iter);
     solve_result result;
-    const const_matrix_view initial(x0 ? *x0 : b);
-    result.solve_seconds = impl_->solve(b, x, x0 ? &initial : nullptr, {&result, 1},
+    const auto initial = detail::dense_of(x0 ? *x0 : b);
+    result.solve_seconds = impl_->solve(detail::dense_of(b), detail::dense_of(x),
+                                        x0 ? &initial : nullptr, {&result, 1},
                                         tol, max_iter, start);
     return result;
 }
@@ -1417,19 +1410,23 @@ batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X,
     const auto [tol, max_iter] = resolve_solve_parameters(requested_tol, requested_max_iter);
     batch_solve_result result;
     result.columns.resize(B.cols());
-    result.solve_seconds = impl_->solve(B, X, X0, result.columns, tol, max_iter, start);
+    std::optional<detail::const_matrix_ref> initial;
+    if (X0) initial.emplace(detail::dense_of(*X0));
+    result.solve_seconds = impl_->solve(detail::dense_of(B), detail::dense_of(X),
+                                        initial ? &*initial : nullptr, result.columns,
+                                        tol, max_iter, start);
     return result;
 }
 
 Eigen::VectorXd solver::apply(const Eigen::VectorXd& r) {
     if (r.size() != rows()) throw std::invalid_argument("apxchol: preconditioner input length does not match the operator");
     Eigen::VectorXd z(rows());
-    impl_->apply(r, z);
+    impl_->apply(detail::dense_of(r), detail::dense_of(z));
     return z;
 }
 
 void solver::apply(const_matrix_view R, matrix_view Z) {
-    impl_->apply(R, Z);
+    impl_->apply(detail::dense_of(R), detail::dense_of(Z));
 }
 
 factorization solver::factor() const {
@@ -1450,7 +1447,6 @@ double solver::setup_seconds() const { return impl_->setup_seconds; }
 solve_result solve(const Eigen::SparseMatrix<double>& A, const Eigen::VectorXd& b,
                    std::optional<double> tol, std::optional<int> max_iter,
                    const Eigen::VectorXd* x0, const solve_options& opts) {
-    ensure_eigen_parallel();
     // Reject invalid limits and lengths before paying for setup.
     resolve_solve_parameters(tol, max_iter);
     if (b.size() != A.rows()) throw std::invalid_argument("apxchol: RHS length does not match the operator");

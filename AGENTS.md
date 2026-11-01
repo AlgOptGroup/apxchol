@@ -31,6 +31,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 - Portable save/load: `solver::save`/`solver::load` (`src/solver_archive.cpp`) and `docs/serialization.md`; the versioned binary format stores the original CSC operator and the installed factor (after dropping, in its FP32 or scaled FP16 storage), which `load()` reinstalls exactly. Typed arrays carry explicit widths, byte order and zlib CRC32 checksums; loading validates and prepares the backend without memory mapping.
 - MATLAB/Octave builds use `octave/CMakeLists.txt` and the shared `apxchol::core` target. Archive methods reuse native save/load.
 - Public API scope and compatibility: `docs/api.md`. Precision and storage: `docs/precision.md`. Extension seams: `docs/extending.md`.
+- Internal storage: `detail/csc_matrix.h` (borrowed `csc_ref`, owned `csc_matrix` on node_index/edge_index, transpose, unpermute, triplet assembly), `detail/dense.h` (strided `dense_ref` views and vector reductions) and `detail/buffer.h` (64-byte aligned, uninitialized). Eigen types are converted once in `detail/eigen_boundary.h`; nothing behind the public API, CLI or bindings uses Eigen.
 - Operator validation and M-matrix lumping: `operator_class`. Every surface reads input as the operator. One rule in `operator_class` (`detail::is_graph_adjacency`) backs `--convert-input`, `apxchol.as_operator` and `apxchol_as_operator`; the CLI's logging lives in `src/mtx_input.h`.
 - Measurement contracts: `benchmarks/README.md`.
 - CLI archives: `.github/workflows/cli.yml` uses the `cli` install component, bundles OpenMP/notices, and runs `tests/check_cli_archive.py` after relocation.
@@ -53,7 +54,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 - Canonical neighbors sort by weight, then vertex. Preserve ordered duplicate sums, exact cumulative weights, `upper_bound` sampling and per-elimination random streams.
 - OpenMP work uses the actual team size, never the requested one; every logical range must execute under reduced or nested teams. Caller-operator loops split work with `detail::work_balanced_range`; reductions stay thread-ordered.
 - Partitioner conflict resolution is deterministic for a given graph, context and team size. Symmetric-input pairing shortcuts must preserve results bit for bit. Prune skipping must retain its full-walk audit for hidden eligible vertices; it need not reproduce the same factor as full pruning.
-- Residual importance normalization uses fixed ordered 16,384-item partials, invariant to thread count. Same-graph selection and same-factor solves are deterministic; independently rebuilt parallel factors need not be identical (see `docs/precision.md`).
+- Residual importance normalization uses fixed ordered 16,384-item partials, invariant to thread count. `detail::vec` reductions (norms, sums, means) use fixed 8,192-element blocks summed in block order, also invariant to thread count. Same-graph selection and same-factor solves are deterministic; independently rebuilt parallel factors need not be identical (see `docs/precision.md`).
 - GPU selection guarantees independence and progress, not the CPU's selected set; GPU floating folds may differ from CPU while preserving the sampling law.
 
 ## Memory invariants

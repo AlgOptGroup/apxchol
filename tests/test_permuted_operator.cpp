@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "apxchol/solver/detail/permuted_operator.h"
+#include "apxchol/detail/eigen_boundary.h"
 #include "scoped_omp_threads.h"
 #include <array>
 #include <cstring>
@@ -39,9 +40,9 @@ void check(const Matrix& L, const std::vector<node_index>& perm, bool use_full_b
     const auto ref = serial_reference(L, perm);
     apxchol::detail::permuted_operator_csr out;
     if (use_full_builder)
-        out = apxchol::detail::build_permuted_full_symmetric_csr(L, perm);
+        out = apxchol::detail::build_permuted_full_symmetric_csr(apxchol::detail::eigen_csc(L), perm);
     else
-        ASSERT_TRUE(apxchol::detail::try_build_permuted_symmetric_csr(L, perm, out));
+        ASSERT_TRUE(apxchol::detail::try_build_permuted_symmetric_csr(apxchol::detail::eigen_csc(L), perm, out));
     const auto nnz = out.ptr.back();
     ASSERT_EQ(nnz, static_cast<std::int64_t>(ref.idx.size()));
     EXPECT_EQ(out.ptr, ref.ptr);
@@ -57,7 +58,7 @@ Matrix from_entries(int n, std::initializer_list<Eigen::Triplet<double>> entries
 bool accepted(const Matrix& L) {
     std::vector<node_index> perm(L.rows()); std::iota(perm.begin(), perm.end(), 0);
     apxchol::detail::permuted_operator_csr out;
-    return apxchol::detail::try_build_permuted_symmetric_csr(L, perm, out);
+    return apxchol::detail::try_build_permuted_symmetric_csr(apxchol::detail::eigen_csc(L), perm, out);
 }
 } // namespace
 
@@ -111,13 +112,14 @@ TEST(PermutedOperator, MissingPartnerDoesNotPublishPartiallyWrittenArrays) {
     const auto* original_vals = out.vals.get();
     out.fp32_exact = false;
     EXPECT_FALSE(apxchol::detail::try_build_permuted_symmetric_csr(
-        L, {2, 0, 1}, out));
+        apxchol::detail::eigen_csc(L), {2, 0, 1}, out));
     EXPECT_EQ(out.idx.get(), original_idx); EXPECT_EQ(out.vals.get(), original_vals);
     EXPECT_EQ(out.idx[0], 23); EXPECT_EQ(out.vals[0], 4.5);
     EXPECT_FALSE(out.fp32_exact);
 }
 
-TEST(PermutedOperator, RejectsDuplicatesUnsortedAndUncompressedStorage) {
+// Uncompressed Eigen storage is compressed at the library boundary.
+TEST(PermutedOperator, RejectsDuplicatesAndUnsortedStorage) {
     Matrix duplicate(2, 2);
     duplicate.resizeNonZeros(4);
     std::copy_n(std::array<int, 3>{0, 2, 4}.data(), 3, duplicate.outerIndexPtr());
@@ -128,9 +130,6 @@ TEST(PermutedOperator, RejectsDuplicatesUnsortedAndUncompressedStorage) {
     std::swap(unsorted.innerIndexPtr()[0], unsorted.innerIndexPtr()[1]);
     std::swap(unsorted.valuePtr()[0], unsorted.valuePtr()[1]);
     EXPECT_FALSE(accepted(unsorted));
-    Matrix uncompressed = from_entries(2, {{0, 0, 2.}, {1, 1, 2.}});
-    uncompressed.uncompress();
-    EXPECT_FALSE(accepted(uncompressed));
 }
 
 TEST(PermutedOperator, GeneralFallbackMatchesIndependentLowerTriangleReference) {
@@ -215,7 +214,7 @@ TEST(PermutedOperator, GeneralFallbackRejectsNonFiniteValuesBeforeSorting) {
         std::copy(values.begin(), values.end(), L.valuePtr());
         ASSERT_FALSE(accepted(L));
         const std::vector<node_index> perm{0, 1};
-        EXPECT_THROW(apxchol::detail::build_permuted_full_symmetric_csr(L, perm),
+        EXPECT_THROW(apxchol::detail::build_permuted_full_symmetric_csr(apxchol::detail::eigen_csc(L), perm),
                      std::invalid_argument);
     }
 }

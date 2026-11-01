@@ -10,7 +10,11 @@
 #include <memory>
 
 namespace apxchol {
-namespace detail { struct checkpoint; struct solver_access; }
+namespace detail {
+struct checkpoint;
+struct solver_access;
+template<class T> struct csc_ref;
+}
 
 /// Relative residual tolerance of a solve that does not pass one.
 inline constexpr double default_tol      = 1e-8;
@@ -155,7 +159,7 @@ public:
     static solver load(const std::filesystem::path& path, const solve_options& opts = {});
 
 private:
-    solver(const Eigen::SparseMatrix<double>& A, factorization* F,
+    solver(const detail::csc_ref<double>& A, factorization* F,
            const solve_options& opts, detail::checkpoint* timings);
     batch_solve_result solve_batch(const_matrix_view B, matrix_view X,
                                    std::optional<double> tol, std::optional<int> max_iter,

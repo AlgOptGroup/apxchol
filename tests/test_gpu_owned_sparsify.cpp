@@ -422,7 +422,7 @@ TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneDeviceAttempt) {
         while ((at = text.find(needle,at)) != std::string::npos) { ++count;at += needle.size(); }
         return count;
     };
-    ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(original));
+    ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(apxchol::detail::eigen_csc(original)));
     apxchol::solve_result solved;
     testing::internal::CaptureStderr();
     try {
