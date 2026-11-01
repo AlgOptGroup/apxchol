@@ -37,6 +37,9 @@ def main():
         (source / "docs/performance").mkdir(parents=True)
         for asset in (ROOT / "docs/performance").glob("*"):
             shutil.copyfile(asset, source / "docs/performance" / asset.name)
+        # Campaign charts and tables are rendered from the committed extracts.
+        subprocess.run([sys.executable, str(ROOT / "docs/performance.py"), str(source / "docs/performance"),
+                        "--campaigns", str(ROOT / "docs/performance")], check=True)
         shutil.copytree(ROOT / "examples", source / "examples")
         for original, destination in PAGES.items():
             def link(match):

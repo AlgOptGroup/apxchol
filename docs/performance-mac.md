@@ -10,16 +10,16 @@ system, including com-Orkut (237 million stored nonzeros) within the 32 GB of
 unified memory.
 
 ```{note}
-These results were measured with the benchmark's Metal route from a pull
-request that is not merged yet, at revision `0009d670`. Host code used the
-8 performance cores; macOS can't pin threads, so runs were unpinned.
+These results were measured at revision `0009d670`, from the pull request
+that added the benchmark's Metal route. Host code used the 8 performance cores; macOS can't
+pin threads, so runs were unpinned.
 ```
 
 ## Metal
 
-![Apple M1 Max Metal: apxchol setup, solve and total time per matrix](performance/mac-metal.svg)
+![Apple M1 Max Metal: apxchol setup + solve time per matrix](performance/mac-metal.svg)
 
-Times come from the repeat with the median total, out of three after one warm-up. Peak memory is the
+Times come from the repeat with the median setup + solve time, out of three after one warm-up. Peak memory is the
 whole process.
 
 ```{include} performance/mac-metal-table.md
