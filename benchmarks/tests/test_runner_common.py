@@ -343,11 +343,11 @@ class CellReuseTest(unittest.TestCase):
     def test_current_cell_is_reused(self):
         self.assertTrue(rc.cell_is_current(self.cell(), self.SHA))
 
-    def test_legacy_cmg_tag_and_current_revision_do_not_establish_shared_inputs(self):
+    def test_cmg_cells_follow_the_competitor_contract(self):
         cell = self.cell(cell={"solver": "cmg", "device": "cpu", "matrix_id": "grid"})
-        self.assertEqual(cell["metrics"]["stop_contract"], "original-v1")
+        self.assertTrue(rc.cell_is_current(cell, self.SHA))
+        cell["metrics"].pop("stop_contract")
         self.assertFalse(rc.cell_meets_contract(cell))
-        self.assertFalse(rc.cell_is_current(cell, self.SHA))
 
     def test_other_revision_is_rerun(self):
         self.assertFalse(rc.cell_is_current(self.cell(), "b" * 40))

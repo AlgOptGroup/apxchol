@@ -140,10 +140,6 @@ def cell_meets_contract(cell):
     receipt for apxchol timings, and a recorded cap for timeouts."""
     if not isinstance(cell, dict) or not isinstance(cell.get("cell"), dict):
         return False
-    # The retained MATLAB adapter generates its own RHS and shifts Laplacians.
-    # Its original-v1 tag does not establish the shared original A,b contract.
-    if cell["cell"].get("solver") == "cmg":
-        return False
     status, metrics = cell.get("status"), cell.get("metrics", {})
     if not isinstance(status, str) or not isinstance(metrics, dict):
         return False
@@ -559,8 +555,9 @@ def matrix_cache_key(mid):
     return f"{mid}--{digest}" if digest else mid
 
 
-def dump_matrix(mid, directory, binary, threads, timeout):
-    """Cache a successful operator export for Julia/CMG, preserving input identity.
+def dump_matrix(mid, directory, binary, threads, timeout, rhs=False):
+    """Cache a successful export of the operator (or, with ``rhs``, of the
+    right-hand side) for Julia/CMG, preserving input identity.
 
     Export to private scratch first: a failed or interrupted process must not
     leave a truncated file that a later call mistakes for a completed cache.
@@ -568,14 +565,15 @@ def dump_matrix(mid, directory, binary, threads, timeout):
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    target = directory / (matrix_cache_key(mid) + ".mtx")
+    flag, suffix = ("--dump-rhs", ".rhs.mtx") if rhs else ("--dump-mtx", ".mtx")
+    target = directory / (matrix_cache_key(mid) + suffix)
     if target.is_file():
         return str(target)
     with tempfile.TemporaryDirectory(prefix=".export-", dir=directory) as scratch:
-        staged = Path(scratch) / "operator.mtx"
+        staged = Path(scratch) / "export.mtx"
         result = sh(
             f"{shlex.quote(str(binary))} {margs_for(mid)} --solver none "
-            f"--dump-mtx {shlex.quote(str(staged))}",
+            f"{flag} {shlex.quote(str(staged))}",
             timeout=timeout, env=benchmark_openmp_env(threads))
         if result.returncode != 0 or not staged.is_file():
             return None

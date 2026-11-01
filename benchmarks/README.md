@@ -80,7 +80,7 @@ comments, Pages or README measurements.
 - Inputs declare graph adjacency (`L=D-A`) or an assembled operator, and Laplacian
   or SDDM class. Preserve the original operator/RHS and component-wise nullspace.
 - Accept only when **every retained true residual** `||b-Ax||/||b|| ≤ 1e-8`.
-  A recurrence residual is insufficient. Keep shifted CMG series separately labelled.
+  A recurrence residual is insufficient.
 - `original-v1` stopping checks that residual at native solver exits and continues
   when needed, within one total iteration budget and at most eight attempts.
   Disconnected split solves apply the budget per component. Direct solvers count
@@ -254,17 +254,33 @@ no untimed, matrix-specific tolerance calibration before retained runs.
 Julia uses fixed tiny connected/disconnected/SDDM fixtures to warm its native closure
 types before timing; these fixtures do not depend on the measured matrix.
 
-The MATLAB CMG adapter is excluded from comparisons until it uses the shared
-operator and RHS: it currently generates its own RHS and shifts Laplacians.
-The Linux container recipe remains in [cmg/Dockerfile.matlab](cmg/Dockerfile.matlab):
-
-```sh
-docker build -t apxchol-matlab-cmg:r2026a -f benchmarks/cmg/Dockerfile.matlab benchmarks/cmg
-```
+Canonical MATLAB CMG (`cmg_matlab_runner.py`) runs on the CPU axis on the same
+exported operator A and RHS b as the other external solvers. One MATLAB process
+per cell runs [cmg/bench_cmg_common.m](cmg/bench_cmg_common.m): one warmup and
+`--repeat` retained repetitions, each building the hierarchy with
+`cmg_precondition` and solving with MATLAB `pcg` (tol 1e-8, at most 500
+iterations) under `-singleCompThread`, pinned to one CPU. A disconnected
+Laplacian gets one grounded coordinate per Laplacian component
+([cmg/component_gauge.h](cmg/component_gauge.h)); coefficients and RHS values
+are kept unchanged, with no shift or RHS projection. Setup covers the component
+gauge and hierarchy; solve covers PCG and reconstruction. Every repetition is
+graded by `||Ax-b||/||b||` on the original A and b, and the cell follows the
+same status and per-solve cap rules as the other competitors. An empty hierarchy,
+which CMG returns for operators it does not support such as positive
+off-diagonals, is recorded as `n/a`.
 
 Set `APXCHOL_MATLAB_ROOT` to a licensed MATLAB R2026a installation and
 `APXCHOL_CMG_SOLVER` to a CMG checkout whose MEX files were built with `makeCMG`
-for that MATLAB version.
+for that MATLAB version. The first cell compiles the gauge MEX into the dump
+directory. Without these settings the sweep prints why and plans no CMG cells.
+To run MATLAB in the Linux container from
+[cmg/Dockerfile.matlab](cmg/Dockerfile.matlab) instead, build the image and
+set `APXCHOL_CMG_IMAGE`:
+
+```sh
+docker build -t apxchol-matlab-cmg:r2026a -f benchmarks/cmg/Dockerfile.matlab benchmarks/cmg
+export APXCHOL_CMG_IMAGE=apxchol-matlab-cmg:r2026a
+```
 
 ## Weighted and additional inputs
 
