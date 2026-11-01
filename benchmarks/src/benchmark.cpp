@@ -75,6 +75,10 @@
 #if defined(__APPLE__)
 #include <mach/mach.h>      // task_info for read_vmrss_mb().
 #endif
+#ifdef HAVE_ACCELERATE
+#include <Accelerate/Accelerate.h>
+#include <sys/sysctl.h>     // hw.memsize for the factor-size preflight.
+#endif
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
@@ -1271,6 +1275,9 @@ static Args parse_args(int argc, char** argv) {
         , "amgcl_cuda"
 #endif
 #endif
+#ifdef HAVE_ACCELERATE
+        , "accelerate"
+#endif
 #ifdef HAVE_HYPRE
         , "hypre_boomeramg"
 #if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_BENCH_HYPRE_CUDA)
@@ -1762,7 +1769,7 @@ enum class decompose_mode { whole, split };
 enum class ground_mode    { pin, coarse, native };
 
 // Validity matrix + `auto` defaults in ONE place (invalid cells -> n/a, never silent).
-// solver key: "apxchol" | "amgcl" | "boomeramg".
+// solver key: "apxchol" | "amgcl" | "boomeramg" | "accelerate".
 struct desing_plan { bool supported; decompose_mode decompose; ground_mode ground; };
 static desing_plan resolve_desing(const std::string& solver, const std::string& dec_req,
                                   const std::string& gnd_req, bool disconnected) {
@@ -1785,6 +1792,7 @@ static desing_plan resolve_desing(const std::string& solver, const std::string& 
     if      (solver=="apxchol")                       ok = (gnd==ground_mode::native);
     else if (solver=="boomeramg")                     ok = (gnd==ground_mode::pin);
     else if (solver=="amgcl")                         ok = (gnd==ground_mode::pin || gnd==ground_mode::coarse);
+    else if (solver=="accelerate")                    ok = (gnd==ground_mode::pin);
     // The invalid cell: whole + coarse on a DISCONNECTED graph -- the unpinned singular
     // operator has a k-dim constant null space the single near-null vector can't span
     // (AMGCL CG breaks down / NaN). split makes every piece connected (k=1), so it's ok.
@@ -2005,6 +2013,168 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
     }
     return r;
 }
+
+// ──────────────────── Apple Accelerate sparse Cholesky ────────────────────
+#ifdef HAVE_ACCELERATE
+// Accelerate's direct sparse Cholesky (SparseFactor, default ordering: AMD) on
+// the grounded operator. A singular Laplacian gets the same multi-component
+// Dirichlet pin as AMGCL and BoomerAMG, and the solution is graded on the original
+// operator. Each solve or refinement step counts as one work unit (original-v1).
+// Accelerate threads with its own pool; --threads and OpenMP do not control it.
+namespace accelerate_detail {
+inline thread_local std::string error;
+inline void record_error(const char* message) { error = message ? message : "unknown"; }
+inline void* allocate(size_t bytes) { return std::malloc(bytes); }
+inline void release(void* pointer) { std::free(pointer); }
+inline const char* status_name(SparseStatus_t status) {
+    switch (status) {
+        case SparseStatusOK: return "ok";
+        case SparseFactorizationFailed: return "factorization failed";
+        case SparseMatrixIsSingular: return "matrix is singular";
+        case SparseInternalError: return "internal error";
+        case SparseParameterError: return "parameter error";
+        default: return "unknown status";
+    }
+}
+inline double physical_memory_bytes() {
+    std::uint64_t bytes = 0;
+    size_t size = sizeof(bytes);
+    return sysctlbyname("hw.memsize", &bytes, &size, nullptr, 0) == 0
+        ? static_cast<double>(bytes) : 0.0;
+}
+}  // namespace accelerate_detail
+
+static BenchResult run_accelerate_cholesky(
+    const Eigen::SparseMatrix<double>& L,
+    const Eigen::VectorXd& b,
+    const std::string& graph_name,
+    double tol, int maxiter, ground_mode ground = ground_mode::pin)
+{
+    namespace ad = accelerate_detail;
+    BenchResult r;
+    r.solver_name = "Cholesky [Accelerate]";
+    r.graph_name = graph_name;
+    r.n = static_cast<int>(L.rows());
+    r.nnz = static_cast<int>(L.nonZeros());
+    const int n = r.n;
+    if (g_laplacian_mode && ground != ground_mode::pin)
+        throw std::invalid_argument("Accelerate Cholesky grounds Laplacians with a pin only");
+
+    Timer t;
+    t.start();   // setup: grounding, lower-triangle conversion, symbolic + numeric factor
+    Eigen::VectorXd rhs = b;
+    std::vector<int> pinned;
+    Eigen::SparseMatrix<double> pinned_operator;
+    if (g_laplacian_mode) {
+        pinned_operator = dirichlet_pin(L, pinned);
+        for (int p : pinned) rhs[p] = 0.0;
+    }
+    const Eigen::SparseMatrix<double>& A = g_laplacian_mode ? pinned_operator : L;
+    // Accelerate reads one triangle of a symmetric matrix in CSC form.
+    std::vector<long> column_starts(n + 1, 0);
+    std::vector<int> row_indices;
+    std::vector<double> values;
+    row_indices.reserve(static_cast<size_t>(A.nonZeros() / 2 + n));
+    values.reserve(row_indices.capacity());
+    for (int column = 0; column < n; ++column) {
+        for (Eigen::SparseMatrix<double>::InnerIterator it(A, column); it; ++it) {
+            if (it.row() < column) continue;
+            row_indices.push_back(static_cast<int>(it.row()));
+            values.push_back(it.value());
+        }
+        column_starts[column + 1] = static_cast<long>(row_indices.size());
+    }
+    SparseAttributes_t attributes{};
+    attributes.kind = SparseSymmetric;
+    attributes.triangle = SparseLowerTriangle;
+    SparseMatrixStructure structure{};
+    structure.rowCount = n;
+    structure.columnCount = n;
+    structure.columnStarts = column_starts.data();
+    structure.rowIndices = row_indices.data();
+    structure.attributes = attributes;
+    structure.blockSize = 1;
+    SparseMatrix_Double matrix{structure, values.data()};
+
+    SparseSymbolicFactorOptions symbolic_options{};
+    symbolic_options.control = SparseDefaultControl;
+    symbolic_options.orderMethod = SparseOrderDefault;
+    symbolic_options.malloc = ad::allocate;
+    symbolic_options.free = ad::release;
+    symbolic_options.reportError = ad::record_error;
+    ad::error.clear();
+    SparseOpaqueSymbolicFactorization symbolic =
+        SparseFactor(SparseFactorizationCholesky, structure, symbolic_options);
+    struct SymbolicGuard {
+        SparseOpaqueSymbolicFactorization& value;
+        ~SymbolicGuard() { SparseCleanup(value); }
+    } symbolic_guard{symbolic};
+    if (symbolic.status != SparseStatusOK)
+        throw std::runtime_error(std::string("Accelerate symbolic Cholesky failed: ")
+            + ad::status_name(symbolic.status) + (ad::error.empty() ? "" : ": " + ad::error));
+    // The symbolic phase predicts the numeric factor's size. Refuse a factor
+    // that cannot fit instead of letting the operating system swap.
+    const double required = static_cast<double>(symbolic.factorSize_Double)
+                          + static_cast<double>(symbolic.workspaceSize_Double);
+    const double budget = 0.5 * ad::physical_memory_bytes();
+    std::cerr << "[accelerate] factor_bytes=" << symbolic.factorSize_Double
+              << " workspace_bytes=" << symbolic.workspaceSize_Double
+              << " budget_bytes=" << static_cast<std::uint64_t>(budget) << '\n';
+    if (budget > 0 && required > budget) {
+        std::ostringstream message;
+        message << "Accelerate Cholesky: out of memory: the factor and workspace need "
+                << std::fixed << std::setprecision(1) << required / 1073741824.0
+                << " GiB, more than half of physical memory ("
+                << budget / 1073741824.0 << " GiB)";
+        throw std::runtime_error(message.str());
+    }
+    SparseOpaqueFactorization_Double factor = SparseFactor(symbolic, matrix);
+    struct FactorGuard {
+        SparseOpaqueFactorization_Double& value;
+        ~FactorGuard() { SparseCleanup(value); }
+    } factor_guard{factor};
+    if (factor.status != SparseStatusOK)
+        throw std::runtime_error(std::string("Accelerate Cholesky failed: ")
+            + ad::status_name(factor.status) + (ad::error.empty() ? "" : ": " + ad::error));
+    r.setup_time = t.elapsed();
+
+    t.start();
+    Eigen::VectorXd correction(n);
+    auto solve_into = [&](Eigen::VectorXd& right, Eigen::VectorXd& out) {
+        DenseVector_Double in{n, right.data()};
+        DenseVector_Double result{n, out.data()};
+        SparseSolve(factor, in, result);
+    };
+    Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
+        [&](double, int, bool warm, Eigen::VectorXd& current) {
+            if (!warm) {
+                current.resize(n);
+                solve_into(rhs, current);
+            } else {
+                // Refinement on the original operator: the centered residual is
+                // compatible, and the pinned rows carry no equation.
+                Eigen::VectorXd residual = b - L * current;
+                center_if_laplacian(residual);
+                for (int p : pinned) residual[p] = 0.0;
+                solve_into(residual, correction);
+                current += correction;
+            }
+            return 1;   // one direct solve/refinement consumes one budget unit
+        });
+    center_if_laplacian(x);
+    r.solve_time = t.elapsed();
+    r.total_time = r.setup_time + r.solve_time;
+    r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from time -l)
+
+    Eigen::VectorXd res = b - L * x;
+    center_if_laplacian(res);
+    const double bnorm = b.norm() > 0 ? b.norm() : 1.0;
+    r.rel_residual = res.norm() / bnorm;
+    r.fillin = 0;
+    r.us_per_nnz = r.total_time / r.nnz * 1e6;
+    return r;
+}
+#endif
 
 // ──────────────────── AMGCL solver ────────────────────
 #ifdef HAVE_AMGCL
@@ -3237,6 +3407,15 @@ int main(int argc, char** argv) try {
 #ifdef HAVE_CHOLMOD
     if (args.solvers.count("cholmod"))
         print(median_run([&]() { return run_cholmod(L, b, graph_name, args.tol, args.maxiter); }, R));
+#endif
+
+#ifdef HAVE_ACCELERATE
+    if (args.solvers.count("accelerate"))
+        print(median_run([&]() { return run_desing("accelerate", "Cholesky [Accelerate]",
+            [&](const Eigen::SparseMatrix<double>& L_, const Eigen::VectorXd& b_,
+                const std::string& nm, double tl, int mi, ground_mode g) {
+                return run_accelerate_cholesky(L_, b_, nm, tl, mi, g);
+            }); }, R));
 #endif
 
     // AMG solvers use run_desing (--decompose/--ground). Auto pins Laplacians;

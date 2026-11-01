@@ -454,6 +454,10 @@ APX = [("apxchol_v1", APX_DEFAULT_CONFIG),
 # (smoothed-aggregation + spai0, vs BoomerAMG's classical AMG); converges to true
 # 1e-8 under --reg-rel.
 COMP = ["rchol","rchol_par","hypre_boomeramg","amgcl"]
+# Apple Accelerate's sparse Cholesky: a macOS-only direct competitor
+# (configure with -DBENCH_ACCELERATE=ON).
+if sys.platform == "darwin":
+    COMP.append("accelerate")
 # AC/AC2 = Laplacians.jl Julia reference of our method (read .mtx). Slow (julia).
 JULIA = ["ac","ac2"]
 RUN_PARAC = True     # ParAC runs as part of every sweep (skip via --no-parac)
