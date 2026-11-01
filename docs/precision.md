@@ -14,7 +14,7 @@ the outer iteration each have their own precision.
 | Metal triangular solves | FP32 storage by default; optional scaled FP16 | Shared CUDA/Metal dataflow worker; FP32 arithmetic |
 | Metal PCG | Mixed FP32 and double-float; host FP64 exit residual | Metal has no native FP64 arithmetic; see below |
 
-`factor_options::factor_storage` selects triangular-solve storage per solver (`automatic`, `fp16`, or `fp32`). Python exposes this as `factor_storage_dtype=None`, `np.float16`, or `np.float32`. The default is CPU/Metal FP32 and CUDA FP16; C++ owns parsing and default selection.
+`factor_options::factor_storage` selects triangular-solve storage per solver (`automatic`, `fp16`, or `fp32`). Python exposes this as `factor_storage="auto"`, `"float16"` or `"float32"` (NumPy dtypes also work). The default is CPU/Metal FP32 and CUDA FP16; C++ owns parsing and default selection.
 
 Construction precision is independent of triangular-solve storage. Factor export and saved solvers carry the installed factor in its triangular-solve storage (FP32, or binary16 off-diagonals with FP32 diagonals and scales); Python returns it as float64. CPU solve inputs and results use FP64 arithmetic.
 
@@ -119,6 +119,12 @@ is applied later and does not make factor construction deterministic.
 Selection is deterministic for the same graph, candidates, selector state and
 actual thread team. Reusing one factor avoids the variability of rebuilding
 it; moving a host factor to a GPU does not change how it was constructed.
+
+Results are reproducible from run to run at a fixed thread count on the same
+hardware and build. Bit-for-bit reproducibility is not guaranteed across
+releases: a release may change results, within the documented precision, when
+that makes setup or solves measurably faster or smaller. The changelog lists
+such changes.
 
 The [benchmark protocol](../benchmarks/README.md) describes how to compare
 supported configurations without changing timing boundaries.

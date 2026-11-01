@@ -19,6 +19,7 @@
 - CUDA and Metal solvers can be copied: copies share the device factor and operator, and solve concurrently on their own streams or command queues and workspace.
 
 ### API and CLI changes
+- Breaking: the C++ one-shot `solve(A, b, tol, max_iter, x0, opts)` takes an optional initial guess before the options, like the reusable solver, Python and MATLAB/Octave; the CLI reads one with `--x0 FILE`, shaped like the right-hand side.
 - Breaking: runtime environment variables are replaced by explicit solver options.
 - Breaking: the CUDA build no longer uses cuSPARSE or cuBLAS, and the level-set GPU triangular solve is removed.
 - Breaking: forward-star and indexed pooled graph storage and the standalone analysis/setup tools are retired.
@@ -32,7 +33,12 @@
 - Breaking: removed CLI flags `--stagnation-window`, `--graph-storage`, `--fs-compact` and `--fs-filter-append`.
 - `apxchol::core` no longer passes its `-march` flag to consumers, and a `-march`/`-mcpu` already in `CMAKE_CXX_FLAGS` or `CMAKE_CXX_FLAGS_<CONFIG>` replaces apxchol's own. Consumers get `EIGEN_MAX_ALIGN_BYTES` and `EIGEN_MALLOC_ALREADY_ALIGNED=0` instead, so Eigen objects cross the library boundary safely whichever instruction set each side targets. Projects that embed apxchol by including `cmake/apxchol_core.cmake` now default to portable code, like `add_subdirectory` embedding; standalone root, Python and benchmark builds stay native.
 - Breaking: `solve_result::solve_vram_mb` is removed. It reported device-wide memory in use, including other processes, so it did not measure the solve.
-- Breaking: C++ `solve()` takes `std::optional` tolerance and iteration budget; `std::nullopt` selects the solver's defaults, and a negative value now throws `std::invalid_argument` instead of selecting them.
+- Breaking: C++ `solve()` takes `std::optional` tolerance and iteration budget; `std::nullopt` selects the defaults, and a negative value now throws `std::invalid_argument` instead of selecting them.
+- Breaking: `solve_options::tol` and `solve_options::max_iter` are removed; the tolerance and iteration budget are solve arguments in every interface, and an omitted one uses `default_tol` or `default_max_iter`. The one-shot C++ call becomes `solve(A, b, tol, max_iter, x0, opts)`.
+- Breaking: the iteration count is `iterations` in every interface; Python `SolveResult.iters` and the MATLAB/Octave result field `iters` are renamed.
+- Breaking: the Python option and property `factor_storage_dtype` are renamed `factor_storage`; the option accepts `"auto"` (the default), `"float16"`, `"float32"` or a NumPy dtype.
+- Breaking: MATLAB/Octave `apxchol_solve(A, b, rtol, maxiter, x0, options)` takes the initial guess before the options, in the order of `s.solve`.
+- Breaking: errors use two classes in every interface: `std::invalid_argument` (Python `ValueError`, MATLAB/Octave `apxchol:badInput`) for invalid input, options and unsupported requests, and `std::runtime_error` or a subclass (`RuntimeError`, `apxchol:error`) for execution failures. Metal input checks now throw `std::invalid_argument` instead of `std::domain_error` or `std::length_error`, an edge-index overflow throws `std::overflow_error` instead of `std::length_error`, Python no longer raises `OverflowError` or `ValueError` for execution failures, and MATLAB/Octave `apxchol:badMatrix`, `apxchol:badVector`, `apxchol:tooLarge` and `apxchol:badHandle` become `apxchol:badInput`.
 - Breaking: `apxchol::cpu_solver` is removed; use `apxchol::solver` with `solve_backend::cpu`.
 - Breaking: `save_solver`/`load_solver` are replaced by `solver::save` and `solver::load`.
 - Breaking: `apxchol::apx_cholesky` is removed from the public API; use `apxchol::solver` (`apply` inside an external Krylov solver).
@@ -58,6 +64,11 @@
 - Breaking: the CMake helpers `apxchol_openmp_runtime()`, `apxchol_configure_core()`, `apxchol_install_core()` and the `APXCHOL_ARCH_FLAG` variable are internal (`_apxchol_*` and `_APXCHOL_ARCH_FLAG`); `find_package(apxchol)` and `apxchol_add_core()` are the supported entry points.
 - Breaking: Python `Solver.L`, `Solver.D` and `Solver.fill_ratio` are removed (use `chol()`, `P` and `factor_nnz`), `Solver.lumped` is renamed `lumped_offdiag`, and `apxchol.DEFAULT_TOL`/`DEFAULT_MAXITER` are no longer public.
 - Breaking: the raw MATLAB/Octave `apxchol_mex` entry point moves to `octave/private/`; use the `apxchol_*` wrappers.
+- Breaking: custom partitioners receive a read-only `apxchol::partition_graph` (`n`, `is_active`, `for_each_neighbor`, `degree`) instead of the mutable graph; `graph`, `make_graph` and `laplacian` move to `apxchol::detail`.
+- Breaking: partitioners no longer declare a `name`, and `partitioner_list.h` with `dispatch_partitioner` is removed; pass a custom partitioner as an instance to `factorize`.
+- Breaking: `factorize(A, eliminator, opts)` no longer takes a partitioner template argument, and now uses the partitioner `opts.partitioner` names instead of always `block_greedy`; pass an instance to use another partitioner.
+- Breaking: `tree_elimination` moves to `apxchol::detail`; configure the built-in rule through `factor_options`.
+- Breaking: `sparse_csc::kEdgeMax` is removed; use `std::numeric_limits<apxchol::edge_index>::max()`.
 - New `apxchol.as_operator(M)`, `apxchol_as_operator(M)` and CLI `--convert-input`: a finite symmetric matrix with at least one off-diagonal entry, all of them positive, becomes its graph Laplacian `L = D - M` (self-loops cancel), any other finite symmetric matrix is used as given and checked by the solver, and asymmetric or non-finite input is an error.
 - The CLI solves an `n` by `k` `--rhs` file as one batch, writes an `n` by `k` solution with `-o`, and logs iterations and residuals per column.
 - The v1 API compatibility scope is documented.
@@ -83,8 +94,10 @@
 ### Documentation
 - The website separates user and developer guides, adds installation, quick start, examples, changelog and citing pages, and marks development pages with a banner.
 - The Performance page has a page per platform: Euler (x86_64, CUDA), Daint (ARM64, CUDA) and Apple M1 Max (Metal).
+- The precision guide states when results are reproducible and that a release may change results, within the documented precision, for measured speed or memory gains.
 
 ### Fixes
+- The CLI reports "matrix is empty" and exits 2 for a dense (array) input with no rows or columns, instead of crashing with SIGFPE while reading it.
 - Reported residuals are now correct on early solve exits.
 - Fixed SDDM misclassification of exact Laplacians.
 - CPU solves rescale right-hand sides of extreme magnitude; operators whose scale is not representable in FP32 factor storage are still rejected.

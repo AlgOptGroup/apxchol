@@ -192,8 +192,8 @@ TEST(MetalHost, FactorStorageRangeAndRounding) {
         EXPECT_LE(std::abs(metadata.diagonal - diagonal), diagonal * 2 * std::numeric_limits<float>::epsilon());
     }
     for (float bad : {0.0f, -1.0f, std::numeric_limits<float>::infinity()})
-        EXPECT_THROW(mh::pack_factor_metadata(bad, 1), std::domain_error);
-    EXPECT_THROW(mh::pack_factor_metadata(1, 0), std::domain_error);
+        EXPECT_THROW(mh::pack_factor_metadata(bad, 1), std::invalid_argument);
+    EXPECT_THROW(mh::pack_factor_metadata(1, 0), std::invalid_argument);
 }
 
 TEST(MetalHost, Float16ScaleFallbackKeepsSmallOffDiagonalFactorsFinite) {

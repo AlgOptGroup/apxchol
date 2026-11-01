@@ -2,7 +2,7 @@
 //
 // One gateway, op-dispatched (keeps the binary surface to a single MEX file):
 //   [h, setup_seconds]         = apxchol_mex('factorize', A)        % A sparse double, square
-//   [x, iters, resid, conv, solve_seconds] = apxchol_mex('solve', h, b, tol, maxiter, x0)
+//   [x, iterations, resid, conv, solve_seconds] = apxchol_mex('solve', h, b, rtol, maxiter, x0)
 //   z                          = apxchol_mex('apply', h, r)         % z = M^{-1} r
 //   apxchol_mex('save', h, path)
 //   [h, setup_seconds]         = apxchol_mex('load', path, options)
@@ -148,11 +148,11 @@ void store_solver(std::unique_ptr<apxchol::solver> solver, int nlhs, mxArray* pl
 
 apxchol::solver& get_solver(const mxArray* mh) {
     if (!mxIsUint64(mh) || mxGetNumberOfElements(mh) != 1)
-        fail("apxchol:badHandle", "handle must be a uint64 scalar");
+        fail("apxchol:badInput", "handle must be a uint64 scalar");
     const std::uint64_t h = *static_cast<std::uint64_t*>(mxGetData(mh));
     auto it = store().find(h);
     if (it == store().end())
-        fail("apxchol:badHandle", "invalid or freed apxchol handle");
+        fail("apxchol:badInput", "invalid or freed apxchol handle");
     return *it->second;
 }
 
@@ -160,10 +160,10 @@ apxchol::solver& get_solver(const mxArray* mh) {
 // Python binding (this build uses 32-bit Eigen storage indices).
 Eigen::SparseMatrix<double> mx_to_eigen(const mxArray* mA) {
     if (!mxIsSparse(mA) || !mxIsDouble(mA) || mxIsComplex(mA))
-        fail("apxchol:badMatrix", "A must be a real sparse double matrix");
+        fail("apxchol:badInput", "A must be a real sparse double matrix");
     const mwSize nr = mxGetM(mA), nc = mxGetN(mA);
     if (nr != nc)
-        fail("apxchol:badMatrix", "A must be square (got " + std::to_string(nr) +
+        fail("apxchol:badInput", "A must be square (got " + std::to_string(nr) +
                                   "x" + std::to_string(nc) + ")");
     const mwIndex* jc = mxGetJc(mA);
     const mwIndex* ir = mxGetIr(mA);
@@ -171,7 +171,7 @@ Eigen::SparseMatrix<double> mx_to_eigen(const mxArray* mA) {
     const std::uint64_t nnz = jc[nc];
     if (std::cmp_greater(nr, std::numeric_limits<int>::max()) ||
         std::cmp_greater(nnz, std::numeric_limits<int>::max()))
-        fail("apxchol:tooLarge",
+        fail("apxchol:badInput",
              "matrix too large for 32-bit indices (n or nnz exceeds 2^31)");
 
     return apxchol::detail::import_csc(nr, jc, ir, pr);
@@ -181,7 +181,7 @@ Eigen::Map<const Eigen::MatrixXd> mx_to_rhs(const mxArray* value, Eigen::Index r
                                            const char* name) {
     if (!mxIsDouble(value) || mxIsComplex(value) || mxIsSparse(value) ||
         mxGetNumberOfDimensions(value) != 2)
-        fail("apxchol:badVector", std::string(name) + " must be a dense real double vector or matrix");
+        fail("apxchol:badInput", std::string(name) + " must be a dense real double vector or matrix");
     const mwSize nr = mxGetM(value), nc = mxGetN(value);
     // Preserve row-vector input; for a one-row system, columns are separate RHSs.
     if (rows > 1 && nr == 1 && nc == static_cast<mwSize>(rows))
@@ -259,7 +259,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         } else if (op == "solve") {
             if (nrhs != 5 && nrhs != 6)
                 fail("apxchol:usage",
-                     "usage: [x,iters,resid,conv,seconds] = apxchol_mex('solve', h, b, tol, maxiter, x0)");
+                     "usage: [x,iterations,resid,conv,seconds] = apxchol_mex('solve', h, b, rtol, maxiter, x0)");
             auto& s = get_solver(prhs[1]);
             const auto B = mx_to_rhs(prhs[2], s.rows(), "b");
             std::optional<double> tol;

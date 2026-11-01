@@ -10,13 +10,13 @@ int main() {
     b(L.rows() - 1) = -1.0;
 
     // One-shot: factorize + PCG in one call.
-    auto res = apxchol::solve(L, b, {.tol = 1e-8, .max_iter = 500});
+    auto res = apxchol::solve(L, b, /*tol=*/1e-8, /*max_iter=*/500);
     std::printf("one-shot : %ld iterations, residual %.2e\n",
                 long(res.iterations), res.residual);
 
     // Reusable: factor once, then solve any number of right-hand sides.
     apxchol::solver slv(L);
-    auto r1 = slv.solve(b);                             // opts defaults
+    auto r1 = slv.solve(b);                             // default tol and max_iter
     auto r2 = slv.solve(b, /*tol=*/1e-10, /*max_iter=*/1000);
     std::printf("reusable : %ld iterations @1e-8, %ld @1e-10\n",
                 long(r1.iterations), long(r2.iterations));

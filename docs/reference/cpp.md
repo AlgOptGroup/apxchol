@@ -22,8 +22,9 @@ A warm start is an initial solution estimate supplied through `x0`.
 
 ### Solve defaults
 
-These values come directly from the native headers. Python and MATLAB/Octave
-use them when tolerance and iteration-budget arguments are omitted.
+These values come directly from the native headers. Every interface uses them
+when a solve omits the tolerance or iteration budget; an explicit invalid
+value throws `std::invalid_argument`.
 
 ```{doxygenvariable} apxchol::default_tol
 ```
@@ -33,13 +34,11 @@ use them when tolerance and iteration-budget arguments are omitted.
 
 ### Solve options
 
-These defaults apply to each solve. A call may override the tolerance and
-iteration budget without rebuilding the factor; an omitted or `std::nullopt`
-argument keeps the default, and an explicit invalid value throws
-`std::invalid_argument`.
+These options fix the setup and backend; the tolerance and iteration budget
+are arguments of each solve.
 
 ```{doxygenstruct} apxchol::solve_options
-:members: tol, max_iter, factor_opts, backend, num_threads
+:members: factor_opts, backend, num_threads
 :undoc-members:
 ```
 

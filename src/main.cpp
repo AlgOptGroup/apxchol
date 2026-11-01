@@ -57,13 +57,35 @@ solver make_solver(const Eigen::SparseMatrix<double>& L, const run_config& cfg,
         : solver(L, cfg.solve_opts);
 }
 
+// The --x0 file must have the RHS's shape. The header is checked before the
+// body: the reader divides by the row count.
+std::optional<Eigen::MatrixXd> read_initial_guess(const run_config& cfg, Eigen::Index rows,
+                                                  Eigen::Index cols) {
+    if (!cfg.x0_path) return std::nullopt;
+    fast_matrix_market::matrix_market_header header;
+    {
+        std::ifstream f(*cfg.x0_path);
+        fast_matrix_market::read_header(f, header);
+    }
+    if (header.nrows != rows || header.ncols != cols)
+        throw std::invalid_argument(fmt::format(
+            "x0 is {}x{}, but the RHS is {}x{}", header.nrows, header.ncols, rows, cols));
+    Eigen::MatrixXd X0;
+    std::ifstream f(*cfg.x0_path);
+    fast_matrix_market::read_matrix_market_eigen_dense(f, X0);
+    return X0;
+}
+
 // An n x k RHS file: one reusable solver, one batched solve over its columns.
 int solve_batch(const Eigen::SparseMatrix<double>& L, const Eigen::MatrixXd& B,
                 const run_config& cfg, bool graph, const input_scan& scan) {
+    const auto X0 = read_initial_guess(cfg, B.rows(), B.cols());
     detail::checkpoint timings;
     solver owner = make_solver(L, cfg, timings);
     Eigen::MatrixXd X(B.rows(), B.cols());
-    const auto res = owner.solve(B, X);
+    const std::optional<const_matrix_view> warm =
+        X0 ? std::optional<const_matrix_view>(*X0) : std::nullopt;
+    const auto res = owner.solve(B, X, cfg.tol, cfg.max_iter, warm ? &*warm : nullptr);
 
     spdlog::info("backend:    {}", owner.backend() == solve_backend::gpu ? "gpu" : "cpu");
     spdlog::info("columns:    {}", B.cols());
@@ -82,7 +104,7 @@ int solve_batch(const Eigen::SparseMatrix<double>& L, const Eigen::MatrixXd& B,
 
     if (failed)
         spdlog::error("{} of {} columns did not reach tol {} within {} iterations.{}",
-                      failed, B.cols(), cfg.solve_opts.tol, cfg.solve_opts.max_iter,
+                      failed, B.cols(), cfg.tol, cfg.max_iter,
                       diagnose_failure(graph, scan));
     return failed ? 1 : 0;
 }
@@ -99,14 +121,19 @@ int main(int argc, char* argv[]) try {
     fast_matrix_market::matrix_market_header hdr;
     {
         std::ifstream f(cfg.input_path);
+        // fast_matrix_market divides by the row count while reading an array
+        // body, so reject an empty matrix from its header first.
+        fast_matrix_market::read_header(f, hdr);
+        if (hdr.nrows == 0 || hdr.ncols == 0) {
+            spdlog::error("matrix is empty ({}x{})", hdr.nrows, hdr.ncols);
+            return 2;
+        }
+        f.clear();
+        f.seekg(0);
         fast_matrix_market::read_matrix_market_eigen(f, hdr, L);
     }
     if (L.rows() != L.cols()) {
         spdlog::error("matrix must be square, got {}x{}", L.rows(), L.cols());
-        return 2;
-    }
-    if (L.rows() == 0) {
-        spdlog::error("matrix is empty (0x0)");
         return 2;
     }
 
@@ -165,9 +192,11 @@ int main(int argc, char* argv[]) try {
         }
     }
 
+    const auto X0 = read_initial_guess(cfg, L.rows(), 1);
+    const Eigen::VectorXd x0 = X0 ? Eigen::VectorXd(X0->col(0)) : Eigen::VectorXd();
     detail::checkpoint timings;
     solver owner = make_solver(L, cfg, timings);
-    const auto res = owner.solve(b);
+    const auto res = owner.solve(b, cfg.tol, cfg.max_iter, X0 ? &x0 : nullptr);
 
     spdlog::info("backend:    {}", res.backend == solve_backend::gpu ? "gpu" : "cpu");
     spdlog::info("iterations: {}", res.iterations);
@@ -180,7 +209,7 @@ int main(int argc, char* argv[]) try {
 
     if (!res.converged)
         spdlog::error("did not reach tol {} in {} iterations (residual {}).{}",
-                      cfg.solve_opts.tol, res.iterations, res.residual,
+                      cfg.tol, res.iterations, res.residual,
                       diagnose_failure(graph, scan));
     return res.converged ? 0 : 1;
 } catch (const std::exception& e) {

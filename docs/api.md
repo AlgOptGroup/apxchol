@@ -18,8 +18,9 @@ interfaces throughout the 1.x series:
 - Reading [solver archives](serialization.md) written by any earlier 1.x release.
 
 The [partitioner and eliminator extension contracts](extending.md), and the
-graph/context operations they require, are **experimental**: they may change in
-minor 1.x releases, and each change is noted in the [changelog](../CHANGELOG.md).
+`partition_graph`, `partition_context` and `selection` operations they require,
+are **experimental**: they may change in minor 1.x releases, and each change is
+noted in the [changelog](../CHANGELOG.md).
 
 The research controls in `factor_options::experimental` (the
 `experimental_options` struct) are outside this promise: they may change or
@@ -29,15 +30,22 @@ disappear in any release. The stable factorization options are `seed`,
 `partition.degree_multiplier`, plus `verbose`; the
 [usage guide](usage.md#option-names) lists their names in each interface.
 
+Errors use two classes in every interface: `std::invalid_argument`
+(`ValueError` in Python, `apxchol:badInput` in MATLAB/Octave) for invalid
+input or options and unsupported requests, and `std::runtime_error` or a type
+derived from it (`RuntimeError`, `apxchol:error`) for execution failures; see
+[results and errors](usage.md#results-and-errors). Message texts are not part
+of the promise.
+
 Numerical results and performance may change within the documented
 [precision and convergence contracts](precision.md). This compatibility
 policy begins with v1.0; it does not apply to earlier prereleases.
 
 Some implementation headers must be installed for C++ templates. Installation
 alone does not make every declaration public. The triangular solves, allocator,
-graph storage, built-in partitioners, operator validation, the per-stage timing
-tree and the CPU, CUDA and Metal routes behind `solver` live in `detail`
-namespaces. Outside the documented contracts above, `detail` namespaces, private
+graph storage, built-in partitioners and clique sampler, operator validation,
+the per-stage timing tree and the CPU, CUDA and Metal routes behind `solver`
+live in `detail` namespaces. Outside the documented contracts above, `detail` namespaces, private
 members, device kernels, internal mutators, benchmark scripts and diagnostic
 output are implementation details.
 

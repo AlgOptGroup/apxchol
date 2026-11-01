@@ -179,7 +179,7 @@ TEST(ResidualBlockedGraph, CrossBlockSamplingIsRepeatableAndConnected) {
     omp_settings settings;
     constexpr apxchol::node_index n = 193; //18,528 distinct edges: two blocks.
     const auto make = [=] {
-        apxchol::graph graph(n);
+        apxchol::detail::graph graph(n);
         for (apxchol::node_index u = 0; u < n; ++u)
             for (apxchol::node_index v = u + 1; v < n; ++v)
                 graph.add_edge(u, v, u == 0 ? 1024.0 + v

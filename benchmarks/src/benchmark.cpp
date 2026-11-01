@@ -769,7 +769,7 @@ static BenchResult run_apxchol_v1(
     const Eigen::VectorXd& b,
     const std::string& graph_name,
     const std::string& combo_name,
-    apxchol::solve_options opts, bool dump_profile, bool report_fill)
+    apxchol::solve_options opts, double tol, int maxiter, bool dump_profile, bool report_fill)
 {
     BenchResult r;
     r.solver_name = combo_name;
@@ -777,8 +777,6 @@ static BenchResult run_apxchol_v1(
     r.n = static_cast<int>(L.rows());
     r.nnz = static_cast<int>(L.nonZeros());
 
-    const double tol = opts.tol;
-    const int maxiter = opts.max_iter;
 #if defined(APXCHOL_USE_CUDA)
     // Warm the compatible runtime outside timing; input eligibility is setup work.
     if (apxchol::detail::select_solve_backend(opts) == apxchol::solve_backend::gpu)
@@ -3204,10 +3202,7 @@ int main(int argc, char** argv) try {
             auto apx_single = [&, label, opts](const Eigen::SparseMatrix<double>& L_,
                                               const Eigen::VectorXd& b_, const std::string& nm,
                                               double tl, int mi, ground_mode) {
-                auto request = opts;
-                request.tol = tl;
-                request.max_iter = mi;
-                return run_apxchol_v1(L_, b_, nm, label, request, args.profile, args.report_fill);
+                return run_apxchol_v1(L_, b_, nm, label, opts, tl, mi, args.profile, args.report_fill);
             };
             print(median_run([&]() {
                 return run_desing("apxchol", label, apx_single);
