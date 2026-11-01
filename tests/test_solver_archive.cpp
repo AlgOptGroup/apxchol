@@ -14,6 +14,7 @@
 #include <fstream>
 #include <functional>
 #include <future>
+#include <string>
 #include <system_error>
 #include <vector>
 #include <barrier>
@@ -62,7 +63,7 @@ void put_number(Bytes& bytes, std::size_t at, unsigned width, std::uint64_t valu
 Bytes read_bytes(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary | std::ios::ate);
     const auto size = input.tellg();
-    if (size < 0 || size > 16 * 1024 * 1024) throw std::runtime_error("invalid test fixture size");
+    if (size < 0 || size > 64 * 1024 * 1024) throw std::runtime_error("invalid test fixture size");
     Bytes bytes(static_cast<std::size_t>(size));
     input.seekg(0);
     if (!input.read(reinterpret_cast<char*>(bytes.data()), bytes.size())) throw std::runtime_error("fixture read failed");
@@ -571,13 +572,23 @@ TEST_F(SolverArchive, RejectsCorruptArrayPayload) {
     EXPECT_THROW(solver::load(descriptor), std::invalid_argument);
 }
 
-// Arrays over 4 MiB are read in blocks by several threads; the result and the
-// combined checksum must not depend on the team size.
+// Arrays over 4 MiB are read in blocks by several threads; the result, the
+// combined checksum and the reported error must not depend on the team size.
 TEST_F(SolverArchive, MultiBlockArraysLoadAtAnyTeamSize) {
-    const Sparse large = matrix(200000);  // operator values span two blocks
+    const Sparse large = matrix(700000);  // operator values span five 4 MiB blocks
     const solver source(large, options());
     const auto path = directory / "large.apxchol";
     source.save(path);
+    const auto expect_error = [](const std::filesystem::path& file, int threads, const char* message) {
+        auto opts = options();
+        opts.num_threads = threads;
+        try {
+            (void)solver::load(file, opts);
+            ADD_FAILURE() << "expected: " << message;
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(std::string(error.what()).find(message), std::string::npos) << error.what();
+        }
+    };
     for (int threads : {1, 4}) {
         auto opts = options();
         opts.num_threads = threads;
@@ -585,14 +596,27 @@ TEST_F(SolverArchive, MultiBlockArraysLoadAtAnyTeamSize) {
         EXPECT_EQ(csc_access::vals(restored.factor().L), csc_access::vals(source.factor().L));
         EXPECT_EQ(csc_access::inner(restored.factor().L), csc_access::inner(source.factor().L));
         EXPECT_EQ(restored.factor().perm, source.factor().perm);
+        expect_operator(path, large);
     }
+    constexpr std::size_t block = std::size_t(1) << 22;
     auto bytes = read_bytes(path);
     const auto values = number(bytes, 64 + 40 * a_values + 16, 8);
-    ASSERT_GT(number(bytes, 64 + 40 * a_values + 24, 8), std::uint64_t(1) << 22);
-    bytes.at(values + (std::size_t(1) << 22) + 3) ^= 1;
-    const auto corrupt = directory / "large-corrupt.apxchol";
-    write_bytes(corrupt, bytes);
-    EXPECT_THROW(solver::load(corrupt, options()), std::invalid_argument);
+    const auto length = number(bytes, 64 + 40 * a_values + 24, 8);
+    ASSERT_GT(length, 4 * block);
+    for (const auto at : {block + 3, static_cast<std::size_t>(length) - 1}) {
+        auto corrupt = bytes;
+        corrupt.at(values + at) ^= 1;
+        const auto file = directory / "large-corrupt.apxchol";
+        write_bytes(file, corrupt);
+        for (int threads : {1, 4}) expect_error(file, threads, "array checksum mismatch");
+    }
+    // A negative row index in a later block, with a valid checksum.
+    auto fixture = read_fixture(path);
+    ASSERT_GT(fixture[a_inner].data.size(), 2 * block);
+    fixture[a_inner].value(block / 4 + 5, UINT32_MAX);
+    const auto negative = directory / "large-negative.apxchol";
+    write_bytes(negative, encode_fixture(fixture));
+    for (int threads : {1, 4}) expect_error(negative, threads, "negative index");
 }
 
 TEST_F(SolverArchive, RejectsDuplicatePermutation) {

@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 #include <fcntl.h>
+#include <omp.h>
 #include <unistd.h>
 
 namespace apxchol {
@@ -304,7 +305,8 @@ private:
         std::vector<std::uint32_t> crcs(static_cast<std::size_t>(blocks));
         const int fd = fileno(file_.get());
         auto* bytes = reinterpret_cast<unsigned char*>(output);
-#pragma omp parallel for schedule(dynamic, 1) if (blocks > 1)
+        const auto team = static_cast<int>(std::min<std::int64_t>(blocks, omp_get_max_threads()));
+#pragma omp parallel for schedule(dynamic, 1) num_threads(team) if (blocks > 1)
         for (std::int64_t b = 0; b < blocks; ++b) {
             const auto first = static_cast<std::size_t>(b) * block;
             const auto size = std::min(block, length - first);
@@ -335,6 +337,8 @@ private:
         if (crc != info.crc) invalid("array checksum mismatch");
     }
 
+    // Arrays stored with another byte order, width or signedness are converted
+    // element by element.
     template<class T, class Put> void decode(const array_info& info, Put put) const {
         if constexpr (std::is_same_v<T, binary16> || std::is_floating_point_v<T>) {
             if (info.kind != 'f' || info.width != sizeof(T)) invalid("unexpected floating-point type");
@@ -347,42 +351,32 @@ private:
         std::size_t first = 0;
         while (first < info.count) {
             const auto count = std::min({static_cast<std::size_t>(info.count) - first, sizeof(buffer) / info.width, decoded.size()});
-            const char target_kind = std::is_same_v<T, binary16> || std::is_floating_point_v<T>
-                ? 'f' : std::is_signed_v<T> ? 'i' : 'u';
-            if (!swap && info.width == sizeof(T) && info.kind == target_kind) {
-                read_exact(file_.get(), decoded.data(), count * sizeof(T));
-                crc = checksum(crc, decoded.data(), count * sizeof(T));
-                if constexpr (std::is_integral_v<T> && std::is_signed_v<T>)
-                    for (std::size_t i = 0; i < count; ++i)
-                        if (decoded[i] < 0) invalid("negative index");
-            } else {
-                read_exact(file_.get(), buffer.data(), count * info.width);
-                crc = checksum(crc, buffer.data(), count * info.width);
-                for (std::size_t i = 0; i < count; ++i) {
-                    std::uint64_t bits = 0;
-                    if (info.width == 2) {
-                        std::uint16_t word;
-                        std::memcpy(&word, reinterpret_cast<const std::byte*>(buffer.data()) + 2 * i, 2);
-                        bits = swap ? std::byteswap(word) : word;
-                    } else if (info.width == 4) {
-                        std::uint32_t word;
-                        std::memcpy(&word, reinterpret_cast<const std::byte*>(buffer.data()) + 4 * i, 4);
-                        bits = swap ? std::byteswap(word) : word;
-                    } else {
-                        bits = buffer[i];
-                        if (swap) bits = std::byteswap(bits);
-                    }
-                    if constexpr (std::is_same_v<T, binary16>) {
-                        decoded[i] = {static_cast<std::uint16_t>(bits)};
-                    } else if constexpr (std::is_floating_point_v<T>) {
-                        if constexpr (sizeof(T) == 4) decoded[i] = std::bit_cast<float>(static_cast<std::uint32_t>(bits));
-                        else decoded[i] = std::bit_cast<double>(bits);
-                    } else {
-                        if ((info.kind == 'i' && (bits >> (info.width * 8 - 1))) ||
-                            bits > static_cast<std::uint64_t>(std::numeric_limits<T>::max()))
-                            invalid("index does not fit this build");
-                        decoded[i] = static_cast<T>(bits);
-                    }
+            read_exact(file_.get(), buffer.data(), count * info.width);
+            crc = checksum(crc, buffer.data(), count * info.width);
+            for (std::size_t i = 0; i < count; ++i) {
+                std::uint64_t bits = 0;
+                if (info.width == 2) {
+                    std::uint16_t word;
+                    std::memcpy(&word, reinterpret_cast<const std::byte*>(buffer.data()) + 2 * i, 2);
+                    bits = swap ? std::byteswap(word) : word;
+                } else if (info.width == 4) {
+                    std::uint32_t word;
+                    std::memcpy(&word, reinterpret_cast<const std::byte*>(buffer.data()) + 4 * i, 4);
+                    bits = swap ? std::byteswap(word) : word;
+                } else {
+                    bits = buffer[i];
+                    if (swap) bits = std::byteswap(bits);
+                }
+                if constexpr (std::is_same_v<T, binary16>) {
+                    decoded[i] = {static_cast<std::uint16_t>(bits)};
+                } else if constexpr (std::is_floating_point_v<T>) {
+                    if constexpr (sizeof(T) == 4) decoded[i] = std::bit_cast<float>(static_cast<std::uint32_t>(bits));
+                    else decoded[i] = std::bit_cast<double>(bits);
+                } else {
+                    if ((info.kind == 'i' && (bits >> (info.width * 8 - 1))) ||
+                        bits > static_cast<std::uint64_t>(std::numeric_limits<T>::max()))
+                        invalid("index does not fit this build");
+                    decoded[i] = static_cast<T>(bits);
                 }
             }
             put(std::span<const T>(decoded.data(), count));
