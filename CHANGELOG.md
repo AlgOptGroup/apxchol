@@ -97,6 +97,7 @@
 
 ### Documentation
 - The website separates user and developer guides, adds installation, quick start, examples, changelog and citing pages, and marks development pages with a banner.
+- The precision guide states when results are reproducible and that a release may change results, within the documented precision, for measured speed or memory gains.
 - A new Input formats page shows how to pass matrices from Eigen, SuiteSparse/CHOLMOD, SciPy, MATLAB/Octave, raw CSR/CSC arrays and Matrix Market files; CI builds and runs its examples.
 
 ### Fixes
