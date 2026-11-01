@@ -67,7 +67,10 @@ thread count, and a cross marks a run over the cap.
 
 ## Provenance
 
-[Download all results](performance/euler-20261031.json): apxchol revision
-`1c4abb35`, toolchains, binary and matrix checksums, the reason for every
-cell without a result, and the thread-scaling series. GPU memory is not
-published: these runs recorded device-wide usage, not per-process usage.
+[Every result](performance/euler-20261031.csv), the
+[thread-scaling series](performance/euler-20261031-scaling.csv) and
+[what all results share](performance/euler-20261031.json): apxchol revision
+`1c4abb35`, hardware, toolchains, tolerance and the cap rule. The header points
+to the full extract, with per-repeat values, checksums and the reason for every
+cell without a result. GPU memory is not published: these runs recorded
+device-wide usage, not per-process usage.

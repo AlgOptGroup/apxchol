@@ -27,5 +27,7 @@ whole process.
 
 ## Provenance
 
-[Download all cells](performance/mac-20261031.json): hardware, toolchain,
-benchmark binary checksum, matrix checksums and the largest residual over the repeats.
+[Every result](performance/mac-20261031.csv) and
+[what all results share](performance/mac-20261031.json): hardware, toolchain
+and revision. The header points to the full extract with the binary and matrix
+checksums.

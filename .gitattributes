@@ -1,0 +1,3 @@
+# Benchmark data derived by apxchol-research tools/compact.py
+docs/performance/*.csv linguist-generated=true
+docs/performance/*-2*.json linguist-generated=true

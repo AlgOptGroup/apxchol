@@ -50,7 +50,7 @@ Labels: `fail` (failed), `nc` (did not converge), `t/o` (timed out) and `n/a`
 
 ## Provenance
 
-[Download all results](performance/daint-20260910.json), converted from the
-published [results table](https://github.com/AlgOptGroup/apxchol/blob/390467c0dcb665a531ef5ab6bf53e2e895646900/benchmarks/daint/results.csv).
-Each cell records its source revision, toolchain and, where it was recorded,
-the binary checksum.
+[Every result](performance/daint-20260910.csv) and
+[what all results share](performance/daint-20260910.json), converted from the
+published [results table](https://github.com/AlgOptGroup/apxchol/blob/390467c0dcb665a531ef5ab6bf53e2e895646900/benchmarks/daint/results.csv),
+which also records each cell's source revision and toolchain.
