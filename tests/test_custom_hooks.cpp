@@ -7,6 +7,7 @@
 #include "grid_laplacian.h"
 #include "test_rhs.h"
 #include <algorithm>
+#include <cstdint>
 #include <span>
 #include <vector>
 
@@ -190,6 +191,37 @@ TEST(CustomPartitioner, LambdaViaAsPartitioner) {
     apxchol::solver slv(L, std::move(F));
     auto res = slv.solve(b, 1e-8, 500);
     EXPECT_LT(res.residual, 1e-8);
+}
+
+// View queries are pure reads: any threads may query any vertices, including
+// the same vertex and from inside a visitor.
+TEST(CustomPartitioner, ConcurrentViewQueriesMatchSerialOnes) {
+    const auto L = grid_laplacian(40, 40);
+    std::size_t rounds = 0;
+    auto part = apxchol::as_partitioner(
+        [&](const apxchol::partition_graph& G, std::span<const apxchol::node_index> active,
+            const apxchol::partition_context&, apxchol::selection& out) {
+            const auto summary = [&](apxchol::node_index v) {
+                long long total = G.degree(v);
+                G.for_each_neighbor(v, [&](auto u) { total += 1000LL * u + G.degree(u) + G.degree(v); });
+                return total;
+            };
+            const auto count = static_cast<std::int64_t>(active.size());
+            std::vector<long long> serial(active.size()), parallel(2 * active.size());
+            for (std::int64_t i = 0; i < count; ++i) serial[i] = summary(active[i]);
+#pragma omp parallel for schedule(dynamic, 3) num_threads(4)
+            for (std::int64_t i = 0; i < 2 * count; ++i) parallel[i] = summary(active[i % count]);
+            for (std::int64_t i = 0; i < 2 * count; ++i) EXPECT_EQ(parallel[i], serial[i % count]);
+            for (auto v : active) {
+                bool ok = true;
+                G.for_each_neighbor(v, [&](auto u) { if (out.contains(u)) ok = false; });
+                if (ok) out.add(v);
+            }
+            ++rounds;
+        });
+    const auto F = apxchol::factorize(L, std::move(part));
+    EXPECT_GT(rounds, 1u);
+    EXPECT_FALSE(F.rounds.empty());
 }
 
 TEST(CustomPartitioner, GraphViewMatchesPrepassDegrees) {

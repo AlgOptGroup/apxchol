@@ -1030,6 +1030,14 @@ factorization factorize_impl(const Eliminator& elim,
                                  pre_eligible.data(), eligible_count),
                              pctx, sel);
         } else {
+            // A custom rule gets only the read-only view, so dead incidences
+            // are dropped here, as the prepass does. baumann_kyng prunes the
+            // lists it samples itself.
+            if constexpr (!std::is_same_v<P, baumann_kyng_partitioner>) {
+                (void)prune_and_degrees(g, act, pre_degrees,
+                                        opts.experimental.omp_threshold);
+                if (cp) (*cp)("prune");
+            }
             p.find_partition(partition_graph_access::view(g), act, pctx, sel);
         }
         if (cp) (*cp)("select");

@@ -194,6 +194,19 @@ public:
         return prune_and_visit(v, [](node_index) {});
     }
 
+    /// Visit each active neighbor without changing v's list, and return the
+    /// count. A pure read, safe alongside other reads.
+    template<typename Visitor>
+    node_index visit_live(node_index v, Visitor&& visit) const {
+        node_index count = 0;
+        for (const auto& idx : adj_[v]) {
+            if (!is_active(idx.to)) continue;
+            visit(idx.to);
+            ++count;
+        }
+        return count;
+    }
+
     // ── active-aware queries ──
 
     bool is_active(node_index v) const {
