@@ -92,12 +92,12 @@ def historical(data, output):
 FAMILIES = {"amgcl": "AMGCL", "amgcl_cuda": "AMGCL", "amgx": "AMGX",
             "hypre_boomeramg": "BoomerAMG", "hypre_boomeramg_gpu": "BoomerAMG",
             "cmg_packed": "CMG", "cmg_matlab": "CMG", "ac": "Laplacians.jl", "ac2": "Laplacians.jl",
-            "rchol": "RCHOL", "rchol_par": "RCHOL", "accelerate_cholesky": "Accelerate", "accelerate_cg": "Accelerate",
+            "rchol": "RCHOL", "rchol_par": "RCHOL", "accelerate": "Accelerate",
             "parac": "ParAC", "parac_graph": "ParAC", "parac_physics": "ParAC"}
 FAMILY_ORDER = ["AMGCL", "AMGX", "BoomerAMG", "CMG", "Laplacians.jl", "RCHOL", "ParAC", "Accelerate"]
 VARIANTS = {"ac": "AC", "ac2": "AC2", "rchol": "serial", "rchol_par": "pRCHOL", "cmg_packed": "packed port",
             "cmg_matlab": "MATLAB", "parac": "Graph", "parac_graph": "Graph", "parac_physics": "Physics",
-            "accelerate_cholesky": "Cholesky", "accelerate_cg": "CG"}
+}
 CLASSES = {"grids": "Grids", "meshes": "Meshes and circuits", "ipm": "Linear programs (IPM)",
            "social": "Social and web graphs"}
 DEVICES = {"cpu": "CPU", "gpu": "CUDA", "metal": "Metal"}

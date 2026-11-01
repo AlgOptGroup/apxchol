@@ -10,14 +10,14 @@ lists every measured result, including failures.
 
 Euler (x86_64 + CUDA) <performance-euler>
 Daint (ARM64 + CUDA) <performance-daint>
-Apple M1 Max (Metal) <performance-mac>
+Apple M1 Max (CPU + Metal) <performance-mac>
 ```
 
 | Platform | Hardware | Routes |
 |---|---|---|
 | [Euler](performance-euler.md) | 2 × AMD EPYC 9554, 8 × RTX 4090 | CPU, CUDA |
 | [Daint](performance-daint.md) | NVIDIA GH200 (72-core Grace, Hopper) | ARM CPU, CUDA |
-| [Apple M1 Max](performance-mac.md) | M1 Max, 32 GB unified memory | Metal |
+| [Apple M1 Max](performance-mac.md) | M1 Max, 32 GB unified memory | ARM CPU, Metal |
 
 ## Speedup over each solver family
 
