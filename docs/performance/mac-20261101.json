@@ -1,0 +1,71 @@
+{
+ "campaign": "mac-20261101",
+ "date": "2026-11-01",
+ "hardware": {
+  "cpu": "Apple M1 Max (8 performance + 2 efficiency cores; 32 GB unified memory; macOS 26.0.1)",
+  "sockets": 1,
+  "gpus": [
+   {
+    "name": "Apple M1 Max GPU (32 cores, Metal 4)",
+    "count": 1
+   }
+  ]
+ },
+ "toolchains": [
+  {
+   "compiler": "clang",
+   "compiler_version": "17.0.0",
+   "openmp_runtime": "llvm-libomp",
+   "arch_flags": "-mcpu=native",
+   "node_index_bits": "32",
+   "edge_index_bits": "32",
+   "hypre_cuda": "off"
+  },
+  {
+   "compiler": "julia",
+   "compiler_version": "1.13.2 (libLLVM 20.1.8)",
+   "openmp_runtime": "none (pure-julia solver path)",
+   "arch_flags": "cpu_target=native (apple-m1)"
+  },
+  {
+   "compiler": "ParAC driver (patches 0001-0008, portable CPU solve), Apple clang 17.0.0"
+  },
+  {
+   "compiler": "CMG MATLAB Coder C++ port (private), Apple clang 17.0.0"
+  }
+ ],
+ "notes": [
+  "Two devices. metal: the 27 cells of mac-20261031.json, unchanged (apxchol only, measured from PR #116 head 0009d670). cpu: this campaign, measured 2026-11-01 from 45f42824 (origin/main 468f3df5 plus the Accelerate adapter on branch bench-accelerate); every cell carries its source_commit.",
+  "Competitors are capped at max(20 x the best complete CPU apxchol total on the same matrix on this Mac, 30 s) per solve. A run over the cap or a process killed at its deadline is exceeded_cap; times are withheld and cap_s is kept. ParAC's runner has no per-solve cap: its cell (preparation plus three runs) is killed at 4 x cap + 300 s and its median-total run is checked against the cap.",
+  "8 OpenMP threads (the 8 performance cores). macOS has no CPU pinning, so runs are unpinned. Processes ran under nice 10, one at a time, on a shared host. Accelerate uses its own thread pool, which --threads does not control. AC/AC2 and CMG are serial (threads 1 for CMG).",
+  "C++ series: one warmup and three retained repetitions. AC/AC2: three processes after Julia's fixed warm-up fixtures. ParAC: three runs, no warmup (runner default). CMG: one warmup and three retained processes, solutions regraded with Julia outside timing.",
+  "RCHOL/pRCHOL use the portable Eigen PCG (no MKL on arm64) and the repository's macOS affinity shim, which disables their Linux-only thread pinning.",
+  "ParAC: portable CPU solve (patch 0008), ParAC's own zero-sum RHS (Euler's 'portable, own RHS' variant). The MKL and shared-RHS variants were not run (no MKL on arm64; shared RHS out of scope here).",
+  "Accelerate: SparseFactor Cholesky with Accelerate's default ordering (AMD) on the Dirichlet-pinned operator, SparseSolve plus refinement on the original operator; each solve counts as one iteration. A factor plus workspace above half of physical memory (16 GB) stops as oom before the numeric factorization. Accelerate's iterative CG was not added: its only built-in preconditioner is diagonal (Jacobi).",
+  "Packed CMG: the private MATLAB Coder C++ port built natively on this Mac (Apple clang 17), on the shared A and b. Canonical MATLAB CMG was not run: no MATLAB on this Mac.",
+  "apxchol CPU ran on all 27 matrices. Competitors ran on the 20 matrices whose every Euler series peaks at or below 13 GB, plus grid_3000. Other competitor cells are n/a with the reason: either the series' Euler peak RSS exceeds a 16 GB per-process budget, or the matrix was outside the competitor tier.",
+  "No competitor has a Metal backend; Metal cells are apxchol only.",
+  "max_rss_mb is the process peak from BSD time -l."
+ ],
+ "tolerance": 1e-08,
+ "source_commits": [
+  "0009d670803d49c2d0a0156485eaf08114816eb8",
+  "45f42824c29050bfbaf2f1f0defcd9e92af213f6"
+ ],
+ "cap_rule": "CPU: max(20 x the fastest complete apxchol CPU setup + solve on the same matrix on this Mac, 30 s) per solve; Metal: none (apxchol only)",
+ "files": [
+  "mac-20261101.csv"
+ ],
+ "columns": {
+  "rel_res": "largest ||b-Ax||/||b|| over the retained repeats, on the original system",
+  "setup_s": "seconds, from the repeat with the median setup + solve",
+  "solve_s": "seconds, same repeat",
+  "cap_s": "the competitor's time cap, when one applied",
+  "class": "grids, meshes (meshes and circuits), ipm (linear programs), social (social and web graphs)"
+ },
+ "full_extract": {
+  "repository": "https://github.com/AlgOptGroup/apxchol-research",
+  "path": "campaigns/mac-20261101/extract.json",
+  "sha256": "c7c72778d88b3fc4c111084523e1c3f52e2c4d2d04ba1b5733aba34fe32a40e2"
+ }
+}
