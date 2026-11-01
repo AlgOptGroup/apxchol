@@ -2,8 +2,8 @@
 #include "apxchol/solver/solve.h"
 #include "apxchol/detail/csc_import.h"
 #include "apxchol/solver/sptrsv/omp.h"
+#include "../src/crc32c.h"
 #include "../src/solver_archive_internal.h"
-#include <zlib.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -47,6 +47,22 @@ solve_options options() {
 
 // Independent test fixture encoder for the documented binary layout.
 using Bytes = std::vector<unsigned char>;
+
+// Bytewise CRC-32C, independent of the library's implementation.
+std::uint32_t reference_crc32c(const unsigned char* data, std::size_t size) {
+    static const auto table = [] {
+        std::array<std::uint32_t, 256> t{};
+        for (std::uint32_t b = 0; b < 256; ++b) {
+            std::uint32_t c = b;
+            for (int k = 0; k < 8; ++k) c = c & 1 ? (c >> 1) ^ 0x82F63B78u : c >> 1;
+            t[b] = c;
+        }
+        return t;
+    }();
+    std::uint32_t c = 0xFFFFFFFFu;
+    for (std::size_t i = 0; i < size; ++i) c = table[(c ^ data[i]) & 0xff] ^ (c >> 8);
+    return ~c;
+}
 constexpr std::size_t prefix_size = 64 + 11 * 40;
 enum ArrayId : std::size_t { metadata, a_outer, a_inner, a_values, l_outer, l_inner, l_values, permutation, round_sizes,
                              l_diagonal, l_scales };
@@ -75,7 +91,7 @@ void write_bytes(const std::filesystem::path& path, const Bytes& bytes) {
 }
 void checksum_metadata(Bytes& bytes) {
     put_number(bytes, 20, 4, 0);
-    put_number(bytes, 20, 4, crc32(0, bytes.data(), prefix_size));
+    put_number(bytes, 20, 4, reference_crc32c(bytes.data(), prefix_size));
 }
 struct FixtureArray {
     unsigned char endian, kind, width;
@@ -110,7 +126,7 @@ Bytes encode_fixture(const Fixture& arrays) {
         put_number(bytes, d, 4, i); bytes[d + 4] = a.endian; bytes[d + 5] = a.kind; bytes[d + 6] = a.width;
         put_number(bytes, d + 8, 8, a.count); put_number(bytes, d + 16, 8, offset);
         put_number(bytes, d + 24, 8, a.data.size());
-        put_number(bytes, d + 32, 4, crc32(0, a.data.data(), a.data.size()));
+        put_number(bytes, d + 32, 4, reference_crc32c(a.data.data(), a.data.size()));
     }
     put_number(bytes, 24, 8, bytes.size()); checksum_metadata(bytes);
     return bytes;
@@ -507,6 +523,60 @@ TEST_F(SolverArchive, RejectsNewerFormatVersion) {
         EXPECT_STREQ(error.what(),
             "solver archive: written by a newer apxchol (format 2); upgrade to read it");
     }
+}
+
+TEST(Crc32c, KnownAnswers) {
+    const std::string digits = "123456789";
+    std::array<unsigned char, 32> zeros{}, ones{}, ascending{};
+    ones.fill(0xff);
+    for (std::size_t i = 0; i < ascending.size(); ++i) ascending[i] = static_cast<unsigned char>(i);
+    for (auto crc : {detail::crc32c, detail::crc32c_portable}) {
+        EXPECT_EQ(crc(0, digits.data(), digits.size()), 0xE3069283u);
+        EXPECT_EQ(crc(0, digits.data(), 0), 0u);
+        // RFC 3720, appendix B.4.
+        EXPECT_EQ(crc(0, zeros.data(), zeros.size()), 0x8A9136AAu);
+        EXPECT_EQ(crc(0, ones.data(), ones.size()), 0x62A8AB43u);
+        EXPECT_EQ(crc(0, ascending.data(), ascending.size()), 0x46DD794Eu);
+    }
+    EXPECT_EQ(reference_crc32c(reinterpret_cast<const unsigned char*>(digits.data()), digits.size()), 0xE3069283u);
+}
+
+// The hardware path runs three interleaved lanes over 24 KiB stretches; the
+// portable path reads 8 bytes at a time. Both must match the bytewise
+// reference at every alignment and length, and when continued.
+TEST(Crc32c, HardwareAndPortableAgreeAtAnyAlignmentAndLength) {
+    Bytes data(3 * 3 * 8192 + 1000);
+    std::uint64_t state = 0x9E3779B97F4A7C15ull;
+    for (auto& byte : data) { state = state * 6364136223846793005ull + 1442695040888963407ull; byte = state >> 56; }
+    for (std::size_t offset = 0; offset < 16; ++offset)
+        for (std::size_t size : {std::size_t(0), std::size_t(1), std::size_t(7), std::size_t(8), std::size_t(9),
+                                 std::size_t(63), std::size_t(3 * 8192 - 1), std::size_t(3 * 8192),
+                                 std::size_t(3 * 8192 + 5), std::size_t(2 * 3 * 8192 + 13), data.size() - 16}) {
+            const auto* p = data.data() + offset;
+            const auto expected = reference_crc32c(p, size);
+            EXPECT_EQ(detail::crc32c(0, p, size), expected) << offset << " " << size;
+            EXPECT_EQ(detail::crc32c_portable(0, p, size), expected) << offset << " " << size;
+            const auto half = size / 3;
+            EXPECT_EQ(detail::crc32c(detail::crc32c(0, p, half), p + half, size - half), expected);
+            EXPECT_EQ(detail::crc32c_portable(detail::crc32c_portable(0, p, half), p + half, size - half), expected);
+        }
+}
+
+TEST(Crc32c, CombineAcrossManyBoundaries) {
+    Bytes data(200000);
+    for (std::size_t i = 0; i < data.size(); ++i) data[i] = static_cast<unsigned char>(i * 131 + (i >> 9));
+    const auto expected = reference_crc32c(data.data(), data.size());
+    for (std::size_t step : {std::size_t(1), std::size_t(7), std::size_t(4096), std::size_t(65536), std::size_t(99999)}) {
+        std::uint32_t crc = 0;
+        std::size_t pieces = 0;
+        for (std::size_t first = 0; first < data.size(); first += step, ++pieces) {
+            const auto size = std::min(step, data.size() - first);
+            crc = detail::crc32c_combine(crc, detail::crc32c(0, data.data() + first, size), size);
+        }
+        EXPECT_EQ(crc, expected) << step << " bytes per piece, " << pieces << " pieces";
+    }
+    EXPECT_EQ(detail::crc32c_combine(0x12345678u, 0, 0), 0x12345678u);
+    EXPECT_EQ(detail::crc32c_combine(0, 0xE3069283u, 9), 0xE3069283u);
 }
 
 // The committed fixture is tests/fixtures/path5_sddm.mtx saved with default CPU

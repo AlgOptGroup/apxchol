@@ -21,20 +21,6 @@ install(TARGETS _apxchol LIBRARY DESTINATION apxchol)
 if (SKBUILD)
     install(FILES "${APX_ROOT}/LICENSE" DESTINATION "${SKBUILD_METADATA_DIR}/licenses")
 
-    # Preserve the notice from the zlib headers actually selected by this build.
-    find_package(ZLIB REQUIRED)
-    file(READ "${ZLIB_INCLUDE_DIR}/zlib.h" zlib_header)
-    string(FIND "${zlib_header}" "/* zlib.h" notice_start)
-    string(FIND "${zlib_header}" "*/" notice_end)
-    if (notice_start LESS 0 OR notice_end LESS notice_start)
-        message(FATAL_ERROR "Cannot find the selected zlib header's license notice")
-    endif()
-    math(EXPR notice_length "${notice_end} + 2 - ${notice_start}")
-    string(SUBSTRING "${zlib_header}" ${notice_start} ${notice_length} zlib_notice)
-    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/zlib-LICENSE.txt" "${zlib_notice}\n")
-    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/zlib-LICENSE.txt"
-        DESTINATION "${SKBUILD_METADATA_DIR}/licenses/zlib" RENAME LICENSE)
-
     execute_process(COMMAND "${Python_EXECUTABLE}" -c [=[
 from importlib.metadata import distribution
 import sys

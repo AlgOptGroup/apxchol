@@ -1,10 +1,10 @@
 #include "solver_archive_internal.h"
+#include "crc32c.h"
 #include "apxchol/csc_work.h"
 #include "apxchol/solver/detail/factor_validation.h"
 #include "apxchol/solver/detail/solver_route.h"
 #include "apxchol/solver/detail/thread_budget.h"
 
-#include <zlib.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -125,8 +125,7 @@ template<class T> void set(unsigned char* bytes, T value) {
     std::memcpy(bytes, &value, sizeof(T));
 }
 std::uint32_t checksum(std::uint32_t crc, const void* data, std::size_t size) {
-    // All callers process at most one 4 MiB block or the small metadata prefix.
-    return static_cast<std::uint32_t>(crc32(crc, static_cast<const Bytef*>(data), static_cast<uInt>(size)));
+    return detail::crc32c(crc, data, size);
 }
 
 struct array_info {
@@ -346,7 +345,7 @@ private:
             if (status[b] == negative) invalid("negative index");
             if (status[b] != ok) throw std::system_error(status[b], std::generic_category(), "read solver archive");
             const auto size = std::min(block, length - static_cast<std::size_t>(b) * block);
-            crc = static_cast<std::uint32_t>(crc32_combine(crc, crcs[b], static_cast<z_off_t>(size)));
+            crc = detail::crc32c_combine(crc, crcs[b], size);
         }
         if (crc != info.crc) invalid("array checksum mismatch");
     }

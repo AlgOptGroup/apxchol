@@ -2,7 +2,7 @@
 
 ## Dependencies
 
-CPU builds require CMake 3.20+, GCC or Clang with C++23 and OpenMP, and zlib headers.
+CPU builds require CMake 3.20+, GCC or Clang with C++23 and OpenMP.
 CMake uses an installed Eigen package when available and fetches it otherwise.
 Windows builds with MSVC or `clang-cl` are not supported.
 On x86-64, the minimum target is x86-64-v2.

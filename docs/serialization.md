@@ -62,7 +62,7 @@ The uncompressed binary file stores eleven typed arrays:
 | Factor diagonal | FP16 storage: d_j per column, FP32; empty for FP32 storage |
 | Factor scales | FP16 storage: s_j per column, FP32; empty for FP32 storage |
 
-The header identifies format version 1. Array descriptors record the element type, width, byte order, count, file offset and CRC32 checksum. Header fields use little-endian integers; array values use their recorded byte order. The header and descriptors have a separate checksum, and each array starts at a 64-byte-aligned file offset.
+The header identifies format version 1. Array descriptors record the element type, width, byte order, count, file offset and CRC-32C checksum. Header fields use little-endian integers; array values use their recorded byte order. The header and descriptors have a separate checksum, and each array starts at a 64-byte-aligned file offset.
 
 Loading checks file lengths, dimensions, index ranges, conversion to the current build’s index widths and the factor's structure. The original operator uses Eigen’s signed 32-bit sparse indices; wider factor indices do not remove that limit. CRC checks detect accidental corruption but do not authenticate a file.
 
@@ -81,7 +81,7 @@ All offsets below are in bytes. Header and descriptor integers are unsigned litt
 |---|---|
 | 0 | Eight ASCII bytes: `APXCHB01` |
 | 8, 12, 16 | Three `uint32`: format version `1`, array count `11`, descriptor size `40` |
-| 20 | `uint32`: header CRC32 |
+| 20 | `uint32`: header CRC-32C |
 | 24 | `uint64`: exact file size |
 | 32 | 32 reserved bytes, all zero |
 
@@ -93,7 +93,7 @@ All offsets below are in bytes. Header and descriptor integers are unsigned litt
 | 6 | Numeric byte value `2`, `4` or `8`: element width in bytes; `2` only for `f` |
 | 7 | One reserved zero byte |
 | 8, 16, 24 | Three `uint64`: element count, absolute payload offset, payload byte length |
-| 32 | `uint32`: payload CRC32 |
+| 32 | `uint32`: payload CRC-32C |
 | 36 | Four reserved zero bytes |
 
 Array IDs `0` through `10` identify metadata, operator offsets, operator rows, operator values, factor offsets, factor rows, factor values, permutation, round sizes, factor diagonal and factor scales, respectively. Each ID occurs once; descriptors follow payload order. The eight metadata values are `[1, n, sddm, operator_nnz, factor_nnz, lumped_nnz, original_nnz, storage]`, with `sddm` equal to `0` or `1` and `storage` equal to `0` (FP32) or `1` (FP16).
@@ -102,7 +102,7 @@ With FP16 storage, factor values are binary16 and the diagonal slots hold zero; 
 
 Payloads contain contiguous numeric values in their declared byte order: `i` means two’s-complement signed integers, `u` unsigned integers, and `f` IEEE 754 floating point. Operator values are FP64 and factor values FP32 or binary16. The writer uses unsigned 64-bit metadata and round sizes, signed 32-bit operator indices, and the build's factor-index widths. The reader accepts 32- or 64-bit integers when every value fits its destination.
 
-CRC32 uses zlib's CRC32 convention with initial value zero. The header checksum covers all 504 header/descriptor bytes with bytes 20–23 set to zero; each payload checksum covers exactly its declared bytes. Empty payloads have checksum zero.
+Checksums are CRC-32C (Castagnoli: reflected polynomial `0x82F63B78`, initial value and final XOR `0xFFFFFFFF`), so `123456789` checksums to `0xE3069283`. The header checksum covers all 504 header/descriptor bytes with bytes 20–23 set to zero; each payload checksum covers exactly its declared bytes. Empty payloads have checksum zero.
 
 The first payload starts at byte `512`. Each later payload starts at the first multiple of 64 at or after the preceding payload’s end. Payload length must equal count × width. Writers zero-fill alignment padding; readers ignore its contents and checksums exclude it. There are no trailing bytes after the final payload.
 
