@@ -13,8 +13,6 @@
 #include <unistd.h>
 #endif
 
-#include <Eigen/Core>
-#include <Eigen/Sparse>
 
 #include "apxchol/csc_work.h"
 #include "apxchol/graph/conversions.h"
@@ -23,13 +21,15 @@
 #include "reference_graph.h"
 
 namespace {
-// The library's Laplacian of a graph, and a graph of an Eigen operator.
+using Sparse = apxchol::test::sparse_matrix;
+using Triplet = apxchol::test::triplet;
+// The library's Laplacian of a graph, and a graph of an operator.
 template<class Graph>
-Eigen::SparseMatrix<double> laplacian_of(const Graph& g) {
-    return apxchol::test::to_eigen(apxchol::detail::laplacian(g).ref());
+Sparse laplacian_of(const Graph& g) {
+    return apxchol::test::from_csc(apxchol::detail::laplacian(g).ref());
 }
-apxchol::detail::graph make_graph_of(const Eigen::SparseMatrix<double>& L) {
-    return apxchol::detail::make_graph(apxchol::test::eigen_csc(L));
+apxchol::detail::graph make_graph_of(const Sparse& L) {
+    return apxchol::detail::make_graph(apxchol::test::internal_csc(L));
 }
 } // namespace
 
@@ -397,25 +397,24 @@ static apxchol::detail::graph make_grid_vec(int rows, int cols) {
 TEST(Laplacian, RowSumsZero) {
     auto G = make_grid_vec(10, 10);
     auto L = laplacian_of(G);
-    Eigen::VectorXd ones = Eigen::VectorXd::Ones(L.rows());
-    Eigen::VectorXd res = L * ones;
-    EXPECT_LT(res.norm(), 1e-12);
+    const std::vector<double> ones(L.rows, 1.0);
+    EXPECT_LT(apxchol::test::norm(apxchol::test::multiply(L, ones)), 1e-12);
 }
 
 TEST(Laplacian, Symmetric) {
     auto G = make_grid_vec(8, 8);
     auto L = laplacian_of(G);
-    Eigen::SparseMatrix<double> diff = L - Eigen::SparseMatrix<double>(L.transpose());
-    EXPECT_LT(diff.norm(), 1e-12);
+    const Sparse diff = apxchol::test::combine(1.0, L, -1.0, apxchol::test::transpose(L));
+    EXPECT_LT(apxchol::test::norm(diff.values), 1e-12);
 }
 
 TEST(Laplacian, PositiveDiagonal) {
     auto G = make_grid_vec(5, 5);
     auto L = laplacian_of(G);
-    for (int k = 0; k < L.outerSize(); ++k)
-        for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it) {
-            if (it.row() == it.col()) {
-                EXPECT_GE(it.value(), 0.0);
+    for (int k = 0; k < L.cols; ++k)
+        for (auto p = L.col_ptr[k]; p < L.col_ptr[k + 1]; ++p) {
+            if (L.row_idx[p] == k) {
+                EXPECT_GE(L.values[p], 0.0);
             }
         }
 }
@@ -424,7 +423,7 @@ TEST(Laplacian, PathGraph) {
     auto G = make_path_vec(3);  // 0-1-2, weights 1.0
     auto L = laplacian_of(G);
     // L should be [[1,-1,0],[-1,2,-1],[0,-1,1]]
-    EXPECT_EQ(L.rows(), 3);
+    EXPECT_EQ(L.rows, 3);
     EXPECT_NEAR(L.coeff(0, 0), 1.0, 1e-15);
     EXPECT_NEAR(L.coeff(1, 1), 2.0, 1e-15);
     EXPECT_NEAR(L.coeff(0, 1), -1.0, 1e-15);
@@ -432,7 +431,7 @@ TEST(Laplacian, PathGraph) {
 }
 
 namespace {
-void expect_directed_csc_matches_general(const Eigen::SparseMatrix<double>& L) {
+void expect_directed_csc_matches_general(const Sparse& L) {
     const auto reference = reference_graph(L);
     const auto candidate = make_graph_of(L);
     ASSERT_EQ(reference.n(), candidate.n());
@@ -455,19 +454,17 @@ void expect_directed_csc_matches_general(const Eigen::SparseMatrix<double>& L) {
                   std::bit_cast<std::uint64_t>(candidate.excess(v)));
     }
 }
-Eigen::SparseMatrix<double> csc_edge_fixture() {
+Sparse csc_edge_fixture() {
     // Straddle a float midpoint with an upper/lower difference below the
     // accepted symmetry tolerance: blindly copying the upper value is wrong.
     const double midpoint = 1.0 + std::ldexp(1.0, -24);
-    std::vector<Eigen::Triplet<double>> entries{
+    std::vector<Triplet> entries{
         {0,0,5}, {1,1,5}, {2,2,5}, {3,3,5}, {4,4,2},
         {1,0,-(midpoint+1e-12)}, {0,1,-(midpoint-1e-12)},
         {2,0,-0.0}, {0,2,-0.0},
         {3,1,-0.125}, {1,3,-0.125},
         {3,2,-1e-20}, {2,3,-1e-20}};
-    Eigen::SparseMatrix<double> L(5,5);
-    L.setFromTriplets(entries.begin(), entries.end());
-    return L;
+    return apxchol::test::from_triplets(5, 5, entries);
 }
 }
 
@@ -485,7 +482,9 @@ TEST(PooledGraph, NestedTeamConsumesEveryLogicalColumnRange) {
     const int prior_levels = omp_get_max_active_levels();
     omp_set_max_active_levels(1);
     auto L = laplacian_of(make_grid_vec(20, 20));
-    for (int v = 0; v < L.rows(); ++v) L.coeffRef(v,v) += 0.125;
+    for (int v = 0; v < L.cols; ++v)
+        for (auto p = L.col_ptr[v]; p < L.col_ptr[v + 1]; ++p)
+            if (L.row_idx[p] == v) L.values[p] += 0.125;
     const auto reference = make_graph_of(L);
     int observed_outer = 0, observed_inner = 0;
     #pragma omp parallel num_threads(2)
@@ -513,10 +512,7 @@ TEST(PooledGraph, NestedTeamConsumesEveryLogicalColumnRange) {
                     ASSERT_EQ(candidate.excess(v),reference.excess(v)) << v;
                 }
             };
-            // Vector storage always takes the general path; uncompressed directed
-            // storage forces that path instead of the full-column shortcut.
-            check();
-            L.uncompress();
+            // Vector storage always takes the general path.
             check();
         }
     }
@@ -541,22 +537,20 @@ TEST(DirectedCscGraph, BitIdenticalProofBuildsTheSameGraph) {
         lower[{std::max(a, b), std::min(a, b)}] = weight(rng);
     }
     std::vector<double> degree(n, 0.0);
-    std::vector<Eigen::Triplet<double>> entries;
+    std::vector<Triplet> entries;
     for (const auto& [rc, w] : lower) {
-        entries.emplace_back(rc.first, rc.second, -w);
-        entries.emplace_back(rc.second, rc.first, -w);
+        entries.push_back({rc.first, rc.second, -w});
+        entries.push_back({rc.second, rc.first, -w});
         degree[rc.first] += w; degree[rc.second] += w;
     }
     for (int v = 0; v < n; ++v)
-        entries.emplace_back(v, v, degree[v] + (v % 5 == 0 ? 0.5 : 0.0));
-    Eigen::SparseMatrix<double> L(n, n);
-    L.setFromTriplets(entries.begin(), entries.end());
-    L.makeCompressed();
+        entries.push_back({v, v, degree[v] + (v % 5 == 0 ? 0.5 : 0.0)});
+    const Sparse L = apxchol::test::from_triplets(n, n, entries);
 
     using G = apxchol::detail::graph;
     auto same_graph = [&] {
         const G searched = make_graph_of(L);
-        const G proven = apxchol::detail::make_graph_from_operator(apxchol::test::eigen_csc(L), true);
+        const G proven = apxchol::detail::make_graph_from_operator(apxchol::test::internal_csc(L), true);
         ASSERT_EQ(searched.n(), proven.n());
         ASSERT_EQ(searched.m(), proven.m());
         for (apxchol::node_index v = 0; v < searched.n(); ++v) {
@@ -628,38 +622,31 @@ TEST(CscWork, UniformRowsReproduceTheEqualCountSplit) {
 
 TEST(DirectedCscGraph, OneTriangleAndBalancedUnpairedPatternUseGeneralPath) {
     auto full = csc_edge_fixture();
-    Eigen::SparseMatrix<double> lower = full.triangularView<Eigen::Lower>();
-    expect_directed_csc_matches_general(lower);
-    std::vector<Eigen::Triplet<double>> entries{
+    std::vector<Triplet> lower_entries;
+    for (const auto& e : apxchol::test::triplets(full))
+        if (e.row >= e.col) lower_entries.push_back(e);
+    expect_directed_csc_matches_general(apxchol::test::from_triplets(full.rows, full.cols, lower_entries));
+    const std::vector<Triplet> entries{
         {0,0,3}, {1,1,3}, {2,2,3}, {3,3,3},
         {1,0,-1}, {3,2,-2}, {0,2,-1}, {2,3,-2}};
-    Eigen::SparseMatrix<double> asymmetric(4,4);
-    asymmetric.setFromTriplets(entries.begin(), entries.end());
+    const Sparse asymmetric = apxchol::test::from_triplets(4, 4, entries);
     expect_directed_csc_matches_general(asymmetric);
 }
 
-TEST(DirectedCscGraph, UncompressedAndDuplicateCoordinatesUseGeneralPath) {
-    auto L = csc_edge_fixture();
-    L.reserve(Eigen::VectorXi::Constant(5, 7));
-    ASSERT_FALSE(L.isCompressed());
-    expect_directed_csc_matches_general(L);
-    const int outer[]{0,3,6};
-    const int inner[]{0,1,1,0,0,1};
-    const double values[]{4,-2,-1,-1,-2,4};
-    const Eigen::Map<const Eigen::SparseMatrix<double>> mapped(
-        2,2,6,outer,inner,values);
-    Eigen::SparseMatrix<double> duplicate = mapped;
-    ASSERT_EQ(duplicate.nonZeros(), 6);
+TEST(DirectedCscGraph, DuplicateCoordinatesUseGeneralPath) {
+    Sparse duplicate(2, 2);
+    duplicate.col_ptr = {0, 3, 6};
+    duplicate.row_idx = {0, 1, 1, 0, 0, 1};
+    duplicate.values = {4, -2, -1, -1, -2, 4};
+    ASSERT_EQ(duplicate.nnz(), 6);
     expect_directed_csc_matches_general(duplicate);
 }
 
 TEST(DirectedCscGraph, EmptyAndDiagonalOnlyInputs) {
-    Eigen::SparseMatrix<double> empty(0,0);
+    const Sparse empty(0,0);
     expect_directed_csc_matches_general(empty);
-    Eigen::SparseMatrix<double> diagonal(3,3);
-    diagonal.insert(0,0)=1;
-    diagonal.insert(2,2)=2;
-    diagonal.makeCompressed();
+    const std::vector<Triplet> entries{{0,0,1}, {2,2,2}};
+    const Sparse diagonal = apxchol::test::from_triplets(3, 3, entries);
     expect_directed_csc_matches_general(diagonal);
 }
 

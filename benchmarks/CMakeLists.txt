@@ -3,10 +3,11 @@ project(laplacian_benchmarks LANGUAGES C CXX)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_device.cmake)
 
-# The shipped core configuration: C++23, Eigen, OpenMP, the architecture flag,
+# The shipped core configuration: C++23, OpenMP, the architecture flag,
 # index/pool options and, for CUDA, static cudart. apxchol_v1 below is built by
 # the same _apxchol_configure_core() as the root library and Python module.
 include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_core.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/eigen.cmake)
 set(CMAKE_CXX_STANDARD 17) # The apxchol targets request C++23 explicitly.
 
 # Competitors get the same machine-tuning flag as the core. It is recorded into

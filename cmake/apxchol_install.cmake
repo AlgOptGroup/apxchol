@@ -5,17 +5,6 @@ function(_apxchol_install_core)
     _apxchol_openmp_runtime(APXCHOL_OPENMP_RUNTIME)
     get_target_property(APXCHOL_CORE_TYPE apxchol_core TYPE)
     set(package_dir "${CMAKE_INSTALL_LIBDIR}/cmake/apxchol")
-    set(APXCHOL_BUNDLED_EIGEN OFF)
-    if (TARGET apxchol_eigen)
-        set(APXCHOL_BUNDLED_EIGEN ON)
-        FetchContent_GetProperties(eigen SOURCE_DIR eigen_source)
-        install(TARGETS apxchol_eigen EXPORT apxcholTargets)
-        install(DIRECTORY "${eigen_source}/Eigen"
-            DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/apxchol/eigen")
-        file(GLOB eigen_licenses "${eigen_source}/COPYING.*")
-        install(FILES ${eigen_licenses}
-            DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/apxchol/eigen")
-    endif()
     configure_package_config_file("${root}/cmake/apxcholConfig.cmake.in"
         "${CMAKE_CURRENT_BINARY_DIR}/apxcholConfig.cmake"
         INSTALL_DESTINATION "${package_dir}")

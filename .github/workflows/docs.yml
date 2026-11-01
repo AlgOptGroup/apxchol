@@ -62,7 +62,7 @@ jobs:
       - name: Install native dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y g++-14 libeigen3-dev ninja-build doxygen ccache
+          sudo apt-get install -y g++-14 ninja-build doxygen ccache
       - uses: ./.github/actions/ccache
         with:
           key: docs-gcc14

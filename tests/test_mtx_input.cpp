@@ -9,14 +9,12 @@
 // AdjacencyInputRegression.RawAdjacencyIsRefusedByTheOperatorContract below).
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <string>
 #include <utility>
 #include <vector>
-
-#include <Eigen/Core>
-#include <Eigen/Sparse>
 
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"
@@ -31,16 +29,21 @@ using apxchol::test::is_graph_adjacency;
 
 namespace {
 
-using Sparse = Eigen::SparseMatrix<double>;
-using Trip   = Eigen::Triplet<double>;
+using Sparse = apxchol::test::sparse_matrix;
+using Trip   = apxchol::test::triplet;
 
 input_scan scan_input(const Sparse& M) {
-    return apxchol::scan_input(apxchol::test::eigen_csc(M));
+    return apxchol::scan_input(apxchol::test::internal_csc(M));
 }
 
-std::int64_t project_laplacian_rhs_components(const Sparse& L, Eigen::VectorXd& b) {
-    return apxchol::project_laplacian_rhs_components(apxchol::test::eigen_csc(L),
-                                                     apxchol::test::mspan(b));
+std::int64_t project_laplacian_rhs_components(const Sparse& L, std::vector<double>& b) {
+    return apxchol::project_laplacian_rhs_components(apxchol::test::internal_csc(L), b);
+}
+
+using apxchol::test::set_entry;
+/// M(i, j) += value, inserting the entry when it is not stored.
+void add_entry(Sparse& M, std::int64_t i, std::int64_t j, double value) {
+    set_entry(M, i, j, M.coeff(i, j) + value);
 }
 
 /// Symmetric adjacency matrix of a rows x cols 4-neighbour grid, both
@@ -51,17 +54,15 @@ Sparse grid_adjacency(int rows, int cols, double w = 1.0) {
     for (int r = 0; r < rows; ++r)
         for (int c = 0; c < cols; ++c) {
             if (r + 1 < rows) {
-                t.emplace_back(id(r, c), id(r + 1, c), w);
-                t.emplace_back(id(r + 1, c), id(r, c), w);
+                t.push_back({id(r, c), id(r + 1, c), w});
+                t.push_back({id(r + 1, c), id(r, c), w});
             }
             if (c + 1 < cols) {
-                t.emplace_back(id(r, c), id(r, c + 1), w);
-                t.emplace_back(id(r, c + 1), id(r, c), w);
+                t.push_back({id(r, c), id(r, c + 1), w});
+                t.push_back({id(r, c + 1), id(r, c), w});
             }
         }
-    Sparse A(rows * cols, rows * cols);
-    A.setFromTriplets(t.begin(), t.end());
-    return A;
+    return apxchol::test::from_triplets(rows * cols, rows * cols, t);
 }
 
 /// The matching assembled Laplacian L = D - A.
@@ -75,9 +76,9 @@ Sparse path_adjacency(int n) { return grid_adjacency(1, n); }
 
 /// nnz of the strictly-off-diagonal part of a factor column set: what the
 /// factorization actually produced beyond the trivial diagonal.
-Eigen::Index offdiag_factor_nnz(const apxchol::factorization& F) {
-    return static_cast<Eigen::Index>(F.L.nonZeros()) -
-           static_cast<Eigen::Index>(F.L.cols());
+std::int64_t offdiag_factor_nnz(const apxchol::factorization& F) {
+    return static_cast<std::int64_t>(F.L.nonZeros()) -
+           static_cast<std::int64_t>(F.L.cols());
 }
 
 } // namespace
@@ -111,15 +112,10 @@ TEST(MtxInputScan, CountsDominanceViolations) {
     // grid_2000.mtx's exact corruption: an extra off-diagonal entry that the
     // diagonal does not account for, leaving two rows with row sum -1.
     Sparse L = grid_laplacian(4, 4);
-    std::vector<Trip> t;
-    for (int k = 0; k < L.outerSize(); ++k)
-        for (Sparse::InnerIterator it(L, k); it; ++it)
-            t.emplace_back(static_cast<int>(it.row()), static_cast<int>(it.col()),
-                           it.value());
-    t.emplace_back(0, 15, -1.0);
-    t.emplace_back(15, 0, -1.0);
-    Sparse bad(16, 16);
-    bad.setFromTriplets(t.begin(), t.end());
+    std::vector<Trip> t = apxchol::test::triplets(L);
+    t.push_back({0, 15, -1.0});
+    t.push_back({15, 0, -1.0});
+    const Sparse bad = apxchol::test::from_triplets(16, 16, t);
 
     const input_scan s = scan_input(bad);
     EXPECT_EQ(s.deficient_rows, 2);
@@ -131,11 +127,11 @@ TEST(MtxInputScan, CountsDominanceViolations) {
 
 TEST(AsOperatorRule, ValidOperatorsPassUnchanged) {
     Sparse sddm = grid_laplacian(6, 6);
-    for (int i = 0; i < sddm.rows(); ++i) sddm.coeffRef(i, i) += 0.05;
+    for (int i = 0; i < sddm.rows; ++i) add_entry(sddm, i, i, 0.05);
     Sparse nearly = grid_laplacian(6, 6);   // lumpable positive off-diagonals
-    nearly.coeffRef(0, 1) = nearly.coeffRef(1, 0) = 0.25;
-    Sparse diagonal(3, 3);                  // a positive diagonal-only matrix
-    diagonal.setIdentity();
+    set_entry(nearly, 0, 1, 0.25);
+    set_entry(nearly, 1, 0, 0.25);
+    const Sparse diagonal = apxchol::test::identity(3);  // a positive diagonal-only matrix
     for (const Sparse& M : {grid_laplacian(6, 6), sddm, nearly, diagonal})
         EXPECT_FALSE(is_graph_adjacency(M));
 }
@@ -143,18 +139,19 @@ TEST(AsOperatorRule, ValidOperatorsPassUnchanged) {
 TEST(AsOperatorRule, NonnegativeOffDiagonalsAreAGraph) {
     EXPECT_TRUE(is_graph_adjacency(grid_adjacency(6, 6, 2.5)));
     Sparse loops = grid_adjacency(6, 6);    // self-loops, as a pattern file has
-    for (int i = 0; i < loops.rows(); ++i) loops.coeffRef(i, i) = 1.0;
+    for (int i = 0; i < loops.rows; ++i) set_entry(loops, i, i, 1.0);
     EXPECT_TRUE(is_graph_adjacency(loops));
 }
 
 TEST(AsOperatorRule, AsymmetricOrNonFiniteInputRaises) {
-    Sparse asymmetric(3, 3);                // edge 0 -> 1 without 1 -> 0
-    std::vector<Trip> t{{0, 1, 1.0}, {1, 2, 1.0}, {2, 1, 1.0}};
-    asymmetric.setFromTriplets(t.begin(), t.end());
+    // edge 0 -> 1 without 1 -> 0
+    const std::vector<Trip> t{{0, 1, 1.0}, {1, 2, 1.0}, {2, 1, 1.0}};
+    const Sparse asymmetric = apxchol::test::from_triplets(3, 3, t);
     Sparse nan = grid_adjacency(3, 3);
-    nan.coeffRef(0, 1) = std::numeric_limits<double>::quiet_NaN();
+    set_entry(nan, 0, 1, std::numeric_limits<double>::quiet_NaN());
     Sparse inf = grid_adjacency(3, 3);
-    inf.coeffRef(1, 0) = inf.coeffRef(0, 1) = std::numeric_limits<double>::infinity();
+    set_entry(inf, 1, 0, std::numeric_limits<double>::infinity());
+    set_entry(inf, 0, 1, std::numeric_limits<double>::infinity());
     for (const auto& [M, reason] : {std::pair{asymmetric, "differ from their transpose partner"},
                                     std::pair{nan, "NaN or infinite"},
                                     std::pair{inf, "NaN or infinite"}}) {
@@ -173,12 +170,12 @@ TEST(AsOperatorRule, AsymmetricOrNonFiniteInputRaises) {
 TEST(AsOperatorRule, AnyNegativeOffDiagonalLeavesTheMatrixToTheSolver) {
     // Mixed signs, and an operator beyond the default lumping ceiling, are
     // used as given; only the solver decides whether they are valid.
-    std::vector<Trip> t{{0, 1, +1.0}, {1, 0, +1.0}, {1, 2, -1.0}, {2, 1, -1.0}};
-    Sparse mixed(3, 3);
-    mixed.setFromTriplets(t.begin(), t.end());
+    const std::vector<Trip> t{{0, 1, +1.0}, {1, 0, +1.0}, {1, 2, -1.0}, {2, 1, -1.0}};
+    const Sparse mixed = apxchol::test::from_triplets(3, 3, t);
     Sparse heavy = grid_laplacian(4, 4);
-    heavy.coeffRef(0, 5) = heavy.coeffRef(5, 0) = 20.0;   // 45% positive mass
-    for (int i = 0; i < heavy.rows(); ++i) heavy.coeffRef(i, i) += 5.0;
+    set_entry(heavy, 0, 5, 20.0);   // 45% positive mass
+    set_entry(heavy, 5, 0, 20.0);
+    for (int i = 0; i < heavy.rows; ++i) add_entry(heavy, i, i, 5.0);
     EXPECT_FALSE(is_graph_adjacency(mixed));
     EXPECT_FALSE(is_graph_adjacency(heavy));
 }
@@ -203,48 +200,52 @@ TEST(AdjacencyToLaplacian, BuildsDegreeMinusAdjacency) {
     Sparse L = grid_adjacency(4, 5, 2.0);
     L = adjacency_laplacian(L);
 
-    ASSERT_EQ(L.rows(), 20);
-    for (int k = 0; k < L.outerSize(); ++k) {
+    ASSERT_EQ(L.rows, 20);
+    for (int k = 0; k < L.cols; ++k) {
         double colsum = 0.0;
-        for (Sparse::InnerIterator it(L, k); it; ++it) {
-            colsum += it.value();
-            if (it.row() == it.col()) EXPECT_GT(it.value(), 0.0);
-            else                      EXPECT_DOUBLE_EQ(it.value(), -2.0);
+        for (auto p = L.col_ptr[k]; p < L.col_ptr[k + 1]; ++p) {
+            colsum += L.values[p];
+            if (L.row_idx[p] == k) EXPECT_GT(L.values[p], 0.0);
+            else                   EXPECT_DOUBLE_EQ(L.values[p], -2.0);
         }
         EXPECT_NEAR(colsum, 0.0, 1e-12);        // pure Laplacian
     }
     // Symmetric.
-    const Sparse asym = Sparse(L.transpose()) - L;
-    EXPECT_NEAR(asym.norm(), 0.0, 1e-12);
+    const Sparse asym = apxchol::test::combine(1.0, apxchol::test::transpose(L), -1.0, L);
+    EXPECT_NEAR(apxchol::test::norm(asym.values), 0.0, 1e-12);
 }
 
 TEST(AdjacencyToLaplacian, DropsSelfLoops) {
     Sparse A = path_adjacency(5);
-    A.coeffRef(2, 2) = 7.0;
-    A.makeCompressed();
+    set_entry(A, 2, 2, 7.0);
     A = adjacency_laplacian(A);
 
-    for (Sparse::InnerIterator it(A, 2); it; ++it)
-        if (it.row() == it.col()) {
-            EXPECT_DOUBLE_EQ(it.value(), 2.0);   // degree 2, self-loop ignored
+    for (auto p = A.col_ptr[2]; p < A.col_ptr[3]; ++p)
+        if (A.row_idx[p] == 2) {
+            EXPECT_DOUBLE_EQ(A.values[p], 2.0);   // degree 2, self-loop ignored
         }
 }
 
 TEST(AdjacencyToLaplacian, IsDegreeMinusAdjacencyWithSelfLoopsCancelling) {
     // L = D - M with D the row sums of M, including the self-loop itself.
     Sparse M = grid_adjacency(3, 4, 1.5);
-    M.coeffRef(0, 0) = 4.0;
-    M.coeffRef(5, 5) = 0.5;
-    M.makeCompressed();
-    const Eigen::VectorXd rowsum = M * Eigen::VectorXd::Ones(M.cols());
-    const Sparse expected = Sparse(Eigen::MatrixXd(rowsum.asDiagonal()).sparseView()) - M;
-    EXPECT_NEAR((adjacency_laplacian(M) - expected).norm(), 0.0, 1e-12);
+    set_entry(M, 0, 0, 4.0);
+    set_entry(M, 5, 5, 0.5);
+    const std::vector<double> rowsum = apxchol::test::multiply(M, std::vector<double>(M.cols, 1.0));
+    std::vector<Trip> degree;
+    for (int i = 0; i < M.rows; ++i)
+        if (rowsum[i] != 0.0) degree.push_back({i, i, rowsum[i]});
+    const Sparse expected = apxchol::test::combine(
+        1.0, apxchol::test::from_triplets(M.rows, M.cols, degree), -1.0, M);
+    const Sparse diff = apxchol::test::combine(1.0, adjacency_laplacian(M), -1.0, expected);
+    EXPECT_NEAR(apxchol::test::norm(diff.values), 0.0, 1e-12);
 }
 
 TEST(ComponentRhsProjection, LeavesConnectedRhsByteIdentical) {
     const Sparse L = grid_laplacian(4, 5);
-    Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(L.rows(), -2.0, 3.0);
-    const Eigen::VectorXd original = b;
+    std::vector<double> b(L.rows);
+    for (std::size_t i = 0; i < b.size(); ++i) b[i] = -2.0 + 5.0 * double(i) / double(b.size() - 1);
+    const std::vector<double> original = b;
 
     EXPECT_EQ(project_laplacian_rhs_components(L, b), 1);
     EXPECT_EQ(b, original);
@@ -254,15 +255,12 @@ TEST(ComponentRhsProjection, CentersEveryDisconnectedComponent) {
     std::vector<Trip> edges{
         {0, 1, 1.0}, {1, 0, 1.0}, {1, 2, 1.0}, {2, 1, 1.0},
         {3, 4, 1.0}, {4, 3, 1.0}, {4, 5, 1.0}, {5, 4, 1.0}};
-    Sparse L(6, 6);
-    L.setFromTriplets(edges.begin(), edges.end());
-    L = adjacency_laplacian(L);
-    Eigen::VectorXd b(6);
-    b << 1.0, 2.0, 6.0, -3.0, 4.0, 8.0;
+    const Sparse L = adjacency_laplacian(apxchol::test::from_triplets(6, 6, edges));
+    std::vector<double> b{1.0, 2.0, 6.0, -3.0, 4.0, 8.0};
 
     EXPECT_EQ(project_laplacian_rhs_components(L, b), 2);
-    EXPECT_NEAR(b.head(3).sum(), 0.0, 1e-15);
-    EXPECT_NEAR(b.tail(3).sum(), 0.0, 1e-15);
+    EXPECT_NEAR(b[0] + b[1] + b[2], 0.0, 1e-15);
+    EXPECT_NEAR(b[3] + b[4] + b[5], 0.0, 1e-15);
 }
 
 // ── end-to-end regression: the adjacency-as-operator mistake ─────────────────
@@ -275,9 +273,9 @@ TEST(AdjacencyInputRegression, RawAdjacencyIsRefusedByTheOperatorContract) {
     // asserts the operator class instead: an adjacency matrix has no positive
     // diagonal anywhere, which is a hard PSD violation, so it is REFUSED --
     // with the explicit conversion named.
-    constexpr Eigen::Index kEdges = 2 * 20 * 19;   // 20x20 4-neighbour grid
+    constexpr std::int64_t kEdges = 2 * 20 * 19;   // 20x20 4-neighbour grid
     const Sparse A = grid_adjacency(20, 20);
-    ASSERT_EQ(A.nonZeros(), 2 * kEdges);           // both triangles stored
+    ASSERT_EQ(A.nnz(), 2 * kEdges);           // both triangles stored
 
     for (auto call : {+[](const Sparse& M) {
                           (void)apxchol::factorize(apxchol::test::csc(M));
@@ -285,7 +283,7 @@ TEST(AdjacencyInputRegression, RawAdjacencyIsRefusedByTheOperatorContract) {
                       +[](const Sparse& M) {
                           (void)apxchol::solve(
                               apxchol::test::csc(M),
-                              apxchol::test::cspan(apxchol::test::random_rhs(M.rows())),
+                              apxchol::test::random_rhs(M.rows),
                               1e-8, 200);
                       }}) {
         try {
@@ -303,7 +301,7 @@ TEST(AdjacencyInputRegression, RawAdjacencyIsRefusedByTheOperatorContract) {
 }
 
 TEST(AdjacencyInputRegression, ConvertedAdjacencyHasPlausibleFillAndConverges) {
-    constexpr Eigen::Index kEdges = 2 * 20 * 19;
+    constexpr std::int64_t kEdges = 2 * 20 * 19;
     Sparse L = grid_adjacency(20, 20);
     L = adjacency_laplacian(L);
 
@@ -313,8 +311,8 @@ TEST(AdjacencyInputRegression, ConvertedAdjacencyHasPlausibleFillAndConverges) {
     EXPECT_GT(offdiag_factor_nnz(F), kEdges)
         << "factor shows no fill at all -- the clique sampler bailed out again";
 
-    const Eigen::VectorXd b = apxchol::test::random_rhs(L.rows());
-    const auto res = apxchol::solve(apxchol::test::csc(L), apxchol::test::cspan(b), 1e-8, 200);
+    const std::vector<double> b = apxchol::test::random_rhs(L.rows);
+    const auto res = apxchol::solve(apxchol::test::csc(L), b, 1e-8, 200);
     EXPECT_GT(res.iterations, 0);
     EXPECT_LT(res.residual, 1e-8);
 }
@@ -326,8 +324,8 @@ TEST(AdjacencyInputRegression, ConversionRoutesAnAdjacencyMatrixToConvergence) {
     ASSERT_TRUE(is_graph_adjacency(M));
     M = adjacency_laplacian(M);
 
-    const Eigen::VectorXd b = apxchol::test::random_rhs(M.rows());
-    const auto res = apxchol::solve(apxchol::test::csc(M), apxchol::test::cspan(b), 1e-8, 200);
+    const std::vector<double> b = apxchol::test::random_rhs(M.rows);
+    const auto res = apxchol::solve(apxchol::test::csc(M), b, 1e-8, 200);
     EXPECT_GT(res.iterations, 0);
     EXPECT_LT(res.residual, 1e-8);
 }
@@ -336,14 +334,13 @@ TEST(AdjacencyInputRegression, SddmInputIsStillSolvedAsAnOperator) {
     // Requirement: SDDM (positive diagonal excess) must keep working, and must
     // NOT be rebuilt as a Laplacian -- that would discard the excess.
     Sparse L = grid_laplacian(16, 16);
-    for (int i = 0; i < L.rows(); ++i) L.coeffRef(i, i) += 0.05;
-    L.makeCompressed();
+    for (int i = 0; i < L.rows; ++i) add_entry(L, i, i, 0.05);
 
-    EXPECT_EQ(scan_input(L).excess_rows, L.rows());
+    EXPECT_EQ(scan_input(L).excess_rows, L.rows);
     ASSERT_FALSE(is_graph_adjacency(L));
 
-    const Eigen::VectorXd b = apxchol::test::random_rhs(L.rows());
-    const auto res = apxchol::solve(apxchol::test::csc(L), apxchol::test::cspan(b), 1e-8, 200);
+    const std::vector<double> b = apxchol::test::random_rhs(L.rows);
+    const auto res = apxchol::solve(apxchol::test::csc(L), b, 1e-8, 200);
     EXPECT_GT(res.iterations, 0);
     EXPECT_LT(res.residual, 1e-8);
 }
