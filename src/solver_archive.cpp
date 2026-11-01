@@ -1,4 +1,5 @@
 #include "solver_archive_internal.h"
+#include "apxchol/csc_work.h"
 #include "apxchol/solver/detail/factor_validation.h"
 #include "apxchol/solver/detail/solver_route.h"
 #include "apxchol/solver/detail/thread_budget.h"
@@ -6,6 +7,7 @@
 #include <zlib.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cerrno>
 #include <cstdio>
@@ -292,13 +294,13 @@ private:
         return !swap && info.width == sizeof(T) && info.kind == kind;
     }
 
-    // An array stored in this build's layout is read straight into place in
-    // 4 MiB blocks, each checked and checksummed by the thread that reads it,
-    // 256 KiB at a time while the piece is still in cache.
-    // Block checksums combine in file order, and the first failing block in file
-    // order decides the error, so neither depends on the team size.
+    // An array stored in this build's layout is read in 4 MiB blocks, each
+    // checked and checksummed by the thread that reads it. A thread reads 64 KiB
+    // at a time into its own buffer, checks it while it is in cache, then copies
+    // it into place. Block checksums combine in file order, and the first failing
+    // block in file order decides the error, so neither depends on the team size.
     template<class T> void read_native(const array_info& info, T* output) const {
-        constexpr std::size_t block = std::size_t(1) << 22, piece_bytes = std::size_t(1) << 18;
+        constexpr std::size_t block = std::size_t(1) << 22, piece_bytes = std::size_t(1) << 16;
         const auto length = static_cast<std::size_t>(info.length);
         const auto blocks = static_cast<std::int64_t>((length + block - 1) / block);
         enum : int { ok = 0, truncated = -1, negative = -2 };  // positive: errno
@@ -307,31 +309,36 @@ private:
         const int fd = fileno(file_.get());
         auto* bytes = reinterpret_cast<unsigned char*>(output);
         const auto team = static_cast<int>(std::min<std::int64_t>(blocks, omp_get_max_threads()));
-#pragma omp parallel for schedule(dynamic, 1) num_threads(team) if (blocks > 1)
-        for (std::int64_t b = 0; b < blocks; ++b) {
-            const auto first = static_cast<std::size_t>(b) * block;
-            const auto end = first + std::min(block, length - first);
-            std::uint32_t crc = 0;
-            for (auto piece = first; piece < end && status[b] == ok;) {
-                const auto size = std::min(piece_bytes, end - piece);
-                for (std::size_t done = 0; done < size;) {
-                    const auto got = ::pread(fd, bytes + piece + done, size - done,
-                                             static_cast<off_t>(info.offset + piece + done));
-                    if (got > 0) { done += static_cast<std::size_t>(got); continue; }
-                    if (got < 0 && errno == EINTR) continue;
-                    status[b] = got < 0 ? errno : truncated;
-                    break;
+#pragma omp parallel num_threads(team) if (blocks > 1)
+        {
+            std::array<T, piece_bytes / sizeof(T)> piece;
+            auto* buffer = reinterpret_cast<unsigned char*>(piece.data());
+#pragma omp for schedule(dynamic, 1)
+            for (std::int64_t b = 0; b < blocks; ++b) {
+                const auto first = static_cast<std::size_t>(b) * block;
+                const auto end = first + std::min(block, length - first);
+                std::uint32_t crc = 0;
+                for (auto at = first; at < end && status[b] == ok;) {
+                    const auto size = std::min(piece_bytes, end - at);
+                    for (std::size_t done = 0; done < size;) {
+                        const auto got = ::pread(fd, buffer + done, size - done,
+                                                 static_cast<off_t>(info.offset + at + done));
+                        if (got > 0) { done += static_cast<std::size_t>(got); continue; }
+                        if (got < 0 && errno == EINTR) continue;
+                        status[b] = got < 0 ? errno : truncated;
+                        break;
+                    }
+                    if (status[b] != ok) break;
+                    crc = checksum(crc, buffer, size);
+                    if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
+                        if (std::any_of(piece.data(), piece.data() + size / sizeof(T), [](T v) { return v < 0; }))
+                            status[b] = negative;
+                    }
+                    std::memcpy(bytes + at, buffer, size);
+                    at += size;
                 }
-                if (status[b] != ok) break;
-                crc = checksum(crc, bytes + piece, size);
-                if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
-                    const T* values = output + piece / sizeof(T);
-                    if (std::any_of(values, values + size / sizeof(T), [](T v) { return v < 0; }))
-                        status[b] = negative;
-                }
-                piece += size;
+                crcs[b] = crc;
             }
-            crcs[b] = crc;
         }
         std::uint32_t crc = 0;
         for (std::int64_t b = 0; b < blocks; ++b) {
@@ -396,17 +403,25 @@ private:
 void check_operator_structure(const Eigen::SparseMatrix<double>& A) {
     if (A.rows() == 0 || A.rows() != A.cols() || !A.isCompressed()) invalid("operator must be nonempty square compressed CSC");
     const auto n = A.rows(), nnz = A.nonZeros();
-    if (A.outerIndexPtr()[0] != 0 || A.outerIndexPtr()[n] != nnz) invalid("invalid operator offsets");
-    for (Eigen::Index col = 0; col < n; ++col) {
-        const auto first = A.outerIndexPtr()[col], last = A.outerIndexPtr()[col + 1];
-        if (first < 0 || first > last || last > nnz) invalid("invalid operator offsets");
-        int previous = -1;
-        for (auto p = first; p < last; ++p) {
-            const auto row = A.innerIndexPtr()[p];
-            if (row <= previous || row >= n) invalid("operator rows must be sorted, unique and in range");
-            previous = row;
+    const int* outer = A.outerIndexPtr();
+    const int* inner = A.innerIndexPtr();
+    if (outer[0] != 0 || outer[n] != nnz) invalid("invalid operator offsets");
+    for (Eigen::Index col = 0; col < n; ++col)
+        if (outer[col] > outer[col + 1]) invalid("invalid operator offsets");
+    // With monotone offsets the columns split into work-balanced ranges.
+    std::atomic<bool> unsorted{false};
+#pragma omp parallel if (nnz >= (1 << 16))
+    {
+        const auto [lo, hi] = detail::work_balanced_range(outer, n);
+        for (auto col = lo; col < hi && !unsorted.load(std::memory_order_relaxed); ++col) {
+            int previous = -1;
+            for (auto p = outer[col]; p < outer[col + 1]; ++p) {
+                if (inner[p] <= previous || inner[p] >= n) { unsorted = true; break; }
+                previous = inner[p];
+            }
         }
     }
+    if (unsorted) invalid("operator rows must be sorted, unique and in range");
 }
 
 template<class T> void require_extent(const array_info& info, std::uint64_t expected) {

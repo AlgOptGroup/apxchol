@@ -617,6 +617,26 @@ TEST_F(SolverArchive, MultiBlockArraysLoadAtAnyTeamSize) {
     const auto negative = directory / "large-negative.apxchol";
     write_bytes(negative, encode_fixture(fixture));
     for (int threads : {1, 4}) expect_error(negative, threads, "negative index");
+    // Rows out of order in a column far into the operator, checked in parallel.
+    fixture = read_fixture(path);
+    const auto at = fixture[a_inner].count - 1000;
+    const auto row = fixture[a_inner].value(at);
+    fixture[a_inner].value(at, fixture[a_inner].value(at + 1));
+    fixture[a_inner].value(at + 1, row);
+    const auto unsorted = directory / "large-unsorted.apxchol";
+    write_bytes(unsorted, encode_fixture(fixture));
+    for (int threads : {1, 4}) expect_error(unsorted, threads, "rows must be sorted");
+}
+
+TEST_F(SolverArchive, RejectsUnsortedAndOutOfRangeRows) {
+    const auto unsorted = change("unsorted-rows", a_inner, [](auto& a) {
+        const auto first = a.value(0);
+        a.value(0, a.value(1));
+        a.value(1, first);
+    });
+    EXPECT_THROW(solver::load(unsorted), std::invalid_argument);
+    const auto range = change("row-range", a_inner, [](auto& a) { a.value(a.count - 1, 32); });
+    EXPECT_THROW(solver::load(range), std::invalid_argument);
 }
 
 TEST_F(SolverArchive, RejectsDuplicatePermutation) {
