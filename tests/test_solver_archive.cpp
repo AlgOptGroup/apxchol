@@ -530,7 +530,9 @@ TEST(Crc32c, KnownAnswers) {
     std::array<unsigned char, 32> zeros{}, ones{}, ascending{};
     ones.fill(0xff);
     for (std::size_t i = 0; i < ascending.size(); ++i) ascending[i] = static_cast<unsigned char>(i);
-    for (auto crc : {detail::crc32c, detail::crc32c_portable}) {
+    std::vector<std::uint32_t (*)(std::uint32_t, const void*, std::size_t) noexcept> all{detail::crc32c};
+    for (const auto& implementation : detail::crc32c_implementations()) all.push_back(implementation.checksum);
+    for (auto crc : all) {
         EXPECT_EQ(crc(0, digits.data(), digits.size()), 0xE3069283u);
         EXPECT_EQ(crc(0, digits.data(), 0), 0u);
         // RFC 3720, appendix B.4.
@@ -541,26 +543,35 @@ TEST(Crc32c, KnownAnswers) {
     EXPECT_EQ(reference_crc32c(reinterpret_cast<const unsigned char*>(digits.data()), digits.size()), 0xE3069283u);
 }
 
-// The hardware path runs three interleaved lanes over 24 KiB and then 768-byte
-// stretches; the portable path reads 8 bytes at a time. Both must match the bytewise
-// reference at every alignment and length, and when continued.
-TEST(Crc32c, HardwareAndPortableAgreeAtAnyAlignmentAndLength) {
+// The folding kernel takes 136-byte steps (at least four), the crc instruction
+// lanes 24 KiB and then 768-byte stretches, and the table 8 bytes at a time.
+// Every implementation must match the bytewise reference at every alignment and
+// length, and when continued.
+TEST(Crc32c, EveryImplementationAgreesAtAnyAlignmentAndLength) {
     Bytes data(3 * 3 * 8192 + 1000);
     std::uint64_t state = 0x9E3779B97F4A7C15ull;
     for (auto& byte : data) { state = state * 6364136223846793005ull + 1442695040888963407ull; byte = state >> 56; }
-    for (std::size_t offset = 0; offset < 16; ++offset)
-        for (std::size_t size : {std::size_t(0), std::size_t(1), std::size_t(7), std::size_t(8), std::size_t(9),
-                                 std::size_t(63), std::size_t(767), std::size_t(768), std::size_t(769), std::size_t(65536),
-                                 std::size_t(3 * 8192 - 1), std::size_t(3 * 8192),
-                                 std::size_t(3 * 8192 + 5), std::size_t(2 * 3 * 8192 + 13), data.size() - 16}) {
-            const auto* p = data.data() + offset;
-            const auto expected = reference_crc32c(p, size);
-            EXPECT_EQ(detail::crc32c(0, p, size), expected) << offset << " " << size;
-            EXPECT_EQ(detail::crc32c_portable(0, p, size), expected) << offset << " " << size;
-            const auto half = size / 3;
-            EXPECT_EQ(detail::crc32c(detail::crc32c(0, p, half), p + half, size - half), expected);
-            EXPECT_EQ(detail::crc32c_portable(detail::crc32c_portable(0, p, half), p + half, size - half), expected);
-        }
+    const auto implementations = detail::crc32c_implementations();
+    ASSERT_FALSE(implementations.empty());
+    std::vector<std::size_t> sizes{0, 1, 7, 8, 9, 63, 135, 136, 137, 543, 544, 545, 767, 768, 769,
+                                   4 * 136 + 23, 99 * 136 + 7, 65536, 3 * 8192 - 1, 3 * 8192, 3 * 8192 + 5,
+                                   2 * 3 * 8192 + 13};
+    sizes.push_back(data.size() - 16);
+    for (const auto& implementation : implementations)
+        for (std::size_t offset = 0; offset < 16; ++offset)
+            for (std::size_t size : sizes) {
+                const auto* p = data.data() + offset;
+                const auto expected = reference_crc32c(p, size);
+                const auto crc = implementation.checksum;
+                EXPECT_EQ(crc(0, p, size), expected) << implementation.name << " " << offset << " " << size;
+                EXPECT_EQ(crc(0x12345678u, p, size), detail::crc32c_portable(0x12345678u, p, size))
+                    << implementation.name << " " << offset << " " << size;
+                const auto third = size / 3;
+                EXPECT_EQ(crc(crc(0, p, third), p + third, size - third), expected)
+                    << implementation.name << " " << offset << " " << size;
+            }
+    EXPECT_EQ(detail::crc32c(0, data.data(), data.size()),
+              implementations.back().checksum(0, data.data(), data.size()));
 }
 
 TEST(Crc32c, CombineAcrossManyBoundaries) {
