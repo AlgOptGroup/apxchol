@@ -121,14 +121,19 @@ int main(int argc, char* argv[]) try {
     fast_matrix_market::matrix_market_header hdr;
     {
         std::ifstream f(cfg.input_path);
+        // fast_matrix_market divides by the row count while reading an array
+        // body, so reject an empty matrix from its header first.
+        fast_matrix_market::read_header(f, hdr);
+        if (hdr.nrows == 0 || hdr.ncols == 0) {
+            spdlog::error("matrix is empty ({}x{})", hdr.nrows, hdr.ncols);
+            return 2;
+        }
+        f.clear();
+        f.seekg(0);
         fast_matrix_market::read_matrix_market_eigen(f, hdr, L);
     }
     if (L.rows() != L.cols()) {
         spdlog::error("matrix must be square, got {}x{}", L.rows(), L.cols());
-        return 2;
-    }
-    if (L.rows() == 0) {
-        spdlog::error("matrix is empty (0x0)");
         return 2;
     }
 
