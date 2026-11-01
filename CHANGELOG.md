@@ -94,6 +94,7 @@
 ### Documentation
 - The website separates user and developer guides, adds installation, quick start, examples, changelog and citing pages, and marks development pages with a banner.
 - The precision guide states when results are reproducible and that a release may change results, within the documented precision, for measured speed or memory gains.
+- The usage guide recommends interleaving memory across NUMA nodes (`numactl --interleave`) when CPU threads span several of them.
 
 ### Fixes
 - The CLI reports "matrix is empty" and exits 2 for a dense (array) input with no rows or columns, instead of crashing with SIGFPE while reading it.

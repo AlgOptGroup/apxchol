@@ -295,6 +295,17 @@ The setting also covers CPU work in a GPU build; it does not control GPU
 threadgroups. More CPU threads need not be faster. To choose which cores run those CPU workers,
 see [thread placement](../benchmarks/README.md#thread-placement).
 
+When a CPU thread team spans several NUMA nodes, run with memory interleaved
+across those nodes, for example `numactl --interleave=0-2` when the threads run
+on cores of NUMA nodes 0 to 2. Without it, each page stays on the node of the
+thread that first wrote it, so solve time depends on that placement and can vary
+between runs. On a two-socket EPYC 9654 node with 64 threads on three NUMA
+nodes, interleaving cut solve time by 18 to 25% on as-Skitter, com-Youtube,
+com-LiveJournal, G3_circuit and grid_2000, with the same iterations and
+residuals, and removed a slow mode that made some as-Skitter solves up to 1.7
+times slower.
+With 16 threads on one NUMA node it made no difference.
+
 ## Thread safety
 
 Use one solver per thread. A solver reuses its workspace across `solve`,
