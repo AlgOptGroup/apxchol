@@ -120,9 +120,11 @@ Selection is deterministic for the same graph, candidates, selector state and
 actual thread team. Reusing one factor avoids the variability of rebuilding
 it; moving a host factor to a GPU does not change how it was constructed.
 
-Reproducibility at a fixed thread count is a default, not a guarantee across
-releases. A release may give it up where that makes setup or solves measurably
-faster or smaller without reducing accuracy; the changelog lists such changes.
+Results are reproducible from run to run at a fixed thread count on the same
+hardware and build. Bit-for-bit reproducibility is not guaranteed across
+releases: a release may change results, within the documented precision, when
+that makes setup or solves measurably faster or smaller. The changelog lists
+such changes.
 
 The [benchmark protocol](../benchmarks/README.md) describes how to compare
 supported configurations without changing timing boundaries.

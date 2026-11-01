@@ -93,7 +93,7 @@
 
 ### Documentation
 - The website separates user and developer guides, adds installation, quick start, examples, changelog and citing pages, and marks development pages with a banner.
-- The precision guide states that reproducibility at a fixed thread count is a default: a release may give it up where that makes setup or solves measurably faster or smaller without reducing accuracy, and says so in the changelog.
+- The precision guide states when results are reproducible and that a release may change results, within the documented precision, for measured speed or memory gains.
 
 ### Fixes
 - The CLI reports "matrix is empty" and exits 2 for a dense (array) input with no rows or columns, instead of crashing with SIGFPE while reading it.
