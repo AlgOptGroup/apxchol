@@ -293,11 +293,12 @@ private:
     }
 
     // An array stored in this build's layout is read straight into place in
-    // 4 MiB blocks, each checked and checksummed by the thread that reads it.
+    // 4 MiB blocks, each checked and checksummed by the thread that reads it,
+    // 256 KiB at a time while the piece is still in cache.
     // Block checksums combine in file order, and the first failing block in file
     // order decides the error, so neither depends on the team size.
     template<class T> void read_native(const array_info& info, T* output) const {
-        constexpr std::size_t block = std::size_t(1) << 22;
+        constexpr std::size_t block = std::size_t(1) << 22, piece_bytes = std::size_t(1) << 18;
         const auto length = static_cast<std::size_t>(info.length);
         const auto blocks = static_cast<std::int64_t>((length + block - 1) / block);
         enum : int { ok = 0, truncated = -1, negative = -2 };  // positive: errno
@@ -309,22 +310,28 @@ private:
 #pragma omp parallel for schedule(dynamic, 1) num_threads(team) if (blocks > 1)
         for (std::int64_t b = 0; b < blocks; ++b) {
             const auto first = static_cast<std::size_t>(b) * block;
-            const auto size = std::min(block, length - first);
-            for (std::size_t done = 0; done < size;) {
-                const auto got = ::pread(fd, bytes + first + done, size - done,
-                                         static_cast<off_t>(info.offset + first + done));
-                if (got > 0) { done += static_cast<std::size_t>(got); continue; }
-                if (got < 0 && errno == EINTR) continue;
-                status[b] = got < 0 ? errno : truncated;
-                break;
+            const auto end = first + std::min(block, length - first);
+            std::uint32_t crc = 0;
+            for (auto piece = first; piece < end && status[b] == ok;) {
+                const auto size = std::min(piece_bytes, end - piece);
+                for (std::size_t done = 0; done < size;) {
+                    const auto got = ::pread(fd, bytes + piece + done, size - done,
+                                             static_cast<off_t>(info.offset + piece + done));
+                    if (got > 0) { done += static_cast<std::size_t>(got); continue; }
+                    if (got < 0 && errno == EINTR) continue;
+                    status[b] = got < 0 ? errno : truncated;
+                    break;
+                }
+                if (status[b] != ok) break;
+                crc = checksum(crc, bytes + piece, size);
+                if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
+                    const T* values = output + piece / sizeof(T);
+                    if (std::any_of(values, values + size / sizeof(T), [](T v) { return v < 0; }))
+                        status[b] = negative;
+                }
+                piece += size;
             }
-            if (status[b] != ok) continue;
-            crcs[b] = checksum(0, bytes + first, size);
-            if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
-                const T* values = output + first / sizeof(T);
-                if (std::any_of(values, values + size / sizeof(T), [](T v) { return v < 0; }))
-                    status[b] = negative;
-            }
+            crcs[b] = crc;
         }
         std::uint32_t crc = 0;
         for (std::int64_t b = 0; b < blocks; ++b) {
