@@ -78,9 +78,10 @@ inline std::uint32_t step1(std::uint32_t c, unsigned char b) noexcept { return _
 #endif
 
 // One crc instruction has a latency of about three cycles but can issue every
-// cycle, so three independent lanes over adjacent `lane` byte ranges keep it
-// busy. Their registers merge by shifting the earlier ones past the later bytes.
-constexpr std::size_t lane = 8192;
+// cycle, so three independent lanes over adjacent ranges keep it busy. Their
+// registers merge by shifting the earlier ones past the later bytes. Long lanes
+// cover most of a buffer; short ones leave at most 767 bytes to a single lane.
+constexpr std::size_t long_lane = 8192, short_lane = 256;
 
 // shift[j][b] = (b << 8j) * x^(8 * bytes): the shift as four byte lookups.
 using shift_tables = std::array<std::array<std::uint32_t, 256>, 4>;
@@ -91,13 +92,16 @@ constexpr shift_tables make_shift_tables(std::uint64_t bytes) {
         for (std::uint32_t b = 0; b < 256; ++b) t[j][b] = multiply(op, b << (8 * j));
     return t;
 }
-constexpr shift_tables shift_one = make_shift_tables(lane), shift_two = make_shift_tables(2 * lane);
+constexpr shift_tables long_one = make_shift_tables(long_lane), long_two = make_shift_tables(2 * long_lane);
+constexpr shift_tables short_one = make_shift_tables(short_lane), short_two = make_shift_tables(2 * short_lane);
 
 inline std::uint32_t shift(const shift_tables& t, std::uint32_t c) noexcept {
     return t[0][c & 0xff] ^ t[1][(c >> 8) & 0xff] ^ t[2][(c >> 16) & 0xff] ^ t[3][c >> 24];
 }
 
-std::uint32_t update_hardware(std::uint32_t c, const unsigned char* p, std::size_t size) noexcept {
+// Runs three lanes of `lane` bytes while 3 * lane bytes remain.
+std::uint32_t three_lanes(std::uint32_t c, const unsigned char*& p, std::size_t& size, std::size_t lane,
+                          const shift_tables& one, const shift_tables& two) noexcept {
     for (; size >= 3 * lane; p += 3 * lane, size -= 3 * lane) {
         std::uint32_t a = c, b = 0, d = 0;
         for (std::size_t i = 0; i < lane; i += 8) {
@@ -109,8 +113,14 @@ std::uint32_t update_hardware(std::uint32_t c, const unsigned char* p, std::size
             b = step8(b, wb);
             d = step8(d, wd);
         }
-        c = shift(shift_two, a) ^ shift(shift_one, b) ^ d;
+        c = shift(two, a) ^ shift(one, b) ^ d;
     }
+    return c;
+}
+
+std::uint32_t update_hardware(std::uint32_t c, const unsigned char* p, std::size_t size) noexcept {
+    c = three_lanes(c, p, size, long_lane, long_one, long_two);
+    c = three_lanes(c, p, size, short_lane, short_one, short_two);
     for (; size >= 8; p += 8, size -= 8) {
         std::uint64_t w;
         std::memcpy(&w, p, 8);

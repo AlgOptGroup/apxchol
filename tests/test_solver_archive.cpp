@@ -541,8 +541,8 @@ TEST(Crc32c, KnownAnswers) {
     EXPECT_EQ(reference_crc32c(reinterpret_cast<const unsigned char*>(digits.data()), digits.size()), 0xE3069283u);
 }
 
-// The hardware path runs three interleaved lanes over 24 KiB stretches; the
-// portable path reads 8 bytes at a time. Both must match the bytewise
+// The hardware path runs three interleaved lanes over 24 KiB and then 768-byte
+// stretches; the portable path reads 8 bytes at a time. Both must match the bytewise
 // reference at every alignment and length, and when continued.
 TEST(Crc32c, HardwareAndPortableAgreeAtAnyAlignmentAndLength) {
     Bytes data(3 * 3 * 8192 + 1000);
@@ -550,7 +550,8 @@ TEST(Crc32c, HardwareAndPortableAgreeAtAnyAlignmentAndLength) {
     for (auto& byte : data) { state = state * 6364136223846793005ull + 1442695040888963407ull; byte = state >> 56; }
     for (std::size_t offset = 0; offset < 16; ++offset)
         for (std::size_t size : {std::size_t(0), std::size_t(1), std::size_t(7), std::size_t(8), std::size_t(9),
-                                 std::size_t(63), std::size_t(3 * 8192 - 1), std::size_t(3 * 8192),
+                                 std::size_t(63), std::size_t(767), std::size_t(768), std::size_t(769), std::size_t(65536),
+                                 std::size_t(3 * 8192 - 1), std::size_t(3 * 8192),
                                  std::size_t(3 * 8192 + 5), std::size_t(2 * 3 * 8192 + 13), data.size() - 16}) {
             const auto* p = data.data() + offset;
             const auto expected = reference_crc32c(p, size);
