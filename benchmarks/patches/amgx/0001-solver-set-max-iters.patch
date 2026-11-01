@@ -1,0 +1,77 @@
+diff --git a/include/amgx_c.h b/include/amgx_c.h
+index fda72ac..2e341de 100644
+--- a/include/amgx_c.h
++++ b/include/amgx_c.h
+@@ -397,6 +397,11 @@ AMGX_RC AMGX_API AMGX_solver_get_iterations_number
+ (AMGX_solver_handle slv,
+  int *n);
+ 
++/* Iteration limit for later solves; the hierarchy and setup are kept. */
++AMGX_RC AMGX_API AMGX_solver_set_max_iters
++(AMGX_solver_handle slv,
++ int max_iters);
++
+ AMGX_RC AMGX_API AMGX_solver_get_iteration_residual
+ (AMGX_solver_handle slv,
+  int it,
+diff --git a/src/amgx_c.cu b/src/amgx_c.cu
+index 6fe3b4c..d6f87db 100644
+--- a/src/amgx_c.cu
++++ b/src/amgx_c.cu
+@@ -1969,6 +1969,13 @@ inline void solver_get_iterations_number(AMGX_solver_handle slv, int *n)
+     *n = solver->get_num_iters();
+ }
+ 
++template<AMGX_Mode CASE>
++inline void solver_set_max_iters(AMGX_solver_handle slv, int max_iters)
++{
++    auto *solver = get_mode_object_from<CASE, AMG_Solver, AMGX_solver_handle>(slv);
++    solver->getSolverObject()->set_max_iters(max_iters);
++}
++
+ template<AMGX_Mode CASE>
+ inline AMGX_RC solver_get_iteration_residual(AMGX_solver_handle slv,
+         int it,
+@@ -3672,6 +3679,42 @@ extern "C" {
+         //return getCAPIerror(rc);
+     }
+ 
++    AMGX_RC AMGX_API AMGX_solver_set_max_iters(AMGX_solver_handle slv, int max_iters)
++    {
++        nvtxRange nvrf(__func__);
++
++        Resources *resources = NULL;
++        AMGX_CHECK_API_ERROR_NORSRC(getAMGXerror(getResourcesFromSolverHandle(slv, &resources)))
++        if (max_iters < 0)
++        {
++            AMGX_CHECK_API_ERROR(AMGX_ERR_BAD_PARAMETERS, resources)
++        }
++        AMGX_ERROR rc = AMGX_OK;
++
++        AMGX_TRIES()
++        {
++            AMGX_Mode mode = get_mode_from(slv);
++
++            switch (mode)
++            {
++#define AMGX_CASE_LINE(CASE) case CASE: { \
++          solver_set_max_iters<CASE>(slv, max_iters); \
++        } \
++        break;
++                    AMGX_FORALL_BUILDS(AMGX_CASE_LINE)
++                    AMGX_FORCOMPLEX_BUILDS(AMGX_CASE_LINE)
++#undef AMGX_CASE_LINE
++
++                default:
++                    AMGX_CHECK_API_ERROR(AMGX_ERR_BAD_MODE, resources)
++            }
++        }
++
++        AMGX_CATCHES(rc)
++        AMGX_CHECK_API_ERROR(rc, resources)
++        return AMGX_RC_OK;
++    }
++
+     AMGX_RC AMGX_API AMGX_solver_get_iteration_residual(AMGX_solver_handle slv, int it, int idx, double *res)
+     {
+         nvtxRange nvrf(__func__);

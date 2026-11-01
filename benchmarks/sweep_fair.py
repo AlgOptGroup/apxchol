@@ -472,7 +472,7 @@ NOCAP_TIMEOUT = int(os.environ.get("NOCAP_TIMEOUT_S", str(4 * 3600)))
 # The GPU route owns both setup and solve. Host-only storage/selector ablations
 # remain on the CPU axis; historical mixed-route cells retain their own sources.
 APX_GPU = [("apxchol_v1", APX_DEFAULT_CONFIG)]
-COMP_GPU = ["hypre_boomeramg_gpu","amgcl_cuda"]
+COMP_GPU = ["hypre_boomeramg_gpu","amgcl_cuda","amgx"]
 
 # --- Metal axis: apxchol only (no competitor has a Metal backend) ---
 APX_METAL = [("apxchol_v1", APX_DEFAULT_CONFIG)]

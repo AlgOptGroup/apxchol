@@ -154,6 +154,72 @@ class GpuTimingIsolationTest(unittest.TestCase):
         self.assertNotIn("max_vram_mb", metrics)
 
 
+class AmgxSeriesTest(unittest.TestCase):
+    ROW = ("AMG+PCG [AMGX;cuda],m,4,10,2.5e-02,1.0e-02,3.5e-02,7,4.0e-09,0,1000,"
+           "512.0,96.0,80.0,3,2,6.0e-09,original-v1,2,0.002,\n")
+    STDERR = (
+        'BUILD_META compiler=clang compiler_version=23.1.4 openmp_runtime=llvm-libomp '
+        'node_index_bits=32 edge_index_bits=32 hypre_cuda=off rchol_pcg=upstream-mkl '
+        'cuda_host_compiler="/usr/bin/g++-15" '
+        'amgx=91a8413ef267b1c32aff4014c02820e1c5897ac2+set_max_iters '
+        'amgx_config=PCG_CLASSICAL_V_JACOBI.json amgx_config_sha256=abc123 '
+        'arch_flags="-march=native"\n'
+        "[bench] cuda_init (once, before any timed solver): 90.0 ms\n"
+        "[bench] gpu_memory pid=9 bus_id=00000000:01:00.0 baseline_mib=238.0 "
+        "other_processes=0 other_mib=0.0\n"
+        "AMGX version 2.5.0\nBuilt on Nov  1 2026, 20:20:45\n"
+        "[bench] amgx_init (charged once per AMGX row): 0.150000 s\n"
+        "BENCH_REPEAT phase=retained index=1 total_s=3.4e-02\n")
+
+    def test_amgx_is_a_gpu_competitor_series(self):
+        self.assertIn("amgx", sweep_fair.COMP_GPU)
+        self.assertNotIn("amgx", sweep_fair.COMP)
+        self.assertIn(("AMGX", "amgx", ""), thread_scaling.CPP_GPU)
+        self.assertIn("AMGX", thread_scaling.COLORS)
+        with mock.patch.object(sweep_fair, "PARAC_ONLY", False), \
+             mock.patch.object(sweep_fair, "RUN_PARAC", False):
+            # apxchol, BoomerAMG default and cut, AMGCL and AMGX.
+            self.assertEqual(sweep_fair.planned_cell_count([("m", {})] * 2, "gpu"), 10)
+
+    def _run(self, output, stderr):
+        build = {}
+        with mock.patch.object(sweep_fair, "DEVICE", "gpu"), \
+             mock.patch.object(sweep_fair, "BUILD", build), \
+             mock.patch.object(rc, "benchmark_openmp_env", return_value={}), \
+             mock.patch.object(rc, "taskset_prefix", return_value="taskset -c 0"), \
+             mock.patch.object(sweep_fair, "sh", return_value=subprocess.CompletedProcess(
+                 "benchmark", 0, output, stderr)) as run:
+            status, metrics = sweep_fair.run_cpp("", "amgx", "", False, family="grids")
+        return status, metrics, build, run.call_args.args[0]
+
+    def test_amgx_row_parses_with_contract_memory_and_receipts(self):
+        status, metrics, build, cmd = self._run(self.ROW, self.STDERR)
+        self.assertIn("--solver amgx ", cmd)
+        self.assertIn(f"--maxiter {sweep_fair.MAXITER['gpu']} ", cmd)
+        self.assertEqual(status, "complete")
+        self.assertEqual(metrics["stop_contract"], "original-v1")
+        self.assertEqual((metrics["iters"], metrics["solve_passes"]), (7, 2))
+        self.assertEqual((metrics["setup_vram_mb"], metrics["solve_vram_mb"]), (80.0, 96.0))
+        self.assertEqual(metrics["max_repeat_rel_res"], 6.0e-09)
+        self.assertEqual(metrics["cuda_init_s"], 0.09)
+        self.assertEqual(metrics["vram_baseline_mb"], 238.0)
+        self.assertEqual(len(metrics["repeat_receipts"]), 1)
+        self.assertNotIn("execution_route", metrics)
+        self.assertEqual(build["amgx"], "91a8413ef267b1c32aff4014c02820e1c5897ac2+set_max_iters")
+        self.assertEqual(build["amgx_config"], "PCG_CLASSICAL_V_JACOBI.json")
+
+    def test_amgx_grades_the_worst_retained_repeat(self):
+        row = self.ROW.replace("6.0e-09,original-v1", "2.0e-08,original-v1")
+        status, metrics, _, _ = self._run(row, self.STDERR)
+        self.assertEqual(status, "not_converged")
+
+    def test_amgx_row_without_original_v1_is_failed(self):
+        row = "AMG+PCG [AMGX;cuda],m,4,10,2.5e-02,1.0e-02,3.5e-02,7,4.0e-09,0,1000\n"
+        status, metrics, _, _ = self._run(row, self.STDERR)
+        self.assertEqual(status, "failed")
+        self.assertIn("stopping_failure", metrics)
+
+
 class JuliaDriverPathTest(unittest.TestCase):
     def test_julia_driver_and_project_are_root_derived(self):
         output = (
@@ -551,11 +617,11 @@ class FairSweepSelectionTest(unittest.TestCase):
                             for _, config in sweep_fair.APX + sweep_fair.APX_GPU
                             for retired in ("[vec]", "[bstr]", "[vec_pool]", "[fwd_star]", "[forward_star]")))
         self.assertEqual(sweep_fair.planned_cell_count(selected, "cpu"), 351)
-        self.assertEqual(sweep_fair.planned_cell_count(selected, "gpu"), 162)
+        self.assertEqual(sweep_fair.planned_cell_count(selected, "gpu"), 189)  # 27 x 7
         self.assertEqual(
             sweep_fair.planned_cell_count(selected, "cpu")
             + sweep_fair.planned_cell_count(selected, "gpu"),
-            513,
+            540,
         )
 
     def test_all_registry_entries_are_selected_once(self):

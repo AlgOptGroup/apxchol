@@ -11,7 +11,9 @@ python3 benchmarks/sweep_fair.py --threads N --store results/cells
 ```
 
 For CUDA, use a separate build directory and add `-DAPXCHOL_DEVICE=CUDA
--DBENCH_HYPRE_USE_CUDA=ON -DBUILD_GPU_RCHOL=ON`; sweep with `--device gpu`.
+-DBENCH_HYPRE_USE_CUDA=ON -DBUILD_GPU_RCHOL=ON -DBENCH_AMGX=ON`; sweep with
+`--device gpu`. `BENCH_AMGX` builds AMGX as a separate CMake project with the
+same C/C++/CUDA compilers, `CMAKE_CUDA_ARCHITECTURES` and `CMAKE_CUDA_FLAGS`.
 
 On macOS, build `benchmarks/build-metal` with `-DAPXCHOL_DEVICE=METAL
 -DOpenMP_ROOT=$(brew --prefix libomp)` (Apple Clang; Hypre needs `OpenMP_ROOT` to
@@ -85,7 +87,7 @@ comments, Pages or README measurements.
   when needed, within one total iteration budget and at most eight attempts.
   Disconnected split solves apply the budget per component. Direct solvers count
   a solve/refinement as one work unit. Exhaustion remains `not_converged`.
-- CPU apxchol, Eigen CG, AMGCL and Hypre warm-start native retries. GPU apxchol
+- CPU apxchol, Eigen CG, AMGCL, Hypre and AMGX warm-start native retries. GPU apxchol
   and RCHOL reuse setup with cold native restarts. Julia AC/AC2 reuse their native
   solver closures; Julia CG, regularized ICC and direct methods can use residual
   corrections. These are adapter stopping policies, not vendor kernel rewrites.
@@ -102,7 +104,8 @@ comments, Pages or README measurements.
   transfers and returning the solution. Total is setup + solve.
 - Common parsing/assembly and independent grading are excluded. Process-wide CUDA
   initialization is separately reported; solver-specific allocations/module loading
-  remain charged. Hypre initialization is charged once per row. Metal device
+  remain charged. Hypre initialization is charged once per row, and so are
+  `AMGX_initialize` and AMGX resource creation (`[bench] amgx_init`). Metal device
   creation and kernel compilation are excluded the same way: one small Metal
   setup and solve runs before the first timed Metal owner, reported once as
   `metal_init_s`.
@@ -113,7 +116,7 @@ comments, Pages or README measurements.
   boundary correction.
 - GPU memory is this process's device memory as NVML attributes it to its PID on
   the benchmark's device, in MiB. Every GPU solver in the benchmark binary (apxchol,
-  AMGCL, Hypre) is measured the same way. Right after CUDA context creation, before
+  AMGCL, Hypre, AMGX) is measured the same way. Right after CUDA context creation, before
   any solver allocates, the binary prints
   `[bench] gpu_memory pid=… bus_id=… baseline_mib=… other_processes=… other_mib=…`.
   - `vram_baseline_mb`: that raw baseline (CUDA context only).
@@ -216,7 +219,8 @@ ETH Euler's `eu-g6` nodes (2 × EPYC 9554, 8 × RTX 4090) in October 2026.
 
 ## Solvers
 
-Hypre/BoomerAMG and AMGCL have CPU/CUDA series; AC/AC2 are Julia references.
+Hypre/BoomerAMG and AMGCL have CPU/CUDA series, and NVIDIA AMGX has a CUDA
+series (`amgx`); AC/AC2 are Julia references.
 RCHOL/pRCHOL retain upstream factors with labelled MKL or portable PCG.
 
 RCHOL prints progress to `std::cout`, and pRCHOL does so from its worker
@@ -238,6 +242,33 @@ nodes in October 2026 they failed in Hypre's device-to-device `cudaMemcpy`
 ordinal". Input staging and the solution buffer are charged to Hypre GPU
 setup; each solve attempt's copy of the solution back to the host is charged
 to Solve.
+
+AMGX is pinned to upstream commit `91a8413` (tarball SHA-256 in
+[CMakeLists.txt](CMakeLists.txt)). Release v2.5.0 does not compile with CUDA
+13.x: CCCL 3 removed the legacy `thrust::tuple` API that its headers use.
+`91a8413` is the first commit that maps it to `cuda::std::tuple`; since v2.5.0
+it changes only that header shim, an export macro and the CMake C++17 setting. [Patch 0001](patches/amgx/) adds
+`AMGX_solver_set_max_iters`, so a retry uses only the remaining iteration
+budget without rebuilding the hierarchy.
+
+The solver configuration is
+[amgx/PCG_CLASSICAL_V_JACOBI.json](amgx/PCG_CLASSICAL_V_JACOBI.json), compiled
+into the binary and recorded with its SHA-256 in `BUILD_META`. It is AMGX's
+shipped `PCG_CLASSICAL_V_JACOBI.json`: PCG preconditioned by one classical AMG
+V-cycle (two aggressive levels, D2 interpolation, block-Jacobi smoothing), in
+double precision (`dDDI`). Classical AMG matches the BoomerAMG GPU series; the
+shipped aggregation config uses size-2 aggregates without a coarse solver.
+Changes from the shipped file: printing and timing collection are off, and
+`convergence` is `ABSOLUTE`. The adapter sets `max_iters` to the remaining
+budget and `tolerance` to `request x ||b||` before each pass, so AMGX stops on
+its unpreconditioned recurrence residual relative to the RHS norm, whatever the
+warm start. The original-v1 check then grades the original operator.
+
+AMGX solves the whole operator. A singular Laplacian is grounded like AMGCL,
+with one Dirichlet pin per connected component, including isolated vertices.
+Setup covers grounding, CSR conversion, AMGX object creation, the matrix
+upload and the hierarchy. Solve covers the RHS upload, PCG passes, checks and
+each copy of the solution back to the host.
 
 [ParAC Graph/Physics](patches/parac/) separates common input reading and final
 interchange from CPU Graph/AMD algorithm preparation, while retaining required

@@ -43,12 +43,15 @@ CPP = [("apxchol bg+tree", "apxchol_v1", "bg+tree[vec_pool_aos]"),
        ("RCHOL", "rchol", ""), ("pRCHOL", "rchol_par", ""),
        ("BoomerAMG", "hypre_boomeramg", ""),
        ("AMGCL", "amgcl", "")]   # OMP-parallel (builtin backend) — belongs on the scaling chart
+CPP_GPU = [("apxchol bg+tree", "apxchol_v1", rc.APXCHOL_DEFAULT_CONFIG),
+           ("AMGCL", "amgcl_cuda", ""), ("BoomerAMG", "hypre_boomeramg_gpu", ""),
+           ("AMGX", "amgx", "")]
 COLORS = {"apxchol bg+tree": "#0b5394",
           "apxchol trace-cycle": "#3d7ebf",
           "apxchol greedy+tree": "#073763",
           "apxchol bk+tree": "#3d85c6",
           "RCHOL": "#d62728", "pRCHOL": "#ff9896", "BoomerAMG": "#2ca02c",
-          "AMGCL": "#8c564b", "ParAC": "#ff8c00", "ParAC Graph": "#ff8c00"}
+          "AMGCL": "#8c564b", "AMGX": "#76b900", "ParAC": "#ff8c00", "ParAC Graph": "#ff8c00"}
 
 # sh/git_sha/boost_state/parse_csv come from runner_common — the previous local
 # sh used the UNHARDENED subprocess.run (orphan-on-timeout bug); the common one
@@ -580,8 +583,7 @@ if __name__ == "__main__":
             parser.error("--matrices needs unique registered matrix ids")
         MATS = [(mid, rc.MATRICES[mid]["family"], margs_for(mid), False, rc.MATRICES[mid]["is2d"]) for mid in selected]
     if DEVICE == "gpu":
-        CPP = [("apxchol bg+tree", "apxchol_v1", rc.APXCHOL_DEFAULT_CONFIG),
-               ("AMGCL", "amgcl_cuda", ""), ("BoomerAMG", "hypre_boomeramg_gpu", "")]
+        CPP = list(CPP_GPU)
         INCLUDE_PARAC = False
     if args.series:
         selected = set(args.series.split(","))

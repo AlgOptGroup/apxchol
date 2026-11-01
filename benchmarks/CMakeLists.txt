@@ -272,6 +272,78 @@ if (APXCHOL_DEVICE STREQUAL "CUDA" AND BENCH_HYPRE_USE_CUDA)
 endif()
 FetchContent_MakeAvailable(hypre)
 
+# ── NVIDIA AMGX (optional GPU competitor) ────────────
+# v2.5.0 does not compile with CUDA 13.x: CCCL 3 removed the legacy
+# thrust::tuple API its headers use. 91a8413 ("Fix CUDA 13 tuple compatibility")
+# is the first upstream commit that builds; since v2.5.0 it changes only that
+# header shim, an export macro and the CMake C++17 setting. Patch 0001 adds
+# AMGX_solver_set_max_iters so original-v1 retries stay within the remaining
+# iteration budget without rebuilding the hierarchy.
+# AMGX is built as its own CMake project because its top level forces global
+# cache settings (C++ standard, compiler flags, CUDA architectures).
+option(BENCH_AMGX "Build the NVIDIA AMGX GPU competitor (CUDA builds only)" OFF)
+if (BENCH_AMGX)
+    if (NOT APXCHOL_DEVICE STREQUAL "CUDA")
+        message(FATAL_ERROR "BENCH_AMGX requires -DAPXCHOL_DEVICE=CUDA")
+    endif()
+    set(BENCH_AMGX_COMMIT 91a8413ef267b1c32aff4014c02820e1c5897ac2)
+    FetchContent_Declare(amgx
+        URL https://github.com/NVIDIA/AMGX/archive/${BENCH_AMGX_COMMIT}.tar.gz
+        URL_HASH SHA256=81d64b6fa744704e6dee1a7e71ef06fd422d4abcf9867c0451108f40f20707c4
+        # patch, not git apply: inside another git work tree (this repository),
+        # git apply resolves paths against that tree and silently skips the files.
+        PATCH_COMMAND patch -p1 --forward -i
+            ${CMAKE_CURRENT_SOURCE_DIR}/patches/amgx/0001-solver-set-max-iters.patch
+    )
+    FetchContent_GetProperties(amgx)
+    if (NOT amgx_POPULATED)
+        FetchContent_Populate(amgx)
+    endif()
+    include(ExternalProject)
+    set(_amgx_binary_dir ${CMAKE_CURRENT_BINARY_DIR}/amgx-build)
+    set(_amgx_library
+        ${_amgx_binary_dir}/${CMAKE_SHARED_LIBRARY_PREFIX}amgxsh${CMAKE_SHARED_LIBRARY_SUFFIX})
+    set(_amgx_args
+        -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+        -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+        -DCMAKE_CUDA_COMPILER=${CMAKE_CUDA_COMPILER}
+        -DCMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES}
+        -DCMAKE_CUDA_FLAGS=${CMAKE_CUDA_FLAGS}
+        -DCMAKE_DISABLE_FIND_PACKAGE_MPI=ON)
+    if (CMAKE_CUDA_HOST_COMPILER)
+        list(APPEND _amgx_args -DCMAKE_CUDA_HOST_COMPILER=${CMAKE_CUDA_HOST_COMPILER})
+    endif()
+    ExternalProject_Add(amgx_external
+        SOURCE_DIR ${amgx_SOURCE_DIR}
+        BINARY_DIR ${_amgx_binary_dir}
+        CMAKE_ARGS ${_amgx_args}
+        BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target amgxsh
+        INSTALL_COMMAND ""
+        BUILD_BYPRODUCTS ${_amgx_library})
+    add_library(bench_amgx SHARED IMPORTED)
+    set_target_properties(bench_amgx PROPERTIES
+        IMPORTED_LOCATION ${_amgx_library}
+        INTERFACE_INCLUDE_DIRECTORIES ${amgx_SOURCE_DIR}/include)
+    add_dependencies(bench_amgx amgx_external)
+
+    # The pinned solver configuration is compiled into the binary, so a cell
+    # cannot run a config file that changed after the build.
+    set(BENCH_AMGX_CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/amgx/PCG_CLASSICAL_V_JACOBI.json)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${BENCH_AMGX_CONFIG})
+    file(READ ${BENCH_AMGX_CONFIG} BENCH_AMGX_CONFIG_JSON)
+    file(SHA256 ${BENCH_AMGX_CONFIG} BENCH_AMGX_CONFIG_SHA256)
+    get_filename_component(BENCH_AMGX_CONFIG_NAME ${BENCH_AMGX_CONFIG} NAME)
+    file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/generated/bench_amgx_config.h
+        CONTENT "#pragma once
+// Generated from benchmarks/amgx/@BENCH_AMGX_CONFIG_NAME@ by CMake.
+inline constexpr const char* kAmgxCommit = \"@BENCH_AMGX_COMMIT@\";
+inline constexpr const char* kAmgxConfigName = \"@BENCH_AMGX_CONFIG_NAME@\";
+inline constexpr const char* kAmgxConfigSha256 = \"@BENCH_AMGX_CONFIG_SHA256@\";
+inline constexpr const char* kAmgxConfigJson = R\"amgxjson(@BENCH_AMGX_CONFIG_JSON@)amgxjson\";
+" @ONLY)
+endif()
+
 # ── GPU RCHOL — Liang et al. (2025) ──────────────────
 # Builds both the CPU driver (experiment/) and GPU driver (gpu_implementation/).
 # Invoked as standalone binaries from run.sh; parses stdout for timing.
@@ -549,6 +621,11 @@ if (APXCHOL_DEVICE STREQUAL "CUDA" AND BENCH_HYPRE_USE_CUDA)
     # generic APXCHOL_USE_CUDA definition says only that our own CUDA path exists.
     target_compile_definitions(benchmark PRIVATE APXCHOL_BENCH_HYPRE_CUDA)
 endif()
+if (BENCH_AMGX)
+    target_link_libraries(benchmark PRIVATE bench_amgx)
+    target_include_directories(benchmark PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+    target_compile_definitions(benchmark PRIVATE HAVE_AMGX)
+endif()
 if (HAVE_CHOLMOD)
     target_compile_definitions(benchmark PRIVATE HAVE_CHOLMOD)
     target_include_directories(benchmark PRIVATE ${CHOLMOD_INCLUDE})
@@ -601,6 +678,9 @@ if (NOT Boost_FOUND)
 endif()
 if (NOT APXCHOL_DEVICE STREQUAL "CUDA")
     test_solver_rejection(contract_rejects_unavailable_cuda amgcl_cuda)
+endif()
+if (NOT BENCH_AMGX)
+    test_solver_rejection(contract_rejects_unavailable_amgx amgx)
 endif()
 if (APXCHOL_DEVICE STREQUAL "METAL")
     add_test(NAME contract_v1_metal_route

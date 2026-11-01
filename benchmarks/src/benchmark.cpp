@@ -72,6 +72,10 @@
 #include <unistd.h>         // getpid for the GPU memory receipt.
 #include "gpu_memory.h"
 #endif
+#ifdef HAVE_AMGX
+#include <amgx_c.h>
+#include "bench_amgx_config.h"  // generated: pinned AMGX commit and embedded JSON config
+#endif
 #if defined(__APPLE__)
 #include <mach/mach.h>      // task_info for read_vmrss_mb().
 #endif
@@ -374,6 +378,11 @@ static void emit_build_meta() {
     const char* cuda_host = "unknown";
 #  endif
     std::cerr << " cuda_host_compiler=\"" << cuda_host << "\"";
+#endif
+#ifdef HAVE_AMGX
+    std::cerr << " amgx=" << kAmgxCommit << "+set_max_iters"
+              << " amgx_config=" << kAmgxConfigName
+              << " amgx_config_sha256=" << kAmgxConfigSha256;
 #endif
     std::cerr << " arch_flags=\"" << arch << "\"\n";
 }
@@ -1277,6 +1286,9 @@ static Args parse_args(int argc, char** argv) {
         , "hypre_boomeramg_gpu"
 #endif
 #endif
+#if defined(APXCHOL_USE_CUDA) && defined(HAVE_AMGX)
+        , "amgx"
+#endif
     });
     const bool input_only = !a.dump_mtx.empty() || !a.dump_rhs.empty() || a.component_info;
     for (const auto& solver : a.solvers) {
@@ -1762,7 +1774,7 @@ enum class decompose_mode { whole, split };
 enum class ground_mode    { pin, coarse, native };
 
 // Validity matrix + `auto` defaults in ONE place (invalid cells -> n/a, never silent).
-// solver key: "apxchol" | "amgcl" | "boomeramg".
+// solver key: "apxchol" | "amgcl" | "boomeramg" | "amgx".
 struct desing_plan { bool supported; decompose_mode decompose; ground_mode ground; };
 static desing_plan resolve_desing(const std::string& solver, const std::string& dec_req,
                                   const std::string& gnd_req, bool disconnected) {
@@ -1785,6 +1797,7 @@ static desing_plan resolve_desing(const std::string& solver, const std::string& 
     if      (solver=="apxchol")                       ok = (gnd==ground_mode::native);
     else if (solver=="boomeramg")                     ok = (gnd==ground_mode::pin);
     else if (solver=="amgcl")                         ok = (gnd==ground_mode::pin || gnd==ground_mode::coarse);
+    else if (solver=="amgx")                          ok = (gnd==ground_mode::pin);
     // The invalid cell: whole + coarse on a DISCONNECTED graph -- the unpinned singular
     // operator has a k-dim constant null space the single near-null vector can't span
     // (AMGCL CG breaks down / NaN). split makes every piece connected (k=1), so it's ok.
@@ -2647,6 +2660,146 @@ static BenchResult run_hypre_boomeramg_gpu(
 
 #endif
 
+// ──────────────────── NVIDIA AMGX ────────────────────
+#if defined(APXCHOL_USE_CUDA) && defined(HAVE_AMGX)
+// AMGX_initialize and the resources object are process-wide, like HYPRE_Init.
+// main() times them once after the CUDA warm-up and charges the cost once to
+// each reported AMGX row.
+static double g_amgx_init_seconds = 0.0;
+static AMGX_config_handle g_amgx_resources_config = nullptr;
+static AMGX_resources_handle g_amgx_resources = nullptr;
+
+static void amgx_call(AMGX_RC rc, const char* call) {
+    if (rc == AMGX_RC_OK) return;
+    char message[4096] = {};
+    AMGX_get_error_string(rc, message, sizeof message);
+    throw std::runtime_error(std::string("AMGX call failed: ") + call + ": " + message);
+}
+#define AMGX_CALL(expr) amgx_call((expr), #expr)
+
+// AMGX prints through this callback; keep stdout for the CSV.
+static void amgx_print_to_stderr(const char* message, int length) {
+    std::cerr.write(message, length);
+}
+
+static void amgx_initialize_once() {
+    AMGX_CALL(AMGX_register_print_callback(&amgx_print_to_stderr));
+    AMGX_CALL(AMGX_initialize());
+    AMGX_CALL(AMGX_config_create(&g_amgx_resources_config, "config_version=2"));
+    AMGX_CALL(AMGX_resources_create_simple(&g_amgx_resources, g_amgx_resources_config));
+}
+
+static void amgx_finalize() {
+    if (g_amgx_resources) AMGX_resources_destroy(g_amgx_resources);
+    if (g_amgx_resources_config) AMGX_config_destroy(g_amgx_resources_config);
+    AMGX_finalize();
+}
+
+// AMGX classical AMG + PCG in double precision (dDDI) with the pinned config in
+// benchmarks/amgx. A singular Laplacian is grounded with the same multi-component
+// Dirichlet pin as the other AMG adapters; every original-v1 check grades the
+// ORIGINAL operator. AMGX's PCG tests the unpreconditioned recurrence residual
+// against an ABSOLUTE threshold, set per pass to request * ||b_solve||, so each
+// pass is relative to the right-hand side whatever its warm start.
+static BenchResult run_amgx(
+    const Eigen::SparseMatrix<double>& L,
+    const Eigen::VectorXd& b,
+    const std::string& graph_name,
+    double tol, int maxiter)
+{
+    BenchResult r;
+    r.solver_name = "AMG+PCG [AMGX;cuda]";
+    r.graph_name = graph_name;
+    r.n = static_cast<int>(L.rows());
+    r.nnz = static_cast<int>(L.nonZeros());
+    const int n = r.n;
+    const bool is_laplacian = g_laplacian_mode;   // DECLARED class, never re-derived
+
+    // Setup: grounding, CSR conversion, AMGX objects, matrix upload and hierarchy.
+    Timer t;
+    t.start();
+    std::vector<int> pinned;
+    Eigen::SparseMatrix<double, Eigen::RowMajor> A;
+    Eigen::VectorXd bsub = b;
+    if (is_laplacian) {
+        A = dirichlet_pin(L, pinned);
+        for (int p : pinned) bsub(p) = 0.0;
+    } else {
+        A = L;
+    }
+    A.makeCompressed();
+    const double bsub_norm = bsub.norm() > 0 ? bsub.norm() : 1.0;
+
+    // The solver keeps a pointer to this config and re-reads `tolerance` at the
+    // start of every solve; `max_iters` is fixed at creation and changed with the
+    // patched AMGX_solver_set_max_iters.
+    AMGX_config_handle cfg = nullptr;
+    AMGX_CALL(AMGX_config_create(&cfg, kAmgxConfigJson));
+    auto set_native_tolerance = [&](double request) {
+        char option[128];
+        std::snprintf(option, sizeof option, "config_version=2, main:tolerance=%.17g",
+                      request * bsub_norm);
+        AMGX_CALL(AMGX_config_add_parameters(&cfg, option));
+    };
+    set_native_tolerance(tol);
+    {
+        const std::string budget = "config_version=2, main:max_iters=" + std::to_string(maxiter);
+        AMGX_CALL(AMGX_config_add_parameters(&cfg, budget.c_str()));
+    }
+    AMGX_matrix_handle matrix = nullptr;
+    AMGX_vector_handle rhs = nullptr, solution = nullptr;
+    AMGX_solver_handle solver = nullptr;
+    AMGX_CALL(AMGX_matrix_create(&matrix, g_amgx_resources, AMGX_mode_dDDI));
+    AMGX_CALL(AMGX_vector_create(&rhs, g_amgx_resources, AMGX_mode_dDDI));
+    AMGX_CALL(AMGX_vector_create(&solution, g_amgx_resources, AMGX_mode_dDDI));
+    AMGX_CALL(AMGX_solver_create(&solver, g_amgx_resources, AMGX_mode_dDDI, cfg));
+    AMGX_CALL(AMGX_matrix_upload_all(matrix, n, static_cast<int>(A.nonZeros()), 1, 1,
+                                     A.outerIndexPtr(), A.innerIndexPtr(), A.valuePtr(),
+                                     nullptr));
+    AMGX_CALL(AMGX_solver_setup(solver, matrix));
+    cudaDeviceSynchronize();
+    r.setup_time = t.elapsed();
+    r.setup_vram_mb = read_vram_mb();   // outside both timers
+
+    // Solve: RHS upload, PCG passes (warm-started from the device iterate),
+    // original-operator checks and every copy of the solution back to the host.
+    t.start();
+    AMGX_CALL(AMGX_vector_upload(rhs, n, 1, bsub.data()));
+    AMGX_CALL(AMGX_vector_set_zero(solution, n, 1));
+    std::vector<double> x_host(n);
+    Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
+        [&](double request, int remaining, bool, Eigen::VectorXd& current) {
+            set_native_tolerance(request);
+            AMGX_CALL(AMGX_solver_set_max_iters(solver, remaining));
+            AMGX_CALL(AMGX_solver_solve(solver, rhs, solution));
+            int used = 0;
+            AMGX_CALL(AMGX_solver_get_iterations_number(solver, &used));
+            AMGX_CALL(AMGX_vector_download(solution, x_host.data()));
+            current = Eigen::Map<const Eigen::VectorXd>(x_host.data(), n);
+            return used;
+        });
+    r.solve_time = t.elapsed();
+    r.total_time = r.setup_time + r.solve_time;
+    r.solve_rss_mb = read_vmrss_mb();
+    r.solve_vram_mb = read_vram_mb();   // hierarchy, operator and vectors still held
+    r.fillin = 0;
+    r.us_per_nnz = r.total_time / std::max(1, r.nnz) * 1e6;
+
+    center_if_laplacian(x);
+    Eigen::VectorXd res = b - L * x;
+    center_if_laplacian(res);
+    const double bnorm = b.norm() > 0 ? b.norm() : 1.0;
+    r.rel_residual = res.norm() / bnorm;
+
+    AMGX_solver_destroy(solver);
+    AMGX_vector_destroy(solution);
+    AMGX_vector_destroy(rhs);
+    AMGX_matrix_destroy(matrix);
+    AMGX_config_destroy(cfg);
+    return r;
+}
+#endif
+
 // ──────────────────── main ────────────────────
 int main(int argc, char** argv) try {
     // First, before anything can fail or hang: a cell recorded as `timeout` or
@@ -2720,8 +2873,22 @@ int main(int argc, char** argv) try {
     // Printed rather than hidden. Nothing else about the timing logic changes.
     // v1 resolves each configuration first and calls the same helper only for
     // its GPU route. Competitor GPU initialization stays at this process point.
-    if (args.solvers.count("amgcl_cuda") || args.solvers.count("hypre_boomeramg_gpu"))
+    if (args.solvers.count("amgcl_cuda") || args.solvers.count("hypre_boomeramg_gpu") ||
+        args.solvers.count("amgx"))
         warm_up_cuda_once();
+#endif
+
+#if defined(APXCHOL_USE_CUDA) && defined(HAVE_AMGX)
+    const bool amgx_requested = args.solvers.count("amgx") != 0;
+    if (amgx_requested) {
+        const auto t_amgx_init = std::chrono::high_resolution_clock::now();
+        amgx_initialize_once();
+        g_amgx_init_seconds = std::chrono::duration<double>(
+            std::chrono::high_resolution_clock::now() - t_amgx_init).count();
+        std::cerr << "[bench] amgx_init (charged once per AMGX row): "
+                  << std::fixed << std::setprecision(6)
+                  << g_amgx_init_seconds << " s\n";
+    }
 #endif
 
 #ifdef HAVE_HYPRE
@@ -3285,6 +3452,22 @@ int main(int argc, char** argv) try {
     }
 #endif
 
+#endif
+
+#if defined(APXCHOL_USE_CUDA) && defined(HAVE_AMGX)
+    // AMGX uses run_desing with the AMGCL policy: one Dirichlet pin per
+    // component on the whole operator (auto = whole + pin).
+    if (amgx_requested) {
+        auto result = median_run([&]() { return run_desing("amgx", "AMG+PCG [AMGX;cuda]",
+            [](const Eigen::SparseMatrix<double>& L_, const Eigen::VectorXd& b_,
+               const std::string& nm, double tl, int mi, ground_mode) {
+                return run_amgx(L_, b_, nm, tl, mi); }); }, R);
+        result.setup_time += g_amgx_init_seconds;
+        result.total_time += g_amgx_init_seconds;
+        result.us_per_nnz = result.total_time / std::max(1, result.nnz) * 1e6;
+        print(result);
+        amgx_finalize();
+    }
 #endif
 
 #ifdef HAVE_HYPRE
