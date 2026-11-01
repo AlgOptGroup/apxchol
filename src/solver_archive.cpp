@@ -308,7 +308,7 @@ private:
         std::vector<std::uint32_t> crcs(static_cast<std::size_t>(blocks));
         const int fd = fileno(file_.get());
         auto* bytes = reinterpret_cast<unsigned char*>(output);
-        const auto team = static_cast<int>(std::min<std::int64_t>(blocks, omp_get_max_threads()));
+        const auto team = static_cast<int>(std::clamp<std::int64_t>(blocks, 1, omp_get_max_threads()));
 #pragma omp parallel num_threads(team) if (blocks > 1)
         {
             std::array<T, piece_bytes / sizeof(T)> piece;

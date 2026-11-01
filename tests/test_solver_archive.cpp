@@ -617,6 +617,13 @@ TEST_F(SolverArchive, MultiBlockArraysLoadAtAnyTeamSize) {
     const auto negative = directory / "large-negative.apxchol";
     write_bytes(negative, encode_fixture(fixture));
     for (int threads : {1, 4}) expect_error(negative, threads, "negative index");
+    // A failed check in a later block is reported before a checksum mismatch
+    // in an earlier one, as by a sequential reader.
+    auto mixed = read_bytes(negative);
+    mixed.at(number(mixed, 64 + 40 * a_inner + 16, 8)) ^= 1;
+    const auto both = directory / "large-negative-and-corrupt.apxchol";
+    write_bytes(both, mixed);
+    for (int threads : {1, 4}) expect_error(both, threads, "negative index");
     // Rows out of order in a column far into the operator, checked in parallel.
     fixture = read_fixture(path);
     const auto at = fixture[a_inner].count - 1000;
