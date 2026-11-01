@@ -242,6 +242,8 @@ if (APXCHOL_BUILD_CLI)
     apxchol_cli_rhs_error_test(cli_x0_must_match_batch path5_rhs3 "x0 is 5x1, but the RHS is 5x3"
         --x0 "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/path5_x0.mtx")
     apxchol_cli_test(cli_empty_matrix empty 2 "matrix is empty")
+    apxchol_cli_test(cli_empty_array_matrix empty_array 2 "matrix is empty")
+    apxchol_cli_test(cli_no_rows_matrix rhs_no_rows 2 "matrix is empty")
     string(TOLOWER "${APXCHOL_DEVICE}" cli_device)
     apxchol_cli_test(cli_build_backend path5_sddm 0 "device: ${cli_device}" --version)
 endif()

@@ -169,13 +169,15 @@ int main(int argc, char* argv[]) try {
     spdlog::debug("loading matrix from {}", cfg.input_path);
     std::ifstream input(cfg.input_path);
     fast_matrix_market::matrix_market_header hdr;
+    // fast_matrix_market divides by the row count while reading an array
+    // body, so reject an empty matrix from its header first.
     fast_matrix_market::read_header(input, hdr);
-    if (hdr.nrows != hdr.ncols) {
-        spdlog::error("matrix must be square, got {}x{}", hdr.nrows, hdr.ncols);
+    if (hdr.nrows == 0 || hdr.ncols == 0) {
+        spdlog::error("matrix is empty ({}x{})", hdr.nrows, hdr.ncols);
         return 2;
     }
-    if (hdr.nrows == 0) {
-        spdlog::error("matrix is empty (0x0)");
+    if (hdr.nrows != hdr.ncols) {
+        spdlog::error("matrix must be square, got {}x{}", hdr.nrows, hdr.ncols);
         return 2;
     }
     detail::csc_matrix<double> L = read_matrix_body(input, hdr);
