@@ -571,6 +571,30 @@ TEST_F(SolverArchive, RejectsCorruptArrayPayload) {
     EXPECT_THROW(solver::load(descriptor), std::invalid_argument);
 }
 
+// Arrays over 4 MiB are read in blocks by several threads; the result and the
+// combined checksum must not depend on the team size.
+TEST_F(SolverArchive, MultiBlockArraysLoadAtAnyTeamSize) {
+    const Sparse large = matrix(200000);  // operator values span two blocks
+    const solver source(large, options());
+    const auto path = directory / "large.apxchol";
+    source.save(path);
+    for (int threads : {1, 4}) {
+        auto opts = options();
+        opts.num_threads = threads;
+        const auto restored = solver::load(path, opts);
+        EXPECT_EQ(csc_access::vals(restored.factor().L), csc_access::vals(source.factor().L));
+        EXPECT_EQ(csc_access::inner(restored.factor().L), csc_access::inner(source.factor().L));
+        EXPECT_EQ(restored.factor().perm, source.factor().perm);
+    }
+    auto bytes = read_bytes(path);
+    const auto values = number(bytes, 64 + 40 * a_values + 16, 8);
+    ASSERT_GT(number(bytes, 64 + 40 * a_values + 24, 8), std::uint64_t(1) << 22);
+    bytes.at(values + (std::size_t(1) << 22) + 3) ^= 1;
+    const auto corrupt = directory / "large-corrupt.apxchol";
+    write_bytes(corrupt, bytes);
+    EXPECT_THROW(solver::load(corrupt, options()), std::invalid_argument);
+}
+
 TEST_F(SolverArchive, RejectsDuplicatePermutation) {
     const auto path = change("permutation", permutation, [](auto& a) { a.value(1, a.value(0)); });
     EXPECT_THROW(solver::load(path), std::invalid_argument);

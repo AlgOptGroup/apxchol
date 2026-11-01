@@ -1,6 +1,7 @@
 #include "solver_archive_internal.h"
 #include "apxchol/solver/detail/factor_validation.h"
 #include "apxchol/solver/detail/solver_route.h"
+#include "apxchol/solver/detail/thread_budget.h"
 
 #include <zlib.h>
 #include <algorithm>
@@ -16,6 +17,7 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -120,7 +122,7 @@ template<class T> void set(unsigned char* bytes, T value) {
     std::memcpy(bytes, &value, sizeof(T));
 }
 std::uint32_t checksum(std::uint32_t crc, const void* data, std::size_t size) {
-    // All callers process at most one 64 KiB chunk or the small metadata prefix.
+    // All callers process at most one 4 MiB block or the small metadata prefix.
     return static_cast<std::uint32_t>(crc32(crc, static_cast<const Bytef*>(data), static_cast<uInt>(size)));
 }
 
@@ -260,6 +262,7 @@ public:
 
     template<class T> void read(const array_info& info, std::span<T> values) const {
         if (info.count != values.size()) invalid("array length mismatch");
+        if (native<T>(info)) return read_native(info, values.data());
         std::size_t offset = 0;
         decode<T>(info, [&](std::span<const T> chunk) {
             std::copy(chunk.begin(), chunk.end(), values.begin() + offset);
@@ -270,12 +273,68 @@ public:
     template<class T> std::vector<T> read_vector(const array_info& info) const {
         std::vector<T> values;
         if (info.count > values.max_size()) invalid("array exceeds container capacity");
+        if (native<T>(info)) {
+            values.resize(static_cast<std::size_t>(info.count));
+            read_native(info, values.data());
+            return values;
+        }
         values.reserve(static_cast<std::size_t>(info.count));
         decode<T>(info, [&](std::span<const T> chunk) { values.insert(values.end(), chunk.begin(), chunk.end()); });
         return values;
     }
 
 private:
+    template<class T> static bool native(const array_info& info) {
+        constexpr char kind = std::is_same_v<T, binary16> || std::is_floating_point_v<T>
+            ? 'f' : std::is_signed_v<T> ? 'i' : 'u';
+        const bool swap = (info.endian == '<') != (std::endian::native == std::endian::little);
+        return !swap && info.width == sizeof(T) && info.kind == kind;
+    }
+
+    // An array stored in this build's layout is read straight into place in
+    // 4 MiB blocks, each checked and checksummed by the thread that reads it.
+    // Block checksums combine in file order, and the first failing block in file
+    // order decides the error, so neither depends on the team size.
+    template<class T> void read_native(const array_info& info, T* output) const {
+        constexpr std::size_t block = std::size_t(1) << 22;
+        const auto length = static_cast<std::size_t>(info.length);
+        const auto blocks = static_cast<std::int64_t>((length + block - 1) / block);
+        enum : int { ok = 0, truncated = -1, negative = -2 };  // positive: errno
+        std::vector<int> status(static_cast<std::size_t>(blocks), ok);
+        std::vector<std::uint32_t> crcs(static_cast<std::size_t>(blocks));
+        const int fd = fileno(file_.get());
+        auto* bytes = reinterpret_cast<unsigned char*>(output);
+#pragma omp parallel for schedule(dynamic, 1) if (blocks > 1)
+        for (std::int64_t b = 0; b < blocks; ++b) {
+            const auto first = static_cast<std::size_t>(b) * block;
+            const auto size = std::min(block, length - first);
+            for (std::size_t done = 0; done < size;) {
+                const auto got = ::pread(fd, bytes + first + done, size - done,
+                                         static_cast<off_t>(info.offset + first + done));
+                if (got > 0) { done += static_cast<std::size_t>(got); continue; }
+                if (got < 0 && errno == EINTR) continue;
+                status[b] = got < 0 ? errno : truncated;
+                break;
+            }
+            if (status[b] != ok) continue;
+            crcs[b] = checksum(0, bytes + first, size);
+            if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
+                const T* values = output + first / sizeof(T);
+                if (std::any_of(values, values + size / sizeof(T), [](T v) { return v < 0; }))
+                    status[b] = negative;
+            }
+        }
+        std::uint32_t crc = 0;
+        for (std::int64_t b = 0; b < blocks; ++b) {
+            if (status[b] == truncated) invalid("truncated array");
+            if (status[b] == negative) invalid("negative index");
+            if (status[b] != ok) throw std::system_error(status[b], std::generic_category(), "read solver archive");
+            const auto size = std::min(block, length - static_cast<std::size_t>(b) * block);
+            crc = static_cast<std::uint32_t>(crc32_combine(crc, crcs[b], static_cast<z_off_t>(size)));
+        }
+        if (crc != info.crc) invalid("array checksum mismatch");
+    }
+
     template<class T, class Put> void decode(const array_info& info, Put put) const {
         if constexpr (std::is_same_v<T, binary16> || std::is_floating_point_v<T>) {
             if (info.kind != 'f' || info.width != sizeof(T)) invalid("unexpected floating-point type");
@@ -419,6 +478,7 @@ solver solver::load(const std::filesystem::path& path, const solve_options& opti
     const auto started = std::chrono::steady_clock::now();
     detail::validate_solve_options(options);
     check_path(path);
+    const detail::thread_budget threads(options.num_threads);
     reader archive(path);
     const auto metadata_info = archive.inspect(array_id::metadata);
     require_extent<std::uint64_t>(metadata_info, metadata_count);
