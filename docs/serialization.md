@@ -66,7 +66,7 @@ The header identifies format version 1. Array descriptors record the element typ
 
 Loading checks file lengths, dimensions, index ranges, conversion to the current build’s index widths and the factor's structure. The original operator uses Eigen’s signed 32-bit sparse indices; wider factor indices do not remove that limit. CRC checks detect accidental corruption but do not authenticate a file.
 
-Only canonical CSC is stored. Loading copies the arrays and rebuilds triangular-solve layouts and backend schedules; it does not memory-map the file. Level sets, transposed copies, GPU buffers, an active iterative solve and construction diagnostics are omitted.
+Only canonical CSC is stored. Loading copies the arrays, reading and checking them on `num_threads` threads, and rebuilds triangular-solve layouts and backend schedules; it does not memory-map the file. Level sets, transposed copies, GPU buffers, an active iterative solve and construction diagnostics are omitted.
 
 The original stored entry count is kept separately for fill-ratio reporting. It can differ from the saved matrix’s count when normalization reflects or removes unmatched explicit zeros.
 
