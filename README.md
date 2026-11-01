@@ -84,8 +84,14 @@ the [command-line guide](docs/cli.md) lists the available controls.
 
 ## Performance
 
-Cross-solver results are in preparation for 1.0; see [performance](docs/performance.md)
-for the methodology and the measured [batching case study](docs/batching.md).
+One-RHS time (setup plus solve) of other solvers relative to apxchol on 27
+matrices on ETH Euler (AMD EPYC 9554 and RTX 4090); values above 1 mean
+apxchol was faster. [Performance](docs/performance.md) has every cell, the ARM
+(Daint) and Apple Metal results, and the method.
+
+![CPU: competitor time relative to apxchol](docs/performance/euler-cpu.svg)
+
+![GPU: competitor time relative to apxchol](docs/performance/euler-gpu.svg)
 
 ## Learn more
 

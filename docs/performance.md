@@ -23,11 +23,18 @@ Apple M1 Max (Metal) <performance-mac>
 ```{note}
 The comparison charts show one-RHS time (setup plus solve) for each competitor relative
 to apxchol: dots are matrices, bars are medians, and values above 1 mean
-apxchol was faster. Euler results for 1.0 are being measured.
+apxchol was faster.
 ```
 
-- **x86_64 CPU (Euler):** chart pending.
-- **CUDA (Euler):** chart pending.
+### x86_64 CPU (Euler)
+
+![Euler CPU: competitor time relative to apxchol](performance/euler-cpu.svg)
+
+### CUDA (Euler)
+
+![Euler GPU: competitor time relative to apxchol](performance/euler-gpu.svg)
+
+See the [Euler page](performance-euler.md) for every cell and the time cap.
 
 ### ARM64 CPU (Daint)
 

@@ -99,7 +99,8 @@ MARKS = {"failed": "fail", "not_converged": "nc", "timeout": "t/o", "exceeded_ca
 def series_label(cell):
     if cell["solver"] == "apxchol_v1":
         config = cell["config"].split("[")[0].replace("bg+", "").replace("trace_cycle", "trace-cycle")
-        return "apxchol " + config.replace("/gpu-owned-q0", " q0.").replace("tree", "GKS")
+        config = config.replace("/gpu-owned-q0", "/q0.").replace("/q", " q")  # Daint and Euler spellings
+        return "apxchol " + config.replace("tree", "GKS")
     name = SOLVERS.get(cell["solver"], cell["solver"])
     extra = [v for v in (cell.get("variant"), "" if cell["config"] in ("", "original-operator") else cell["config"]) if v]
     return name + (f" ({', '.join(extra)})" if extra else "")
