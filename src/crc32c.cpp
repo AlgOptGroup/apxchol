@@ -14,8 +14,9 @@
 // so the folding kernel is compiled for it and chosen at run time.
 #define APXCHOL_CRC32C_FOLD_TARGET __attribute__((target("sse4.2,pclmul")))
 #endif
-#elif defined(__ARM_FEATURE_CRC32)
+#elif defined(__ARM_FEATURE_CRC32) && !defined(__AARCH64EB__)
 #include <arm_acle.h>
+#define APXCHOL_CRC32C_ARM 1
 #if defined(__ARM_FEATURE_AES) && defined(__aarch64__)
 #include <arm_neon.h>
 #define APXCHOL_CRC32C_FOLD 1
@@ -80,7 +81,8 @@ constexpr std::uint32_t power(std::uint64_t n) noexcept {
     return result;
 }
 
-#if defined(__SSE4_2__) || defined(__ARM_FEATURE_CRC32)
+// The crc instruction paths load words in little-endian order.
+#if defined(__SSE4_2__) || defined(APXCHOL_CRC32C_ARM)
 #if defined(__SSE4_2__)
 inline std::uint32_t step8(std::uint32_t c, std::uint64_t w) noexcept {
     return static_cast<std::uint32_t>(_mm_crc32_u64(c, w));
@@ -194,9 +196,15 @@ inline std::uint64_t multiply64(std::uint32_t a, std::uint32_t b) noexcept {
 inline std::uint32_t fold_step8(std::uint32_t c, std::uint64_t w) noexcept { return __crc32cd(c, w); }
 #endif
 
+// Buffers go through in chunks of `steps` steps, so every constant is fixed.
 constexpr std::size_t vector_bytes = 64, lane_bytes = 24, step_bytes = vector_bytes + 3 * lane_bytes;
+constexpr std::size_t steps = 60, chunk_bytes = steps * step_bytes;
+constexpr std::size_t lane = lane_bytes * steps, vector = vector_bytes * steps;
 constexpr std::uint32_t fold64_low = power(8 * 64 + 31), fold64_high = power(8 * 64 - 33);
 constexpr std::uint32_t fold16_low = power(8 * 16 + 31), fold16_high = power(8 * 16 - 33);
+// Lanes a, b and d precede the vector part of a chunk.
+constexpr std::uint32_t shift_a = power(8 * (2 * lane + vector) - 33),
+                        shift_b = power(8 * (lane + vector) - 33), shift_d = power(8 * vector - 33);
 
 APXCHOL_CRC32C_FOLD_TARGET inline std::uint32_t shift_by(std::uint32_t c, std::uint32_t k) noexcept {
     return fold_step8(0, multiply64(c, k));
@@ -204,23 +212,11 @@ APXCHOL_CRC32C_FOLD_TARGET inline std::uint32_t shift_by(std::uint32_t c, std::u
 
 APXCHOL_CRC32C_FOLD_TARGET std::uint32_t update_fold(std::uint32_t c, const unsigned char* p,
                                                      std::size_t size) noexcept {
-    const std::size_t steps = size / step_bytes;
-    if (steps >= 4) {
-        // Layout: lanes a, b, d of 24 * steps bytes each, then the vector part.
-        const std::size_t lane = lane_bytes * steps, vector = vector_bytes * steps;
-        // The shifts depend only on `steps`; the archive reader calls with one size.
-        thread_local std::size_t cached_steps = 0;
-        thread_local std::uint32_t shift_a, shift_b, shift_d;
-        if (cached_steps != steps) {
-            shift_a = power(8 * (2 * lane + vector) - 33);
-            shift_b = power(8 * (lane + vector) - 33);
-            shift_d = power(8 * vector - 33);
-            cached_steps = steps;
-        }
+    const v128 k64 = constants(fold64_low, fold64_high), k16 = constants(fold16_low, fold16_high);
+    for (; size >= chunk_bytes; p += chunk_bytes, size -= chunk_bytes) {
         const unsigned char *a = p, *b = p + lane, *d = p + 2 * lane, *v = p + 3 * lane;
         std::uint32_t ca = c, cb = 0, cd = 0;
         v128 x0 = load16(v), x1 = load16(v + 16), x2 = load16(v + 32), x3 = load16(v + 48);
-        const v128 k64 = constants(fold64_low, fold64_high);
         for (std::size_t s = 0; s < steps; ++s) {
             for (std::size_t i = 0; i < lane_bytes; i += 8) {
                 ca = fold_step8(ca, load8(a + i));
@@ -236,27 +232,24 @@ APXCHOL_CRC32C_FOLD_TARGET std::uint32_t update_fold(std::uint32_t c, const unsi
                 x3 = vxor(fold(x3, k64), load16(v + 48));
             }
         }
-        const v128 k16 = constants(fold16_low, fold16_high);
         v128 x = vxor(fold(x0, k16), x1);
         x = vxor(fold(x, k16), x2);
         x = vxor(fold(x, k16), x3);
         const std::uint32_t cv = fold_step8(fold_step8(0, half(x, 0)), half(x, 1));
         c = shift_by(ca, shift_a) ^ shift_by(cb, shift_b) ^ shift_by(cd, shift_d) ^ cv;
-        p += steps * step_bytes;
-        size -= steps * step_bytes;
     }
     return update_lanes(c, p, size);
 }
 
 bool fold_supported() noexcept {
-#if defined(__SSE4_2__)
+#if defined(__PCLMUL__) || !defined(__SSE4_2__)
+    return true;
+#else
     static const bool supported = [] {
         __builtin_cpu_init();
         return __builtin_cpu_supports("pclmul") != 0;
     }();
     return supported;
-#else
-    return true;
 #endif
 }
 #endif
@@ -272,7 +265,7 @@ std::uint32_t crc32c(std::uint32_t crc, const void* data, std::size_t size) noex
 #if defined(APXCHOL_CRC32C_FOLD)
     if (fold_supported()) return ~update_fold(~crc, p, size);
 #endif
-#if defined(__SSE4_2__) || defined(__ARM_FEATURE_CRC32)
+#if defined(__SSE4_2__) || defined(APXCHOL_CRC32C_ARM)
     return ~update_lanes(~crc, p, size);
 #else
     return ~update_portable(~crc, p, size);
@@ -282,7 +275,7 @@ std::uint32_t crc32c(std::uint32_t crc, const void* data, std::size_t size) noex
 std::span<const crc32c_implementation> crc32c_implementations() noexcept {
     static const auto list = [] {
         std::vector<crc32c_implementation> all{{"portable", crc32c_portable}};
-#if defined(__SSE4_2__) || defined(__ARM_FEATURE_CRC32)
+#if defined(__SSE4_2__) || defined(APXCHOL_CRC32C_ARM)
         all.push_back({"crc instruction lanes", [](std::uint32_t crc, const void* data, std::size_t size) noexcept {
             return ~update_lanes(~crc, static_cast<const unsigned char*>(data), size);
         }});
