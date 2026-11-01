@@ -84,8 +84,13 @@ the [command-line guide](docs/cli.md) lists the available controls.
 
 ## Performance
 
-Cross-solver results are in preparation for 1.0; see [performance](docs/performance.md)
-for the methodology and the measured [batching case study](docs/batching.md).
+![Speedup of apxchol over other solver families on 27 matrices](docs/performance/euler-families.svg)
+
+apxchol is faster than every other solver family except AMGCL on the CPU, where
+the median is a draw, and a median 1.5–1.7× faster than AMGCL and BoomerAMG on
+an RTX 4090. Each dot is the speedup in setup + solve time on one of 27
+matrices on ETH Euler; [Performance](docs/performance.md) has every result,
+other platforms and the method.
 
 ## Learn more
 

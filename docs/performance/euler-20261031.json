@@ -1,0 +1,80 @@
+{
+ "campaign": "euler-20261031",
+ "date": "2026-10-31",
+ "hardware": {
+  "cpu": "AMD EPYC 9554 64-Core Processor",
+  "sockets": 2,
+  "gpus": [
+   {
+    "name": "NVIDIA GeForce RTX 4090",
+    "memory_mib": 24564,
+    "driver": "580.178.04",
+    "count": 8
+   }
+  ]
+ },
+ "toolchains": [
+  {
+   "compiler": "julia",
+   "compiler_version": "1.12.4 (libLLVM 18.1.7)",
+   "openmp_runtime": "none (pure-julia solver path)",
+   "arch_flags": "cpu_target=native (znver4)"
+  },
+  {
+   "compiler": "clang",
+   "compiler_version": "19.1.3",
+   "openmp_runtime": "llvm-libomp",
+   "arch_flags": "-march=native",
+   "node_index_bits": "32",
+   "edge_index_bits": "32",
+   "hypre_cuda": "off"
+  },
+  {
+   "compiler": "clang",
+   "compiler_version": "19.1.3",
+   "openmp_runtime": "llvm-libomp",
+   "arch_flags": "-march=native",
+   "node_index_bits": "32",
+   "edge_index_bits": "32",
+   "hypre_cuda": "on"
+  },
+  {
+   "compiler": "ParAC driver with patches 0007 and 0008"
+  },
+  {
+   "compiler": "CMG MATLAB Coder C++ port (private), clang 19.1.3"
+  },
+  {
+   "compiler": "MATLAB R2026a"
+  }
+ ],
+ "notes": [
+  "Competitors are capped at max(20 x the best apxchol total on the same matrix and device, 30 s). A timeout or an over-cap run is exceeded_cap; its measured times are kept with cap_s.",
+  "CPU series use 64 threads on one socket of an exclusive node; CMG is serial.",
+  "ParAC uses patch 0007 (original-system stopping) and 0008 (benchmark I/O). 'own RHS' is ParAC's zero-sum right-hand side as on Daint; 'shared RHS' is the campaign's common b. Shared-RHS CPU graph mode solves disconnected graphs per connected component.",
+  "GPU apxchol series: default degree quantile 0.5, plus q0.8 and q0.2 as on Daint.",
+  "max_rss_mb is the process peak. GPU memory is not published: these binaries recorded device-wide usage, not per-process usage.",
+  "Thread scaling (1 to 128 threads, both sockets at 128) is under 'scaling', capped per thread count."
+ ],
+ "tolerance": 1e-08,
+ "source_commits": [
+  "1c4abb35f1cf08276bc9dc65534dbfb6d2b66059"
+ ],
+ "cap_rule": "max(20 x the fastest complete apxchol setup + solve on the same matrix and device, 30 s); a competitor over the cap, or killed at it, is exceeded_cap",
+ "files": [
+  "euler-20261031-scaling.csv",
+  "euler-20261031.csv"
+ ],
+ "columns": {
+  "rel_res": "largest ||b-Ax||/||b|| over the retained repeats, on the original system",
+  "setup_s": "seconds, from the repeat with the median setup + solve",
+  "solve_s": "seconds, same repeat",
+  "cap_s": "the competitor's time cap, when one applied",
+  "class": "grids, meshes (meshes and circuits), ipm (linear programs), social (social and web graphs)"
+ },
+ "full_extract": {
+  "repository": "https://github.com/AlgOptGroup/apxchol-research",
+  "path": "campaigns/euler-20261031/extract.json",
+  "sha256": "14a29cfc7f37d972d049eca9788196deba71e0d0ca04a2d77f138bf7aab8f94e"
+ }
+}

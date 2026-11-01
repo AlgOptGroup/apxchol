@@ -1,0 +1,68 @@
+{
+ "campaign": "daint-20260910",
+ "date": "2026-09-10",
+ "hardware": {
+  "cpu": "NVIDIA Grace, 72 cores",
+  "gpus": [
+   {
+    "name": "NVIDIA GH200 (Hopper)",
+    "count": 1
+   }
+  ]
+ },
+ "toolchains": [
+  {
+   "compiler": "julia"
+  },
+  {
+   "compiler": "clang"
+  },
+  {
+   "compiler": "Clang22.1.8/llvm-libomp"
+  },
+  {
+   "compiler": null
+  },
+  {
+   "compiler": "Clang22.1.8/libomp; NVCC host GCC14.3"
+  },
+  {
+   "compiler": "GCC14.3 (pinned native cache/build flags in campaign)"
+  }
+ ],
+ "notes": [
+  "No relative competitor cap: cells used fixed whole-cell deadlines.",
+  "ParAC cells predate the current stopping rule (patch 0007) and report ParAC's own residual on its own right-hand side.",
+  "GPU apxchol series use degree quantile 0.8 or 0.2; the current device default is 0.5."
+ ],
+ "tolerance": 1e-08,
+ "source_commits": [
+  "17fbacec7886eda3545bde4dc3426d992f7a4af2",
+  "280b7ee0087c47d1a5101787312dd7574acdfee0",
+  "394bf322b7c25f9b7af4770e9e3d5704da69e005",
+  "67750bb65e4e872acb408f2467759e75c70fe5b6",
+  "6a8244eaab178d659364f16919362bacda79a601",
+  "8827024f79d2cd40e3e162faf5ada0fcc5943af6",
+  "98b6a4cda51bdaba2c58a6dbb560df43107cf071",
+  "c94a94a1dee6070947be21e08171210131d9cdd8",
+  "ea01e2ff32b171d94ae8c048436df98203a0fc67",
+  "f17b98eca1d46cde68ffe1555e5284f225745567",
+  "fa329b5ac757bab0aeb36cfc7f6ec14ff15bdc9b"
+ ],
+ "cap_rule": "none relative to apxchol; cells used fixed whole-cell deadlines (timeout)",
+ "files": [
+  "daint-20260910.csv"
+ ],
+ "columns": {
+  "rel_res": "largest ||b-Ax||/||b|| over the retained repeats, on the original system",
+  "setup_s": "seconds, from the repeat with the median setup + solve",
+  "solve_s": "seconds, same repeat",
+  "cap_s": "the competitor's time cap, when one applied",
+  "class": "grids, meshes (meshes and circuits), ipm (linear programs), social (social and web graphs)"
+ },
+ "full_extract": {
+  "repository": "https://github.com/AlgOptGroup/apxchol-research",
+  "path": "campaigns/daint-20260910/extract.json",
+  "sha256": "b0dc182ce403bb6d8cbc20440cea73193130e84e62ccf09f4cc901cd7b023986"
+ }
+}
