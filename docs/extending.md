@@ -77,8 +77,8 @@ static_assert(apxchol::partitioner<my_partitioner>);
 With `degree_prepass=true`, the orchestrator prunes dead incidences, obtains
 degrees, and applies the configured degree cap. `candidates` contains eligible
 vertices; **`ctx.degrees[v]` is indexed by vertex ID**, not candidate position.
-Without the trait, candidates are the ascending active list and the degrees
-span is empty. The rule then owns any degree estimation or cap application.
+Without the trait, the orchestrator still prunes dead incidences, candidates
+are the ascending active list and the degrees span is empty. The rule then owns any degree estimation or cap application.
 See the header for optional `sample_bounded` and
 `residual_handoff_threshold` traits.
 
@@ -100,9 +100,8 @@ context, and team size; dynamic arrival order must not choose the result.
 including eliminated vertices, and `G.is_active(v)` tells whether `v` is still
 live. `G.for_each_neighbor(v, f)` calls `f(u)` for each live neighbor `u`,
 once per parallel edge, and returns that count; `G.degree(v)` returns the
-count alone. Both drop `v`'s stored incidences of eliminated vertices, so
-concurrent calls must use distinct `v`, and `f` must not query `v` itself.
-Querying another vertex inside `f` is fine when no other thread visits it.
+count alone. Every query is a pure read, so any threads may query any vertices
+concurrently, including from inside `f`.
 
 Pass a partitioner instance to `factorize`, alone or with an eliminator; it is
 taken by value and replaces `factor_options::partitioner`. Callable adapters

@@ -1721,6 +1721,24 @@ TEST(BaumannKyngWorkHint, MatchesSelectedLiveDegreeSum) {
     EXPECT_EQ(bk.selected_degree_work(), 0u);
 }
 
+TEST(PartitionGraphView, QueriesSkipEliminatedNeighborsWithoutPruning) {
+    const auto L = grid_laplacian(5, 5);
+    auto G = apxchol::detail::make_graph(L);
+    G.set_inactive_unchecked(6);  // a neighbor of 7 on the 5x5 grid
+    G.bulk_decrement_active(1);
+    const auto view = partition_view(G);
+    const auto stored = G.adj_count(7);
+    ASSERT_EQ(stored, 4);
+    std::vector<apxchol::node_index> seen;
+    EXPECT_EQ(view.for_each_neighbor(7, [&](auto u) { seen.push_back(u); }), 3);
+    EXPECT_EQ(view.degree(7), 3);
+    std::sort(seen.begin(), seen.end());
+    EXPECT_EQ(seen, (std::vector<apxchol::node_index>{2, 8, 12}));
+    EXPECT_EQ(G.adj_count(7), stored);  // the view never prunes
+    EXPECT_EQ(G.prune_and_degree(7), 3);
+    EXPECT_EQ(G.adj_count(7), 3);
+}
+
 TEST(EliminationTeamSizing, DenseSmallRoundsUseFineSchedulingChunks) {
     using apxchol::detail::elimination_compute_chunk;
     EXPECT_EQ(elimination_compute_chunk(2000, 2000), 1);
