@@ -77,8 +77,8 @@ static_assert(apxchol::partitioner<my_partitioner>);
 With `degree_prepass=true`, the orchestrator prunes dead incidences, obtains
 degrees, and applies the configured degree cap. `candidates` contains eligible
 vertices; **`ctx.degrees[v]` is indexed by vertex ID**, not candidate position.
-Without the trait, the orchestrator still prunes dead incidences, candidates
-are the ascending active list and the degrees span is empty. The rule then owns any degree estimation or cap application.
+Without the trait, candidates are the ascending active list and the degrees
+span is empty. The rule then owns any degree estimation or cap application.
 See the header for optional `sample_bounded` and
 `residual_handoff_threshold` traits.
 

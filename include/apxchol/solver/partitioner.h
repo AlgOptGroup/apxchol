@@ -25,10 +25,9 @@
 ///     cache update, and may be conservative during audited prune skipping.
 ///     The scan rules (block_greedy, priority_greedy) use this.
 ///   * false — no degree pre-pass runs: `candidates` is the raw active list
-///     (ascending original-index order) and ctx.degrees is empty. The
-///     orchestrator still drops dead incidences from the active lists before
-///     the call. baumann_kyng works this way — it estimates degrees from its
-///     hash sample and applies the cap to that estimate.
+///     (ascending original-index order) and ctx.degrees is empty.
+///     baumann_kyng works this way — it estimates degrees from its hash
+///     sample and applies the cap to that estimate.
 ///
 /// Degrees are indexed by vertex ID so rules can compare neighboring vertices.
 /// Incidence-list sizes may include eliminated neighbors. The orchestrator
