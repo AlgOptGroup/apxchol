@@ -1,6 +1,7 @@
 """Render public benchmark summaries; raw measurements remain downloadable JSON."""
 import argparse
 import collections
+import csv
 import json
 from pathlib import Path
 import shutil
@@ -97,8 +98,8 @@ FAMILY_ORDER = ["AMGCL", "AMGX", "BoomerAMG", "CMG", "Laplacians.jl", "RCHOL", "
 VARIANTS = {"ac": "AC", "ac2": "AC2", "rchol": "serial", "rchol_par": "pRCHOL", "cmg_packed": "packed port",
             "cmg_matlab": "MATLAB", "parac": "Graph", "parac_graph": "Graph", "parac_physics": "Physics",
             "accelerate_cholesky": "Cholesky", "accelerate_cg": "CG"}
-CLASSES = ["Grids", "Meshes and circuits", "Linear programs (IPM)", "Social and web graphs"]
-MESHES = {"G3_circuit", "apache2", "ecology1", "parabolic_fem", "thermal2"}
+CLASSES = {"grids": "Grids", "meshes": "Meshes and circuits", "ipm": "Linear programs (IPM)",
+           "social": "Social and web graphs"}
 DEVICES = {"cpu": "CPU", "gpu": "CUDA", "metal": "Metal"}
 MARKS = {"failed": "fail", "not_converged": "nc", "timeout": "t/o", "exceeded_cap": "≥20×", "oom": "oom",
          "n/a": "n/a", "missing": "—"}
@@ -109,10 +110,34 @@ TICKS = [0.5, 1, 2, 5, 10, 20, 50, 100]
 CLIP = 100  # draw larger speedups and unfinished runs at the right edge
 
 
-def matrix_class(cell):
-    if cell["family"] in ("grids", "ipm"):
-        return CLASSES[0] if cell["family"] == "grids" else CLASSES[2]
-    return CLASSES[1] if cell["matrix"] in MESHES else CLASSES[3]
+NUMBERS = {"n": int, "nnz": int, "threads": int, "iters": int, "setup_s": float, "solve_s": float,
+           "rel_res": float, "cap_s": float, "max_rss_mb": float}
+
+
+def read_cells(path, tolerance):
+    """Rows of a compact campaign CSV, with numbers parsed and the tolerance verdict added."""
+    cells = []
+    with open(path, newline="") as handle:
+        for row in csv.DictReader(handle):
+            cell = {k: (NUMBERS[k](v) if v != "" else None) if k in NUMBERS else v for k, v in row.items()}
+            cell["meets_tolerance"] = (cell["status"] == "complete" and cell["rel_res"] is not None
+                                       and cell["rel_res"] <= tolerance)
+            cells.append(cell)
+    return cells
+
+
+def load(header_path):
+    """One campaign: the shared header plus its cells (and thread scaling, when published)."""
+    header_path = Path(header_path)
+    data = json.loads(header_path.read_text())
+    campaign = data["campaign"]
+    data["cells"] = read_cells(header_path.with_name(f"{campaign}.csv"), data["tolerance"])
+    scaling = header_path.with_name(f"{campaign}-scaling.csv")
+    if scaling.is_file():
+        cells = read_cells(scaling, data["tolerance"])
+        data["scaling"] = {"matrices": list(dict.fromkeys(c["matrix"] for c in cells)),
+                           "thread_counts": sorted({c["threads"] for c in cells}), "cells": cells}
+    return data
 
 
 def apx_label(config):
@@ -151,12 +176,11 @@ class Campaign:
         self.cells = {}
         for c in data["cells"]:
             self.cells[c["device"], series_label(c), c["matrix"]] = c
-        for m in data.get("missing", []):
-            self.cells[m["device"], series_label(m), m["matrix"]] = dict(m, status="missing")
         self.devices = [d for d in DEVICES if any(c["device"] == d for c in data["cells"])]
-        self.cls = {c["matrix"]: matrix_class(c) for c in data["cells"]}
+        self.cls = {c["matrix"]: CLASSES[c["class"]] for c in data["cells"]}
         rows = {c["matrix"]: c["n"] for c in data["cells"]}
-        self.matrices = sorted(self.cls, key=lambda m: (CLASSES.index(self.cls[m]), rows[m], m))
+        order = list(CLASSES.values())
+        self.matrices = sorted(self.cls, key=lambda m: (order.index(self.cls[m]), rows[m], m))
 
     def series(self, device):
         return sorted({s for d, s, _ in self.cells if d == device},
@@ -256,7 +280,7 @@ def best_other_chart(run, platform, output):
                 continue
             value, family = min(options)
             jitter = (sum(map(ord, matrix)) % 7 - 3) * .07
-            y = CLASSES.index(run.cls[matrix]) + jitter
+            y = list(CLASSES.values()).index(run.cls[matrix]) + jitter
             if value == UNFINISHED:
                 winners["none"] += 1
                 ax.plot(CLIP, y, "o", markersize=7, markerfacecolor="white", markeredgecolor=MUTED)
@@ -264,7 +288,7 @@ def best_other_chart(run, platform, output):
             winners[family] += 1
             ax.plot(value, y, "o", markersize=7, color=FAMILY_COLORS.get(family, "#9a9993"),
                     markeredgecolor="white", markeredgewidth=1)
-        ax.set_yticks(range(len(CLASSES)), CLASSES)
+        ax.set_yticks(range(len(CLASSES)), list(CLASSES.values()))
         ax.set_ylim(len(CLASSES) - .5, -.5)
         ax.set_title(DEVICES[device], loc="left", fontsize=10)
         log_axis(ax, "speedup over the fastest other solver")
@@ -469,11 +493,11 @@ def campaign(data, platform, output):
 
 
 def campaigns(directory, output):
-    """Render every docs/performance/<platform>-<date>.json extract."""
+    """Render every docs/performance/<platform>-<date>.json campaign header and its CSV files."""
     for path in sorted(directory.glob("*-2*.json")):
         platform = path.name.split("-")[0]
         if platform in ("euler", "daint", "mac"):
-            campaign(json.loads(path.read_text()), platform, output)
+            campaign(load(path), platform, output)
 
 
 def render(report_paths, output, revision=None):
