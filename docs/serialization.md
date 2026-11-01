@@ -102,7 +102,7 @@ With FP16 storage, factor values are binary16 and the diagonal slots hold zero; 
 
 Payloads contain contiguous numeric values in their declared byte order: `i` means two’s-complement signed integers, `u` unsigned integers, and `f` IEEE 754 floating point. Operator values are FP64 and factor values FP32 or binary16. The writer uses unsigned 64-bit metadata and round sizes, signed 32-bit operator indices, and the build's factor-index widths. The reader accepts 32- or 64-bit integers when every value fits its destination.
 
-Checksums are CRC-32C (Castagnoli: reflected polynomial `0x82F63B78`, initial value and final XOR `0xFFFFFFFF`), so `123456789` checksums to `0xE3069283`. The header checksum covers all 504 header/descriptor bytes with bytes 20–23 set to zero; each payload checksum covers exactly its declared bytes. Empty payloads have checksum zero.
+Checksums are CRC-32C (Castagnoli: polynomial `0x1EDC6F41`, `0x82F63B78` reflected, with reflected input and output, initial value and final XOR `0xFFFFFFFF`), so the nine ASCII bytes `"123456789"` checksum to `0xE3069283`. The header checksum covers all 504 header/descriptor bytes with bytes 20–23 set to zero; each payload checksum covers exactly its declared bytes. Empty payloads have checksum zero.
 
 The first payload starts at byte `512`. Each later payload starts at the first multiple of 64 at or after the preceding payload’s end. Payload length must equal count × width. Writers zero-fill alignment padding; readers ignore its contents and checksums exclude it. There are no trailing bytes after the final payload.
 
