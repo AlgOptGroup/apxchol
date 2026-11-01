@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "csc_test_util.h"
 #include "gpu_preconditioner_fixture.h"
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/pcg_cuda.h"
@@ -422,11 +423,11 @@ TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneDeviceAttempt) {
         while ((at = text.find(needle,at)) != std::string::npos) { ++count;at += needle.size(); }
         return count;
     };
-    ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(apxchol::detail::eigen_csc(original)));
+    ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(apxchol::test::eigen_csc(original)));
     apxchol::solve_result solved;
     testing::internal::CaptureStderr();
     try {
-        solved = apxchol::solve(original, rhs, 1e-8, 1000, nullptr, options);
+        solved = apxchol::solve(apxchol::test::csc(original), apxchol::test::cspan(rhs), 1e-8, 1000, {}, options);
         EXPECT_EQ(solved.backend, apxchol::solve_backend::gpu);
     } catch (...) {
         const auto failure = testing::internal::GetCapturedStderr();
@@ -448,9 +449,9 @@ TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneDeviceAttempt) {
     EXPECT_EQ(number("physical_before="),136u);EXPECT_EQ(number("distinct_before="),136u);
     EXPECT_LT(number("kept="),136u);EXPECT_GE(number("kept="),16u);
     EXPECT_NE(trace.find("[gpu-owned-factorization] complete"),std::string::npos) << trace;
-    ASSERT_EQ(solved.x.size(),n);
-    EXPECT_TRUE(solved.x.allFinite());
-    EXPECT_LE((original*solved.x-rhs).norm()/rhs.norm(),1e-8);
+    ASSERT_EQ(solved.x.size(),static_cast<std::size_t>(n));
+    EXPECT_TRUE(apxchol::test::vec(solved.x).allFinite());
+    EXPECT_LE((original*apxchol::test::vec(solved.x)-rhs).norm()/rhs.norm(),1e-8);
     RecordProperty("owned_sparsify_controller_csc",line);
 #endif
 }

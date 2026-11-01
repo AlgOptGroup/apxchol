@@ -90,6 +90,21 @@
 // the M-matrix lumping ceiling. The benchmark asserts a matrix declared
 // `--kind operator` against it rather than re-deriving its own classification.
 #include "apxchol/operator_class.h"
+#include "apxchol/detail/csc_input.h"
+#include "apxchol/views.h"
+#include <span>
+
+// apxchol takes borrowed views; the benchmark keeps Eigen containers for the
+// competitors and converts at each apxchol call. L must be compressed.
+static apxchol::csc_view apxchol_view(const Eigen::SparseMatrix<double>& L) {
+    if (!L.isCompressed()) throw std::logic_error("apxchol input must be compressed");
+    const auto n = static_cast<std::size_t>(L.rows());
+    const auto nnz = static_cast<std::size_t>(L.nonZeros());
+    return {L.rows(), {L.outerIndexPtr(), n + 1}, {L.innerIndexPtr(), nnz}, {L.valuePtr(), nnz}};
+}
+static std::span<const double> apxchol_span(const Eigen::VectorXd& v) {
+    return {v.data(), static_cast<std::size_t>(v.size())};
+}
 
 #ifdef HAVE_APXCHOL_V1
 #include "apxchol/detail/checkpoint.h"
@@ -651,8 +666,8 @@ static void warm_up_metal_once(apxchol::solve_options opts) {
     const auto L = laplacian_from_adj(grid_graph(16, 16, 1.0, 1.0));
     Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(L.rows(), -1.0, 1.0);
     b.array() -= b.mean();
-    apxchol::solver warm(L, opts);
-    (void)warm.solve(b, 1e-6, 100);
+    apxchol::solver warm(apxchol_view(L), opts);
+    (void)warm.solve(apxchol_span(b), 1e-6, 100);
     const double init_ms = std::chrono::duration<double, std::milli>(
         std::chrono::high_resolution_clock::now() - begin).count();
     std::ostringstream line;
@@ -782,7 +797,8 @@ static BenchResult run_apxchol_v1(
     if (apxchol::detail::select_solve_backend(opts) == apxchol::solve_backend::gpu)
         warm_up_cuda_once();
 #elif defined(APXCHOL_USE_METAL)
-    if (apxchol::detail::select_solve_backend(opts, &L) == apxchol::solve_backend::gpu)
+    if (const apxchol::detail::csc_input input(apxchol_view(L));
+        apxchol::detail::select_solve_backend(opts, &input.ref()) == apxchol::solve_backend::gpu)
         warm_up_metal_once(opts);
 #endif
     long long factor_nnz = 0, factor_rows = 0;
@@ -819,7 +835,12 @@ static BenchResult run_apxchol_v1(
     Eigen::initParallel();
     // The solver selects its route once, under setup.backend_selection;
     // retries reuse the same concrete owner.
-    apxchol::solver solver = apxchol::detail::solver_access::with_timings(L, opts, timings);
+    // Checking the caller's view is setup work, as in solver(csc_view, opts).
+    const auto t_view = std::chrono::high_resolution_clock::now();
+    const apxchol::detail::csc_input input(apxchol_view(L));
+    const double view_seconds = std::chrono::duration<double>(
+        std::chrono::high_resolution_clock::now() - t_view).count();
+    apxchol::solver solver = apxchol::detail::solver_access::make(input, opts, &timings);
     const bool gpu_route = solver.backend() == apxchol::solve_backend::gpu;
 #ifdef APXCHOL_USE_METAL
     // Its own label, so a Metal cell can never be taken for a CUDA one.
@@ -841,11 +862,12 @@ static BenchResult run_apxchol_v1(
         Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
             [&](double request, int remaining, bool warm, Eigen::VectorXd& current) {
                 // GPU retries restart cold, as they always have.
-                res = solver.solve(b, request, remaining, warm && !gpu_route ? &current : nullptr);
-                current = std::move(res.x);
+                res = solver.solve(apxchol_span(b), request, remaining,
+                                   warm && !gpu_route ? apxchol_span(current) : std::span<const double>());
+                current = Eigen::Map<const Eigen::VectorXd>(res.x.data(), Eigen::Index(res.x.size()));
                 return static_cast<int>(res.iterations);
             });
-        res.x = std::move(x);
+        res.x.assign(x.data(), x.data() + x.size());
         res.iterations = r.iterations;
         capture_fill(solver);
         r.solve_rss_mb = read_vmrss_mb();
@@ -865,14 +887,14 @@ static BenchResult run_apxchol_v1(
     //   triangular forward/back), which was UNDER-REPORTING solve time by
     //   the full PCG SpMV cost — making our v1 numbers look ~2× better
     //   than reality vs Eigen-CG-based competitors. Fixed 2026-05-24.
-    r.setup_time = timings.total("setup");
+    r.setup_time = timings.total("setup") + view_seconds;
     r.solve_time = wall_total - r.setup_time;
     if (r.solve_time < 0.0) r.solve_time = 0.0;
     r.total_time = wall_total;
     r.iterations = static_cast<int>(res.iterations);
     // Independently grade the returned solution against the original operator and RHS.
     {
-        Eigen::VectorXd xg = res.x;
+        Eigen::VectorXd xg = Eigen::Map<const Eigen::VectorXd>(res.x.data(), Eigen::Index(res.x.size()));
         center_if_laplacian(xg);
         Eigen::VectorXd rg = b - L * xg;
         center_if_laplacian(rg);
@@ -2862,7 +2884,9 @@ int main(int argc, char** argv) try {
         // adjacency signature) with counts, so a file mis-declared `operator`
         // dies here with a diagnosis instead of quietly producing nonsense.
         try {
-            op_scan = apxchol::detail::require_operator(L,
+            L.makeCompressed();   // apxchol borrows the compressed arrays
+            op_scan = apxchol::detail::require_operator(
+                apxchol::detail::csc_input(apxchol_view(L)),
 #ifdef HAVE_APXCHOL_V1
                 args.v1_options.factor_opts.lump_max_mass
 #else
@@ -2935,6 +2959,7 @@ int main(int argc, char** argv) try {
         std::cerr << "[reg] L += " << eps << " * I (reg_rel=" << args.reg_rel << ")\n";
     }
 
+    L.makeCompressed();   // apxchol borrows the compressed arrays
     int nnz = static_cast<int>(L.nonZeros());
     std::cerr << ", nnz=" << nnz << "\n";
 

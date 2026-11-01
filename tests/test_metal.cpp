@@ -13,6 +13,7 @@
 #include "apxchol/solver/sptrsv/gpu_factor_prep.h"
 #include "metal_device.h"
 #include "apxchol/solver/detail/solve_backend.h"
+#include "csc_test_util.h"
 
 #include <Eigen/Sparse>
 #include <algorithm>
@@ -245,11 +246,11 @@ TEST_F(MetalDevice, UniformOperatorScalingPreservesConvergence) {
             apxchol::solve_options options;
             options.factor_opts.seed = 17;
             options.factor_opts.factor_storage = storage;
-            apxchol::solver solver(A, gpu_options(options));
+            apxchol::solver solver(apxchol::test::csc(A), gpu_options(options));
             for (unsigned salt : {1u, 4u}) {
                 const auto b = rhs(A.rows(), salt, false);
-                const auto result = solver.solve(b, 1e-8, 2000);
-                EXPECT_LE(true_residual(A, b, result.x), 1e-8);
+                const auto result = solver.solve(apxchol::test::cspan(b), 1e-8, 2000);
+                EXPECT_LE(true_residual(A, b, apxchol::test::vec(result.x)), 1e-8);
             }
         }
     }
@@ -264,7 +265,7 @@ TEST_F(MetalDevice, ScaledMatrixSolvesMatchScalarColumns) {
             options.backend = apxchol::solve_backend::gpu;
             options.factor_opts.seed = 17;
             options.factor_opts.factor_storage = storage;
-            apxchol::solver owner(A, options);
+            apxchol::solver owner(apxchol::test::csc(A), options);
             Eigen::MatrixXd exact(A.rows(), 7);
             for (int q = 0; q < 7; ++q)
                 exact.col(q) = rhs(A.rows(), q + 1, false) * std::scalbn(1.0, -exponent);
@@ -283,20 +284,20 @@ TEST_F(MetalDevice, ScaledMatrixSolvesMatchScalarColumns) {
                     const bool warm = mode == start::warm_first || mode == start::warm_second ||
                                       mode == start::warm_no_iterations;
                     const int budget = mode == start::no_iterations || mode == start::warm_no_iterations ? 0 : 2000;
-                    const apxchol::const_matrix_view x0(initial);
+                    const apxchol::const_matrix_view x0 = apxchol::test::cmat(initial);
                     Eigen::MatrixXd X(A.rows(), width);
-                    const auto result = owner.solve(B, X, 1e-8, budget, warm ? &x0 : nullptr);
+                    const auto result = owner.solve(apxchol::test::cmat(B), apxchol::test::mmat(X), 1e-8, budget, warm ? x0 : apxchol::const_matrix_view{});
                     ASSERT_EQ(result.columns.size(), std::size_t(width));
                     for (int q = 0; q < width; ++q) {
                         const Eigen::VectorXd b = B.col(q), guess = initial.col(q);
-                        const auto scalar = owner.solve(b, 1e-8, budget, warm ? &guess : nullptr);
+                        const auto scalar = owner.solve(apxchol::test::cspan(b), 1e-8, budget, warm ? apxchol::test::cspan(guess) : std::span<const double>{});
                         EXPECT_EQ(result.columns[q].backend, apxchol::solve_backend::gpu);
                         EXPECT_EQ(result.columns[q].iterations, scalar.iterations);
                         EXPECT_EQ(result.columns[q].x.size(), 0);
                         ASSERT_TRUE(X.col(q).allFinite());
-                        ASSERT_TRUE(scalar.x.allFinite());
-                        EXPECT_LE((X.col(q) - scalar.x).stableNorm(),
-                                  1e-12 * std::max(scalar.x.stableNorm(), 1e-300));
+                        ASSERT_TRUE(apxchol::test::vec(scalar.x).allFinite());
+                        EXPECT_LE((X.col(q) - apxchol::test::vec(scalar.x)).stableNorm(),
+                                  1e-12 * std::max(apxchol::test::vec(scalar.x).stableNorm(), 1e-300));
                         if (budget || warm) {
                             EXPECT_LE((b - A * X.col(q)).stableNorm() / std::max(b.stableNorm(), 1e-300), 1e-8);
                         }
@@ -319,26 +320,26 @@ TEST_F(MetalDevice, ScalarAndMatrixSolvesRejectOverflowWhenRestoringScale) {
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::gpu;
         options.factor_opts.factor_storage = storage;
-        apxchol::solver owner(A, options);
+        apxchol::solver owner(apxchol::test::csc(A), options);
         for (const bool warm : {false, true}) {
             SCOPED_TRACE(testing::Message() << int(storage) << ' ' << warm);
             const Eigen::VectorXd b = Eigen::VectorXd::Constant(4, 1e275);
             const Eigen::VectorXd guess = Eigen::VectorXd::Constant(4, 0.25e305);
-            const auto scalar = owner.solve(b, 1e-8, 100, warm ? &guess : nullptr);
-            ASSERT_TRUE(scalar.x.allFinite());
-            EXPECT_LT((b - A * scalar.x).stableNorm() / b.stableNorm(), 1e-8);
+            const auto scalar = owner.solve(apxchol::test::cspan(b), 1e-8, 100, warm ? apxchol::test::cspan(guess) : std::span<const double>{});
+            ASSERT_TRUE(apxchol::test::vec(scalar.x).allFinite());
+            EXPECT_LT((b - A * apxchol::test::vec(scalar.x)).stableNorm() / b.stableNorm(), 1e-8);
             Eigen::MatrixXd B = b.replicate(1, 4), X(4, 4), initial = guess.replicate(1, 4);
-            const apxchol::const_matrix_view x0(initial);
-            const auto batch = owner.solve(B, X, 1e-8, 100, warm ? &x0 : nullptr);
+            const apxchol::const_matrix_view x0 = apxchol::test::cmat(initial);
+            const auto batch = owner.solve(apxchol::test::cmat(B), apxchol::test::mmat(X), 1e-8, 100, warm ? x0 : apxchol::const_matrix_view{});
             ASSERT_TRUE(X.allFinite());
             for (int c = 0; c < X.cols(); ++c) {
                 EXPECT_LT((b - A * X.col(c)).stableNorm() / b.stableNorm(), 1e-8);
                 EXPECT_LT(batch.columns[c].residual, 1e-8);
             }
             const Eigen::VectorXd huge = Eigen::VectorXd::Constant(4, 1e300);
-            EXPECT_THROW(owner.solve(huge, 1e-8, 100, warm ? &guess : nullptr), std::overflow_error);
+            EXPECT_THROW(owner.solve(apxchol::test::cspan(huge), 1e-8, 100, warm ? apxchol::test::cspan(guess) : std::span<const double>{}), std::overflow_error);
             B.col(2) = huge;
-            EXPECT_THROW(owner.solve(B, X, 1e-8, 100, warm ? &x0 : nullptr), std::overflow_error);
+            EXPECT_THROW(owner.solve(apxchol::test::cmat(B), apxchol::test::mmat(X), 1e-8, 100, warm ? x0 : apxchol::const_matrix_view{}), std::overflow_error);
         }
     }
 }
@@ -355,7 +356,7 @@ TEST_F(MetalDevice, ScaledSolutionAccumulatorsPreserveAccuracy) {
             apxchol::solve_options options;
             options.backend = apxchol::solve_backend::gpu;
             options.factor_opts.factor_storage = storage;
-            apxchol::solver solver(A, options);
+            apxchol::solver solver(apxchol::test::csc(A), options);
             for (int width : {1, 2, 4, 7}) {
                 Eigen::MatrixXd B(4, width), X(4, width);
                 for (int q = 0; q < width; ++q) B.col(q).setConstant(q % 2 ? -magnitude : magnitude);
@@ -367,11 +368,11 @@ TEST_F(MetalDevice, ScaledSolutionAccumulatorsPreserveAccuracy) {
                     std::vector<apxchol::solve_result> columns;
                     if (width == 1) {
                         const Eigen::VectorXd rhs = B.col(0), guess = initial.col(0);
-                        columns.push_back(solver.solve(rhs, 1e-8, 100, warm ? &guess : nullptr));
-                        X.col(0) = columns[0].x;
+                        columns.push_back(solver.solve(apxchol::test::cspan(rhs), 1e-8, 100, warm ? apxchol::test::cspan(guess) : std::span<const double>{}));
+                        X.col(0) = apxchol::test::vec(columns[0].x);
                     } else {
-                        const apxchol::const_matrix_view guess(initial);
-                        columns = solver.solve(B, X, 1e-8, 100, warm ? &guess : nullptr).columns;
+                        const apxchol::const_matrix_view guess = apxchol::test::cmat(initial);
+                        columns = solver.solve(apxchol::test::cmat(B), apxchol::test::mmat(X), 1e-8, 100, warm ? guess : apxchol::const_matrix_view{}).columns;
                     }
                     ASSERT_TRUE(X.allFinite());
                     for (int q = 0; q < width; ++q) {
@@ -398,14 +399,14 @@ TEST_F(MetalDevice, FourColumnPlansReuseStorageAfterScalarAndWarmSolves) {
     const Eigen::VectorXd first_rhs = B.col(0);
     Eigen::MatrixXd initial = 0.25 * exact;
     initial.col(0) = exact.col(0);
-    const apxchol::const_matrix_view warm(initial);
+    const apxchol::const_matrix_view warm = apxchol::test::cmat(initial);
     auto check = [&](apxchol::solver& owner) {
         for (unsigned pass = 0; pass < 3; ++pass) {
             SCOPED_TRACE(pass);
-            const auto scalar = owner.solve(first_rhs, 1e-8, 1000);
-            EXPECT_LE(true_residual(A, first_rhs, scalar.x), 1e-8);
+            const auto scalar = owner.solve(apxchol::test::cspan(first_rhs), 1e-8, 1000);
+            EXPECT_LE(true_residual(A, first_rhs, apxchol::test::vec(scalar.x)), 1e-8);
             Eigen::MatrixXd X(A.rows(), 4);
-            const auto result = owner.solve(B, X, 1e-8, 1000, pass == 2 ? &warm : nullptr);
+            const auto result = owner.solve(apxchol::test::cmat(B), apxchol::test::mmat(X), 1e-8, 1000, pass == 2 ? warm : apxchol::const_matrix_view{});
             ASSERT_EQ(result.columns.size(), 4u);
             if (pass == 2) { EXPECT_EQ(result.columns[0].iterations, 0); }
             for (unsigned q = 0; q < 4; ++q) {
@@ -419,7 +420,7 @@ TEST_F(MetalDevice, FourColumnPlansReuseStorageAfterScalarAndWarmSolves) {
         auto options = keep_opts();
         options.backend = apxchol::solve_backend::gpu;
         options.factor_opts.factor_storage = storage;
-        apxchol::solver resident(A, options);
+        apxchol::solver resident(apxchol::test::csc(A), options);
         std::vector<unsigned> row_sizes(A.rows());
         const auto factor = resident.factor();
         for (auto row : csc_access::inner(factor.L)) ++row_sizes[row];
@@ -429,7 +430,7 @@ TEST_F(MetalDevice, FourColumnPlansReuseStorageAfterScalarAndWarmSolves) {
                 std::count_if(first, first + round.is_size, [](unsigned size) { return size > 1; }) > 32;
         }));
         check(resident);
-        apxchol::solver adopted(A, resident.factor(), options);
+        apxchol::solver adopted(apxchol::test::csc(A), resident.factor(), options);
         check(adopted);
     }
 }
@@ -441,7 +442,7 @@ TEST_F(MetalDevice, LongRowMatrixSolvesMatchScalarColumns) {
         options.backend = apxchol::solve_backend::gpu;
         options.factor_opts.seed = 17;
         options.factor_opts.factor_storage = storage;
-        apxchol::solver owner(A, options);
+        apxchol::solver owner(apxchol::test::csc(A), options);
         std::vector<unsigned> row_sizes(A.rows());
         const auto factor = owner.factor();
         for (auto row : csc_access::inner(factor.L))
@@ -451,16 +452,16 @@ TEST_F(MetalDevice, LongRowMatrixSolvesMatchScalarColumns) {
             SCOPED_TRACE(testing::Message() << int(storage) << ' ' << width);
             Eigen::MatrixXd B(A.rows(), width), X(A.rows(), width);
             for (int q = 0; q < width; ++q) B.col(q) = rhs(A.rows(), q + 1, true);
-            const auto batch = owner.solve(B, X, 1e-8, 2000);
+            const auto batch = owner.solve(apxchol::test::cmat(B), apxchol::test::mmat(X), 1e-8, 2000);
             ASSERT_EQ(batch.columns.size(), std::size_t(width));
             for (int q = 0; q < width; ++q) {
                 const Eigen::VectorXd b = B.col(q);
-                const auto scalar = owner.solve(b, 1e-8, 2000);
+                const auto scalar = owner.solve(apxchol::test::cspan(b), 1e-8, 2000);
                 ASSERT_TRUE(X.col(q).allFinite());
-                ASSERT_TRUE(scalar.x.allFinite());
+                ASSERT_TRUE(apxchol::test::vec(scalar.x).allFinite());
                 EXPECT_LE(true_residual(A, b, X.col(q)), 1e-8);
-                EXPECT_LE(true_residual(A, b, scalar.x), 1e-8);
-                EXPECT_LE((X.col(q) - scalar.x).norm(), 1e-5 * scalar.x.norm());
+                EXPECT_LE(true_residual(A, b, apxchol::test::vec(scalar.x)), 1e-8);
+                EXPECT_LE((X.col(q) - apxchol::test::vec(scalar.x)).norm(), 1e-5 * apxchol::test::vec(scalar.x).norm());
             }
         }
     }
@@ -474,16 +475,16 @@ TEST_F(MetalDevice, MatrixResidualsSurviveOverflowingRhsNorms) {
     for (int q = 0; q < 4; ++q) B.col(q).setConstant(magnitudes[q]);
     Eigen::MatrixXd initial = B;
     initial.row(0).setZero();
-    const apxchol::const_matrix_view guess(initial);
+    const apxchol::const_matrix_view guess = apxchol::test::cmat(initial);
     for (const auto storage : {apxchol::factor_storage_type::fp16,
                               apxchol::factor_storage_type::fp32}) {
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::gpu;
         options.factor_opts.factor_storage = storage;
-        apxchol::solver solver(A, options);
+        apxchol::solver solver(apxchol::test::csc(A), options);
         for (bool warm : {false, true}) {
             for (int budget : {0, 100}) {
-                const auto result = solver.solve(B, X, 1e-8, budget, warm ? &guess : nullptr);
+                const auto result = solver.solve(apxchol::test::cmat(B), apxchol::test::mmat(X), 1e-8, budget, warm ? guess : apxchol::const_matrix_view{});
                 ASSERT_TRUE(X.allFinite());
                 for (int q = 0; q < 4; ++q) {
                     const double scale = apxchol::detail::metal_host::pow2_scale(magnitudes[q]);
@@ -507,12 +508,12 @@ TEST_F(MetalDevice, ApplyAgreesWithSerialDoubleReference) {
     for (const double shift : {0.0, 0.5}) {
         SCOPED_TRACE(shift == 0.0 ? "Laplacian" : "SDDM");
         const Sparse A = grid(37, 29, shift, true);
-        apxchol::factorization F = apxchol::factorize(A);
+        apxchol::factorization F = apxchol::factorize(apxchol::test::csc(A));
         const apxchol::factorization Fcopy = F;
-        apxchol::solver slv(A, std::move(F), gpu_options());
+        apxchol::solver slv(apxchol::test::csc(A), std::move(F), gpu_options());
         for (unsigned salt : {1u, 4u}) {
             const Eigen::VectorXd r = rhs(A.rows(), salt, shift == 0.0) * std::ldexp(1.0, 9 * static_cast<int>(salt) - 20);
-            const Eigen::VectorXd z = slv.apply(r);
+            const Eigen::VectorXd z = apxchol::test::vec(slv.apply(apxchol::test::cspan(r)));
             const Eigen::VectorXd ze = emulate_apply(Fcopy, r);
             EXPECT_LT((z - ze).norm() / ze.norm(), 2e-5);
         }
@@ -522,13 +523,13 @@ TEST_F(MetalDevice, ApplyAgreesWithSerialDoubleReference) {
 // Exercise long rows and cross-workgroup dependency stages on the device.
 TEST_F(MetalDevice, HubFactorAgreesWithSerialDoubleReference) {
     const Sparse A = hub_graph(110, 100, 4);
-    apxchol::factorization F = apxchol::factorize(A);
+    apxchol::factorization F = apxchol::factorize(apxchol::test::csc(A));
     const apxchol::factorization Fcopy = F;
     ASSERT_FALSE(Fcopy.sddm);
-    apxchol::solver slv(A, std::move(F), gpu_options());
+    apxchol::solver slv(apxchol::test::csc(A), std::move(F), gpu_options());
     const Eigen::VectorXd r = rhs(A.rows(), 2, true);
     const auto reference = emulate_apply(Fcopy, r);
-    EXPECT_LT((slv.apply(r) - reference).norm() / reference.norm(), 2e-5);
+    EXPECT_LT((apxchol::test::vec(slv.apply(apxchol::test::cspan(r))) - reference).norm() / reference.norm(), 2e-5);
 
 }
 
@@ -573,11 +574,11 @@ TEST_F(MetalDevice, SyntheticHeavyFactorAgreesWithSerialDoubleReference) {
         F.sddm = sddm;
         // The operator only has to match in size for an application.
         const Sparse A = grid(50, 100, sddm ? 0.5 : 0.0);
-        apxchol::solver slv(A, apxchol::factorization(F), gpu_options());
+        apxchol::solver slv(apxchol::test::csc(A), apxchol::factorization(F), gpu_options());
         for (unsigned salt : {1u, 6u}) {
             const Eigen::VectorXd r = rhs(A.rows(), salt, !sddm);
             const auto reference = emulate_apply(F, r);
-            EXPECT_LT((slv.apply(r) - reference).norm() / reference.norm(), 2e-5);
+            EXPECT_LT((apxchol::test::vec(slv.apply(apxchol::test::cspan(r))) - reference).norm() / reference.norm(), 2e-5);
         }
     }
 }
@@ -586,17 +587,17 @@ TEST_F(MetalDevice, ApplyAgreesWithCpuApply) {
     for (const double shift : {0.0, 0.25}) {
         SCOPED_TRACE(shift == 0.0 ? "Laplacian" : "SDDM");
         const Sparse A = grid(40, 40, shift);
-        apxchol::factorization F = apxchol::factorize(A);
-        apxchol::solver cpu(A, apxchol::factorization(F));
-        apxchol::solver gpu(A, std::move(F), gpu_options());
+        apxchol::factorization F = apxchol::factorize(apxchol::test::csc(A));
+        apxchol::solver cpu(apxchol::test::csc(A), apxchol::factorization(F));
+        apxchol::solver gpu(apxchol::test::csc(A), std::move(F), gpu_options());
         const Eigen::VectorXd r = rhs(A.rows(), 3, shift == 0.0);
         // The CPU's center-k schedule centres only some applications; centre
         // its input and output here, as the device does every time.
         Eigen::VectorXd rc = r;
         if (shift == 0.0) rc.array() -= rc.mean();
-        Eigen::VectorXd zc = cpu.apply(rc);
+        Eigen::VectorXd zc = apxchol::test::vec(cpu.apply(apxchol::test::cspan(rc)));
         if (shift == 0.0) zc.array() -= zc.mean();
-        const Eigen::VectorXd zg = gpu.apply(r);
+        const Eigen::VectorXd zg = apxchol::test::vec(gpu.apply(apxchol::test::cspan(r)));
         const double rel = (zg - zc).norm() / zc.norm();
         std::printf("[ metal ] %s apply: |z_gpu - z_cpu| / |z_cpu| = %.3e\n",
                     shift == 0.0 ? "Laplacian" : "SDDM", rel);
@@ -606,20 +607,20 @@ TEST_F(MetalDevice, ApplyAgreesWithCpuApply) {
 
 TEST_F(MetalDevice, GridLaplacianOriginalResidual) {
     const Sparse A = grid(48, 48);
-    apxchol::solver cpu(A, {.backend = apxchol::solve_backend::cpu});
-    apxchol::solver gpu(A, gpu_options());
+    apxchol::solver cpu(apxchol::test::csc(A), {.backend = apxchol::solve_backend::cpu});
+    apxchol::solver gpu(apxchol::test::csc(A), gpu_options());
     const Eigen::VectorXd b = rhs(A.rows(), 2, true);
     for (const double tol : {1e-8, 1e-10}) {
         SCOPED_TRACE(tol);
-        const apxchol::solve_result r = gpu.solve(b, tol, 500);
-        const double eig = true_residual(A, b, r.x);
+        const apxchol::solve_result r = gpu.solve(apxchol::test::cspan(b), tol, 500);
+        const double eig = true_residual(A, b, apxchol::test::vec(r.x));
         EXPECT_LT(r.residual, tol);
         EXPECT_NEAR(r.residual, eig, 1e-3 * eig + 1e-16);
-        EXPECT_LE(std::fabs(r.x.mean()), 1e-12 * r.x.norm());
+        EXPECT_LE(std::fabs(apxchol::test::vec(r.x).mean()), 1e-12 * apxchol::test::vec(r.x).norm());
         EXPECT_GT(r.iterations, 0);
         if (tol == 1e-10) {
-            const apxchol::solve_result c = cpu.solve(b, tol, 500);
-            const double rel = (r.x - c.x).norm() / c.x.norm();
+            const apxchol::solve_result c = cpu.solve(apxchol::test::cspan(b), tol, 500);
+            const double rel = (apxchol::test::vec(r.x) - apxchol::test::vec(c.x)).norm() / apxchol::test::vec(c.x).norm();
             std::printf("[ metal ] grid 48x48 tol 1e-10: metal %lld iterations residual %.3e, cpu %lld "
                         "iterations, |x_gpu - x_cpu| / |x_cpu| = %.3e\n",
                         static_cast<long long>(r.iterations), r.residual,
@@ -633,13 +634,13 @@ TEST_F(MetalDevice, SddmExactAndDoubleFloatOperators) {
     for (const bool inexact : {false, true}) {
         SCOPED_TRACE(inexact ? "double-float operator" : "fp32-exact operator");
         const Sparse A = grid(30, 50, 0.125, inexact);
-        apxchol::solver slv(A, gpu_options());
+        apxchol::solver slv(apxchol::test::csc(A), gpu_options());
         EXPECT_EQ(metal(slv).stats().operator_double_float, inexact);
         EXPECT_TRUE(slv.factor().sddm);
         const Eigen::VectorXd b = rhs(A.rows(), 5, false);
-        const apxchol::solve_result r = slv.solve(b, 1e-10, 500);
+        const apxchol::solve_result r = slv.solve(apxchol::test::cspan(b), 1e-10, 500);
         EXPECT_LT(r.residual, 1e-10);
-        EXPECT_NEAR(r.residual, true_residual(A, b, r.x), 1e-3 * r.residual + 1e-16);
+        EXPECT_NEAR(r.residual, true_residual(A, b, apxchol::test::vec(r.x)), 1e-3 * r.residual + 1e-16);
     }
 }
 
@@ -665,15 +666,15 @@ TEST_F(MetalDevice, LongOperatorRowAndPartialTile) {
             apxchol::solve_options options;
             options.factor_opts.factor_storage = storage;
             options.factor_opts.seed = 42;
-            apxchol::solver solver(A, gpu_options(options));
+            apxchol::solver solver(apxchol::test::csc(A), gpu_options(options));
             ASSERT_EQ(metal(solver).stats().operator_double_float, inexact);
             Eigen::VectorXd guess;
             for (const unsigned salt : {1u, 3u}) {
                 const auto b = rhs(n, salt, false);
-                const auto result = solver.solve(b, 1e-8, 500, guess.size() ? &guess : nullptr);
-                ASSERT_TRUE(result.x.allFinite());
-                EXPECT_LE(true_residual(A, b, result.x), 1e-8);
-                guess = 0.5 * result.x;
+                const auto result = solver.solve(apxchol::test::cspan(b), 1e-8, 500, guess.size() ? apxchol::test::cspan(guess) : std::span<const double>{});
+                ASSERT_TRUE(apxchol::test::vec(result.x).allFinite());
+                EXPECT_LE(true_residual(A, b, apxchol::test::vec(result.x)), 1e-8);
+                guess = 0.5 * apxchol::test::vec(result.x);
             }
         }
     }
@@ -687,34 +688,34 @@ TEST_F(MetalDevice, EarlyExitsTruthful) {
         apxchol::solve_options options;
         options.factor_opts.factor_storage = storage;
         options.backend = apxchol::solve_backend::gpu;
-        apxchol::solver slv(A, options);
+        apxchol::solver slv(apxchol::test::csc(A), options);
         ASSERT_EQ(slv.backend(), apxchol::solve_backend::gpu);
         const Eigen::VectorXd b = rhs(A.rows(), 1, true);
-        const apxchol::solve_result none = slv.solve(b, 1e-8, 0);
+        const apxchol::solve_result none = slv.solve(apxchol::test::cspan(b), 1e-8, 0);
         EXPECT_EQ(none.iterations, 0);
         EXPECT_EQ(none.residual, 1.0);
-        EXPECT_EQ(none.x.norm(), 0.0);
+        EXPECT_EQ(apxchol::test::vec(none.x).norm(), 0.0);
 
         const Eigen::VectorXd guess = rhs(A.rows(), 2, true);
-        const auto seeded = slv.solve(b, 1e-8, 0, &guess);
+        const auto seeded = slv.solve(apxchol::test::cspan(b), 1e-8, 0, apxchol::test::cspan(guess));
         EXPECT_EQ(seeded.iterations, 0);
-        EXPECT_LT((seeded.x - guess).norm(), 1e-12);
-        EXPECT_NEAR(seeded.residual, true_residual(A, b, seeded.x), 1e-12);
+        EXPECT_LT((apxchol::test::vec(seeded.x) - guess).norm(), 1e-12);
+        EXPECT_NEAR(seeded.residual, true_residual(A, b, apxchol::test::vec(seeded.x)), 1e-12);
 
         for (int limit : {0, 1, 4, 5}) {
-            const auto limited = slv.solve(b, 1e-30, limit);
+            const auto limited = slv.solve(apxchol::test::cspan(b), 1e-30, limit);
             EXPECT_EQ(limited.iterations, limit);
-            EXPECT_NEAR(limited.residual, true_residual(A, b, limited.x), 1e-12);
+            EXPECT_NEAR(limited.residual, true_residual(A, b, apxchol::test::vec(limited.x)), 1e-12);
             Eigen::MatrixXd B = b.replicate(1, 4), initial = Eigen::MatrixXd::Zero(A.rows(), 4);
             B.col(0).setZero();
             B.col(1) = A * guess;
             initial.col(1) = guess;
-            const apxchol::const_matrix_view warm(initial);
+            const apxchol::const_matrix_view warm = apxchol::test::cmat(initial);
+            // Padded columns: only the first A.rows() entries of each column are output.
             Eigen::MatrixXd storage = Eigen::MatrixXd::Constant(2 * A.rows(), 4, 77.0);
-            using Stride = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
-            Eigen::Map<Eigen::MatrixXd, 0, Stride> X(storage.data(), A.rows(), 4,
-                                                   Stride(2 * A.rows(), 2));
-            const auto panel = slv.solve(B, X, 1e-8, limit, &warm);
+            Eigen::Map<Eigen::MatrixXd, 0, Eigen::OuterStride<>> X(storage.data(), A.rows(), 4,
+                                                                 Eigen::OuterStride<>(2 * A.rows()));
+            const auto panel = slv.solve(apxchol::test::cmat(B), apxchol::test::mmat(X), 1e-8, limit, warm);
             ASSERT_EQ(panel.columns.size(), 4u);
             for (int q = 0; q < 4; ++q) {
                 EXPECT_LE(panel.columns[q].iterations, limit);
@@ -722,20 +723,20 @@ TEST_F(MetalDevice, EarlyExitsTruthful) {
                 const double residual = q == 0 ? X.col(q).norm() : true_residual(A, B.col(q), X.col(q));
                 EXPECT_NEAR(panel.columns[q].residual, residual, 1e-12);
             }
-            for (Eigen::Index i = 1; i < storage.rows(); i += 2)
+            for (Eigen::Index i = A.rows(); i < storage.rows(); ++i)
                 EXPECT_TRUE((storage.row(i).array() == 77.0).all());
         }
 
         const Eigen::VectorXd zero = Eigen::VectorXd::Zero(A.rows());
-        const apxchol::solve_result z = slv.solve(zero);
+        const apxchol::solve_result z = slv.solve(apxchol::test::cspan(zero));
         EXPECT_EQ(z.iterations, 0);
         EXPECT_EQ(z.residual, 0.0);
-        EXPECT_EQ(z.x.norm(), 0.0);
+        EXPECT_EQ(apxchol::test::vec(z.x).norm(), 0.0);
 
         const Eigen::VectorXd short_x0 = Eigen::VectorXd::Zero(A.rows() - 1);
-        EXPECT_THROW(slv.solve(b, 1e-8, 10, &short_x0), std::invalid_argument);
-        EXPECT_THROW(slv.solve(Eigen::VectorXd(Eigen::VectorXd::Ones(3))), std::invalid_argument);
-        EXPECT_THROW(slv.apply(Eigen::VectorXd(Eigen::VectorXd::Ones(3))), std::invalid_argument);
+        EXPECT_THROW(slv.solve(apxchol::test::cspan(b), 1e-8, 10, apxchol::test::cspan(short_x0)), std::invalid_argument);
+        EXPECT_THROW(slv.solve(apxchol::test::cspan(Eigen::VectorXd(Eigen::VectorXd::Ones(3)))), std::invalid_argument);
+        EXPECT_THROW(slv.apply(apxchol::test::cspan(Eigen::VectorXd(Eigen::VectorXd::Ones(3)))), std::invalid_argument);
     }
 }
 
@@ -747,9 +748,9 @@ TEST_F(MetalDevice, BreakdownIsNotConvergence) {
         SCOPED_TRACE(int(storage));
         apxchol::solve_options options;
         options.factor_opts.factor_storage = storage;
-        apxchol::solver slv(A, gpu_options(options));
+        apxchol::solver slv(apxchol::test::csc(A), gpu_options(options));
         const Eigen::VectorXd b = Eigen::VectorXd::Ones(A.rows());
-        const apxchol::solve_result r = slv.solve(b, 1e-8, 50);
+        const apxchol::solve_result r = slv.solve(apxchol::test::cspan(b), 1e-8, 50);
         EXPECT_EQ(r.iterations, 0);
         EXPECT_EQ(r.residual, 1.0);
     }
@@ -789,13 +790,13 @@ TEST_F(MetalDevice, ProjectedWarmResidualDoesNotConsumeBudget) {
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::gpu;
         options.factor_opts.factor_storage = storage;
-        apxchol::solver slv(A, options);
+        apxchol::solver slv(apxchol::test::csc(A), options);
         ASSERT_EQ(slv.backend(), apxchol::solve_backend::gpu);
-        const auto scalar = slv.solve(incompatible, tolerance, 1000, &guess);
+        const auto scalar = slv.solve(apxchol::test::cspan(incompatible), tolerance, 1000, apxchol::test::cspan(guess));
         EXPECT_EQ(scalar.iterations, 0);
         EXPECT_FALSE(scalar.converged);
-        EXPECT_TRUE(same_bytes(scalar.x, guess));
-        EXPECT_NEAR(scalar.residual, true_residual(A, incompatible, scalar.x), 1e-14);
+        EXPECT_TRUE(same_bytes(apxchol::test::vec(scalar.x), guess));
+        EXPECT_NEAR(scalar.residual, true_residual(A, incompatible, apxchol::test::vec(scalar.x)), 1e-14);
 
         Eigen::MatrixXd B(n, 4), initial = Eigen::MatrixXd::Zero(n, 4), X(n, 4);
         B.col(0) = incompatible;
@@ -803,8 +804,8 @@ TEST_F(MetalDevice, ProjectedWarmResidualDoesNotConsumeBudget) {
         B.col(2).setZero();
         B.col(3) = A * rhs(n, 3, true);
         initial.col(0) = initial.col(1) = guess;
-        const apxchol::const_matrix_view warm(initial);
-        const auto batch = slv.solve(B, X, tolerance, 1000, &warm);
+        const apxchol::const_matrix_view warm = apxchol::test::cmat(initial);
+        const auto batch = slv.solve(apxchol::test::cmat(B), apxchol::test::mmat(X), tolerance, 1000, warm);
         ASSERT_EQ(batch.columns.size(), 4u);
         EXPECT_EQ(batch.columns[0].iterations, 0);
         EXPECT_FALSE(batch.columns[0].converged);
@@ -824,68 +825,68 @@ TEST_F(MetalDevice, ProjectedWarmResidualDoesNotConsumeBudget) {
 
 TEST_F(MetalDevice, UnreachableTolStopsHonestly) {
     const Sparse A = grid(16, 16, 0.0, true);
-    apxchol::solver slv(A, gpu_options());
+    apxchol::solver slv(apxchol::test::csc(A), gpu_options());
     const Eigen::VectorXd b = rhs(A.rows(), 7, true);
-    const apxchol::solve_result r = slv.solve(b, 1e-30, 300);
+    const apxchol::solve_result r = slv.solve(apxchol::test::cspan(b), 1e-30, 300);
     EXPECT_GE(r.residual, 1e-30);
     EXPECT_LE(r.iterations, 300);
-    EXPECT_NEAR(r.residual, true_residual(A, b, r.x), 1e-2 * r.residual);
+    EXPECT_NEAR(r.residual, true_residual(A, b, apxchol::test::vec(r.x)), 1e-2 * r.residual);
 }
 
 TEST_F(MetalDevice, PowerOfTwoScalingExact) {
     const Sparse A = grid(15, 21, 0.3, true);
-    apxchol::solver slv(A, gpu_options());
+    apxchol::solver slv(apxchol::test::csc(A), gpu_options());
     const Eigen::VectorXd b = rhs(A.rows(), 2, false);
-    const apxchol::solve_result base = slv.solve(b, 1e-10, 400);
+    const apxchol::solve_result base = slv.solve(apxchol::test::cspan(b), 1e-10, 400);
     for (const int e : {-40, 7}) {
         SCOPED_TRACE(e);
         const Eigen::VectorXd bs = b * std::ldexp(1.0, e);
-        const apxchol::solve_result s = slv.solve(bs, 1e-10, 400);
+        const apxchol::solve_result s = slv.solve(apxchol::test::cspan(bs), 1e-10, 400);
         EXPECT_EQ(s.iterations, base.iterations);
-        EXPECT_TRUE(same_bytes(s.x, Eigen::VectorXd(base.x * std::ldexp(1.0, e))));
+        EXPECT_TRUE(same_bytes(apxchol::test::vec(s.x), Eigen::VectorXd(apxchol::test::vec(base.x) * std::ldexp(1.0, e))));
     }
 }
 
 TEST_F(MetalDevice, RepeatedAndTwinSolversBitIdentical) {
     const Sparse A = grid(33, 17);
-    apxchol::factorization F = apxchol::factorize(A);
-    apxchol::solver one(A, apxchol::factorization(F), gpu_options());
-    apxchol::solver two(A, std::move(F), gpu_options());
+    apxchol::factorization F = apxchol::factorize(apxchol::test::csc(A));
+    apxchol::solver one(apxchol::test::csc(A), apxchol::factorization(F), gpu_options());
+    apxchol::solver two(apxchol::test::csc(A), std::move(F), gpu_options());
     const Eigen::VectorXd b = rhs(A.rows(), 6, true);
-    const apxchol::solve_result a1 = one.solve(b, 1e-10, 400);
+    const apxchol::solve_result a1 = one.solve(apxchol::test::cspan(b), 1e-10, 400);
     const Eigen::VectorXd other = rhs(A.rows(), 11, true);
-    EXPECT_TRUE(same_bytes(one.apply(other), two.apply(other)));
-    const apxchol::solve_result a2 = one.solve(b, 1e-10, 400);
-    const apxchol::solve_result b1 = two.solve(b, 1e-10, 400);
-    EXPECT_TRUE(same_bytes(a1.x, a2.x));
-    EXPECT_TRUE(same_bytes(a1.x, b1.x));
+    EXPECT_TRUE(same_bytes(apxchol::test::vec(one.apply(apxchol::test::cspan(other))), apxchol::test::vec(two.apply(apxchol::test::cspan(other)))));
+    const apxchol::solve_result a2 = one.solve(apxchol::test::cspan(b), 1e-10, 400);
+    const apxchol::solve_result b1 = two.solve(apxchol::test::cspan(b), 1e-10, 400);
+    EXPECT_TRUE(same_bytes(apxchol::test::vec(a1.x), apxchol::test::vec(a2.x)));
+    EXPECT_TRUE(same_bytes(apxchol::test::vec(a1.x), apxchol::test::vec(b1.x)));
     EXPECT_EQ(a1.iterations, b1.iterations);
-    EXPECT_TRUE(same_bytes(one.apply(b), two.apply(b)));
+    EXPECT_TRUE(same_bytes(apxchol::test::vec(one.apply(apxchol::test::cspan(b))), apxchol::test::vec(two.apply(apxchol::test::cspan(b)))));
 }
 
 
 
 TEST_F(MetalDevice, LaplacianX0ConstantIrrelevant) {
     const Sparse A = grid(26, 26);
-    apxchol::solver slv(A, gpu_options());
+    apxchol::solver slv(apxchol::test::csc(A), gpu_options());
     const Eigen::VectorXd b = rhs(A.rows(), 8, true);
     const Eigen::VectorXd x0 = rhs(A.rows(), 9, false);
     const Eigen::VectorXd x0c = (x0.array() + 5.0).matrix();
-    const apxchol::solve_result r1 = slv.solve(b, 1e-10, 500, &x0);
-    const apxchol::solve_result r2 = slv.solve(b, 1e-10, 500, &x0c);
+    const apxchol::solve_result r1 = slv.solve(apxchol::test::cspan(b), 1e-10, 500, apxchol::test::cspan(x0));
+    const apxchol::solve_result r2 = slv.solve(apxchol::test::cspan(b), 1e-10, 500, apxchol::test::cspan(x0c));
     EXPECT_LT(r1.residual, 1e-10);
     EXPECT_LT(r2.residual, 1e-10);
-    EXPECT_LE(std::fabs(r1.x.mean()), 1e-12 * r1.x.norm());
-    EXPECT_LE(std::fabs(r2.x.mean()), 1e-12 * r2.x.norm());
-    EXPECT_LE((r1.x - r2.x).norm() / r1.x.norm(), 1e-6);
+    EXPECT_LE(std::fabs(apxchol::test::vec(r1.x).mean()), 1e-12 * apxchol::test::vec(r1.x).norm());
+    EXPECT_LE(std::fabs(apxchol::test::vec(r2.x).mean()), 1e-12 * apxchol::test::vec(r2.x).norm());
+    EXPECT_LE((apxchol::test::vec(r1.x) - apxchol::test::vec(r2.x)).norm() / apxchol::test::vec(r1.x).norm(), 1e-6);
 }
 
 TEST_F(MetalDevice, ExactWarmStartUsesTheOriginalOrdering) {
     for (const double shift : {0.0, 0.25}) {
         SCOPED_TRACE(shift);
         const Sparse A = grid(9, 11, shift, true);
-        apxchol::solver resident(A, gpu_options(keep_opts()));
-        apxchol::solver adopted(A, apxchol::factorization(resident.factor()), gpu_options());
+        apxchol::solver resident(apxchol::test::csc(A), gpu_options(keep_opts()));
+        apxchol::solver adopted(apxchol::test::csc(A), apxchol::factorization(resident.factor()), gpu_options());
         bool permuted = false;
         for (node_index i = 0; i < A.rows(); ++i)
             permuted |= resident.factor().perm[i] != i;
@@ -893,9 +894,9 @@ TEST_F(MetalDevice, ExactWarmStartUsesTheOriginalOrdering) {
         const Eigen::VectorXd guess = rhs(A.rows(), 9, shift == 0.0);
         const Eigen::VectorXd b = A * guess;
         for (auto* solver : {&resident, &adopted}) {
-            const auto result = solver->solve(b, 1e-8, 20, &guess);
+            const auto result = solver->solve(apxchol::test::cspan(b), 1e-8, 20, apxchol::test::cspan(guess));
             EXPECT_EQ(result.iterations, 0);
-            const double residual = true_residual(A, b, result.x);
+            const double residual = true_residual(A, b, apxchol::test::vec(result.x));
             EXPECT_LT(residual, 1e-8);
             EXPECT_NEAR(result.residual, residual, 1e-14);
         }
@@ -904,30 +905,30 @@ TEST_F(MetalDevice, ExactWarmStartUsesTheOriginalOrdering) {
 
 TEST_F(MetalDevice, NonFiniteRhsRejected) {
     const Sparse A = grid(8, 8, 0.5);
-    apxchol::solver slv(A, gpu_options());
+    apxchol::solver slv(apxchol::test::csc(A), gpu_options());
     Eigen::VectorXd b = rhs(A.rows(), 1, false);
     b[3] = std::numeric_limits<double>::quiet_NaN();
-    EXPECT_THROW(slv.solve(b), std::invalid_argument);
+    EXPECT_THROW(slv.solve(apxchol::test::cspan(b)), std::invalid_argument);
     b[3] = std::numeric_limits<double>::infinity();
-    EXPECT_THROW(slv.solve(b), std::invalid_argument);
-    EXPECT_THROW(slv.apply(b), std::invalid_argument);
+    EXPECT_THROW(slv.solve(apxchol::test::cspan(b)), std::invalid_argument);
+    EXPECT_THROW(slv.apply(apxchol::test::cspan(b)), std::invalid_argument);
     const Eigen::VectorXd ok = rhs(A.rows(), 1, false);
     Eigen::VectorXd x0 = Eigen::VectorXd::Ones(A.rows());
     x0[0] = std::numeric_limits<double>::quiet_NaN();
-    EXPECT_THROW(slv.solve(ok, 1e-8, 10, &x0), std::invalid_argument);
+    EXPECT_THROW(slv.solve(apxchol::test::cspan(ok), 1e-8, 10, apxchol::test::cspan(x0)), std::invalid_argument);
 }
 
 TEST_F(MetalDevice, OutOfRangeOperatorIsADomainError) {
     Sparse A(3, 3);
     A.setIdentity();
-    const auto F = apxchol::factorize(A);
+    const auto F = apxchol::factorize(apxchol::test::csc(A));
     apxchol::solve_options options;
     options.backend = apxchol::solve_backend::gpu;
     for (double value : {0x1p-101, 0x1p101}) {
         SCOPED_TRACE(value);
         A.diagonal().setConstant(value);
-        EXPECT_THROW(apxchol::solver(A, F, options), std::invalid_argument);
-        EXPECT_THROW(apxchol::solver(A, options), std::invalid_argument);
+        EXPECT_THROW(apxchol::solver(apxchol::test::csc(A), F, options), std::invalid_argument);
+        EXPECT_THROW(apxchol::solver(apxchol::test::csc(A), options), std::invalid_argument);
     }
 }
 
@@ -945,36 +946,36 @@ TEST_F(MetalDevice, TinyFactorOffDiagonalsRemainUsable) {
         csc_access::vals(F.L) = {1.0f, value, 1.0f};
         F.perm = {0, 1};
         F.sddm = true;
-        apxchol::solver solver(A, std::move(F), gpu_options());
+        apxchol::solver solver(apxchol::test::csc(A), std::move(F), gpu_options());
         EXPECT_EQ(metal(solver).stats().levels_forward, 2u);
         EXPECT_EQ(metal(solver).stats().levels_backward, 2u);
-        EXPECT_TRUE(solver.apply(b).allFinite());
-        const auto result = solver.solve(b, 1e-8, 10);
-        EXPECT_LT(true_residual(A, b, result.x), 1e-8);
+        EXPECT_TRUE(apxchol::test::vec(solver.apply(apxchol::test::cspan(b))).allFinite());
+        const auto result = solver.solve(apxchol::test::cspan(b), 1e-8, 10);
+        EXPECT_LT(true_residual(A, b, apxchol::test::vec(result.x)), 1e-8);
     }
 }
 
 TEST_F(MetalDevice, ScaledRightHandSides) {
     Sparse A(2, 2);
     A.setIdentity();
-    apxchol::solver solver(A, gpu_options());
+    apxchol::solver solver(apxchol::test::csc(A), gpu_options());
     for (const double magnitude : {0.0, 1e-200, 1.0, 1e200,
                                    std::numeric_limits<double>::denorm_min()}) {
         SCOPED_TRACE(magnitude);
         Eigen::VectorXd b(2);
         b << magnitude, -2 * magnitude;
-        const auto result = solver.solve(b, 1e-10, 10);
-        const auto applied = solver.apply(b);
-        EXPECT_TRUE(result.x.allFinite());
+        const auto result = solver.solve(apxchol::test::cspan(b), 1e-10, 10);
+        const Eigen::VectorXd applied = apxchol::test::vec(solver.apply(apxchol::test::cspan(b)));
+        EXPECT_TRUE(apxchol::test::vec(result.x).allFinite());
         EXPECT_TRUE(applied.allFinite());
         if (magnitude == 0) {
-            EXPECT_TRUE(result.x.isZero(0.0));
+            EXPECT_TRUE(apxchol::test::vec(result.x).isZero(0.0));
             EXPECT_TRUE(applied.isZero(0.0));
             EXPECT_EQ(result.iterations, 0);
             EXPECT_EQ(result.residual, 0.0);
             continue;
         }
-        const double residual = (b - A * result.x).stableNorm() / b.stableNorm();
+        const double residual = (b - A * apxchol::test::vec(result.x)).stableNorm() / b.stableNorm();
         EXPECT_GT(result.iterations, 0);
         EXPECT_LT(residual, 1e-10);
         EXPECT_NEAR(result.residual, residual, 1e-15);
@@ -994,14 +995,14 @@ TEST_F(MetalDevice, RelativeResidualSurvivesOverflowingRhsNorm) {
                               apxchol::factor_storage_type::fp32}) {
         apxchol::solve_options options;
         options.factor_opts.factor_storage = storage;
-        apxchol::solver solver(A, gpu_options(options));
+        apxchol::solver solver(apxchol::test::csc(A), gpu_options(options));
         for (bool warm : {false, true}) {
-            const auto stopped = solver.solve(rhs, 1e-8, 0, warm ? &guess : nullptr);
+            const auto stopped = solver.solve(apxchol::test::cspan(rhs), 1e-8, 0, warm ? apxchol::test::cspan(guess) : std::span<const double>{});
             EXPECT_DOUBLE_EQ(stopped.residual, warm ? 0.25 : 1.0);
             EXPECT_EQ(stopped.iterations, 0);
-            const auto solved = solver.solve(rhs, 1e-8, 100, warm ? &guess : nullptr);
-            ASSERT_TRUE(solved.x.allFinite());
-            const double residual = (solved.x * scale - scaled_rhs).norm() / scaled_rhs.norm();
+            const auto solved = solver.solve(apxchol::test::cspan(rhs), 1e-8, 100, warm ? apxchol::test::cspan(guess) : std::span<const double>{});
+            ASSERT_TRUE(apxchol::test::vec(solved.x).allFinite());
+            const double residual = (apxchol::test::vec(solved.x) * scale - scaled_rhs).norm() / scaled_rhs.norm();
             EXPECT_LT(residual, 1e-8);
             EXPECT_NEAR(solved.residual, residual, 1e-15);
             EXPECT_GT(solved.iterations, 0);
@@ -1013,24 +1014,24 @@ TEST_F(MetalDevice, TinySystems) {
     Sparse one(1, 1);
     one.insert(0, 0) = 4.0;
     one.makeCompressed();
-    apxchol::solver s1(one, gpu_options());
-    const apxchol::solve_result r1 = s1.solve(Eigen::VectorXd::Constant(1, 2.0));
-    EXPECT_EQ(r1.x[0], 0.5);
+    apxchol::solver s1(apxchol::test::csc(one), gpu_options());
+    const apxchol::solve_result r1 = s1.solve(apxchol::test::cspan(Eigen::VectorXd(Eigen::VectorXd::Constant(1, 2.0))));
+    EXPECT_EQ(apxchol::test::vec(r1.x)[0], 0.5);
     EXPECT_EQ(r1.residual, 0.0);
     for (const int n : {2, 3}) {
         SCOPED_TRACE(n);
         const Sparse A = grid(1, n);  // path Laplacian
-        apxchol::solver s(A, gpu_options());
+        apxchol::solver s(apxchol::test::csc(A), gpu_options());
         const Eigen::VectorXd b = rhs(n, 3, true);
-        const apxchol::solve_result r = s.solve(b, 1e-12, 20);
+        const apxchol::solve_result r = s.solve(apxchol::test::cspan(b), 1e-12, 20);
         EXPECT_LT(r.residual, 1e-12);
-        EXPECT_LE(std::fabs(r.x.mean()), 1e-14 * r.x.norm());
+        EXPECT_LE(std::fabs(apxchol::test::vec(r.x).mean()), 1e-14 * apxchol::test::vec(r.x).norm());
     }
 }
 
 TEST_F(MetalDevice, StatisticsDescribeTheSetup) {
     const Sparse A = grid(50, 40);
-    const apxchol::solver slv(A, gpu_options(keep_opts()));
+    const apxchol::solver slv(apxchol::test::csc(A), gpu_options(keep_opts()));
     const auto st = metal(slv).stats();
     EXPECT_EQ(st.n, A.rows());
     EXPECT_GT(st.levels_forward, 0u);
@@ -1049,15 +1050,15 @@ TEST_F(MetalDevice, ReusesFactorAcrossDifferentRightHandSides) {
     Eigen::MatrixXd dense = Eigen::MatrixXd::Constant(129, 129, -1.0);
     dense.diagonal().setConstant(129.0);
     const Sparse A = dense.sparseView();
-    apxchol::solver solver(A, gpu_options(keep_opts()));
+    apxchol::solver solver(apxchol::test::csc(A), gpu_options(keep_opts()));
     const auto ptr = csc_access::outer(solver.factor().L);
     const auto idx = csc_access::inner(solver.factor().L);
     const auto vals = csc_access::vals(solver.factor().L);
     for (unsigned salt : {2u, 5u, 2u}) {
         const Eigen::VectorXd b = rhs(A.rows(), salt, false);
-        const auto result = solver.solve(b, 1e-9, 400);
+        const auto result = solver.solve(apxchol::test::cspan(b), 1e-9, 400);
         EXPECT_EQ(result.backend, apxchol::solve_backend::gpu);
-        EXPECT_LT(true_residual(A, b, result.x), 1e-9);
+        EXPECT_LT(true_residual(A, b, apxchol::test::vec(result.x)), 1e-9);
         EXPECT_EQ(csc_access::outer(solver.factor().L), ptr);
         EXPECT_EQ(csc_access::inner(solver.factor().L), idx);
         EXPECT_EQ(csc_access::vals(solver.factor().L), vals);
@@ -1073,10 +1074,10 @@ TEST_F(MetalDevice, CommonSolverApiRespectsBackendSelection) {
                               apxchol::solve_backend::gpu}) {
         options.backend = backend;
         apxchol::detail::checkpoint timings;
-        const auto result = apxchol::detail::solver_access::with_timings(A, options, timings).solve(b);
+        const auto result = apxchol::test::with_timings(A, options, timings).solve(apxchol::test::cspan(b));
         EXPECT_EQ(result.backend, backend == apxchol::solve_backend::gpu
             ? apxchol::solve_backend::gpu : apxchol::solve_backend::cpu);
-        EXPECT_LT(true_residual(A, b, result.x), apxchol::default_tol);
+        EXPECT_LT(true_residual(A, b, apxchol::test::vec(result.x)), apxchol::default_tol);
         EXPECT_GT(timings.total("setup"), 0.0);
         EXPECT_GT(timings.total("pcg"), 0.0);
     }
@@ -1084,94 +1085,94 @@ TEST_F(MetalDevice, CommonSolverApiRespectsBackendSelection) {
     large.setIdentity();
     const Eigen::VectorXd large_rhs = Eigen::VectorXd::Ones(large.rows());
     options.backend = apxchol::solve_backend::automatic;
-    apxchol::solver automatic(large, options);
+    apxchol::solver automatic(apxchol::test::csc(large), options);
     EXPECT_EQ(automatic.backend(), apxchol::solve_backend::gpu);
-    EXPECT_LT(true_residual(large, large_rhs, automatic.solve(large_rhs).x), apxchol::default_tol);
+    EXPECT_LT(true_residual(large, large_rhs, apxchol::test::vec(automatic.solve(apxchol::test::cspan(large_rhs)).x)), apxchol::default_tol);
     large.coeffRef(0, 1) = 0; // Numerically valid, but the stored zero has no mate.
     large.makeCompressed();
-    EXPECT_THROW(apxchol::solver(large, gpu_options(options)), std::invalid_argument);
-    apxchol::solver fallback(large, options);
+    EXPECT_THROW(apxchol::solver(apxchol::test::csc(large), gpu_options(options)), std::invalid_argument);
+    apxchol::solver fallback(apxchol::test::csc(large), options);
     EXPECT_EQ(fallback.backend(), apxchol::solve_backend::cpu);
-    EXPECT_LT(true_residual(large, large_rhs, fallback.solve(large_rhs).x), apxchol::default_tol);
+    EXPECT_LT(true_residual(large, large_rhs, apxchol::test::vec(fallback.solve(apxchol::test::cspan(large_rhs)).x)), apxchol::default_tol);
 }
 
 TEST_F(MetalDevice, CommonSolverAdoptsHostFactorWithCpuOnlyOptions) {
     const Sparse A = grid(9, 11, 0.25, true);
     auto options = keep_opts();
     options.factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
-    const auto F = apxchol::factorize(A, options.factor_opts);
+    const auto F = apxchol::factorize(apxchol::test::csc(A), options.factor_opts);
     options.backend = apxchol::solve_backend::gpu;
-    EXPECT_THROW(apxchol::solver(A, options), std::invalid_argument);
-    apxchol::solver adopted(A, F, options);
+    EXPECT_THROW(apxchol::solver(apxchol::test::csc(A), options), std::invalid_argument);
+    apxchol::solver adopted(apxchol::test::csc(A), F, options);
     EXPECT_EQ(adopted.backend(), apxchol::solve_backend::gpu);
     Eigen::MatrixXd B(A.rows(), 4), X(A.rows(), 4);
     for (int q = 0; q < B.cols(); ++q) B.col(q) = rhs(A.rows(), q + 1, false);
-    const auto batch = adopted.solve(B, X, 1e-8, 1000);
+    const auto batch = adopted.solve(apxchol::test::cmat(B), apxchol::test::mmat(X), 1e-8, 1000);
     ASSERT_EQ(batch.columns.size(), 4u);
     for (int q = 0; q < B.cols(); ++q) {
         const Eigen::VectorXd b = B.col(q);
-        const auto scalar = adopted.solve(b, 1e-8, 1000);
+        const auto scalar = adopted.solve(apxchol::test::cspan(b), 1e-8, 1000);
         EXPECT_EQ(scalar.backend, apxchol::solve_backend::gpu);
         EXPECT_EQ(batch.columns[q].backend, apxchol::solve_backend::gpu);
-        EXPECT_LE(true_residual(A, b, scalar.x), 1e-8);
+        EXPECT_LE(true_residual(A, b, apxchol::test::vec(scalar.x)), 1e-8);
         EXPECT_LE(true_residual(A, b, X.col(q)), 1e-8);
     }
     EXPECT_EQ(adopted.backend(), apxchol::solve_backend::gpu);
     options.backend = apxchol::solve_backend::automatic;
-    EXPECT_EQ(apxchol::solver(A, F, options).backend(), apxchol::solve_backend::cpu);
+    EXPECT_EQ(apxchol::solver(apxchol::test::csc(A), F, options).backend(), apxchol::solve_backend::cpu);
     options.factor_opts.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
-    EXPECT_EQ(apxchol::solver(A, F, options).backend(), apxchol::solve_backend::cpu);
+    EXPECT_EQ(apxchol::solver(apxchol::test::csc(A), F, options).backend(), apxchol::solve_backend::cpu);
     options.backend = apxchol::solve_backend::gpu;
-    EXPECT_THROW(apxchol::solver(A, F, options), std::invalid_argument);
+    EXPECT_THROW(apxchol::solver(apxchol::test::csc(A), F, options), std::invalid_argument);
     options.backend = static_cast<apxchol::solve_backend>(-1);
-    EXPECT_THROW(apxchol::solver(A, F, options), std::invalid_argument);
+    EXPECT_THROW(apxchol::solver(apxchol::test::csc(A), F, options), std::invalid_argument);
 }
 
 TEST_F(MetalDevice, PerSolverPreparationOptionsAreIndependent) {
     const Sparse A = grid(7, 9);
     auto options = keep_opts();
-    EXPECT_FALSE(apxchol::solver(A, gpu_options(options)).factor().sddm);
+    EXPECT_FALSE(apxchol::solver(apxchol::test::csc(A), gpu_options(options)).factor().sddm);
     options.factor_opts.regularization = 1e-8;
-    EXPECT_TRUE(apxchol::solver(A, gpu_options(options)).factor().sddm);
+    EXPECT_TRUE(apxchol::solver(apxchol::test::csc(A), gpu_options(options)).factor().sddm);
     options.factor_opts.regularization = 0;
-    EXPECT_FALSE(apxchol::solver(A, gpu_options(options)).factor().sddm);
+    EXPECT_FALSE(apxchol::solver(apxchol::test::csc(A), gpu_options(options)).factor().sddm);
 
     Sparse near = grid(7, 9, 0.25);
     near.coeffRef(0, 1) = near.coeffRef(1, 0) = 1e-6;
     options.factor_opts.lump_max_mass = 0;
-    EXPECT_THROW(apxchol::solver(near, gpu_options(options)), std::invalid_argument);
+    EXPECT_THROW(apxchol::solver(apxchol::test::csc(near), gpu_options(options)), std::invalid_argument);
     options.factor_opts.lump_max_mass = 0.25;
-    EXPECT_EQ(apxchol::solver(near, gpu_options(options)).factor().lumped_offdiag, 2);
+    EXPECT_EQ(apxchol::solver(apxchol::test::csc(near), gpu_options(options)).factor().lumped_offdiag, 2);
     options.factor_opts.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
-    EXPECT_THROW(apxchol::solver(A, gpu_options(options)), std::invalid_argument);
+    EXPECT_THROW(apxchol::solver(apxchol::test::csc(A), gpu_options(options)), std::invalid_argument);
 }
 
 TEST_F(MetalDevice, PerSolverStorageAndDropMatchTheReference) {
     const Sparse A = grid(11, 13, 0.25, true);
-    const auto factor = apxchol::factorize(A);
+    const auto factor = apxchol::factorize(apxchol::test::csc(A));
     const auto b = rhs(A.rows(), 3, false);
     for (const auto storage : {apxchol::factor_storage_type::fp32, apxchol::factor_storage_type::fp16}) {
         for (double drop : {0.0, 0.1, 1.0, 0.0}) {
             auto options = keep_opts();
             options.factor_opts.factor_storage = storage;
             options.factor_opts.drop_tolerance = drop;
-            apxchol::solver solver(A, factor, gpu_options(options));
+            apxchol::solver solver(apxchol::test::csc(A), factor, gpu_options(options));
             const auto expected = emulate_apply(factor, b, options.factor_opts);
-            EXPECT_LT((solver.apply(b) - expected).norm() / expected.norm(), 2e-5);
+            EXPECT_LT((apxchol::test::vec(solver.apply(apxchol::test::cspan(b))) - expected).norm() / expected.norm(), 2e-5);
         }
     }
 }
 
 TEST(MetalOptions, InvalidDropToleranceFailsBeforeDeviceSetup) {
     const Sparse A = grid(4, 4, 0.25);
-    const auto factor = apxchol::factorize(A);
+    const auto factor = apxchol::factorize(apxchol::test::csc(A));
     auto options = keep_opts();
     for (double drop : {-1.0, std::nextafter(1.0, 2.0), 2.0,
                         std::numeric_limits<double>::infinity(),
                         std::numeric_limits<double>::quiet_NaN()}) {
         options.factor_opts.drop_tolerance = drop;
-        EXPECT_THROW(apxchol::solver(A, gpu_options(options)), std::invalid_argument);
-        EXPECT_THROW(apxchol::solver(A, factor, gpu_options(options)), std::invalid_argument);
+        EXPECT_THROW(apxchol::solver(apxchol::test::csc(A), gpu_options(options)), std::invalid_argument);
+        EXPECT_THROW(apxchol::solver(apxchol::test::csc(A), factor, gpu_options(options)), std::invalid_argument);
     }
 }
 
@@ -1187,14 +1188,14 @@ TEST_F(MetalDevice, ResidentDropToleranceMatchesHostReference) {
                 auto options = keep_opts();
                 options.factor_opts.factor_storage = storage;
                 options.factor_opts.drop_tolerance = drop;
-                apxchol::solver solver(A, gpu_options(options));
+                apxchol::solver solver(apxchol::test::csc(A), gpu_options(options));
                 const auto expected = emulate_apply(solver.factor(), b, options.factor_opts);
-                const auto actual = solver.apply(b);
+                const Eigen::VectorXd actual = apxchol::test::vec(solver.apply(apxchol::test::cspan(b)));
                 EXPECT_TRUE(actual.allFinite());
                 EXPECT_LT((actual - expected).norm() / expected.norm(), 2e-5);
-                const auto result = solver.solve(b, 1e-8, 1000);
+                const auto result = solver.solve(apxchol::test::cspan(b), 1e-8, 1000);
                 EXPECT_TRUE(result.converged);
-                EXPECT_LE(true_residual(A, b, result.x), 1e-8);
+                EXPECT_LE(true_residual(A, b, apxchol::test::vec(result.x)), 1e-8);
 
                 // factor() is the installed factor: the entries kept after the drop.
                 const auto installed = solver.factor();
@@ -1238,12 +1239,12 @@ TEST_F(MetalDevice, TinyPositiveDropMatchesHostReference) {
             auto options = keep_opts();
             options.factor_opts.factor_storage = storage;
             options.factor_opts.drop_tolerance = drop;
-            apxchol::solver solver(A, gpu_options(options));
+            apxchol::solver solver(apxchol::test::csc(A), gpu_options(options));
             for (int i = 0; i < 4; ++i) {
                 SCOPED_TRACE(i);
                 const Eigen::VectorXd b = Eigen::VectorXd::Unit(4, i);
                 const auto expected = emulate_apply(solver.factor(), b, options.factor_opts);
-                const auto actual = solver.apply(b);
+                const Eigen::VectorXd actual = apxchol::test::vec(solver.apply(apxchol::test::cspan(b)));
                 EXPECT_TRUE(actual.allFinite());
                 EXPECT_LT((actual - expected).norm() / expected.norm(), 2e-6);
             }
@@ -1260,34 +1261,34 @@ TEST_F(MetalDevice, VerbosityIsPerSolver) {
         options.factor_opts.verbose = verbose;
         testing::internal::CaptureStderr();
         apxchol::solve_result result;
-        try { result = apxchol::solve(A, b, std::nullopt, std::nullopt, nullptr, options); }
+        try { result = apxchol::solve(apxchol::test::csc(A), apxchol::test::cspan(b), std::nullopt, std::nullopt, {}, options); }
         catch (...) { (void)testing::internal::GetCapturedStderr(); throw; }
         const auto output = testing::internal::GetCapturedStderr();
         EXPECT_EQ(output.find("[apxchol] Metal PCG") != std::string::npos, verbose) << output;
         EXPECT_TRUE(result.converged);
-        EXPECT_LE(true_residual(A, b, result.x), apxchol::default_tol);
+        EXPECT_LE(true_residual(A, b, apxchol::test::vec(result.x)), apxchol::default_tol);
     }
 }
 
 TEST_F(MetalDevice, ScalarAndPanelOutputsRejectInputAliasing) {
     const Sparse A = grid(4, 5, 0.25);
     const auto b = rhs(A.rows(), 3, false);
-    apxchol::solver direct(A, gpu_options());
+    apxchol::solver direct(apxchol::test::csc(A), gpu_options());
     Eigen::VectorXd x = b;
-    EXPECT_THROW(direct.solve(x, x), std::invalid_argument);
+    EXPECT_THROW(direct.solve(apxchol::test::cspan(x), apxchol::test::mspan(x)), std::invalid_argument);
     EXPECT_EQ(x, b);
 
     apxchol::solve_options options;
     options.backend = apxchol::solve_backend::gpu;
-    apxchol::solver owner(A, options);
+    apxchol::solver owner(apxchol::test::csc(A), options);
     Eigen::MatrixXd B = b.replicate(1, 4), X = B;
-    EXPECT_THROW(owner.solve(B, B), std::invalid_argument);
+    EXPECT_THROW(owner.solve(apxchol::test::cmat(B), apxchol::test::mmat(B)), std::invalid_argument);
     EXPECT_EQ(B, X);
-    const apxchol::const_matrix_view guess(X);
-    EXPECT_THROW(owner.solve(B, X, std::nullopt, std::nullopt, &guess), std::invalid_argument);
+    const apxchol::const_matrix_view guess = apxchol::test::cmat(X);
+    EXPECT_THROW(owner.solve(apxchol::test::cmat(B), apxchol::test::mmat(X), std::nullopt, std::nullopt, guess), std::invalid_argument);
     EXPECT_EQ(X, B);
     Eigen::MatrixXd wrong(A.rows() - 1, 4);
-    EXPECT_THROW(owner.solve(B, wrong), std::invalid_argument);
+    EXPECT_THROW(owner.solve(apxchol::test::cmat(B), apxchol::test::mmat(wrong)), std::invalid_argument);
 }
 
 TEST_F(MetalDevice, Float16FactorUsesSharedStorageAndConverges) {
@@ -1295,34 +1296,34 @@ TEST_F(MetalDevice, Float16FactorUsesSharedStorageAndConverges) {
         const auto A = grid(37, 29, shift, true);
         auto options = keep_opts();
         options.factor_opts.factor_storage = apxchol::factor_storage_type::fp16;
-        apxchol::solver solver(A, gpu_options(options));
+        apxchol::solver solver(apxchol::test::csc(A), gpu_options(options));
         for (unsigned salt : {1u, 4u}) {
             const auto b = rhs(A.rows(), salt, shift == 0);
             const auto expected = emulate_apply(solver.factor(), b, options.factor_opts);
-            EXPECT_LT((solver.apply(b) - expected).norm() / expected.norm(), 2e-5);
-            const auto result = solver.solve(b, 1e-9, 1000);
-            EXPECT_LT(true_residual(A, b, result.x), 1e-8);
+            EXPECT_LT((apxchol::test::vec(solver.apply(apxchol::test::cspan(b))) - expected).norm() / expected.norm(), 2e-5);
+            const auto result = solver.solve(apxchol::test::cspan(b), 1e-9, 1000);
+            EXPECT_LT(true_residual(A, b, apxchol::test::vec(result.x)), 1e-8);
         }
     }
 }
 
 TEST_F(MetalDevice, Float16InstalledFactorIsReadoptedExactly) {
     const auto A = grid(32, 33, 0.25);
-    auto F = apxchol::factorize(A);
+    auto F = apxchol::factorize(apxchol::test::csc(A));
     auto options = keep_opts();
     options.factor_opts.factor_storage = apxchol::factor_storage_type::fp16;
-    apxchol::solver half(A, F, gpu_options(options));
+    apxchol::solver half(apxchol::test::csc(A), F, gpu_options(options));
     const auto installed = half.factor();
     EXPECT_EQ(installed.storage, apxchol::factor_storage_type::fp16);
     EXPECT_EQ(installed.scale.size(), static_cast<std::size_t>(A.rows()));
     // Conflicting options do not change an installed factor.
     options.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
     options.factor_opts.drop_tolerance = 0;
-    apxchol::solver again(A, installed, gpu_options(options));
+    apxchol::solver again(apxchol::test::csc(A), installed, gpu_options(options));
     EXPECT_EQ(csc_access::vals(again.factor().L), csc_access::vals(installed.L));
     EXPECT_EQ(again.factor().scale, installed.scale);
     const auto b = rhs(A.rows(), 3, false);
-    EXPECT_EQ(again.apply(b), half.apply(b));
+    EXPECT_EQ(again.apply(apxchol::test::cspan(b)), half.apply(apxchol::test::cspan(b)));
 }
 
 TEST_F(MetalDevice, Float16TinyColumnScaleKeepsFinitePreconditioning) {
@@ -1340,17 +1341,17 @@ TEST_F(MetalDevice, Float16TinyColumnScaleKeepsFinitePreconditioning) {
         csc_access::vals(F.L) = {1.0f, value, 1.0f};
         F.perm = {0, 1};
         F.sddm = true;
-        apxchol::solver solver(A, F, gpu_options(options));
+        apxchol::solver solver(apxchol::test::csc(A), F, gpu_options(options));
         const auto expected = emulate_apply(F, b, options.factor_opts);
-        const auto actual = solver.apply(b);
+        const Eigen::VectorXd actual = apxchol::test::vec(solver.apply(apxchol::test::cspan(b)));
         EXPECT_TRUE(actual.allFinite());
         EXPECT_LT((actual - expected).norm() / expected.norm(), 2e-5);
-        EXPECT_LT(true_residual(A, b, solver.solve(b, 1e-9, 10).x), 1e-8);
+        EXPECT_LT(true_residual(A, b, apxchol::test::vec(solver.solve(apxchol::test::cspan(b), 1e-9, 10).x)), 1e-8);
     }
     for (float diagonal : {0x1p-101f, 0x1p101f}) {
-        auto F = apxchol::factorize(A);
+        auto F = apxchol::factorize(apxchol::test::csc(A));
         csc_access::vals(F.L)[0] = diagonal;
-        EXPECT_THROW(apxchol::solver(A, F, gpu_options(options)), std::invalid_argument);
+        EXPECT_THROW(apxchol::solver(apxchol::test::csc(A), F, gpu_options(options)), std::invalid_argument);
     }
 }
 
@@ -1359,21 +1360,21 @@ TEST(MetalOptions, ResidentSetupRejectsUnsupportedOptionsAndLayouts) {
     options.backend = apxchol::solve_backend::gpu;
     const auto A = grid(4, 4, 0.25);
     options.factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
-    EXPECT_THROW(apxchol::solver(A, options), std::invalid_argument);
+    EXPECT_THROW(apxchol::solver(apxchol::test::csc(A), options), std::invalid_argument);
     options.factor_opts.sampler = apxchol::clique_sampler::gks;
     options.factor_opts.partitioner = apxchol::partitioner_kind::priority_greedy;
-    EXPECT_THROW(apxchol::solver(A, options), std::invalid_argument);
+    EXPECT_THROW(apxchol::solver(apxchol::test::csc(A), options), std::invalid_argument);
     options.factor_opts.partitioner = apxchol::partitioner_kind::block_greedy;
     if (!apxchol::backend_available(apxchol::solve_backend::gpu)) GTEST_SKIP() << "no usable Metal device";
     Sparse lower = A.triangularView<Eigen::Lower>();
-    EXPECT_THROW(apxchol::solver(lower, options), std::invalid_argument);
+    EXPECT_THROW(apxchol::solver(apxchol::test::csc(lower), options), std::invalid_argument);
     Sparse missing = A;
     missing.coeffRef(1, 0) = 0;
     missing.prune(0.0);
-    EXPECT_THROW(apxchol::solver(missing, options), std::invalid_argument);
+    EXPECT_THROW(apxchol::solver(apxchol::test::csc(missing), options), std::invalid_argument);
     Sparse unsorted = A;
     std::swap(unsorted.innerIndexPtr()[0], unsorted.innerIndexPtr()[1]);
-    EXPECT_THROW(apxchol::solver(unsorted, options), std::invalid_argument);
+    EXPECT_THROW(apxchol::solver(apxchol::test::csc(unsorted), options), std::invalid_argument);
 }
 
 TEST_F(MetalDevice, ResidentSetupAcceptsIntermediateDegreeQuantiles) {
@@ -1385,10 +1386,10 @@ TEST_F(MetalDevice, ResidentSetupAcceptsIntermediateDegreeQuantiles) {
             auto options = keep_opts();
             options.factor_opts.factor_storage = storage;
             options.factor_opts.partition.degree_quantile = quantile;
-            apxchol::solver solver(A, gpu_options(options));
-            const auto result = solver.solve(b, 1e-8, 300);
+            apxchol::solver solver(apxchol::test::csc(A), gpu_options(options));
+            const auto result = solver.solve(apxchol::test::cspan(b), 1e-8, 300);
             EXPECT_LE(result.residual, 1e-8);
-            EXPECT_LE(true_residual(A, b, result.x), 1e-8);
+            EXPECT_LE(true_residual(A, b, apxchol::test::vec(result.x)), 1e-8);
         }
     }
 }
@@ -1401,11 +1402,11 @@ TEST_F(MetalDevice, ResidentArenaIgnoresNonGraphEntries) {
         else if (kind == 1) A.coeffRef(0, 8) = A.coeffRef(8, 0) = 0.0;
         else A.coeffRef(0, 1) = A.coeffRef(1, 0) = 0.125;
         A.makeCompressed();
-        apxchol::solver solver(A, gpu_options());
+        apxchol::solver solver(apxchol::test::csc(A), gpu_options());
         if (kind == 2) { EXPECT_EQ(solver.factor().lumped_offdiag, 2); }
         const auto b = rhs(A.rows(), 3, false);
-        const auto result = solver.solve(b, 1e-8, 200);
-        EXPECT_LT(true_residual(A, b, result.x), 1e-8);
+        const auto result = solver.solve(apxchol::test::cspan(b), 1e-8, 200);
+        EXPECT_LT(true_residual(A, b, apxchol::test::vec(result.x)), 1e-8);
     }
 }
 
@@ -1429,11 +1430,11 @@ TEST_F(MetalDevice, NonemptyFactorGrowthPreservesExportAndSolve) {
         options.factor_opts.seed = 42;
         options.factor_opts.factor_storage = fp16 ? apxchol::factor_storage_type::fp16
                                                  : apxchol::factor_storage_type::fp32;
-        apxchol::solver solver(A, gpu_options(options));
-        const auto result = solver.solve(b, 1e-8, 200);
-        EXPECT_LT(true_residual(A, b, result.x), 1e-8);
+        apxchol::solver solver(apxchol::test::csc(A), gpu_options(options));
+        const auto result = solver.solve(apxchol::test::cspan(b), 1e-8, 200);
+        EXPECT_LT(true_residual(A, b, apxchol::test::vec(result.x)), 1e-8);
         const auto expected = emulate_apply(solver.factor(), b, options.factor_opts);
-        EXPECT_LT((solver.apply(b) - expected).norm() / expected.norm(), 2e-5);
+        EXPECT_LT((apxchol::test::vec(solver.apply(apxchol::test::cspan(b))) - expected).norm() / expected.norm(), 2e-5);
     }
 }
 
@@ -1444,18 +1445,18 @@ TEST_F(MetalDevice, ResidentOwnerKeepsNoHostFactorValues) {
         auto options = keep_opts();
         options.factor_opts.factor_storage = fp16 ? apxchol::factor_storage_type::fp16
                                                  : apxchol::factor_storage_type::fp32;
-        apxchol::solver exported(A, gpu_options(options));
+        apxchol::solver exported(apxchol::test::csc(A), gpu_options(options));
         const auto b = rhs(A.rows(), 3, laplacian);
         const auto expected = emulate_apply(exported.factor(), b, options.factor_opts);
-        EXPECT_LT((exported.apply(b) - expected).norm() / expected.norm(), 2e-5);
-        apxchol::solver resident(A, gpu_options(options));
+        EXPECT_LT((apxchol::test::vec(exported.apply(apxchol::test::cspan(b))) - expected).norm() / expected.norm(), 2e-5);
+        apxchol::solver resident(apxchol::test::csc(A), gpu_options(options));
         EXPECT_TRUE(csc_access::inner(metal(resident).factor().L).empty());
         EXPECT_TRUE(csc_access::vals(metal(resident).factor().L).empty());
         EXPECT_GT(metal(resident).factor().L.nonZeros(), 0);
         for (unsigned salt : {1u, 2u, 3u}) {
             const auto rhs_value = rhs(A.rows(), salt, laplacian);
-            const auto result = resident.solve(rhs_value);
-            EXPECT_LT(true_residual(A, rhs_value, result.x), apxchol::default_tol);
+            const auto result = resident.solve(apxchol::test::cspan(rhs_value));
+            EXPECT_LT(true_residual(A, rhs_value, apxchol::test::vec(result.x)), apxchol::default_tol);
         }
     }
 }
@@ -1469,7 +1470,7 @@ TEST_F(MetalDevice, ExportedRoundsAreIndependentCpuLevels) {
             dense.diagonal().setConstant(129.0);
             A = dense.sparseView();
         }
-        const apxchol::solver exported(A, gpu_options(keep_opts()));
+        const apxchol::solver exported(apxchol::test::csc(A), gpu_options(keep_opts()));
         const auto& F = exported.factor();
         ASSERT_FALSE(F.rounds.empty());
         std::vector<unsigned> levels(A.rows());
@@ -1487,14 +1488,14 @@ TEST_F(MetalDevice, ExportedRoundsAreIndependentCpuLevels) {
             for (auto p = csc_access::outer(F.L)[col] + 1; p < csc_access::outer(F.L)[col + 1]; ++p)
                 EXPECT_GT(levels[csc_access::inner(F.L)[p]], levels[col]);
 
-        apxchol::solver grouped(A, F);
+        apxchol::solver grouped(apxchol::test::csc(A), F);
         auto ungrouped = F;
         ungrouped.rounds.clear();
-        apxchol::solver reference(A, std::move(ungrouped));
+        apxchol::solver reference(apxchol::test::csc(A), std::move(ungrouped));
         const auto b = rhs(A.rows(), 3, kind == 0);
-        const auto expected = reference.apply(b);
-        EXPECT_LT((grouped.apply(b) - expected).norm() / expected.norm(), 1e-12);
-        EXPECT_LT(true_residual(A, b, grouped.solve(b, 1e-8, 500).x), 1e-8);
+        const Eigen::VectorXd expected = apxchol::test::vec(reference.apply(apxchol::test::cspan(b)));
+        EXPECT_LT((apxchol::test::vec(grouped.apply(apxchol::test::cspan(b))) - expected).norm() / expected.norm(), 1e-12);
+        EXPECT_LT(true_residual(A, b, apxchol::test::vec(grouped.solve(apxchol::test::cspan(b), 1e-8, 500).x)), 1e-8);
     }
 }
 
@@ -1504,13 +1505,13 @@ TEST(MetalOptions, AutomaticSelectionRejectsResidentIncompatibleOptions) {
     A.makeCompressed();
     apxchol::solve_options options;
     options.factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
-    EXPECT_EQ(apxchol::detail::select_solve_backend(options, &A), apxchol::solve_backend::cpu);
+    EXPECT_EQ(apxchol::test::select_solve_backend(options, A), apxchol::solve_backend::cpu);
     options.factor_opts.sampler = apxchol::clique_sampler::gks;
     // Uncompressed Eigen storage is compressed at the library boundary.
     const Sparse compressed = A;
     A.uncompress();
-    EXPECT_EQ(apxchol::detail::select_solve_backend(options, &A),
-              apxchol::detail::select_solve_backend(options, &compressed));
+    EXPECT_EQ(apxchol::test::select_solve_backend(options, A),
+              apxchol::test::select_solve_backend(options, compressed));
     options.backend = apxchol::solve_backend::gpu;
-    EXPECT_EQ(apxchol::detail::select_solve_backend(options, &A), apxchol::solve_backend::gpu);
+    EXPECT_EQ(apxchol::test::select_solve_backend(options, A), apxchol::solve_backend::gpu);
 }

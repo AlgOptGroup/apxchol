@@ -10,7 +10,7 @@
 #include "apxchol/solver/detail/pcg_restart.h"
 #include "apxchol/csc_work.h"
 #include "apxchol/detail/dense.h"
-#include "apxchol/detail/eigen_boundary.h"
+#include "apxchol/detail/csc_input.h"
 #include "apxchol/operator_class.h"
 #include "host_spmv.h"
 #include "solver_archive_internal.h"
@@ -288,10 +288,10 @@ bool copy_symmetric_csc_as_owned_csr(
 }
 
 // ── Fused PCG vector kernels ─────────────────────────────────────────────────
-// The outer PCG loop used to be a chain of plain Eigen expressions -- p.dot(Ap),
-// x += alpha*p, r -= alpha*Ap, r.norm(), r.dot(z), p = z + beta*p -- every one
-// of them a separate single-threaded full-n pass, ~14 n-vector streams per
-// iteration outside the SpMV/SpTRSV kernels. The kernels below fuse them so
+// The outer PCG loop's vector operations -- p.dot(Ap), x += alpha*p,
+// r -= alpha*Ap, r.norm(), r.dot(z), p = z + beta*p -- would each be a separate
+// full-n pass, ~14 n-vector streams per iteration outside the SpMV/SpTRSV
+// kernels. The kernels below fuse them so
 // each vector is streamed ONCE per group of operations, and run the passes
 // OpenMP-parallel with DETERMINISTIC reductions: per-thread partials over the
 // fixed schedule(static) chunk partition, summed serially in thread order
@@ -1290,32 +1290,23 @@ void detail::solver_access::save(const std::filesystem::path& path, const solver
     save_solver_data(path, A.ref(), F, owner.impl_->operator_entries);
 }
 
-solver detail::solver_access::with_timings(const Eigen::SparseMatrix<double>& A,
-                                          const solve_options& opts, checkpoint& timings) {
-    const eigen_csc input(A);
-    return solver(solver_input(input, opts, false), nullptr, opts, &timings);
+solver detail::solver_access::make(csc_ref<double> A, const solve_options& opts,
+                                   checkpoint* timings) {
+    return solver(A, nullptr, opts, timings);
 }
 
 solver detail::solver_access::make(csc_ref<double> A, factorization F, const solve_options& opts) {
     return solver(A, &F, opts, nullptr);
 }
 
-const detail::csc_ref<double>& detail::solver_access::solver_input(
-        const eigen_csc& input, const solve_options& opts, bool adopted) {
-    // The checks the route performs first, for a matrix it cannot represent.
-    if (!input.square()) {
-        validate_solve_options(opts);
-        if (input.rows() == 0) throw std::invalid_argument("apxchol: empty operator");
-        if (adopted) throw std::invalid_argument("apxchol: factor dimension does not match the operator");
-        validate_lump_max_mass(opts.factor_opts.lump_max_mass);
-        throw_operator_not_square(input.rows(), input.cols());
-    }
-    return input.ref();
-}
-
 void detail::solver_access::finish_load(solver& owner, std::int64_t entries,
                                         std::chrono::steady_clock::time_point started) {
     owner.impl_->operator_entries = entries;
+    set_setup_start(owner, started);
+}
+
+void detail::solver_access::set_setup_start(solver& owner,
+                                            std::chrono::steady_clock::time_point started) {
     owner.impl_->setup_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 }
@@ -1353,12 +1344,30 @@ detail::csc_matrix<double> detail::cuda_route::original_operator() const {
 }
 #endif
 
-solver::solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts)
-    : solver(detail::solver_access::solver_input(detail::eigen_csc(A), opts, false),
-             nullptr, opts, nullptr) {}
-solver::solver(const Eigen::SparseMatrix<double>& A, factorization F, const solve_options& opts)
-    : solver(detail::solver_access::solver_input(detail::eigen_csc(A), opts, true),
-             &F, opts, nullptr) {}
+namespace {
+
+// A solver for a public view; setup_seconds includes checking the view.
+template<class Index>
+solver from_view(basic_csc_view<Index> A, factorization* F, const solve_options& opts) {
+    const auto start = std::chrono::steady_clock::now();
+    // Options first, and the thread ceiling also bounds checking the view.
+    detail::validate_solve_options(opts);
+    const detail::thread_budget threads(opts.num_threads);
+    const detail::csc_input input(A);
+    solver owner = F ? detail::solver_access::make(input, std::move(*F), opts)
+                     : detail::solver_access::make(input, opts);
+    detail::solver_access::set_setup_start(owner, start);
+    return owner;
+}
+
+} // namespace
+
+solver::solver(csc_view A, const solve_options& opts) : solver(from_view(A, nullptr, opts)) {}
+solver::solver(csc_view64 A, const solve_options& opts) : solver(from_view(A, nullptr, opts)) {}
+solver::solver(csc_view A, factorization F, const solve_options& opts)
+    : solver(from_view(A, &F, opts)) {}
+solver::solver(csc_view64 A, factorization F, const solve_options& opts)
+    : solver(from_view(A, &F, opts)) {}
 solver::solver(const detail::csc_ref<double>& A, factorization* F,
                const solve_options& opts, detail::checkpoint* timings) {
     const auto start = std::chrono::steady_clock::now();
@@ -1375,66 +1384,85 @@ solver& solver::operator=(const solver& other) {
     return *this;
 }
 
-solve_result solver::solve(const Eigen::VectorXd& b, std::optional<double> requested_tol,
-                           std::optional<int> requested_max_iter, const Eigen::VectorXd* x0) {
+namespace {
+
+// A vector of n elements as a one-column view.
+detail::const_matrix_ref column(std::span<const double> v) {
+    return {v.data(), static_cast<std::int64_t>(v.size())};
+}
+detail::matrix_ref column(std::span<double> v) {
+    return {v.data(), static_cast<std::int64_t>(v.size())};
+}
+
+void check_rhs_length(std::span<const double> b, std::int64_t rows) {
+    if (std::cmp_not_equal(b.size(), rows))
+        throw std::invalid_argument("apxchol: RHS length does not match the operator");
+}
+
+} // namespace
+
+solve_result solver::solve(std::span<const double> b, std::optional<double> requested_tol,
+                           std::optional<int> requested_max_iter, std::span<const double> x0) {
     const auto start = std::chrono::steady_clock::now();
     const auto [tol, max_iter] = resolve_solve_parameters(requested_tol, requested_max_iter);
-    if (b.size() != rows()) throw std::invalid_argument("apxchol: RHS length does not match the operator");
+    check_rhs_length(b, rows());
     solve_result result;
-    result.x.resize(rows());
-    const auto initial = detail::dense_of(x0 ? *x0 : b);
-    result.solve_seconds = impl_->solve(detail::dense_of(b), detail::dense_of(result.x),
-                                        x0 ? &initial : nullptr, {&result, 1},
+    result.x.resize(static_cast<std::size_t>(rows()));
+    const auto initial = column(x0);
+    result.solve_seconds = impl_->solve(column(b), column(std::span<double>(result.x)),
+                                        x0.empty() ? nullptr : &initial, {&result, 1},
                                         tol, max_iter, start);
     return result;
 }
 
-solve_result solver::solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
+solve_result solver::solve(std::span<const double> b, std::span<double> x,
                            std::optional<double> requested_tol, std::optional<int> requested_max_iter,
-                           const Eigen::VectorXd* x0) {
+                           std::span<const double> x0) {
     const auto start = std::chrono::steady_clock::now();
     const auto [tol, max_iter] = resolve_solve_parameters(requested_tol, requested_max_iter);
     solve_result result;
-    const auto initial = detail::dense_of(x0 ? *x0 : b);
-    result.solve_seconds = impl_->solve(detail::dense_of(b), detail::dense_of(x),
-                                        x0 ? &initial : nullptr, {&result, 1},
+    const auto initial = column(x0);
+    result.solve_seconds = impl_->solve(column(b), column(x),
+                                        x0.empty() ? nullptr : &initial, {&result, 1},
                                         tol, max_iter, start);
     return result;
 }
 
-batch_solve_result solver::solve_batch(const_matrix_view B, matrix_view X,
-                                       std::optional<double> requested_tol,
-                                       std::optional<int> requested_max_iter,
-                                       const const_matrix_view *X0) {
+batch_solve_result solver::solve(const_matrix_view B, matrix_view X,
+                                 std::optional<double> requested_tol,
+                                 std::optional<int> requested_max_iter,
+                                 const_matrix_view X0) {
     const auto start = std::chrono::steady_clock::now();
     const auto [tol, max_iter] = resolve_solve_parameters(requested_tol, requested_max_iter);
-    batch_solve_result result;
-    result.columns.resize(B.cols());
+    const auto rhs = detail::dense_input(B);
+    const auto out = detail::dense_input(X);
     std::optional<detail::const_matrix_ref> initial;
-    if (X0) initial.emplace(detail::dense_of(*X0));
-    result.solve_seconds = impl_->solve(detail::dense_of(B), detail::dense_of(X),
-                                        initial ? &*initial : nullptr, result.columns,
+    if (X0.data) initial.emplace(detail::dense_input(X0));
+    batch_solve_result result;
+    result.columns.resize(static_cast<std::size_t>(rhs.cols()));
+    result.solve_seconds = impl_->solve(rhs, out, initial ? &*initial : nullptr, result.columns,
                                         tol, max_iter, start);
     return result;
 }
 
-Eigen::VectorXd solver::apply(const Eigen::VectorXd& r) {
-    if (r.size() != rows()) throw std::invalid_argument("apxchol: preconditioner input length does not match the operator");
-    Eigen::VectorXd z(rows());
-    impl_->apply(detail::dense_of(r), detail::dense_of(z));
+std::vector<double> solver::apply(std::span<const double> r) {
+    if (std::cmp_not_equal(r.size(), rows()))
+        throw std::invalid_argument("apxchol: preconditioner input length does not match the operator");
+    std::vector<double> z(r.size());
+    impl_->apply(column(r), column(std::span<double>(z)));
     return z;
 }
 
 void solver::apply(const_matrix_view R, matrix_view Z) {
-    impl_->apply(detail::dense_of(R), detail::dense_of(Z));
+    impl_->apply(detail::dense_input(R), detail::dense_input(Z));
 }
 
 factorization solver::factor() const {
     const detail::thread_budget threads(impl_->num_threads);
     return std::visit([](const auto& owner) { return owner.installed_factor(); }, impl_->route);
 }
-Eigen::Index solver::rows() const { return impl_->rows(); }
-Eigen::Index solver::operator_nnz() const { return impl_->operator_entries; }
+std::int64_t solver::rows() const { return impl_->rows(); }
+std::int64_t solver::operator_nnz() const { return impl_->operator_entries; }
 solve_backend solver::backend() const {
     return std::holds_alternative<detail::cpu_route>(impl_->route)
         ? solve_backend::cpu : solve_backend::gpu;
@@ -1444,16 +1472,33 @@ factor_storage_type solver::factor_storage() const {
 }
 double solver::setup_seconds() const { return impl_->setup_seconds; }
 
-solve_result solve(const Eigen::SparseMatrix<double>& A, const Eigen::VectorXd& b,
-                   std::optional<double> tol, std::optional<int> max_iter,
-                   const Eigen::VectorXd* x0, const solve_options& opts) {
+namespace {
+
+template<class Index>
+solve_result solve_once(basic_csc_view<Index> A, std::span<const double> b,
+                        std::optional<double> tol, std::optional<int> max_iter,
+                        std::span<const double> x0, const solve_options& opts) {
     // Reject invalid limits and lengths before paying for setup.
     resolve_solve_parameters(tol, max_iter);
-    if (b.size() != A.rows()) throw std::invalid_argument("apxchol: RHS length does not match the operator");
-    if (x0 && x0->size() != A.rows())
+    check_rhs_length(b, A.n);
+    if (!x0.empty() && std::cmp_not_equal(x0.size(), A.n))
         throw std::invalid_argument("apxchol: initial guess length does not match the operator");
     solver owner(A, opts);
     return owner.solve(b, tol, max_iter, x0);
+}
+
+} // namespace
+
+solve_result solve(csc_view A, std::span<const double> b, std::optional<double> tol,
+                   std::optional<int> max_iter, std::span<const double> x0,
+                   const solve_options& opts) {
+    return solve_once(A, b, tol, max_iter, x0, opts);
+}
+
+solve_result solve(csc_view64 A, std::span<const double> b, std::optional<double> tol,
+                   std::optional<int> max_iter, std::span<const double> x0,
+                   const solve_options& opts) {
+    return solve_once(A, b, tol, max_iter, x0, opts);
 }
 
 } // namespace apxchol

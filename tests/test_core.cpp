@@ -19,7 +19,19 @@
 #include "apxchol/csc_work.h"
 #include "apxchol/graph/conversions.h"
 #include "apxchol/graph/graph.h"
+#include "csc_test_util.h"
 #include "reference_graph.h"
+
+namespace {
+// The library's Laplacian of a graph, and a graph of an Eigen operator.
+template<class Graph>
+Eigen::SparseMatrix<double> laplacian_of(const Graph& g) {
+    return apxchol::test::to_eigen(apxchol::detail::laplacian(g).ref());
+}
+apxchol::detail::graph make_graph_of(const Eigen::SparseMatrix<double>& L) {
+    return apxchol::detail::make_graph(apxchol::test::eigen_csc(L));
+}
+} // namespace
 
 #include <omp.h>
 
@@ -384,7 +396,7 @@ static apxchol::detail::graph make_grid_vec(int rows, int cols) {
 
 TEST(Laplacian, RowSumsZero) {
     auto G = make_grid_vec(10, 10);
-    auto L = apxchol::detail::laplacian(G);
+    auto L = laplacian_of(G);
     Eigen::VectorXd ones = Eigen::VectorXd::Ones(L.rows());
     Eigen::VectorXd res = L * ones;
     EXPECT_LT(res.norm(), 1e-12);
@@ -392,14 +404,14 @@ TEST(Laplacian, RowSumsZero) {
 
 TEST(Laplacian, Symmetric) {
     auto G = make_grid_vec(8, 8);
-    auto L = apxchol::detail::laplacian(G);
+    auto L = laplacian_of(G);
     Eigen::SparseMatrix<double> diff = L - Eigen::SparseMatrix<double>(L.transpose());
     EXPECT_LT(diff.norm(), 1e-12);
 }
 
 TEST(Laplacian, PositiveDiagonal) {
     auto G = make_grid_vec(5, 5);
-    auto L = apxchol::detail::laplacian(G);
+    auto L = laplacian_of(G);
     for (int k = 0; k < L.outerSize(); ++k)
         for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it) {
             if (it.row() == it.col()) {
@@ -410,7 +422,7 @@ TEST(Laplacian, PositiveDiagonal) {
 
 TEST(Laplacian, PathGraph) {
     auto G = make_path_vec(3);  // 0-1-2, weights 1.0
-    auto L = apxchol::detail::laplacian(G);
+    auto L = laplacian_of(G);
     // L should be [[1,-1,0],[-1,2,-1],[0,-1,1]]
     EXPECT_EQ(L.rows(), 3);
     EXPECT_NEAR(L.coeff(0, 0), 1.0, 1e-15);
@@ -422,7 +434,7 @@ TEST(Laplacian, PathGraph) {
 namespace {
 void expect_directed_csc_matches_general(const Eigen::SparseMatrix<double>& L) {
     const auto reference = reference_graph(L);
-    const auto candidate = apxchol::detail::make_graph(L);
+    const auto candidate = make_graph_of(L);
     ASSERT_EQ(reference.n(), candidate.n());
     ASSERT_EQ(reference.m(), candidate.m());
     for (apxchol::node_index v = 0; v < reference.n(); ++v) {
@@ -472,9 +484,9 @@ TEST(DirectedCscGraph, FullColumnsKeepCanonicalWeightsZerosAndIsolatedVertices) 
 TEST(PooledGraph, NestedTeamConsumesEveryLogicalColumnRange) {
     const int prior_levels = omp_get_max_active_levels();
     omp_set_max_active_levels(1);
-    auto L = apxchol::detail::laplacian(make_grid_vec(20, 20));
+    auto L = laplacian_of(make_grid_vec(20, 20));
     for (int v = 0; v < L.rows(); ++v) L.coeffRef(v,v) += 0.125;
-    const auto reference = apxchol::detail::make_graph(L);
+    const auto reference = make_graph_of(L);
     int observed_outer = 0, observed_inner = 0;
     #pragma omp parallel num_threads(2)
     {
@@ -488,7 +500,7 @@ TEST(PooledGraph, NestedTeamConsumesEveryLogicalColumnRange) {
                 observed_inner = omp_get_num_threads();
             }
             const auto check = [&]() {
-                const auto candidate = apxchol::detail::make_graph(L);
+                const auto candidate = make_graph_of(L);
                 ASSERT_EQ(candidate.n(), reference.n());
                 ASSERT_EQ(candidate.m(), reference.m());
                 for (apxchol::node_index v = 0; v < reference.n(); ++v) {
@@ -543,8 +555,8 @@ TEST(DirectedCscGraph, BitIdenticalProofBuildsTheSameGraph) {
 
     using G = apxchol::detail::graph;
     auto same_graph = [&] {
-        const G searched = apxchol::detail::make_graph(L);
-        const G proven = apxchol::detail::make_graph_from_operator(apxchol::detail::eigen_csc(L), true);
+        const G searched = make_graph_of(L);
+        const G proven = apxchol::detail::make_graph_from_operator(apxchol::test::eigen_csc(L), true);
         ASSERT_EQ(searched.n(), proven.n());
         ASSERT_EQ(searched.m(), proven.m());
         for (apxchol::node_index v = 0; v < searched.n(); ++v) {

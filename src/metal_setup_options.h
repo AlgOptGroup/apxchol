@@ -10,7 +10,7 @@ namespace apxchol::detail {
 inline constexpr auto metal_regularization_error =
     "Metal setup requires regularization in [2^-100, 2^100] and positive normal FP32 diagonal products";
 
-// A(row, row), or 0 when not stored (Eigen's coeff()).
+// A(row, row), or 0 when not stored.
 inline double metal_diagonal(csc_ref<double> A, node_index row) {
     for (edge_index p = A.ptr[row]; p < A.ptr[row + 1]; ++p)
         if (A.idx[p] == row) return A.val[p];

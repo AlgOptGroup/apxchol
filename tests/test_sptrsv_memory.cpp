@@ -16,6 +16,7 @@
 // accounting would not reflect the release. Linux + glibc only (skipped
 // elsewhere).
 #include <gtest/gtest.h>
+#include "csc_test_util.h"
 #include "grid_laplacian.h"
 #include <algorithm>
 #include <cmath>
@@ -122,7 +123,7 @@ TEST(SpTRSVSetupMemory, TransientsAreReleasedAtLastUse) {
     // nnz * 8 B (~28 MB) to the peak.
     const auto L = grid_laplacian(800, 800);
     apxchol::factor_options fopts; fopts.seed = 7;
-    const auto F = apxchol::factorize(L, fopts);
+    const auto F = apxchol::factorize(apxchol::test::csc(L), fopts);
     const node_index m = F.L.rows() - 1;                       // Laplacian path
     const apxchol::factor_options options{.drop_tolerance = 0.5};             // force a real drop
 
@@ -186,7 +187,7 @@ TEST(SpTRSVSetupMemory, TransientsAreReleasedAtLastUse) {
 TEST(SpTRSVSetupMemory, SetupConsumingReleasesTheFactorAndSolvesIdentically) {
     const auto L = grid_laplacian(120, 120);
     apxchol::factor_options fopts; fopts.seed = 3;
-    auto F1 = apxchol::factorize(L, fopts);
+    auto F1 = apxchol::factorize(apxchol::test::csc(L), fopts);
     // Compare the setup ownership paths with the exact same input factor.
     // Re-factorizing can change parallel floating-point sums even at a fixed
     // seed/team; equal nnz alone never established factor identity here.

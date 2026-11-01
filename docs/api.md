@@ -3,7 +3,9 @@
 Starting with v1.0, apxchol preserves documented source-level use of these
 interfaces throughout the 1.x series:
 
-- C++ solve and factorize operations, their options and their results,
+- C++ solve and factorize operations, the borrowed views they take
+  (`csc_view`, `csc_view64`, `matrix_view` and `const_matrix_view` in
+  `apxchol/views.h`), their options and their results,
   including the read-only `sparse_csc` factor view, `solver::save` and
   `solver::load` for [saved solvers](serialization.md), and the installed
   `factorization` that `solver::factor()` exports, with its `storage` and

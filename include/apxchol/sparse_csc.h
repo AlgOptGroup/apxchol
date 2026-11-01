@@ -29,9 +29,8 @@ namespace detail { using sptrsv_value_t = float; }
 
 namespace detail { struct sparse_csc_access; }
 
-/// Owning Compressed-Sparse-Column matrix that replaces Eigen::SparseMatrix for
-/// the factor L. We own the storage so the index width is OURS, not forced
-/// signed-`int` by Eigen's StorageIndex static_assert.
+/// Owning Compressed-Sparse-Column matrix for the factor L, with the build's
+/// own index widths.
 ///
 /// Two index roles, deliberately different (see types.h) -- BOTH unsigned:
 ///   - column pointers (`col_ptrs()`)    -> edge_index : a cumulative NON-NEGATIVE

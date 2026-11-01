@@ -4,6 +4,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace apxchol {
@@ -15,26 +16,27 @@ constexpr double kRowSumTol = 1e-10;
 
 } // namespace
 
-input_scan scan_input(const Eigen::SparseMatrix<double>& M) {
+input_scan scan_input(detail::csc_ref<double> M) {
     input_scan s;
-    s.n = M.rows();
+    s.n = M.n;
 
     // Column-major walk: one sequential pass, no per-row scatter.
-    for (Eigen::Index k = 0; k < M.outerSize(); ++k) {
+    for (std::int64_t k = 0; k < s.n; ++k) {
         double colsum = 0.0;
         double diag   = 0.0;
-        for (Eigen::SparseMatrix<double>::InnerIterator it(M, k); it; ++it) {
-            const double v = it.value();
+        for (edge_index p = M.ptr[k]; p < M.ptr[k + 1]; ++p) {
+            const std::int64_t row = M.idx[p];
+            const double v = M.val[p];
             colsum += v;
-            if (it.row() == it.col()) {
+            if (row == k) {
                 diag = v;
                 if (v > 0.0) ++s.diag_pos;
             } else {
                 ++s.offdiag_nnz;
                 if (v > 0.0)      ++s.offdiag_pos;
                 else if (v < 0.0) ++s.offdiag_neg;
-                if (it.row() < it.col()) ++s.upper_nnz;
-                else                     ++s.lower_nnz;
+                if (row < k) ++s.upper_nnz;
+                else         ++s.lower_nnz;
             }
         }
         const double slack = kRowSumTol * std::max(std::abs(diag), 1.0);
@@ -51,34 +53,34 @@ input_scan scan_input(const Eigen::SparseMatrix<double>& M) {
     return s;
 }
 
-Eigen::Index project_laplacian_rhs_components(
-        const Eigen::SparseMatrix<double>& L, Eigen::VectorXd& b) {
-    const Eigen::Index n = L.rows();
-    if (L.cols() != n || b.size() != n)
+std::int64_t project_laplacian_rhs_components(
+        detail::csc_ref<double> L, std::span<double> b) {
+    const std::int64_t n = L.n;
+    if (std::cmp_not_equal(b.size(), n))
         throw std::invalid_argument(
             "component RHS projection requires a square matrix and matching RHS");
 
-    std::vector<Eigen::Index> component(static_cast<std::size_t>(n), -1);
-    std::vector<Eigen::Index> stack;
+    std::vector<std::int64_t> component(static_cast<std::size_t>(n), -1);
+    std::vector<std::int64_t> stack;
     std::vector<double> sums;
-    std::vector<Eigen::Index> counts;
+    std::vector<std::int64_t> counts;
     stack.reserve(static_cast<std::size_t>(n));
 
-    for (Eigen::Index root = 0; root < n; ++root) {
+    for (std::int64_t root = 0; root < n; ++root) {
         if (component[static_cast<std::size_t>(root)] >= 0) continue;
-        const Eigen::Index id = static_cast<Eigen::Index>(sums.size());
+        const std::int64_t id = static_cast<std::int64_t>(sums.size());
         sums.push_back(0.0);
         counts.push_back(0);
         component[static_cast<std::size_t>(root)] = id;
         stack.push_back(root);
         while (!stack.empty()) {
-            const Eigen::Index v = stack.back();
+            const std::int64_t v = stack.back();
             stack.pop_back();
-            sums[static_cast<std::size_t>(id)] += b[v];
+            sums[static_cast<std::size_t>(id)] += b[static_cast<std::size_t>(v)];
             ++counts[static_cast<std::size_t>(id)];
-            for (Eigen::SparseMatrix<double>::InnerIterator it(L, v); it; ++it) {
-                const Eigen::Index u = it.row();
-                if (u == v || it.value() == 0.0 ||
+            for (edge_index p = L.ptr[v]; p < L.ptr[v + 1]; ++p) {
+                const std::int64_t u = L.idx[p];
+                if (u == v || L.val[p] == 0.0 ||
                     component[static_cast<std::size_t>(u)] >= 0)
                     continue;
                 component[static_cast<std::size_t>(u)] = id;
@@ -88,12 +90,12 @@ Eigen::Index project_laplacian_rhs_components(
     }
 
     if (sums.size() == 1) return 1;
-    for (Eigen::Index v = 0; v < n; ++v) {
+    for (std::int64_t v = 0; v < n; ++v) {
         const std::size_t id = static_cast<std::size_t>(
             component[static_cast<std::size_t>(v)]);
-        b[v] -= sums[id] / static_cast<double>(counts[id]);
+        b[static_cast<std::size_t>(v)] -= sums[id] / static_cast<double>(counts[id]);
     }
-    return static_cast<Eigen::Index>(sums.size());
+    return static_cast<std::int64_t>(sums.size());
 }
 
 std::string describe_input(bool graph, const input_scan& s,

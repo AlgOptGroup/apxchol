@@ -1,13 +1,12 @@
 #pragma once
 #include "apxchol/solver/factorization.h"
-#include <Eigen/Core>
-#include <Eigen/Sparse>
-#include <array>
+#include "apxchol/views.h"
+#include <cstdint>
 #include <filesystem>
-#include <optional>
-#include <utility>
-#include <vector>
 #include <memory>
+#include <optional>
+#include <span>
+#include <vector>
 
 namespace apxchol {
 namespace detail {
@@ -46,8 +45,9 @@ void validate_solve_options(const solve_options& opts);
 }
 
 struct solve_result {
-    Eigen::VectorXd x;
-    Eigen::Index iterations = 0;
+    /// The solution, or empty when the solve wrote into caller storage.
+    std::vector<double> x;
+    std::int64_t iterations = 0;
     /// Relative residual checked against the original operator and RHS.
     double residual      = 0.0;
     /// Whether the checked residual is below the requested tolerance.
@@ -58,11 +58,6 @@ struct solve_result {
     solve_backend backend = solve_backend::cpu;
 };
 
-using matrix_view = Eigen::Ref<Eigen::MatrixXd, 0,
-    Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>>;
-using const_matrix_view = Eigen::Ref<const Eigen::MatrixXd, 0,
-    Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>>;
-
 struct batch_solve_result {
     // Solutions are written to caller storage; each column's x remains empty.
     std::vector<solve_result> columns;
@@ -72,7 +67,8 @@ struct batch_solve_result {
 
 /// Reusable solver owning one CPU or GPU backend, selected once at setup.
 /// solve_backend::cpu keeps setup and solves on CPU, also in GPU builds.
-/// Owns its input data. solve() and apply() use this object's workspace, so
+/// Copies the operator during construction; the caller's arrays need not
+/// outlive the constructor. solve() and apply() use this object's workspace, so
 /// they are non-const. Concurrent non-const calls on one object are not allowed:
 /// use a copy per thread, or batch the right-hand sides
 /// (see "Thread safety" in docs/usage.md). An overlapping call throws.
@@ -84,12 +80,14 @@ struct batch_solve_result {
 class solver {
     friend struct detail::solver_access;
 public:
-    explicit solver(const Eigen::SparseMatrix<double>& A, const solve_options& opts = {});
+    explicit solver(csc_view A, const solve_options& opts = {});
+    explicit solver(csc_view64 A, const solve_options& opts = {});
     /// Adopt F without rebuilding or regularizing it. lump_max_mass still bounds
     /// operator validation, and backend and num_threads apply. Factor storage and
     /// dropping apply to a construction factor from factorize(); an installed
     /// factor from factor() is adopted exactly (factorization.h).
-    solver(const Eigen::SparseMatrix<double>& A, factorization F, const solve_options& opts = {});
+    solver(csc_view A, factorization F, const solve_options& opts = {});
+    solver(csc_view64 A, factorization F, const solve_options& opts = {});
     ~solver();
     solver(solver&&) noexcept;
     solver& operator=(solver&&) noexcept;
@@ -100,35 +98,25 @@ public:
     /// Omitted values use default_tol and default_max_iter. An explicit tol
     /// must be finite and positive, an explicit max_iter nonnegative (zero
     /// only checks the initial guess). x0 supplies an optional initial guess;
-    /// nullptr starts from zero. Inspect converged in the result even when
+    /// an empty x0 starts from zero. Inspect converged in the result even when
     /// the iteration budget is exhausted.
-    solve_result solve(const Eigen::VectorXd& b, std::optional<double> tol = std::nullopt,
+    solve_result solve(std::span<const double> b, std::optional<double> tol = std::nullopt,
                        std::optional<int> max_iter = std::nullopt,
-                       const Eigen::VectorXd* x0 = nullptr);
+                       std::span<const double> x0 = {});
     /// Write into caller storage; the returned result leaves x empty.
-    solve_result solve(const Eigen::VectorXd& b, Eigen::Ref<Eigen::VectorXd> x,
+    solve_result solve(std::span<const double> b, std::span<double> x,
                        std::optional<double> tol = std::nullopt,
                        std::optional<int> max_iter = std::nullopt,
-                       const Eigen::VectorXd* x0 = nullptr);
-    /// Apply the preconditioner to finite scalar or matrix input.
-    Eigen::VectorXd apply(const Eigen::VectorXd& r);
+                       std::span<const double> x0 = {});
     /// Independent RHS columns, with bounded panel workspace. Output must not
     /// overlap the RHS or warm start. tol/max_iter apply to each column.
-    template<class Input, class Output>
-        requires (Input::ColsAtCompileTime != 1
-            && (Input::Flags & Eigen::DirectAccessBit) != 0
-            && (Output::Flags & Eigen::DirectAccessBit) != 0)
-    batch_solve_result solve(const Eigen::MatrixBase<Input>& B, Eigen::MatrixBase<Output>& X,
+    /// X0.data == nullptr starts every column from zero.
+    batch_solve_result solve(const_matrix_view B, matrix_view X,
                              std::optional<double> tol = std::nullopt,
                              std::optional<int> max_iter = std::nullopt,
-                             const const_matrix_view* X0 = nullptr) {
-        using Stride = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
-        const Eigen::Map<const Eigen::MatrixXd, 0, Stride> rhs(B.derived().data(),
-            B.rows(), B.cols(), Stride(B.colStride(), B.rowStride()));
-        Eigen::Map<Eigen::MatrixXd, 0, Stride> out(X.derived().data(),
-            X.rows(), X.cols(), Stride(X.colStride(), X.rowStride()));
-        return solve_batch(const_matrix_view(rhs), matrix_view(out), tol, max_iter, X0);
-    }
+                             const_matrix_view X0 = {});
+    /// Apply the preconditioner to finite vector or matrix input.
+    std::vector<double> apply(std::span<const double> r);
     void apply(const_matrix_view R, matrix_view Z);
 
     /// The installed preconditioner, the factor the solves actually use
@@ -137,10 +125,10 @@ public:
     /// GPU solver downloads them.
     factorization factor() const;
     /// Operator dimension.
-    Eigen::Index rows() const;
+    std::int64_t rows() const;
     /// Stored entries in the original operator, after input canonicalization
     /// and before preconditioner lumping or dropping.
-    Eigen::Index operator_nnz() const;
+    std::int64_t operator_nnz() const;
     /// Selected route: cpu or gpu, never automatic.
     solve_backend backend() const;
     /// Installed triangular-solve storage: fp16 or fp32, never automatic.
@@ -161,9 +149,6 @@ public:
 private:
     solver(const detail::csc_ref<double>& A, factorization* F,
            const solve_options& opts, detail::checkpoint* timings);
-    batch_solve_result solve_batch(const_matrix_view B, matrix_view X,
-                                   std::optional<double> tol, std::optional<int> max_iter,
-                                   const const_matrix_view* X0);
     struct impl;
     std::unique_ptr<impl> impl_;
 };
@@ -174,11 +159,15 @@ private:
 /// otherwise CPU. Explicit GPU selects device-owned CUDA or Metal setup and solve,
 /// according to the build.
 /// Unsupported inputs and execution failures are errors, never a CPU retry.
-solve_result solve(const Eigen::SparseMatrix<double>& A,
-                   const Eigen::VectorXd& b,
+solve_result solve(csc_view A, std::span<const double> b,
                    std::optional<double> tol = std::nullopt,
                    std::optional<int> max_iter = std::nullopt,
-                   const Eigen::VectorXd* x0 = nullptr,
+                   std::span<const double> x0 = {},
+                   const solve_options& opts = {});
+solve_result solve(csc_view64 A, std::span<const double> b,
+                   std::optional<double> tol = std::nullopt,
+                   std::optional<int> max_iter = std::nullopt,
+                   std::span<const double> x0 = {},
                    const solve_options& opts = {});
 
 } // namespace apxchol

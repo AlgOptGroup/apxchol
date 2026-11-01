@@ -150,8 +150,7 @@ struct triplet {
     double value;
 };
 
-/// Assemble an n x n CSC matrix with Eigen's setFromTriplets semantics:
-/// sorted, unique columns; entries with equal coordinates are summed in their
+/// Assemble an n x n CSC matrix: sorted, unique columns; entries with equal coordinates are summed in their
 /// order in `entries`, ((v1 + v2) + v3); sums that cancel to zero stay stored.
 /// Throws std::out_of_range for coordinates outside [0, n).
 inline csc_matrix<double> csc_from_triplets(node_index n, std::span<const triplet> entries) {

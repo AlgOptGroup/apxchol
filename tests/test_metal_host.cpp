@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "apxchol/detail/eigen_boundary.h"
+#include "csc_test_util.h"
 #include <Eigen/Core>
 
 #include "apxchol/solver/detail/metal_host.h"
@@ -118,7 +118,7 @@ TEST(MetalHost, ScalingRemainsFiniteAtFloatingPointLimits) {
 
 // Eigen test vectors as the library's strided views.
 template<class Vector>
-apxchol::detail::const_matrix_ref view(const Vector& v) { return apxchol::detail::dense_of(v); }
+apxchol::detail::const_matrix_ref view(const Vector& v) { return apxchol::test::dense_of(v); }
 
 TEST(MetalHost, NormAcrossMagnitudes) {
     for (const double scale : {0.0, std::numeric_limits<double>::denorm_min(),
