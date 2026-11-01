@@ -100,6 +100,7 @@
 - A new Input formats page shows how to pass matrices from Eigen, SuiteSparse/CHOLMOD, SciPy, MATLAB/Octave, raw CSR/CSC arrays and Matrix Market files; CI builds and runs its examples.
 
 ### Fixes
+- The CLI reports "matrix is empty" and exits 2 for a dense (array) input with no rows or columns, instead of crashing with SIGFPE while reading it.
 - Reported residuals are now correct on early solve exits.
 - Fixed SDDM misclassification of exact Laplacians.
 - CPU solves rescale right-hand sides of extreme magnitude; operators whose scale is not representable in FP32 factor storage are still rejected.
