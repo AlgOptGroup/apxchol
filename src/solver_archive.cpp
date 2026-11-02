@@ -1,10 +1,13 @@
 #include "solver_archive_internal.h"
+#include "crc32c.h"
+#include "apxchol/csc_work.h"
 #include "apxchol/solver/detail/factor_validation.h"
 #include "apxchol/solver/detail/solver_route.h"
+#include "apxchol/solver/detail/thread_budget.h"
 
-#include <zlib.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cerrno>
 #include <cstdio>
@@ -16,7 +19,9 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 #include <fcntl.h>
+#include <omp.h>
 #include <unistd.h>
 
 namespace apxchol {
@@ -120,8 +125,7 @@ template<class T> void set(unsigned char* bytes, T value) {
     std::memcpy(bytes, &value, sizeof(T));
 }
 std::uint32_t checksum(std::uint32_t crc, const void* data, std::size_t size) {
-    // All callers process at most one 64 KiB chunk or the small metadata prefix.
-    return static_cast<std::uint32_t>(crc32(crc, static_cast<const Bytef*>(data), static_cast<uInt>(size)));
+    return detail::crc32c(crc, data, size);
 }
 
 struct array_info {
@@ -260,6 +264,7 @@ public:
 
     template<class T> void read(const array_info& info, std::span<T> values) const {
         if (info.count != values.size()) invalid("array length mismatch");
+        if (native<T>(info)) return read_native(info, values.data());
         std::size_t offset = 0;
         decode<T>(info, [&](std::span<const T> chunk) {
             std::copy(chunk.begin(), chunk.end(), values.begin() + offset);
@@ -270,12 +275,83 @@ public:
     template<class T> std::vector<T> read_vector(const array_info& info) const {
         std::vector<T> values;
         if (info.count > values.max_size()) invalid("array exceeds container capacity");
+        if (native<T>(info)) {
+            values.resize(static_cast<std::size_t>(info.count));
+            read_native(info, values.data());
+            return values;
+        }
         values.reserve(static_cast<std::size_t>(info.count));
         decode<T>(info, [&](std::span<const T> chunk) { values.insert(values.end(), chunk.begin(), chunk.end()); });
         return values;
     }
 
 private:
+    template<class T> static bool native(const array_info& info) {
+        constexpr char kind = std::is_same_v<T, binary16> || std::is_floating_point_v<T>
+            ? 'f' : std::is_signed_v<T> ? 'i' : 'u';
+        const bool swap = (info.endian == '<') != (std::endian::native == std::endian::little);
+        return !swap && info.width == sizeof(T) && info.kind == kind;
+    }
+
+    // An array stored in this build's layout is read in 4 MiB blocks, each
+    // checked and checksummed by the thread that reads it. A thread reads 64 KiB
+    // at a time into its own buffer, checks it while it is in cache, then copies
+    // it into place. Block checksums combine in file order, and the first failing
+    // block in file order decides the error, so neither depends on the team size.
+    template<class T> void read_native(const array_info& info, T* output) const {
+        constexpr std::size_t block = std::size_t(1) << 22, piece_bytes = std::size_t(1) << 16;
+        const auto length = static_cast<std::size_t>(info.length);
+        const auto blocks = static_cast<std::int64_t>((length + block - 1) / block);
+        enum : int { ok = 0, truncated = -1, negative = -2 };  // positive: errno
+        std::vector<int> status(static_cast<std::size_t>(blocks), ok);
+        std::vector<std::uint32_t> crcs(static_cast<std::size_t>(blocks));
+        const int fd = fileno(file_.get());
+        auto* bytes = reinterpret_cast<unsigned char*>(output);
+        const auto team = static_cast<int>(std::clamp<std::int64_t>(blocks, 1, omp_get_max_threads()));
+#pragma omp parallel num_threads(team) if (blocks > 1)
+        {
+            std::array<T, piece_bytes / sizeof(T)> piece;
+            auto* buffer = reinterpret_cast<unsigned char*>(piece.data());
+#pragma omp for schedule(dynamic, 1)
+            for (std::int64_t b = 0; b < blocks; ++b) {
+                const auto first = static_cast<std::size_t>(b) * block;
+                const auto end = first + std::min(block, length - first);
+                std::uint32_t crc = 0;
+                for (auto at = first; at < end && status[b] == ok;) {
+                    const auto size = std::min(piece_bytes, end - at);
+                    for (std::size_t done = 0; done < size;) {
+                        const auto got = ::pread(fd, buffer + done, size - done,
+                                                 static_cast<off_t>(info.offset + at + done));
+                        if (got > 0) { done += static_cast<std::size_t>(got); continue; }
+                        if (got < 0 && errno == EINTR) continue;
+                        status[b] = got < 0 ? errno : truncated;
+                        break;
+                    }
+                    if (status[b] != ok) break;
+                    crc = checksum(crc, buffer, size);
+                    if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
+                        if (std::any_of(piece.data(), piece.data() + size / sizeof(T), [](T v) { return v < 0; }))
+                            status[b] = negative;
+                    }
+                    std::memcpy(bytes + at, buffer, size);
+                    at += size;
+                }
+                crcs[b] = crc;
+            }
+        }
+        std::uint32_t crc = 0;
+        for (std::int64_t b = 0; b < blocks; ++b) {
+            if (status[b] == truncated) invalid("truncated array");
+            if (status[b] == negative) invalid("negative index");
+            if (status[b] != ok) throw std::system_error(status[b], std::generic_category(), "read solver archive");
+            const auto size = std::min(block, length - static_cast<std::size_t>(b) * block);
+            crc = detail::crc32c_combine(crc, crcs[b], size);
+        }
+        if (crc != info.crc) invalid("array checksum mismatch");
+    }
+
+    // Arrays stored with another byte order, width or signedness are converted
+    // element by element.
     template<class T, class Put> void decode(const array_info& info, Put put) const {
         if constexpr (std::is_same_v<T, binary16> || std::is_floating_point_v<T>) {
             if (info.kind != 'f' || info.width != sizeof(T)) invalid("unexpected floating-point type");
@@ -288,42 +364,32 @@ private:
         std::size_t first = 0;
         while (first < info.count) {
             const auto count = std::min({static_cast<std::size_t>(info.count) - first, sizeof(buffer) / info.width, decoded.size()});
-            const char target_kind = std::is_same_v<T, binary16> || std::is_floating_point_v<T>
-                ? 'f' : std::is_signed_v<T> ? 'i' : 'u';
-            if (!swap && info.width == sizeof(T) && info.kind == target_kind) {
-                read_exact(file_.get(), decoded.data(), count * sizeof(T));
-                crc = checksum(crc, decoded.data(), count * sizeof(T));
-                if constexpr (std::is_integral_v<T> && std::is_signed_v<T>)
-                    for (std::size_t i = 0; i < count; ++i)
-                        if (decoded[i] < 0) invalid("negative index");
-            } else {
-                read_exact(file_.get(), buffer.data(), count * info.width);
-                crc = checksum(crc, buffer.data(), count * info.width);
-                for (std::size_t i = 0; i < count; ++i) {
-                    std::uint64_t bits = 0;
-                    if (info.width == 2) {
-                        std::uint16_t word;
-                        std::memcpy(&word, reinterpret_cast<const std::byte*>(buffer.data()) + 2 * i, 2);
-                        bits = swap ? std::byteswap(word) : word;
-                    } else if (info.width == 4) {
-                        std::uint32_t word;
-                        std::memcpy(&word, reinterpret_cast<const std::byte*>(buffer.data()) + 4 * i, 4);
-                        bits = swap ? std::byteswap(word) : word;
-                    } else {
-                        bits = buffer[i];
-                        if (swap) bits = std::byteswap(bits);
-                    }
-                    if constexpr (std::is_same_v<T, binary16>) {
-                        decoded[i] = {static_cast<std::uint16_t>(bits)};
-                    } else if constexpr (std::is_floating_point_v<T>) {
-                        if constexpr (sizeof(T) == 4) decoded[i] = std::bit_cast<float>(static_cast<std::uint32_t>(bits));
-                        else decoded[i] = std::bit_cast<double>(bits);
-                    } else {
-                        if ((info.kind == 'i' && (bits >> (info.width * 8 - 1))) ||
-                            bits > static_cast<std::uint64_t>(std::numeric_limits<T>::max()))
-                            invalid("index does not fit this build");
-                        decoded[i] = static_cast<T>(bits);
-                    }
+            read_exact(file_.get(), buffer.data(), count * info.width);
+            crc = checksum(crc, buffer.data(), count * info.width);
+            for (std::size_t i = 0; i < count; ++i) {
+                std::uint64_t bits = 0;
+                if (info.width == 2) {
+                    std::uint16_t word;
+                    std::memcpy(&word, reinterpret_cast<const std::byte*>(buffer.data()) + 2 * i, 2);
+                    bits = swap ? std::byteswap(word) : word;
+                } else if (info.width == 4) {
+                    std::uint32_t word;
+                    std::memcpy(&word, reinterpret_cast<const std::byte*>(buffer.data()) + 4 * i, 4);
+                    bits = swap ? std::byteswap(word) : word;
+                } else {
+                    bits = buffer[i];
+                    if (swap) bits = std::byteswap(bits);
+                }
+                if constexpr (std::is_same_v<T, binary16>) {
+                    decoded[i] = {static_cast<std::uint16_t>(bits)};
+                } else if constexpr (std::is_floating_point_v<T>) {
+                    if constexpr (sizeof(T) == 4) decoded[i] = std::bit_cast<float>(static_cast<std::uint32_t>(bits));
+                    else decoded[i] = std::bit_cast<double>(bits);
+                } else {
+                    if ((info.kind == 'i' && (bits >> (info.width * 8 - 1))) ||
+                        bits > static_cast<std::uint64_t>(std::numeric_limits<T>::max()))
+                        invalid("index does not fit this build");
+                    decoded[i] = static_cast<T>(bits);
                 }
             }
             put(std::span<const T>(decoded.data(), count));
@@ -336,17 +402,25 @@ private:
 void check_operator_structure(const Eigen::SparseMatrix<double>& A) {
     if (A.rows() == 0 || A.rows() != A.cols() || !A.isCompressed()) invalid("operator must be nonempty square compressed CSC");
     const auto n = A.rows(), nnz = A.nonZeros();
-    if (A.outerIndexPtr()[0] != 0 || A.outerIndexPtr()[n] != nnz) invalid("invalid operator offsets");
-    for (Eigen::Index col = 0; col < n; ++col) {
-        const auto first = A.outerIndexPtr()[col], last = A.outerIndexPtr()[col + 1];
-        if (first < 0 || first > last || last > nnz) invalid("invalid operator offsets");
-        int previous = -1;
-        for (auto p = first; p < last; ++p) {
-            const auto row = A.innerIndexPtr()[p];
-            if (row <= previous || row >= n) invalid("operator rows must be sorted, unique and in range");
-            previous = row;
+    const int* outer = A.outerIndexPtr();
+    const int* inner = A.innerIndexPtr();
+    if (outer[0] != 0 || outer[n] != nnz) invalid("invalid operator offsets");
+    for (Eigen::Index col = 0; col < n; ++col)
+        if (outer[col] > outer[col + 1]) invalid("invalid operator offsets");
+    // With monotone offsets the columns split into work-balanced ranges.
+    std::atomic<bool> unsorted{false};
+#pragma omp parallel if (nnz >= (1 << 16))
+    {
+        const auto [lo, hi] = detail::work_balanced_range(outer, n);
+        for (auto col = lo; col < hi && !unsorted.load(std::memory_order_relaxed); ++col) {
+            int previous = -1;
+            for (auto p = outer[col]; p < outer[col + 1]; ++p) {
+                if (inner[p] <= previous || inner[p] >= n) { unsorted = true; break; }
+                previous = inner[p];
+            }
         }
     }
+    if (unsorted) invalid("operator rows must be sorted, unique and in range");
 }
 
 template<class T> void require_extent(const array_info& info, std::uint64_t expected) {
@@ -419,6 +493,7 @@ solver solver::load(const std::filesystem::path& path, const solve_options& opti
     const auto started = std::chrono::steady_clock::now();
     detail::validate_solve_options(options);
     check_path(path);
+    const detail::thread_budget threads(options.num_threads);
     reader archive(path);
     const auto metadata_info = archive.inspect(array_id::metadata);
     require_extent<std::uint64_t>(metadata_info, metadata_count);
