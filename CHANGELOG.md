@@ -94,7 +94,7 @@
 ### Documentation
 - The website separates user and developer guides, adds installation, quick start, examples, changelog and citing pages, and marks development pages with a banner.
 - The precision guide states when results are reproducible and that a release may change results, within the documented precision, for measured speed or memory gains.
-- Clearer messages for a solver used by 2 threads at once, an archive from a newer version, and positive off-diagonal input entries. The README now lists zlib as a build dependency.
+- Clearer messages for a solver used by 2 threads at once, an archive from a newer version, and positive off-diagonal input entries.
 
 ### Fixes
 - The CLI reports "matrix is empty" and exits 2 for a dense (array) input with no rows or columns, instead of crashing with SIGFPE while reading it.
