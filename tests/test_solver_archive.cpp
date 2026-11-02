@@ -2,8 +2,8 @@
 #include "apxchol/solver/solve.h"
 #include "apxchol/detail/csc_import.h"
 #include "apxchol/solver/sptrsv/omp.h"
+#include "../src/crc32c.h"
 #include "../src/solver_archive_internal.h"
-#include <zlib.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -14,6 +14,7 @@
 #include <fstream>
 #include <functional>
 #include <future>
+#include <string>
 #include <system_error>
 #include <vector>
 #include <barrier>
@@ -46,6 +47,22 @@ solve_options options() {
 
 // Independent test fixture encoder for the documented binary layout.
 using Bytes = std::vector<unsigned char>;
+
+// Bytewise CRC-32C, independent of the library's implementation.
+std::uint32_t reference_crc32c(const unsigned char* data, std::size_t size) {
+    static const auto table = [] {
+        std::array<std::uint32_t, 256> t{};
+        for (std::uint32_t b = 0; b < 256; ++b) {
+            std::uint32_t c = b;
+            for (int k = 0; k < 8; ++k) c = c & 1 ? (c >> 1) ^ 0x82F63B78u : c >> 1;
+            t[b] = c;
+        }
+        return t;
+    }();
+    std::uint32_t c = 0xFFFFFFFFu;
+    for (std::size_t i = 0; i < size; ++i) c = table[(c ^ data[i]) & 0xff] ^ (c >> 8);
+    return ~c;
+}
 constexpr std::size_t prefix_size = 64 + 11 * 40;
 enum ArrayId : std::size_t { metadata, a_outer, a_inner, a_values, l_outer, l_inner, l_values, permutation, round_sizes,
                              l_diagonal, l_scales };
@@ -62,7 +79,7 @@ void put_number(Bytes& bytes, std::size_t at, unsigned width, std::uint64_t valu
 Bytes read_bytes(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary | std::ios::ate);
     const auto size = input.tellg();
-    if (size < 0 || size > 16 * 1024 * 1024) throw std::runtime_error("invalid test fixture size");
+    if (size < 0 || size > 64 * 1024 * 1024) throw std::runtime_error("invalid test fixture size");
     Bytes bytes(static_cast<std::size_t>(size));
     input.seekg(0);
     if (!input.read(reinterpret_cast<char*>(bytes.data()), bytes.size())) throw std::runtime_error("fixture read failed");
@@ -74,7 +91,7 @@ void write_bytes(const std::filesystem::path& path, const Bytes& bytes) {
 }
 void checksum_metadata(Bytes& bytes) {
     put_number(bytes, 20, 4, 0);
-    put_number(bytes, 20, 4, crc32(0, bytes.data(), prefix_size));
+    put_number(bytes, 20, 4, reference_crc32c(bytes.data(), prefix_size));
 }
 struct FixtureArray {
     unsigned char endian, kind, width;
@@ -109,7 +126,7 @@ Bytes encode_fixture(const Fixture& arrays) {
         put_number(bytes, d, 4, i); bytes[d + 4] = a.endian; bytes[d + 5] = a.kind; bytes[d + 6] = a.width;
         put_number(bytes, d + 8, 8, a.count); put_number(bytes, d + 16, 8, offset);
         put_number(bytes, d + 24, 8, a.data.size());
-        put_number(bytes, d + 32, 4, crc32(0, a.data.data(), a.data.size()));
+        put_number(bytes, d + 32, 4, reference_crc32c(a.data.data(), a.data.size()));
     }
     put_number(bytes, 24, 8, bytes.size()); checksum_metadata(bytes);
     return bytes;
@@ -508,6 +525,71 @@ TEST_F(SolverArchive, RejectsNewerFormatVersion) {
     }
 }
 
+TEST(Crc32c, KnownAnswers) {
+    const std::string digits = "123456789";
+    std::array<unsigned char, 32> zeros{}, ones{}, ascending{};
+    ones.fill(0xff);
+    for (std::size_t i = 0; i < ascending.size(); ++i) ascending[i] = static_cast<unsigned char>(i);
+    std::vector<std::uint32_t (*)(std::uint32_t, const void*, std::size_t) noexcept> all{detail::crc32c};
+    for (const auto& implementation : detail::crc32c_implementations()) all.push_back(implementation.checksum);
+    for (auto crc : all) {
+        EXPECT_EQ(crc(0, digits.data(), digits.size()), 0xE3069283u);
+        EXPECT_EQ(crc(0, digits.data(), 0), 0u);
+        // RFC 3720, appendix B.4.
+        EXPECT_EQ(crc(0, zeros.data(), zeros.size()), 0x8A9136AAu);
+        EXPECT_EQ(crc(0, ones.data(), ones.size()), 0x62A8AB43u);
+        EXPECT_EQ(crc(0, ascending.data(), ascending.size()), 0x46DD794Eu);
+    }
+    EXPECT_EQ(reference_crc32c(reinterpret_cast<const unsigned char*>(digits.data()), digits.size()), 0xE3069283u);
+}
+
+// The folding kernel takes 32 KiB chunks on x86 and 8160-byte chunks on ARM,
+// the crc instruction lanes 24 KiB and then 768-byte stretches, and the table
+// 8 bytes at a time.
+// Every implementation must match the bytewise reference at every alignment and
+// length, and when continued.
+TEST(Crc32c, EveryImplementationAgreesAtAnyAlignmentAndLength) {
+    Bytes data(3 * 3 * 8192 + 1000);
+    std::uint64_t state = 0x9E3779B97F4A7C15ull;
+    for (auto& byte : data) { state = state * 6364136223846793005ull + 1442695040888963407ull; byte = state >> 56; }
+    const auto implementations = detail::crc32c_implementations();
+    ASSERT_FALSE(implementations.empty());
+    std::vector<std::size_t> sizes{0, 1, 7, 8, 9, 63, 135, 136, 137, 543, 544, 545, 767, 768, 769,
+                                   8159, 8160, 8161, 2 * 8160 + 7, 32767, 32768, 32769, 2 * 32768 + 7, 65536, 3 * 8192 - 1, 3 * 8192, 3 * 8192 + 5,
+                                   2 * 3 * 8192 + 13};
+    sizes.push_back(data.size() - 16);
+    for (const auto& implementation : implementations)
+        for (std::size_t offset = 0; offset < 16; ++offset)
+            for (std::size_t size : sizes) {
+                const auto* p = data.data() + offset;
+                const auto expected = reference_crc32c(p, size);
+                const auto crc = implementation.checksum;
+                EXPECT_EQ(crc(0, p, size), expected) << implementation.name << " " << offset << " " << size;
+                EXPECT_EQ(crc(0x12345678u, p, size), detail::crc32c_portable(0x12345678u, p, size))
+                    << implementation.name << " " << offset << " " << size;
+                const auto third = size / 3;
+                EXPECT_EQ(crc(crc(0, p, third), p + third, size - third), expected)
+                    << implementation.name << " " << offset << " " << size;
+            }
+}
+
+TEST(Crc32c, CombineAcrossManyBoundaries) {
+    Bytes data(200000);
+    for (std::size_t i = 0; i < data.size(); ++i) data[i] = static_cast<unsigned char>(i * 131 + (i >> 9));
+    const auto expected = reference_crc32c(data.data(), data.size());
+    for (std::size_t step : {std::size_t(1), std::size_t(7), std::size_t(4096), std::size_t(65536), std::size_t(99999)}) {
+        std::uint32_t crc = 0;
+        std::size_t pieces = 0;
+        for (std::size_t first = 0; first < data.size(); first += step, ++pieces) {
+            const auto size = std::min(step, data.size() - first);
+            crc = detail::crc32c_combine(crc, detail::crc32c(0, data.data() + first, size), size);
+        }
+        EXPECT_EQ(crc, expected) << step << " bytes per piece, " << pieces << " pieces";
+    }
+    EXPECT_EQ(detail::crc32c_combine(0x12345678u, 0, 0), 0x12345678u);
+    EXPECT_EQ(detail::crc32c_combine(0, 0xE3069283u, 9), 0xE3069283u);
+}
+
 // The committed fixture is tests/fixtures/path5_sddm.mtx saved with default CPU
 // options (FP32 storage). Every 1.x release must keep loading it.
 TEST(SolverArchiveFormat, LoadsCommittedVersion1Fixture) {
@@ -569,6 +651,80 @@ TEST_F(SolverArchive, RejectsCorruptArrayPayload) {
     EXPECT_THROW(solver::load(path), std::invalid_argument);
     const auto descriptor = change_file("metadata-crc", [](auto& bytes) { bytes.at(64 + 32) ^= 1; }, false);
     EXPECT_THROW(solver::load(descriptor), std::invalid_argument);
+}
+
+// Arrays over 4 MiB are read in blocks by several threads; the result, the
+// combined checksum and the reported error must not depend on the team size.
+TEST_F(SolverArchive, MultiBlockArraysLoadAtAnyTeamSize) {
+    const Sparse large = matrix(700000);  // operator values span five 4 MiB blocks
+    const solver source(large, options());
+    const auto path = directory / "large.apxchol";
+    source.save(path);
+    const auto expect_error = [](const std::filesystem::path& file, int threads, const char* message) {
+        auto opts = options();
+        opts.num_threads = threads;
+        try {
+            (void)solver::load(file, opts);
+            ADD_FAILURE() << "expected: " << message;
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(std::string(error.what()).find(message), std::string::npos) << error.what();
+        }
+    };
+    for (int threads : {1, 4}) {
+        auto opts = options();
+        opts.num_threads = threads;
+        const auto restored = solver::load(path, opts);
+        EXPECT_EQ(csc_access::vals(restored.factor().L), csc_access::vals(source.factor().L));
+        EXPECT_EQ(csc_access::inner(restored.factor().L), csc_access::inner(source.factor().L));
+        EXPECT_EQ(restored.factor().perm, source.factor().perm);
+        expect_operator(path, large);
+    }
+    constexpr std::size_t block = std::size_t(1) << 22;
+    auto bytes = read_bytes(path);
+    const auto values = number(bytes, 64 + 40 * a_values + 16, 8);
+    const auto length = number(bytes, 64 + 40 * a_values + 24, 8);
+    ASSERT_GT(length, 4 * block);
+    for (const auto at : {block + 3, static_cast<std::size_t>(length) - 1}) {
+        auto corrupt = bytes;
+        corrupt.at(values + at) ^= 1;
+        const auto file = directory / "large-corrupt.apxchol";
+        write_bytes(file, corrupt);
+        for (int threads : {1, 4}) expect_error(file, threads, "array checksum mismatch");
+    }
+    // A negative row index in a later block, with a valid checksum.
+    auto fixture = read_fixture(path);
+    ASSERT_GT(fixture[a_inner].data.size(), 2 * block);
+    fixture[a_inner].value(block / 4 + 5, UINT32_MAX);
+    const auto negative = directory / "large-negative.apxchol";
+    write_bytes(negative, encode_fixture(fixture));
+    for (int threads : {1, 4}) expect_error(negative, threads, "negative index");
+    // A failed check in a later block is reported before a checksum mismatch
+    // in an earlier one, as by a sequential reader.
+    auto mixed = read_bytes(negative);
+    mixed.at(number(mixed, 64 + 40 * a_inner + 16, 8)) ^= 1;
+    const auto both = directory / "large-negative-and-corrupt.apxchol";
+    write_bytes(both, mixed);
+    for (int threads : {1, 4}) expect_error(both, threads, "negative index");
+    // Rows out of order in a column far into the operator, checked in parallel.
+    fixture = read_fixture(path);
+    const auto at = fixture[a_inner].count - 1000;
+    const auto row = fixture[a_inner].value(at);
+    fixture[a_inner].value(at, fixture[a_inner].value(at + 1));
+    fixture[a_inner].value(at + 1, row);
+    const auto unsorted = directory / "large-unsorted.apxchol";
+    write_bytes(unsorted, encode_fixture(fixture));
+    for (int threads : {1, 4}) expect_error(unsorted, threads, "rows must be sorted");
+}
+
+TEST_F(SolverArchive, RejectsUnsortedAndOutOfRangeRows) {
+    const auto unsorted = change("unsorted-rows", a_inner, [](auto& a) {
+        const auto first = a.value(0);
+        a.value(0, a.value(1));
+        a.value(1, first);
+    });
+    EXPECT_THROW(solver::load(unsorted), std::invalid_argument);
+    const auto range = change("row-range", a_inner, [](auto& a) { a.value(a.count - 1, 32); });
+    EXPECT_THROW(solver::load(range), std::invalid_argument);
 }
 
 TEST_F(SolverArchive, RejectsDuplicatePermutation) {
