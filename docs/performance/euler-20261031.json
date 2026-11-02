@@ -46,6 +46,16 @@
   },
   {
    "compiler": "MATLAB R2026a"
+  },
+  {
+   "compiler": "clang",
+   "compiler_version": "19.1.3",
+   "openmp_runtime": "llvm-libomp",
+   "arch_flags": "-march=native",
+   "node_index_bits": "32",
+   "edge_index_bits": "32",
+   "amgx": "91a8413ef267b1c32aff4014c02820e1c5897ac2+set_max_iters",
+   "amgx_config": "PCG_CLASSICAL_V_JACOBI.json"
   }
  ],
  "notes": [
@@ -53,12 +63,15 @@
   "CPU series use 64 threads on one socket of an exclusive node; CMG is serial.",
   "ParAC uses patch 0007 (original-system stopping) and 0008 (benchmark I/O). 'own RHS' is ParAC's zero-sum right-hand side as on Daint; 'shared RHS' is the campaign's common b. Shared-RHS CPU graph mode solves disconnected graphs per connected component.",
   "GPU apxchol series: default degree quantile 0.5, plus q0.8 and q0.2 as on Daint.",
+  "AMGX 2.5.0 (commit 91a8413; v2.5.0 does not build with CUDA 13) runs AMGX's shipped PCG_CLASSICAL_V_JACOBI config with the campaign tolerance and iteration limit, one config for every matrix (job 19297101, same node type, source 7adf9c4c).",
+  "BoomerAMG on thermal2 and as-Skitter (the disconnected matrices with hundreds of nontrivial component) is the whole-operator rerun 19372810. The harness default solved each connected component with its own hierarchy, which on thermal2 meant 959 hierarchies per setup.",
   "max_rss_mb is the process peak. GPU memory is not published: these binaries recorded device-wide usage, not per-process usage.",
   "Thread scaling (1 to 128 threads, both sockets at 128) is under 'scaling', capped per thread count."
  ],
  "tolerance": 1e-08,
  "source_commits": [
-  "1c4abb35f1cf08276bc9dc65534dbfb6d2b66059"
+  "1c4abb35f1cf08276bc9dc65534dbfb6d2b66059",
+  "7adf9c4cb65ce433fd88142ef711fe86de2c78e4"
  ],
  "cap_rule": "max(20 x the fastest complete apxchol setup + solve on the same matrix and device, 30 s); a competitor over the cap, or killed at it, is exceeded_cap",
  "files": [
@@ -75,6 +88,6 @@
  "full_extract": {
   "repository": "https://github.com/AlgOptGroup/apxchol-research",
   "path": "campaigns/euler-20261031/extract.json",
-  "sha256": "14a29cfc7f37d972d049eca9788196deba71e0d0ca04a2d77f138bf7aab8f94e"
+  "sha256": "ac74205d708b94486b721ba000e6a95cd6a25d92404f9e540707226ebaea9352"
  }
 }

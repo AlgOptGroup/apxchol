@@ -25,7 +25,7 @@ Apple M1 Max (CPU + Metal) <performance-mac>
 
 apxchol is faster than every other solver family except AMGCL on the CPU,
 where the median is a draw. On the RTX 4090 it is a median 1.7× faster than
-AMGCL and 1.5× faster than BoomerAMG.
+AMGCL, 1.4× faster than BoomerAMG and 1.3× faster than AMGX.
 
 Each small dot is one matrix: the setup + solve time of the family's fastest
 variant on that matrix, divided by apxchol's. The large dot is the median and
@@ -37,10 +37,11 @@ were. apxchol runs its default configuration.
 
 ![apxchol against the fastest other solver on each matrix, by kind of matrix](performance/euler-best-other.svg)
 
-Multigrid, usually AMGCL, is as fast or faster on grids and meshes. apxchol
-wins on linear programs and social graphs. Against the fastest other solver on
-each matrix, apxchol is faster on 16 of 27 matrices on the CPU and on 20 of 27
-on the GPU.
+Multigrid is close to apxchol or faster on grids and meshes: AMGCL on the CPU
+and mostly AMGX on the GPU. apxchol wins on linear programs, on every social
+graph but kron_g500 on the CPU, and on half of the social graphs on the GPU.
+Against the fastest other solver on each matrix, apxchol is faster on 16 of 27
+matrices on both the CPU and the GPU.
 
 ## Every matrix
 
