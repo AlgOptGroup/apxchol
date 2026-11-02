@@ -303,6 +303,28 @@ void callback_error_propagates() {
     require_contract(calls == 1 && caught, "component exception was swallowed or replaced");
 }
 
+void auto_split_only_for_disconnected_laplacians() {
+    auto plan = [](const char* solver, const char* ground, bool disconnected, bool laplacian) {
+        return resolve_desing(solver, "auto", ground, disconnected, laplacian);
+    };
+    require_contract(plan("boomeramg", "auto", true, true).decompose == decompose_mode::split,
+                     "a disconnected Laplacian no longer splits for BoomerAMG");
+    require_contract(plan("boomeramg", "auto", true, false).decompose == decompose_mode::whole,
+                     "a disconnected SDDM operator splits for BoomerAMG");
+    require_contract(plan("boomeramg", "auto", false, true).decompose == decompose_mode::whole,
+                     "a connected Laplacian splits for BoomerAMG");
+    require_contract(plan("amgcl", "coarse", true, true).decompose == decompose_mode::split,
+                     "a disconnected Laplacian no longer splits under coarse grounding");
+    const auto sddm_coarse = plan("amgcl", "coarse", true, false);
+    require_contract(sddm_coarse.supported && sddm_coarse.decompose == decompose_mode::whole,
+                     "a disconnected SDDM operator is not solved whole under coarse grounding");
+    require_contract(!resolve_desing("amgcl", "whole", "coarse", true, true).supported,
+                     "whole + coarse on a disconnected Laplacian became supported");
+    require_contract(resolve_desing("boomeramg", "split", "auto", true, false).decompose
+                         == decompose_mode::split,
+                     "an explicit split request is ignored for SDDM input");
+}
+
 } // namespace
 
 int main() {
@@ -317,6 +339,7 @@ int main() {
         {"callback_error_propagates", callback_error_propagates},
         {"complete_route_and_fill_propagate", complete_route_and_fill_propagate},
         {"unavailable_sentinel_propagates", unavailable_sentinel_propagates},
+        {"auto_split_only_for_disconnected_laplacians", auto_split_only_for_disconnected_laplacians},
     };
     int passed = 0;
     for (const auto& test : cases) {

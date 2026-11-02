@@ -1765,7 +1765,8 @@ enum class ground_mode    { pin, coarse, native };
 // solver key: "apxchol" | "amgcl" | "boomeramg".
 struct desing_plan { bool supported; decompose_mode decompose; ground_mode ground; };
 static desing_plan resolve_desing(const std::string& solver, const std::string& dec_req,
-                                  const std::string& gnd_req, bool disconnected) {
+                                  const std::string& gnd_req, bool disconnected,
+                                  bool laplacian) {
     // ground: auto = the config-clean default (pin for the AMG solvers -> default
     // config; native for apxchol).
     ground_mode gnd = (gnd_req=="pin")    ? ground_mode::pin
@@ -1777,7 +1778,10 @@ static desing_plan resolve_desing(const std::string& solver, const std::string& 
     // null space) or the solver is BoomerAMG (measured: split avoids dragging the dust
     // components through one AMG hierarchy, ~3-5% faster). apxchol and AMGCL+pin handle
     // the whole disconnected operator faster than paying per-component build overhead.
-    bool auto_split = disconnected && (gnd==ground_mode::coarse || solver=="boomeramg");
+    // A disconnected SDDM operator is already nonsingular and stays whole: splitting it
+    // built one hierarchy per positive-diagonal singleton (959 per setup on thermal2).
+    bool auto_split = laplacian && disconnected
+                   && (gnd==ground_mode::coarse || solver=="boomeramg");
     decompose_mode dec = (dec_req=="whole") ? decompose_mode::whole
                        : (dec_req=="split") ? decompose_mode::split
                        : (auto_split ? decompose_mode::split : decompose_mode::whole);
@@ -1788,7 +1792,8 @@ static desing_plan resolve_desing(const std::string& solver, const std::string& 
     // The invalid cell: whole + coarse on a DISCONNECTED graph -- the unpinned singular
     // operator has a k-dim constant null space the single near-null vector can't span
     // (AMGCL CG breaks down / NaN). split makes every piece connected (k=1), so it's ok.
-    if (gnd==ground_mode::coarse && dec==decompose_mode::whole && disconnected) ok = false;
+    if (laplacian && gnd==ground_mode::coarse && dec==decompose_mode::whole && disconnected)
+        ok = false;
     return {ok, dec, gnd};
 }
 
@@ -3158,7 +3163,8 @@ int main(int argc, char** argv) try {
     };
     [[maybe_unused]] auto run_desing = [&](const std::string& key, const std::string& base,
                           auto single) -> BenchResult {
-        auto plan = resolve_desing(key, args.decompose, args.ground, disconnected);
+        auto plan = resolve_desing(key, args.decompose, args.ground, disconnected,
+                                   g_laplacian_mode);
         if (!plan.supported) return make_na(base);
         if (plan.decompose == decompose_mode::split)
             return run_split([&, g = plan.ground](const Eigen::SparseMatrix<double>& sL,
