@@ -21,7 +21,7 @@ restored = apxchol_solver.load('system.apxchol', struct('num_threads', 4));
 result = restored.solve(b);
 ```
 
-Saving writes `<path>.tmp`, flushes it to disk, renames it onto `<path>` and syncs the directory, so an existing file is replaced, readers never see a partial archive and the new file survives a power loss. If `<path>.tmp` already exists, another save to the same path is running or an earlier save was interrupted; saving fails and names that file. Remove it only when no save to that path is running. The `.apxchol` extension is a convention; loading checks the file contents.
+Saving takes 4 steps: write `<path>.tmp`, flush it to disk, rename it onto `<path>`, and sync the directory. An existing file is replaced. Readers never see a partial archive, and the new file survives a power loss. If `<path>.tmp` already exists, saving fails and names that file. Either another save to the same path is running, or an earlier save stopped. Remove the file only when no save to that path is running. The `.apxchol` extension is a convention. Loading checks the file contents.
 
 The original operator is reconstructed from the solver’s owned data when saving, without keeping another permanent matrix copy. A GPU solver downloads the operator and its installed factor to the host. The file preserves the coefficients used by the solver; duplicate entries and tolerated differences between the input’s two triangles have already been normalized.
 

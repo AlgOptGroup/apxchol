@@ -59,14 +59,15 @@ Start with the built-in solver for factor reuse and batched solves.
 The [Python](python/README.md), [C++](docs/reference/cpp.md) and
 [MATLAB/Octave](octave/README.md) guides cover each interface.
 `solver.apply` (C++) and `aslinearoperator()` (Python) let you use the
-preconditioner with another iterative solver; see [integration and factor reuse](docs/usage.md#using-another-iterative-solver).
+preconditioner with another iterative solver. See [integration and factor reuse](docs/usage.md#using-another-iterative-solver).
 
 ## Build and run
 
 Standalone [CLI archives](docs/install.md#cli-archives) for Linux CPU and
 Apple-silicon CPU/Metal need no Python.
 
-A source build needs CMake, GCC or Clang with C++23 and OpenMP, and Eigen.
+A source build needs CMake 3.20+, GCC or Clang with C++23 and OpenMP, and zlib
+headers. CMake fetches Eigen if it is not installed.
 See [building from source](docs/building.md) for dependencies, GPU builds
 and CMake integration.
 
@@ -77,14 +78,14 @@ ctest --test-dir build --output-on-failure
 ./build/apxchol matrix.mtx --rhs rhs.mtx -o solution.mtx
 ```
 
-The CLI reads the matrix as `A`; `--convert-input` forms the Laplacian of an
+The CLI reads the matrix as `A`. `--convert-input` forms the Laplacian of an
 adjacency matrix. An `--rhs` file with several columns is solved as one batch.
-`--random-rhs` generates a test RHS;
-the [command-line guide](docs/cli.md) lists the available controls.
+`--random-rhs` generates a test RHS.
+The [command-line guide](docs/cli.md) lists the available controls.
 
 ## Performance
 
-Cross-solver results are in preparation for 1.0; see [performance](docs/performance.md)
+Cross-solver results will appear in 1.0. See [performance](docs/performance.md)
 for the methodology and the measured [batching case study](docs/batching.md).
 
 ## Learn more

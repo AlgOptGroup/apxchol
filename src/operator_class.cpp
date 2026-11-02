@@ -262,7 +262,7 @@ static std::string asymmetry(const operator_scan& s) {
                std::to_string(s.worst_asym_col) + "): " +
                num(s.worst_asym_a) + " vs " + num(s.worst_asym_b) + ")";
     return msg + ". If the file stores one triangle only, declare it `symmetric` "
-                 "in the MatrixMarket header so both triangles are read.";
+                 "in the Matrix Market header so both triangles are read.";
 }
 
 // A symmetric matrix with no negative off-diagonal is read as a graph by the

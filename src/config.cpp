@@ -67,7 +67,7 @@ run_config parse_args(int argc, char* argv[]) {
     }, "Print version and build info");
 
     // ── positional ──
-    app.add_option("input", cfg.input_path, "Input graph in MatrixMarket format")
+    app.add_option("input", cfg.input_path, "Matrix A in Matrix Market format. Use --convert-input for a graph adjacency matrix.")
         ->required()
         ->check(CLI::ExistingFile);
 
@@ -76,7 +76,7 @@ run_config parse_args(int argc, char* argv[]) {
     // the excludes keep the "not both" error message specific.
     auto* rhs_group = app.add_option_group("Right-hand side (exactly one required)");
     auto* rhs_opt = rhs_group->add_option("--rhs", rhs_str,
-                   "RHS in dense MatrixMarket format: an n-vector, or an n x k matrix "
+                   "RHS in dense Matrix Market format: an n-vector, or an n x k matrix "
                    "whose k columns are solved as one batch")
         ->check(CLI::ExistingFile);
     auto* rand_flag = rhs_group->add_flag("--random-rhs", cfg.random_rhs,
@@ -86,7 +86,7 @@ run_config parse_args(int argc, char* argv[]) {
     rand_flag->excludes(rhs_opt);
     rhs_group->require_option(1);
     app.add_option("--x0", x0_str,
-                   "Initial guess in dense MatrixMarket format, shaped like the RHS "
+                   "Initial guess in dense Matrix Market format, shaped like the RHS "
                    "(default: zero)")
         ->check(CLI::ExistingFile);
 
@@ -97,7 +97,7 @@ run_config parse_args(int argc, char* argv[]) {
 
     // ── output ──
     app.add_option("-o,--output", output_str,
-                   "Write the solution to a dense MatrixMarket file (n x k for an n x k RHS)");
+                   "Write the solution to a dense Matrix Market file (n x k for an n x k RHS)");
 
     const auto samplers = name_map(detail::clique_sampler_names);
     app.add_option("--sampler", cfg.solve_opts.factor_opts.sampler,

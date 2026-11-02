@@ -4,9 +4,6 @@
   "R4": 1,
   "R7": 1
  },
- "README.md": {
-  "R1": 3
- },
  "docs/api.md": {
   "R1": 3,
   "R7": 3
@@ -18,7 +15,7 @@
   "R1": 2
  },
  "docs/cli.md": {
-  "R1": 3
+  "R1": 2
  },
  "docs/cpp.md": {
   "R1": 3,
@@ -32,8 +29,7 @@
   "R7": 3
  },
  "docs/install.md": {
-  "R1": 3,
-  "R7": 1
+  "R1": 3
  },
  "docs/performance.md": {
   "R1": 1
@@ -53,21 +49,18 @@
   "R1": 4
  },
  "docs/serialization.md": {
-  "R1": 13,
+  "R1": 12,
   "R7": 1
  },
  "docs/usage.md": {
-  "R1": 18,
+  "R1": 17,
   "R7": 1
- },
- "include/apxchol/detail/call_guard.h": {
-  "R1": 1
  },
  "include/apxchol/solver/pcg_cuda.h": {
   "R1": 2
  },
  "python/README.md": {
-  "R1": 15,
+  "R1": 14,
   "R7": 1
  },
  "python/apxchol/__init__.py": {

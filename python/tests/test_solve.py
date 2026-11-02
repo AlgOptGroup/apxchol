@@ -161,7 +161,7 @@ def test_overlapping_calls_on_one_solver_raise():
     for thread in threads:
         thread.join()
     assert errors
-    assert "already in use by another thread" in errors[0]
+    assert "in use by another thread" in errors[0]
 
 
 def test_copies_share_the_factor_and_solve_in_parallel():
