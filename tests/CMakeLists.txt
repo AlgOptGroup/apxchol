@@ -71,7 +71,6 @@ target_compile_definitions(unit_tests PRIVATE
 target_link_libraries(unit_tests PRIVATE
         apxchol_mtx_input
         GTest::gtest_main
-        ZLIB::ZLIB
 )
 
 include(GoogleTest)

@@ -118,7 +118,7 @@ That outer solver controls convergence and reports its own result. Use
 
 ## Build for Octave
 
-Requires CMake 3.20+, `mkoctfile` (Octave development tools), zlib and an
+Requires CMake 3.20+, `mkoctfile` (Octave development tools) and an
 OpenMP-capable C++23 compiler (GCC 14 or equivalent). Use matching C/C++ compiler families
 and one OpenMP runtime.
 
@@ -129,7 +129,7 @@ octave --no-gui --eval "addpath(pwd); run('tests/test_apxchol.m')"
 ```
 
 The extension links the shared native CMake target. Eigen3 is found or fetched
-by the native build helpers; zlib must be installed. A root build is not required.
+by the native build helpers. A root build is not required.
 `CMAKE_BUILD_PARALLEL_LEVEL` sets the build worker count (default: 2).
 The MEX file goes to `octave/private/`, so only the `apxchol_*` wrappers can call it.
 
@@ -137,7 +137,7 @@ The MEX file goes to `octave/private/`, so only the `apxchol_*` wrappers can cal
 
 MATLAB and Octave share the wrapper source and tests, but their MEX binaries
 are not interchangeable. Linux x86-64 builds are tested with MATLAB R2026b
-and GCC 13. Install CMake, OpenMP and zlib, then run:
+and GCC 13. Install CMake and OpenMP, then run:
 
 ```bash
 matlab -batch "run('/path/to/apxchol/octave/build_and_test.m')"

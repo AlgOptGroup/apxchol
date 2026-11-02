@@ -73,8 +73,7 @@ accepts only that minor release. The shared library's soname carries the major
 and minor version (currently `libapxchol_core.so.0.3`), because the binary ABI
 may change between minor releases; rebuild consumers when you upgrade.
 If apxchol fetched Eigen, the install includes its headers. Otherwise, the
-consumer must also provide Eigen. Static SDK consumers also need zlib; CUDA
-SDK consumers need the CUDA Toolkit.
+consumer must also provide Eigen. CUDA SDK consumers need the CUDA Toolkit.
 Use compatible compiler, standard-library and OpenMP runtime settings.
 
 `ExternalProject_Add` builds in a separate project. Use it to build/install

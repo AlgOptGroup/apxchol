@@ -30,8 +30,6 @@ include(${CMAKE_CURRENT_LIST_DIR}/apxchol_eigen.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_arch.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/apxchol_openmp.cmake)
 
-include(${CMAKE_CURRENT_LIST_DIR}/apxchol_archive.cmake)
-
 if (APXCHOL_DEVICE STREQUAL "METAL")
     enable_language(OBJCXX)
 elseif (APXCHOL_DEVICE STREQUAL "CUDA")
@@ -52,8 +50,9 @@ function(_apxchol_configure_core target)
         ${root}/src/operator_class.cpp
         ${root}/src/solve.cpp
         ${root}/src/solver_archive.cpp
+        ${root}/src/crc32c.cpp
     )
-    target_link_libraries(${target} PUBLIC Eigen3::Eigen OpenMP::OpenMP_CXX PRIVATE ZLIB::ZLIB)
+    target_link_libraries(${target} PUBLIC Eigen3::Eigen OpenMP::OpenMP_CXX)
     target_compile_features(${target} PUBLIC cxx_std_23)
     set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
     target_compile_options(${target} PRIVATE
