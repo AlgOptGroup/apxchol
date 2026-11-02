@@ -230,8 +230,8 @@ TEST(Solver, CpuOwnerSurvivesInputsAndMovesAndReusesItsFactor) {
 
 namespace {
 constexpr const char* busy_message =
-    "this solver is already in use by another thread; use a separate solver per thread, "
-    "or pass all right-hand sides to solve() as one matrix";
+    "this solver is in use by another thread. A solver runs 1 call at a time. "
+    "Give each thread its own copy, or pass all right-hand sides to solve() as one matrix";
 
 void expect_busy(const std::function<void()>& call) {
     try {

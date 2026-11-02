@@ -125,8 +125,8 @@ std::string diagnose_failure(bool graph, const input_scan& s) {
     std::vector<std::string> found;
     if (!graph && s.offdiag_pos > 0)
         found.push_back(std::to_string(s.offdiag_pos) +
-                        " off-diagonal entries are positive, so they become "
-                        "negative edge weights and generate no fill");
+                        " off-diagonal entries are positive. The solver moves them onto "
+                        "the preconditioner's diagonal");
     if (!graph && s.diag_pos < s.n)
         found.push_back("only " + std::to_string(s.diag_pos) + " of " +
                         std::to_string(s.n) + " rows carry a positive diagonal "

@@ -521,7 +521,7 @@ TEST_F(SolverArchive, RejectsNewerFormatVersion) {
         FAIL() << "a version 2 archive loaded";
     } catch (const std::invalid_argument& error) {
         EXPECT_STREQ(error.what(),
-            "solver archive: written by a newer apxchol (format 2); upgrade to read it");
+            "solver archive: written by a newer apxchol (format 2), which this version cannot read. Upgrade apxchol to load it");
     }
 }
 
