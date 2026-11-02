@@ -2,8 +2,8 @@
 
 ETH Euler `eu-g6` node: 2 × AMD EPYC 9554 (64 cores each) and 8 × NVIDIA
 RTX 4090 (24 GB). CPU series use 64 threads on one socket; CMG is serial.
-The campaign planned 783 results (27 matrices × 29 solver configurations), and
-all of them ran: 541 met the 1e-8 tolerance on the original system.
+The campaign planned 810 results (27 matrices × 30 solver configurations), and
+all of them ran: 563 met the 1e-8 tolerance on the original system.
 
 Competitors are capped at 20 times apxchol's fastest setup + solve time on the
 same matrix and device, and at least 30 s. A run over the cap is shown as
@@ -23,6 +23,17 @@ dropping a row, and its Graph mode cannot solve a disconnected graph with a
 single zero-sum right-hand side. CMG runs as the canonical MATLAB code and as
 a serial native port of it. BoomerAMG "cut" forces very high-degree rows to
 fine points (`CoarsenCutFactor` 10).
+
+AMGX 2.5.0 runs its shipped `PCG_CLASSICAL_V_JACOBI` configuration on every
+matrix. It runs out of the RTX 4090's 24 GB during setup on iter0010 and on
+the four largest social graphs; every other shipped AMGX configuration fails
+the same way on iter0010.
+
+BoomerAMG on thermal2 and as-Skitter solves the whole operator. The harness
+otherwise solves each connected component separately, which builds 959
+BoomerAMG hierarchies per setup on thermal2. On coAuthorsDBLP, the default
+BoomerAMG GPU setup time is a slow outlier: a recheck measured 0.16 s, the
+same as the "cut" variant, instead of 0.32 s.
 ```
 
 ## CPU
