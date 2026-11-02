@@ -2,3 +2,4 @@ Sphinx>=8.2,<9
 myst-parser>=4,<5
 breathe>=4.36,<5
 furo>=2025.9.25,<2027
+matplotlib>=3.9,<4

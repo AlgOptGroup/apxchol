@@ -14,7 +14,8 @@ GUIDES = ["README.md", "CHANGELOG.md", "python/README.md", "octave/README.md", "
           "benchmarks/README.md", "docs/api.md", "docs/precision.md", "docs/extending.md",
           "docs/usage.md", "docs/building.md", "docs/batching.md", "docs/serialization.md",
           "docs/sdk.md", "docs/performance.md", "docs/install.md", "docs/quickstart.md",
-          "docs/cli.md", "docs/cpp.md", "docs/examples.md", "docs/citing.md"]
+          "docs/cli.md", "docs/cpp.md", "docs/examples.md", "docs/citing.md",
+          "docs/performance-euler.md", "docs/performance-daint.md", "docs/performance-mac.md"]
 PAGES = {name: name for name in GUIDES}
 PAGES.update({"README.md": "_readme.md", "docs/index.md": "index.md",
               "docs/reference/cpp.md": "docs/reference/cpp.md",
@@ -36,6 +37,9 @@ def main():
         (source / "docs/performance").mkdir(parents=True)
         for asset in (ROOT / "docs/performance").glob("*"):
             shutil.copyfile(asset, source / "docs/performance" / asset.name)
+        # Campaign charts and tables are rendered from the committed extracts.
+        subprocess.run([sys.executable, str(ROOT / "docs/performance.py"), str(source / "docs/performance"),
+                        "--campaigns", str(ROOT / "docs/performance")], check=True)
         shutil.copytree(ROOT / "examples", source / "examples")
         for original, destination in PAGES.items():
             def link(match):

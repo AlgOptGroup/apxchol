@@ -93,6 +93,7 @@
 
 ### Documentation
 - The website separates user and developer guides, adds installation, quick start, examples, changelog and citing pages, and marks development pages with a banner.
+- The Performance page has a page per platform: Euler (x86_64, CUDA), Daint (ARM64, CUDA) and Apple M1 Max (Metal).
 - The precision guide states when results are reproducible and that a release may change results, within the documented precision, for measured speed or memory gains.
 
 ### Fixes
