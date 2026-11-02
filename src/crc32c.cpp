@@ -99,46 +99,7 @@ inline std::uint64_t load8(const unsigned char* p) noexcept {
     return w;
 }
 
-// One crc instruction has a latency of about three cycles but can issue every
-// cycle, so three independent lanes over adjacent ranges keep it busy. Their
-// registers merge by shifting the earlier ones past the later bytes. Long lanes
-// cover most of a buffer; short ones leave at most 767 bytes to a single lane.
-constexpr std::size_t long_lane = 8192, short_lane = 256;
-
-// shift[j][b] = (b << 8j) * x^(8 * bytes): the shift as four byte lookups.
-using shift_tables = std::array<std::array<std::uint32_t, 256>, 4>;
-constexpr shift_tables make_shift_tables(std::uint64_t bytes) {
-    const std::uint32_t op = power(8 * bytes);
-    shift_tables t{};
-    for (std::size_t j = 0; j < 4; ++j)
-        for (std::uint32_t b = 0; b < 256; ++b) t[j][b] = multiply(op, b << (8 * j));
-    return t;
-}
-constexpr shift_tables long_one = make_shift_tables(long_lane), long_two = make_shift_tables(2 * long_lane);
-constexpr shift_tables short_one = make_shift_tables(short_lane), short_two = make_shift_tables(2 * short_lane);
-
-inline std::uint32_t shift(const shift_tables& t, std::uint32_t c) noexcept {
-    return t[0][c & 0xff] ^ t[1][(c >> 8) & 0xff] ^ t[2][(c >> 16) & 0xff] ^ t[3][c >> 24];
-}
-
-// Runs three lanes of `lane` bytes while 3 * lane bytes remain.
-std::uint32_t three_lanes(std::uint32_t c, const unsigned char*& p, std::size_t& size, std::size_t lane,
-                          const shift_tables& one, const shift_tables& two) noexcept {
-    for (; size >= 3 * lane; p += 3 * lane, size -= 3 * lane) {
-        std::uint32_t a = c, b = 0, d = 0;
-        for (std::size_t i = 0; i < lane; i += 8) {
-            a = step8(a, load8(p + i));
-            b = step8(b, load8(p + lane + i));
-            d = step8(d, load8(p + 2 * lane + i));
-        }
-        c = shift(two, a) ^ shift(one, b) ^ d;
-    }
-    return c;
-}
-
-std::uint32_t update_lanes(std::uint32_t c, const unsigned char* p, std::size_t size) noexcept {
-    c = three_lanes(c, p, size, long_lane, long_one, long_two);
-    c = three_lanes(c, p, size, short_lane, short_one, short_two);
+std::uint32_t update_crc(std::uint32_t c, const unsigned char* p, std::size_t size) noexcept {
     for (; size >= 8; p += 8, size -= 8) c = step8(c, load8(p));
     for (; size; ++p, --size) c = step1(c, *p);
     return c;
@@ -174,9 +135,6 @@ APXCHOL_CRC32C_FOLD_TARGET inline std::uint64_t multiply64(std::uint32_t a, std:
     return static_cast<std::uint64_t>(_mm_cvtsi128_si64(
         _mm_clmulepi64_si128(_mm_cvtsi32_si128(static_cast<int>(a)), _mm_cvtsi32_si128(static_cast<int>(b)), 0)));
 }
-APXCHOL_CRC32C_FOLD_TARGET inline std::uint32_t fold_step8(std::uint32_t c, std::uint64_t w) noexcept {
-    return static_cast<std::uint32_t>(_mm_crc32_u64(c, w));
-}
 #else
 using v128 = uint64x2_t;
 inline v128 load16(const unsigned char* p) noexcept { return vreinterpretq_u64_u8(vld1q_u8(p)); }
@@ -193,7 +151,6 @@ inline std::uint64_t half(v128 a, int i) noexcept { return i ? vgetq_lane_u64(a,
 inline std::uint64_t multiply64(std::uint32_t a, std::uint32_t b) noexcept {
     return vgetq_lane_u64(vreinterpretq_u64_p128(vmull_p64(a, b)), 0);
 }
-inline std::uint32_t fold_step8(std::uint32_t c, std::uint64_t w) noexcept { return __crc32cd(c, w); }
 #endif
 
 // Buffers go through in chunks of `steps` steps, so every constant is fixed.
@@ -216,7 +173,7 @@ constexpr std::uint32_t shift_a = power(8 * (2 * lane + vector) - 33),
                         shift_b = power(8 * (lane + vector) - 33), shift_d = power(8 * vector - 33);
 
 APXCHOL_CRC32C_FOLD_TARGET inline std::uint32_t shift_by(std::uint32_t c, std::uint32_t k) noexcept {
-    return fold_step8(0, multiply64(c, k));
+    return step8(0, multiply64(c, k));
 }
 
 APXCHOL_CRC32C_FOLD_TARGET std::uint32_t update_fold(std::uint32_t c, const unsigned char* p,
@@ -228,9 +185,9 @@ APXCHOL_CRC32C_FOLD_TARGET std::uint32_t update_fold(std::uint32_t c, const unsi
         v128 x0 = load16(v), x1 = load16(v + 16), x2 = load16(v + 32), x3 = load16(v + 48);
         for (std::size_t s = 0; s < steps; ++s) {
             for (std::size_t i = 0; i < lane_bytes; i += 8) {
-                ca = fold_step8(ca, load8(a + i));
-                cb = fold_step8(cb, load8(b + i));
-                cd = fold_step8(cd, load8(d + i));
+                ca = step8(ca, load8(a + i));
+                cb = step8(cb, load8(b + i));
+                cd = step8(cd, load8(d + i));
             }
             a += lane_bytes; b += lane_bytes; d += lane_bytes;
             if (s + 1 < steps) {
@@ -244,10 +201,10 @@ APXCHOL_CRC32C_FOLD_TARGET std::uint32_t update_fold(std::uint32_t c, const unsi
         v128 x = vxor(fold(x0, k16), x1);
         x = vxor(fold(x, k16), x2);
         x = vxor(fold(x, k16), x3);
-        const std::uint32_t cv = fold_step8(fold_step8(0, half(x, 0)), half(x, 1));
+        const std::uint32_t cv = step8(step8(0, half(x, 0)), half(x, 1));
         c = shift_by(ca, shift_a) ^ shift_by(cb, shift_b) ^ shift_by(cd, shift_d) ^ cv;
     }
-    return update_lanes(c, p, size);
+    return update_crc(c, p, size);
 }
 
 bool fold_supported() noexcept {
@@ -275,7 +232,7 @@ std::uint32_t crc32c(std::uint32_t crc, const void* data, std::size_t size) noex
     if (fold_supported()) return ~update_fold(~crc, p, size);
 #endif
 #if defined(__SSE4_2__) || defined(APXCHOL_CRC32C_ARM)
-    return ~update_lanes(~crc, p, size);
+    return ~update_crc(~crc, p, size);
 #else
     return ~update_portable(~crc, p, size);
 #endif
@@ -285,8 +242,8 @@ std::span<const crc32c_implementation> crc32c_implementations() noexcept {
     static const auto list = [] {
         std::vector<crc32c_implementation> all{{"portable", crc32c_portable}};
 #if defined(__SSE4_2__) || defined(APXCHOL_CRC32C_ARM)
-        all.push_back({"crc instruction lanes", [](std::uint32_t crc, const void* data, std::size_t size) noexcept {
-            return ~update_lanes(~crc, static_cast<const unsigned char*>(data), size);
+        all.push_back({"crc instruction", [](std::uint32_t crc, const void* data, std::size_t size) noexcept {
+            return ~update_crc(~crc, static_cast<const unsigned char*>(data), size);
         }});
 #endif
 #if defined(APXCHOL_CRC32C_FOLD)
