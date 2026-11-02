@@ -6,6 +6,7 @@
 - A user-visible change adds a line to `CHANGELOG.md` under `Unreleased` in the same PR, marked breaking where it is; benchmark-internal and CI-only changes usually need none.
 - State a result as fact only with evidence from the current session; label historical results and hypotheses. Audits report the complete denominator, checked/total and exclusions.
 - Factor identity requires structure and value digests; equal fill, iterations, residuals or seeds are not identity.
+- User-facing text (README, guides, `--help`, exception messages) follows the writing rules in `CONTRIBUTING.md`. Run `python3 scripts/check_text_rules.py` before a PR that changes it.
 - Check the worktree, branch and dirty state before editing; give concurrent agents explicit file ownership. Keep private notes, runbooks and campaign records out of tracked source.
 
 ## Build and validation
