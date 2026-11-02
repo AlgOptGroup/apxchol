@@ -29,9 +29,9 @@ matrix. It runs out of the RTX 4090's 24 GB during setup on iter0010 and on
 the four largest social graphs; every other shipped AMGX configuration fails
 the same way on iter0010.
 
-BoomerAMG on thermal2 and as-Skitter solves the whole operator. The harness
-otherwise solves each connected component separately, which builds 959
-BoomerAMG hierarchies per setup on thermal2. On coAuthorsDBLP, the default
+BoomerAMG on thermal2 solves the whole operator. The harness used to solve
+each connected component of this disconnected SDDM matrix separately, which
+built 959 BoomerAMG hierarchies per setup. On coAuthorsDBLP, the default
 BoomerAMG GPU setup time is a slow outlier: a recheck measured 0.16 s, the
 same as the "cut" variant, instead of 0.32 s.
 ```

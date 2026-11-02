@@ -44,6 +44,10 @@ as-Skitter,social,1696415,23887011,apxchol_v1,bg+tree/q0.2[vec_pool_aos],,gpu,64
 as-Skitter,social,1696415,23887011,apxchol_v1,bg+tree/q0.8[vec_pool_aos],,gpu,64,complete,0.4978708,0.1908058,42,8.48833820352042e-09,,2148.1
 as-Skitter,social,1696415,23887011,apxchol_v1,bg+tree[vec_pool_aos],,cpu,64,complete,0.4733576,0.5027239,20,7.950598015029002e-09,,1945.6
 as-Skitter,social,1696415,23887011,apxchol_v1,bg+tree[vec_pool_aos],,gpu,64,complete,0.5056351,0.119189,30,8.129286202761574e-09,,2148.4
+as-Skitter,social,1696415,23887011,hypre_boomeramg,,,cpu,64,exceeded_cap,105.6808,3.54571,29,7.579865842426475e-09,30.0,9810.8
+as-Skitter,social,1696415,23887011,hypre_boomeramg,cut,,cpu,64,exceeded_cap,3.585903,28.08972,226,8.556949769228432e-09,30.0,3183.1
+as-Skitter,social,1696415,23887011,hypre_boomeramg_gpu,,,gpu,64,oom,,,,,30.0,2243.6
+as-Skitter,social,1696415,23887011,hypre_boomeramg_gpu,cut,,gpu,64,oom,,,,,30.0,2167.6
 as-Skitter,social,1696415,23887011,rchol,,,cpu,64,failed,,,,,30.0,1945.9
 as-Skitter,social,1696415,23887011,rchol_par,,,cpu,64,not_converged,15.4559,69.77188,500,0.00023443403609700407,30.0,8555.2
 coAuthorsDBLP,social,299067,2254419,ac,,,cpu,64,complete,0.7856793,0.4723437,21,7.1845408515907936e-09,30.0,
@@ -801,11 +805,7 @@ ecology1,meshes,1000000,4996000,amgx,,,gpu,64,complete,0.1381701,0.03133882,31,8
 kron_g500-logn16,social,65536,4977678,amgx,,,gpu,64,complete,0.2270601,0.02042687,16,2.554051328421495e-09,30.0,838.4
 parabolic_fem,meshes,525825,3674625,amgx,,,gpu,64,complete,0.09422409,0.02106141,31,7.0311253060526895e-09,30.0,762.2
 thermal2,meshes,1228045,8580313,amgx,,,gpu,64,complete,0.1391621,0.04802228,30,9.884113605813032e-09,30.0,972.1
-as-Skitter,social,1696415,23887011,hypre_boomeramg,cut,,cpu,64,exceeded_cap,3.305684,32.09201,225,9.817664733379409e-09,30.0,2875.5
-as-Skitter,social,1696415,23887011,hypre_boomeramg,,,cpu,64,exceeded_cap,106.9583,4.129292,29,7.597099068661775e-09,30.0,9622.9
 thermal2,meshes,1228045,8580313,hypre_boomeramg,cut,,cpu,64,complete,0.9149652,0.4923761,9,8.592889424267384e-09,30.0,1657.3
 thermal2,meshes,1228045,8580313,hypre_boomeramg,,,cpu,64,complete,0.9022658,0.4912102,9,8.592889424267384e-09,30.0,1666.7
-as-Skitter,social,1696415,23887011,hypre_boomeramg_gpu,cut,,gpu,64,oom,,,,,30.0,2238.0
-as-Skitter,social,1696415,23887011,hypre_boomeramg_gpu,,,gpu,64,oom,,,,,30.0,2240.0
 thermal2,meshes,1228045,8580313,hypre_boomeramg_gpu,cut,,gpu,64,complete,0.2579264,0.0387518,13,9.621177449637273e-09,30.0,1051.7
 thermal2,meshes,1228045,8580313,hypre_boomeramg_gpu,,,gpu,64,complete,0.2603527,0.03806352,13,9.621177449637273e-09,30.0,1049.2

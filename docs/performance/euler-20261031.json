@@ -64,7 +64,7 @@
   "ParAC uses patch 0007 (original-system stopping) and 0008 (benchmark I/O). 'own RHS' is ParAC's zero-sum right-hand side as on Daint; 'shared RHS' is the campaign's common b. Shared-RHS CPU graph mode solves disconnected graphs per connected component.",
   "GPU apxchol series: default degree quantile 0.5, plus q0.8 and q0.2 as on Daint.",
   "AMGX 2.5.0 (commit 91a8413; v2.5.0 does not build with CUDA 13) runs AMGX's shipped PCG_CLASSICAL_V_JACOBI config with the campaign tolerance and iteration limit, one config for every matrix (job 19297101, same node type, source 7adf9c4c).",
-  "BoomerAMG on thermal2 and as-Skitter (the disconnected matrices with hundreds of nontrivial component) is the whole-operator rerun 19372810. The harness default solved each connected component with its own hierarchy, which on thermal2 meant 959 hierarchies per setup.",
+  "BoomerAMG on thermal2 is the whole-operator rerun 19372810. The harness solved each connected component of this disconnected SDDM operator with its own hierarchy, 959 per setup; it now keeps SDDM operators whole.",
   "max_rss_mb is the process peak. GPU memory is not published: these binaries recorded device-wide usage, not per-process usage.",
   "Thread scaling (1 to 128 threads, both sockets at 128) is under 'scaling', capped per thread count."
  ],
@@ -88,6 +88,6 @@
  "full_extract": {
   "repository": "https://github.com/AlgOptGroup/apxchol-research",
   "path": "campaigns/euler-20261031/extract.json",
-  "sha256": "ac74205d708b94486b721ba000e6a95cd6a25d92404f9e540707226ebaea9352"
+  "sha256": "a1e913294340e09c3c295fcf471ca6c6d6ac9dbf9f88ab791e0c3976a5925d6a"
  }
 }
