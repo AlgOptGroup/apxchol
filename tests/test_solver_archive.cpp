@@ -543,8 +543,9 @@ TEST(Crc32c, KnownAnswers) {
     EXPECT_EQ(reference_crc32c(reinterpret_cast<const unsigned char*>(digits.data()), digits.size()), 0xE3069283u);
 }
 
-// The folding kernel takes 8160-byte chunks, the crc instruction lanes 24 KiB
-// and then 768-byte stretches, and the table 8 bytes at a time.
+// The folding kernel takes 32 KiB chunks on x86 and 8160-byte chunks on ARM,
+// the crc instruction lanes 24 KiB and then 768-byte stretches, and the table
+// 8 bytes at a time.
 // Every implementation must match the bytewise reference at every alignment and
 // length, and when continued.
 TEST(Crc32c, EveryImplementationAgreesAtAnyAlignmentAndLength) {
@@ -554,7 +555,7 @@ TEST(Crc32c, EveryImplementationAgreesAtAnyAlignmentAndLength) {
     const auto implementations = detail::crc32c_implementations();
     ASSERT_FALSE(implementations.empty());
     std::vector<std::size_t> sizes{0, 1, 7, 8, 9, 63, 135, 136, 137, 543, 544, 545, 767, 768, 769,
-                                   8159, 8160, 8161, 2 * 8160 + 7, 65536, 3 * 8192 - 1, 3 * 8192, 3 * 8192 + 5,
+                                   8159, 8160, 8161, 2 * 8160 + 7, 32767, 32768, 32769, 2 * 32768 + 7, 65536, 3 * 8192 - 1, 3 * 8192, 3 * 8192 + 5,
                                    2 * 3 * 8192 + 13};
     sizes.push_back(data.size() - 16);
     for (const auto& implementation : implementations)

@@ -147,8 +147,8 @@ std::uint32_t update_lanes(std::uint32_t c, const unsigned char* p, std::size_t 
 
 #if defined(APXCHOL_CRC32C_FOLD)
 // The hybrid kernel: carry-less multiplies fold 64 bytes per step in four
-// 128-bit accumulators while three crc instruction lanes take 24 bytes each,
-// so both units work at once. A 128-bit lane loaded from memory holds bytes in
+// 128-bit accumulators while three crc instruction lanes take `lane_bytes`
+// each, so both units work at once. A 128-bit lane loaded from memory holds bytes in
 // reflected order, so a 64-bit half h stands for h(x) and the multiply of h by
 // a constant r placed in the low 32 bits of a half yields h(x) r(x) x^33.
 // Folding a block by d bytes therefore uses r = x^(8d + 31) for the low half
@@ -197,8 +197,17 @@ inline std::uint32_t fold_step8(std::uint32_t c, std::uint64_t w) noexcept { ret
 #endif
 
 // Buffers go through in chunks of `steps` steps, so every constant is fixed.
-constexpr std::size_t vector_bytes = 64, lane_bytes = 24, step_bytes = vector_bytes + 3 * lane_bytes;
-constexpr std::size_t steps = 60, chunk_bytes = steps * step_bytes;
+// The split between the two units and the chunk length are measured per
+// architecture: Zen 4 multiplies 128-bit vectors slowly and prefetches short
+// streams poorly, so x86 gives the crc lanes more of each step and uses 32 KiB
+// chunks; the M1 is fastest with short lanes in 8 KiB chunks.
+#if defined(__SSE4_2__)
+constexpr std::size_t lane_bytes = 64, steps = 128;
+#else
+constexpr std::size_t lane_bytes = 24, steps = 60;
+#endif
+constexpr std::size_t vector_bytes = 64, step_bytes = vector_bytes + 3 * lane_bytes;
+constexpr std::size_t chunk_bytes = steps * step_bytes;
 constexpr std::size_t lane = lane_bytes * steps, vector = vector_bytes * steps;
 constexpr std::uint32_t fold64_low = power(8 * 64 + 31), fold64_high = power(8 * 64 - 33);
 constexpr std::uint32_t fold16_low = power(8 * 16 + 31), fold16_high = power(8 * 16 - 33);
