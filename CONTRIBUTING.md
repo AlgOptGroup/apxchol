@@ -84,6 +84,11 @@ A pull request with a user-visible change adds a line to the `Unreleased`
 section of `CHANGELOG.md`. Mark breaking changes. Benchmark-internal and
 CI-only changes usually need no entry.
 
+## Writing for people
+
+Follow the writing rules in [AGENTS.md](AGENTS.md#writing-for-people) for everything people read, including
+PR descriptions, review comments and commit messages.
+
 ## Code conventions
 
 Use C++23, `snake_case`, namespace `apxchol`, and trailing underscores for

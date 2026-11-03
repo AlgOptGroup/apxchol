@@ -27,7 +27,7 @@ portable tuning: x86-64-v2 on Linux, arm64 on macOS.
 Use a compatible C++23 compiler and standard library. The compiler's OpenMP
 runtime family must match the SDK; CMake rejects a different family. Linux archives target glibc 2.28+ and use GCC 14 with GNU OpenMP (`libgomp`).
 macOS builds use Clang, libc++ and arm64 LLVM OpenMP (`libomp`). Install the matching OpenMP development package when
-it is not supplied by the compiler. The zlib runtime is also required.
+it is not supplied by the compiler.
 
 A CPU SDK does not need a GPU toolkit. A CUDA SDK includes CPU and CUDA routes
 and currently requires CUDA Toolkit 13.3 or newer when compiling consumers,

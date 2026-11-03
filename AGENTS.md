@@ -28,7 +28,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 - `.github/scripts/build-sdk.sh` packages the shared native install with portable tuning and bundled Eigen; `tests/check_sdk_archive.py` extracts it and builds the `tests/cmake_install` save/load consumer.
 - Native SDK installs include Eigen headers when apxchol fetched them; builds using an existing Eigen package retain that dependency. Python wheels do not install the SDK.
 - `solver` (`src/solve.cpp`) validates options and solve/apply arguments, selects the route, sets the thread budget, guards concurrent calls and splits RHS columns into panels. It dispatches to `detail::cpu_route`, `detail::cuda_route` or `detail::metal_route`, which share the interface in `solver/detail/solver_route.h`. Route methods trust their arguments, while route setup keeps backend-specific input checks; each route owns its factor, triangular solves and PCG. Tests and the benchmark read route state through `detail::solver_access::route`.
-- Portable save/load: `solver::save`/`solver::load` (`src/solver_archive.cpp`) and `docs/serialization.md`; the versioned binary format stores the original CSC operator and the installed factor (after dropping, in its FP32 or scaled FP16 storage), which `load()` reinstalls exactly. Typed arrays carry explicit widths, byte order and zlib CRC32 checksums; loading validates and prepares the backend without memory mapping.
+- Portable save/load: `solver::save`/`solver::load` (`src/solver_archive.cpp`) and `docs/serialization.md`; the versioned binary format stores the original CSC operator and the installed factor (after dropping, in its FP32 or scaled FP16 storage), which `load()` reinstalls exactly. Typed arrays carry explicit widths, byte order and CRC-32C checksums; loading validates and prepares the backend without memory mapping.
 - MATLAB/Octave builds use `octave/CMakeLists.txt` and the shared `apxchol::core` target. Archive methods reuse native save/load.
 - Public API scope and compatibility: `docs/api.md`. Precision and storage: `docs/precision.md`. Extension seams: `docs/extending.md`.
 - Internal storage: `detail/csc_matrix.h` (borrowed `csc_ref`, owned `csc_matrix` on node_index/edge_index, transpose, unpermute, triplet assembly), `detail/dense.h` (strided `dense_ref` views and vector reductions) and `detail/buffer.h` (64-byte aligned, uninitialized). Eigen types are converted once in `detail/eigen_boundary.h`; nothing behind the public API, CLI or bindings uses Eigen.
@@ -76,3 +76,72 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 | Benchmark harness | `benchmarks/tests` (unittest) and the benchmark project's CTest contracts |
 
 Integration correctness is not performance acceptance: compare original-system quality, setup, solve, one-RHS total, reuse and memory against a frozen baseline, following `benchmarks/README.md`.
+
+## Writing for people
+
+These rules apply to everything a person reads in this repository:
+
+- `README.md`, `python/README.md` and the guides in `docs/`.
+- The CLI's `--help`.
+- The messages of exceptions that reach a user.
+- `CHANGELOG.md`.
+- PR descriptions, review comments and commit messages.
+
+They don't apply to code comments or debug logs. The numbers follow the shared list R1 to R28. A missing number is a
+rule that doesn't apply here.
+
+- R1. One idea per sentence. No semicolons, no em dash between clauses, and at most 1 colon per sentence. Split the
+  sentence or use a list.
+- R2. Short sentences: 20 words or fewer on average, none over 30.
+- R3. Outcome first. The first 2 words carry the outcome or the action.
+- R4. An error says what happened, why, and what to do next, in that order. The next step names who or what: a flag,
+  a file, a page, a contact. Codes and IDs go after the sentence. No "sorry", "oops" or a bare "something went
+  wrong".
+- R5. The reader's words. Defined technical terms such as preconditioner, PCG or CSR are fine. Define an internal
+  name (a route code, a struct name) the first time, or leave it out.
+- R6. Active voice with a named actor: you, the solver, the CLI. Passive voice is fine when no actor matters, as in
+  "Nothing was changed."
+- R7. Digits and units for every number and time: "1 hour", "5 GB". Write "may" only for permission. No "soon" or "a
+  while" when the code knows the answer.
+- R8. One term per thing and one verb per action. The term list in `scripts/text-rules.json` is closed: a new term
+  goes into it in the same commit. A default in the guides matches `--help` and `factor_options.h`.
+- R9. No "we" unless the text says who "we" is.
+- R10. Every number, limit, default or guarantee matches the code or config that sets it. The commit that adds a
+  value to the text names where the code sets it. A change to the value changes the text in the same commit.
+- R12. A `--help` option fits on 1 line. An option with a default ends with it.
+- R17. Paragraphs: at most 5 sentences in a guide and 3 sentences in an exception message. Three or more parallel
+  items become a list.
+- R18. Headings are statements that name the topic, with the key word first.
+- R19. Details last. IDs, codes, raw output and internals go after what most readers need, in a Details part.
+- R23. A link names its destination, never "here" or "click here".
+
+What a PR, a review and a commit look like:
+
+- **Commit message.** The subject says what changed, in plain words, in 72 characters or fewer. The body says why,
+  then the numbers (before and after, with the machine and command), then the risk.
+- **PR description.** At most about 15 lines. The first line is the outcome for a user. Then 2 to 4 bullets: what
+  changed and why. Then the numbers with the command, matrix and machine, the risk, and how it was checked. Name the
+  `CHANGELOG.md` line. Say what is not done. Don't list open review points.
+- **Review comment.** One finding per comment. Start with the severity (Must, Should or Nit) and the outcome: what
+  breaks, for whom. Then the evidence (`file:line`, input, output) and a concrete fix. End the review with a line
+  `Text rules: pass` or the rule numbers with `file:line`.
+
+`python3 scripts/check_text_rules.py` compares the files in `scripts/text-rules.json` with
+`scripts/text-rules-baseline.json`. It fails only when a file gains one of these hits:
+
+- R1: a semicolon in prose.
+- R4: "sorry", "oops", "something went wrong", "an error occurred" or "unknown error".
+- R5: a word from the jargon list, in prose.
+- R7: "may", "might", "soon", "shortly", "a while", "eventually", or a number in words before a unit.
+- R8: a banned term from the term list.
+- R9: "we", "our" or "us" where the scope bans them.
+
+It reports R2 (sentences over 30 words) and R6 (passive voice) with `--report` and never fails on them. Every other
+rule, and em dashes and colons for R1, is for the reviewer. Text outside these files, such as commit messages and PR
+descriptions, is not linted.
+
+A file with fewer hits than its baseline passes with a note. Lower its baseline with `--update-baseline`, which
+refuses increases. A deliberate exception takes a comment on that line or the line before: `text-rules-allow: <rule>
+<term> <reason>`, such as `text-rules-allow: R8 kmer the flag name`. The term must occur in the text.
+
+Reviewers use this list.

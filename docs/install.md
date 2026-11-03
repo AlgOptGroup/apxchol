@@ -39,8 +39,8 @@ archives require Apple silicon and macOS 15+.
 2. Extract the archive and run `bin/apxchol --help`.
 
 Keep `bin/` and `lib/` together; OpenMP and redistribution notices are included.
-macOS binaries are ad-hoc signed, not notarized, so Gatekeeper may ask for
-manual approval.
+macOS binaries are ad-hoc signed, not notarized. If Gatekeeper blocks the first
+run, approve the binary in System Settings, Privacy & Security.
 
 From a source build, `cmake --install build --component cli --prefix /path/to/prefix`
 installs the executable using your system runtime libraries.

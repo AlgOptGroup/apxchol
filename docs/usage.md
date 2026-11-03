@@ -53,8 +53,8 @@ backend for their platform; they work without a GPU.
 | `gpu` | Run setup and solves on the compiled GPU backend; fail if the device, input or options are unsupported |
 
 Automatic selection is not a guarantee of the fastest backend for every
-matrix. Once selected, the backend stays fixed. An execution error is
-reported rather than silently retrying on another backend.
+matrix. Once selected, the backend stays fixed. The solver reports an
+execution error and does not retry on another backend.
 
 Use Python's `backend` argument, C++ `solve_options.backend`, or CLI
 `--backend`. Python's `solver.backend` and native solve results report the
@@ -308,10 +308,10 @@ and the operator, which are read-only after setup, and allocates only its
 own workspace. Copy a solver once per thread, with `solver copy = original;`
 in C++ or `copy.copy(solver)` in Python, and the copies solve in parallel
 with the same results as serial calls. Copies stay valid after the original
-is destroyed. On a GPU, copies share the factor and operator in device memory
-and each copy gets its own device workspace and stream (CUDA) or command queue
-(Metal), so copies on one GPU solve concurrently without storing the factor
-again; they share that GPU's compute and memory bandwidth.
+is destroyed. On a GPU, copies share the factor and operator in device memory.
+Each copy gets its own workspace and its own CUDA stream or Metal command queue.
+Copies on 1 GPU solve concurrently without storing the factor again. They share
+that GPU's compute and memory bandwidth.
 
 To solve many right-hand sides from one thread, pass them to `solve(B)` as the
 columns of one matrix; the batched solver shares work between columns.
