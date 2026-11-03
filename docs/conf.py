@@ -17,6 +17,7 @@ if release_tag:
     if release_tag != f"v{release}":
         raise ValueError(f"Documentation tag {release_tag!r} does not match v{release}")
 html_title = "apxchol"
+html_baseurl = f"https://algoptgroup.github.io/apxchol/{release_tag or 'dev'}/"
 # Development builds show a banner naming the release the changelog's Unreleased section follows.
 latest = re.search(r"^## Unreleased \(since v([0-9.]+)\)", (ROOT / "CHANGELOG.md").read_text(), re.M)
 html_context = {"docs_version": release_tag or "Development",
@@ -26,7 +27,7 @@ templates_path = ["_templates"]
 html_static_path = ["_static"]
 html_css_files = ["versions.css"]
 html_sidebars = {"**": [
-    "sidebar/brand.html", "sidebar/version.html", "sidebar/search.html",
+    "sidebar/brand.html", "sidebar/version.html", "sidebar/repository.html", "sidebar/search.html",
     "sidebar/scroll-start.html", "sidebar/navigation.html", "sidebar/ethical-ads.html",
     "sidebar/scroll-end.html", "sidebar/variant-selector.html",
 ]}

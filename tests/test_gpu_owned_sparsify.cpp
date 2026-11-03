@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "csc_test_util.h"
 #include "gpu_preconditioner_fixture.h"
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/pcg_cuda.h"
@@ -400,14 +401,13 @@ TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneDeviceAttempt) {
 #else
     REQUIRE_OWNED_SPARSIFY_DEVICE();
     constexpr int n = 17;
-    std::vector<Eigen::Triplet<double>> entries;
+    std::vector<apxchol::test::triplet> entries;
     for (int u = 0; u < n; ++u) for (int v = 0; v < n; ++v)
-        entries.emplace_back(u,v,u == v ? double(n) : -1.0);
-    Eigen::SparseMatrix<double> original(n,n);original.setFromTriplets(entries.begin(),entries.end());
-    original.makeCompressed();
-    Eigen::VectorXd exact(n);
+        entries.push_back({u,v,u == v ? double(n) : -1.0});
+    const auto original = apxchol::test::from_triplets(n,n,entries);
+    std::vector<double> exact(n);
     for (int i = 0; i < n; ++i) exact[i] = .125 * (i % 7 - 3);
-    const Eigen::VectorXd rhs = original * exact;
+    const std::vector<double> rhs = apxchol::test::multiply(original,exact);
     apxchol::solve_options options;
     options.backend = apxchol::solve_backend::gpu;
     options.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
@@ -422,11 +422,11 @@ TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneDeviceAttempt) {
         while ((at = text.find(needle,at)) != std::string::npos) { ++count;at += needle.size(); }
         return count;
     };
-    ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(original));
+    ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(apxchol::test::internal_csc(original)));
     apxchol::solve_result solved;
     testing::internal::CaptureStderr();
     try {
-        solved = apxchol::solve(original, rhs, 1e-8, 1000, nullptr, options);
+        solved = apxchol::solve(apxchol::test::csc(original), rhs, 1e-8, 1000, {}, options);
         EXPECT_EQ(solved.backend, apxchol::solve_backend::gpu);
     } catch (...) {
         const auto failure = testing::internal::GetCapturedStderr();
@@ -448,9 +448,9 @@ TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneDeviceAttempt) {
     EXPECT_EQ(number("physical_before="),136u);EXPECT_EQ(number("distinct_before="),136u);
     EXPECT_LT(number("kept="),136u);EXPECT_GE(number("kept="),16u);
     EXPECT_NE(trace.find("[gpu-owned-factorization] complete"),std::string::npos) << trace;
-    ASSERT_EQ(solved.x.size(),n);
-    EXPECT_TRUE(solved.x.allFinite());
-    EXPECT_LE((original*solved.x-rhs).norm()/rhs.norm(),1e-8);
+    ASSERT_EQ(solved.x.size(),static_cast<std::size_t>(n));
+    EXPECT_TRUE(apxchol::test::all_finite(solved.x));
+    EXPECT_LE(apxchol::test::relative_residual(original,solved.x,rhs),1e-8);
     RecordProperty("owned_sparsify_controller_csc",line);
 #endif
 }

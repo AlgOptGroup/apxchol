@@ -20,7 +20,7 @@
 //                      construction). What the assembled operator IS; declared by
 //                      the caller and then asserted against the structural scan.
 //                        laplacian -> singular: grounded, scored mean-centred
-//                        sddm      -> full-rank: no pin, no mean-centring
+//                        sddm      -> retain the operator; ground only singular Laplacian blocks
 //   --solver <list>    comma-separated: apxchol,cg,ldlt,rchol,cholmod,all
 //   --tol <double>     PCG tolerance                        (default: 1e-8)
 //   --maxiter <int>    PCG max iterations                   (default: 500)
@@ -72,6 +72,10 @@
 #include <unistd.h>         // getpid for the GPU memory receipt.
 #include "gpu_memory.h"
 #endif
+#ifdef HAVE_AMGX
+#include <amgx_c.h>
+#include "bench_amgx_config.h"  // generated: pinned AMGX commit and embedded JSON config
+#endif
 #if defined(__APPLE__)
 #include <mach/mach.h>      // task_info for read_vmrss_mb().
 #endif
@@ -94,6 +98,21 @@
 // the M-matrix lumping ceiling. The benchmark asserts a matrix declared
 // `--kind operator` against it rather than re-deriving its own classification.
 #include "apxchol/operator_class.h"
+#include "apxchol/detail/csc_input.h"
+#include "apxchol/views.h"
+#include <span>
+
+// apxchol takes borrowed views; the benchmark keeps Eigen containers for the
+// competitors and converts at each apxchol call. L must be compressed.
+static apxchol::csc_view apxchol_view(const Eigen::SparseMatrix<double>& L) {
+    if (!L.isCompressed()) throw std::logic_error("apxchol input must be compressed");
+    const auto n = static_cast<std::size_t>(L.rows());
+    const auto nnz = static_cast<std::size_t>(L.nonZeros());
+    return {L.rows(), {L.outerIndexPtr(), n + 1}, {L.innerIndexPtr(), nnz}, {L.valuePtr(), nnz}};
+}
+static std::span<const double> apxchol_span(const Eigen::VectorXd& v) {
+    return {v.data(), static_cast<std::size_t>(v.size())};
+}
 
 #ifdef HAVE_APXCHOL_V1
 #include "apxchol/detail/checkpoint.h"
@@ -379,6 +398,11 @@ static void emit_build_meta() {
 #  endif
     std::cerr << " cuda_host_compiler=\"" << cuda_host << "\"";
 #endif
+#ifdef HAVE_AMGX
+    std::cerr << " amgx=" << kAmgxCommit << "+set_max_iters"
+              << " amgx_config=" << kAmgxConfigName
+              << " amgx_config_sha256=" << kAmgxConfigSha256;
+#endif
     std::cerr << " arch_flags=\"" << arch << "\"\n";
 }
 
@@ -470,11 +494,8 @@ enum class matrix_kind {
 //
 // Set once in main() from the DECLARATION, then read by every solver runner.
 static bool g_laplacian_mode = true;
-// Populated only for a disconnected operator, because split dispatch also needs
-// it for SDDM inputs. Centering consults it only in Laplacian mode. Connected
-// operators retain the historical single-mean path without keeping an O(n)
-// component list alive. A run_split subproblem has a smaller vector, so it also
-// takes that connected path; the full Laplacian takes one mean per component.
+// For a mixed operator, mark vertices in components with a constant null mode.
+static std::vector<char> g_singular_vertices;
 static std::vector<std::vector<int>> g_laplacian_components;
 static Eigen::Index g_laplacian_dimension = 0;
 static std::size_t g_component_count = 0;
@@ -486,11 +507,12 @@ static double g_component_discovery_seconds = 0.0;
 // Laplacian by construction.
 static Eigen::VectorXd& center_if_laplacian(Eigen::VectorXd& v) {
     if (!g_laplacian_mode) return v;
-    if (g_laplacian_components.empty() || v.size() != g_laplacian_dimension) {
+    if (g_component_count <= 1 || v.size() != g_laplacian_dimension) {
         v.array() -= v.mean();
         return v;
     }
     for (const auto& component : g_laplacian_components) {
+        if (!g_singular_vertices.empty() && !g_singular_vertices[component.front()]) continue;
         double sum = 0.0;
         for (int vertex : component) sum += v[vertex];
         const double mean = sum / static_cast<double>(component.size());
@@ -655,8 +677,8 @@ static void warm_up_metal_once(apxchol::solve_options opts) {
     const auto L = laplacian_from_adj(grid_graph(16, 16, 1.0, 1.0));
     Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(L.rows(), -1.0, 1.0);
     b.array() -= b.mean();
-    apxchol::solver warm(L, opts);
-    (void)warm.solve(b, 1e-6, 100);
+    apxchol::solver warm(apxchol_view(L), opts);
+    (void)warm.solve(apxchol_span(b), 1e-6, 100);
     const double init_ms = std::chrono::duration<double, std::milli>(
         std::chrono::high_resolution_clock::now() - begin).count();
     std::ostringstream line;
@@ -786,7 +808,8 @@ static BenchResult run_apxchol_v1(
     if (apxchol::detail::select_solve_backend(opts) == apxchol::solve_backend::gpu)
         warm_up_cuda_once();
 #elif defined(APXCHOL_USE_METAL)
-    if (apxchol::detail::select_solve_backend(opts, &L) == apxchol::solve_backend::gpu)
+    if (const apxchol::detail::csc_input input(apxchol_view(L));
+        apxchol::detail::select_solve_backend(opts, &input.ref()) == apxchol::solve_backend::gpu)
         warm_up_metal_once(opts);
 #endif
     long long factor_nnz = 0, factor_rows = 0;
@@ -823,7 +846,12 @@ static BenchResult run_apxchol_v1(
     Eigen::initParallel();
     // The solver selects its route once, under setup.backend_selection;
     // retries reuse the same concrete owner.
-    apxchol::solver solver = apxchol::detail::solver_access::with_timings(L, opts, timings);
+    // Checking the caller's view is setup work, as in solver(csc_view, opts).
+    const auto t_view = std::chrono::high_resolution_clock::now();
+    const apxchol::detail::csc_input input(apxchol_view(L));
+    const double view_seconds = std::chrono::duration<double>(
+        std::chrono::high_resolution_clock::now() - t_view).count();
+    apxchol::solver solver = apxchol::detail::solver_access::make(input, opts, &timings);
     const bool gpu_route = solver.backend() == apxchol::solve_backend::gpu;
 #ifdef APXCHOL_USE_METAL
     // Its own label, so a Metal cell can never be taken for a CUDA one.
@@ -845,11 +873,12 @@ static BenchResult run_apxchol_v1(
         Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
             [&](double request, int remaining, bool warm, Eigen::VectorXd& current) {
                 // GPU retries restart cold, as they always have.
-                res = solver.solve(b, request, remaining, warm && !gpu_route ? &current : nullptr);
-                current = std::move(res.x);
+                res = solver.solve(apxchol_span(b), request, remaining,
+                                   warm && !gpu_route ? apxchol_span(current) : std::span<const double>());
+                current = Eigen::Map<const Eigen::VectorXd>(res.x.data(), Eigen::Index(res.x.size()));
                 return static_cast<int>(res.iterations);
             });
-        res.x = std::move(x);
+        res.x.assign(x.data(), x.data() + x.size());
         res.iterations = r.iterations;
         capture_fill(solver);
         r.solve_rss_mb = read_vmrss_mb();
@@ -869,14 +898,14 @@ static BenchResult run_apxchol_v1(
     //   triangular forward/back), which was UNDER-REPORTING solve time by
     //   the full PCG SpMV cost — making our v1 numbers look ~2× better
     //   than reality vs Eigen-CG-based competitors. Fixed 2026-05-24.
-    r.setup_time = timings.total("setup");
+    r.setup_time = timings.total("setup") + view_seconds;
     r.solve_time = wall_total - r.setup_time;
     if (r.solve_time < 0.0) r.solve_time = 0.0;
     r.total_time = wall_total;
     r.iterations = static_cast<int>(res.iterations);
     // Independently grade the returned solution against the original operator and RHS.
     {
-        Eigen::VectorXd xg = res.x;
+        Eigen::VectorXd xg = Eigen::Map<const Eigen::VectorXd>(res.x.data(), Eigen::Index(res.x.size()));
         center_if_laplacian(xg);
         Eigen::VectorXd rg = b - L * xg;
         center_if_laplacian(rg);
@@ -1283,6 +1312,9 @@ static Args parse_args(int argc, char** argv) {
 #if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_BENCH_HYPRE_CUDA)
         , "hypre_boomeramg_gpu"
 #endif
+#endif
+#if defined(APXCHOL_USE_CUDA) && defined(HAVE_AMGX)
+        , "amgx"
 #endif
     });
     const bool input_only = !a.dump_mtx.empty() || !a.dump_rhs.empty() || a.component_info;
@@ -1769,22 +1801,19 @@ enum class decompose_mode { whole, split };
 enum class ground_mode    { pin, coarse, native };
 
 // Validity matrix + `auto` defaults in ONE place (invalid cells -> n/a, never silent).
-// solver key: "apxchol" | "amgcl" | "boomeramg" | "accelerate".
+// solver key: "apxchol" | "amgcl" | "boomeramg" | "amgx" | "accelerate".
 struct desing_plan { bool supported; decompose_mode decompose; ground_mode ground; };
 static desing_plan resolve_desing(const std::string& solver, const std::string& dec_req,
-                                  const std::string& gnd_req, bool disconnected) {
+                                  const std::string& gnd_req, bool disconnected,
+                                  bool laplacian) {
     // ground: auto = the config-clean default (pin for the AMG solvers -> default
     // config; native for apxchol).
     ground_mode gnd = (gnd_req=="pin")    ? ground_mode::pin
                     : (gnd_req=="coarse") ? ground_mode::coarse
                     : (gnd_req=="native") ? ground_mode::native
                     : (solver=="apxchol") ? ground_mode::native : ground_mode::pin;  // auto
-    // decompose: auto = whole, EXCEPT split when disconnected AND either the ground is
-    // `coarse` (whole+coarse is invalid -- single near-null vector can't span a k-dim
-    // null space) or the solver is BoomerAMG (measured: split avoids dragging the dust
-    // components through one AMG hierarchy, ~3-5% faster). apxchol and AMGCL+pin handle
-    // the whole disconnected operator faster than paying per-component build overhead.
-    bool auto_split = disconnected && (gnd==ground_mode::coarse || solver=="boomeramg");
+    // The singular coarse adapter operates on one connected block at a time.
+    const bool auto_split = laplacian && disconnected && gnd == ground_mode::coarse;
     decompose_mode dec = (dec_req=="whole") ? decompose_mode::whole
                        : (dec_req=="split") ? decompose_mode::split
                        : (auto_split ? decompose_mode::split : decompose_mode::whole);
@@ -1792,11 +1821,13 @@ static desing_plan resolve_desing(const std::string& solver, const std::string& 
     if      (solver=="apxchol")                       ok = (gnd==ground_mode::native);
     else if (solver=="boomeramg")                     ok = (gnd==ground_mode::pin);
     else if (solver=="amgcl")                         ok = (gnd==ground_mode::pin || gnd==ground_mode::coarse);
+    else if (solver=="amgx")                          ok = (gnd==ground_mode::pin);
     else if (solver=="accelerate")                    ok = (gnd==ground_mode::pin);
     // The invalid cell: whole + coarse on a DISCONNECTED graph -- the unpinned singular
     // operator has a k-dim constant null space the single near-null vector can't span
     // (AMGCL CG breaks down / NaN). split makes every piece connected (k=1), so it's ok.
-    if (gnd==ground_mode::coarse && dec==decompose_mode::whole && disconnected) ok = false;
+    if (laplacian && gnd==ground_mode::coarse && dec==decompose_mode::whole && disconnected)
+        ok = false;
     return {ok, dec, gnd};
 }
 
@@ -1844,6 +1875,8 @@ static Eigen::SparseMatrix<double> dirichlet_pin(const Eigen::SparseMatrix<doubl
             if (w != -1) { seen[w] = 1; cur[w] = outer[w]; stk.push_back(w); }
             else { stk.pop_back(); if (leaf == -1) leaf = u; }  // first finished = DFS leaf
         }
+        if (L.rows() == g_laplacian_dimension && !g_singular_vertices.empty()
+            && !g_singular_vertices[s]) continue;
         is_pin[leaf] = 1; pinned.push_back(leaf);
     }
     // Build P's CSC directly in column order. L is column-major and already sorted, so
@@ -1884,6 +1917,56 @@ static std::vector<std::vector<int>> connected_components(const Eigen::SparseMat
     std::vector<int> cid(n,-1); std::vector<std::vector<int>> comps;
     for (int v=0;v<n;++v){int r=find(v); if(cid[r]<0){cid[r]=(int)comps.size();comps.emplace_back();} comps[cid[r]].push_back(v);}
     return comps;
+}
+
+// A component of an assembled operator can itself be a graph Laplacian.
+// Require nonpositive off-diagonals and an exactly zero stored column sum.
+// An error-free expansion prevents a small diagonal shift from being rounded
+// away when the weights span several orders of magnitude.
+static bool constant_null_component(const Eigen::SparseMatrix<double>& L,
+                                    const std::vector<int>& nodes) {
+    std::vector<double> partials;
+    for (int col : nodes) {
+        partials.clear();
+        for (Eigen::SparseMatrix<double>::InnerIterator it(L, col); it; ++it) {
+            double x = it.value();
+            if (it.row() != col && x > 0) return false;
+            size_t used = 0;
+            for (double y : partials) {
+                if (std::abs(x) < std::abs(y)) std::swap(x, y);
+                const double hi = x + y;
+                const double lo = y - (hi - x);
+                if (lo != 0) partials[used++] = lo;
+                x = hi;
+            }
+            partials.resize(used);
+            if (x != 0) partials.push_back(x);
+        }
+        if (!partials.empty()) return false;
+    }
+    return true;
+}
+
+static bool prepare_components(const Eigen::SparseMatrix<double>& L, bool declared_laplacian) {
+    g_laplacian_mode = declared_laplacian;
+    const auto component_begin = std::chrono::steady_clock::now();
+    auto components = connected_components(L);
+    g_component_count = components.size();
+    g_laplacian_dimension = L.rows();
+    g_singular_vertices.clear();
+    if (!g_laplacian_mode && components.size() > 1) {
+        for (const auto& nodes : components) {
+            if (!constant_null_component(L, nodes)) continue;
+            if (g_singular_vertices.empty()) g_singular_vertices.resize(L.rows(), false);
+            for (int vertex : nodes) g_singular_vertices[vertex] = true;
+        }
+    }
+    const bool mixed = !g_singular_vertices.empty();
+    g_laplacian_components = std::move(components);
+    g_component_discovery_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - component_begin).count();
+    g_laplacian_mode = g_laplacian_mode || mixed;
+    return mixed;
 }
 
 // Connected-component SPLIT (the `decompose = split` axis): decompose L into its
@@ -1951,6 +2034,12 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
         subL.makeCompressed();
         Eigen::VectorXd subb(sn); for (int i=0;i<sn;++i) subb[i]=b[nodes[i]];
         split_prep += prep.elapsed();
+        // A connected subproblem uses its own grounding and centering mode.
+        struct RestoreMode {
+            bool previous = g_laplacian_mode;
+            ~RestoreMode() { g_laplacian_mode = previous; }
+        } restore_mode;
+        if (!g_singular_vertices.empty()) g_laplacian_mode = g_singular_vertices[nodes.front()];
         BenchResult rc = per_solver(subL, subb, name, tol, maxiter);
         setup += rc.setup_time; solve += rc.solve_time; it=std::max(it,rc.iterations);
         r.solve_passes = std::max(r.solve_passes, rc.solve_passes);
@@ -2817,6 +2906,146 @@ static BenchResult run_hypre_boomeramg_gpu(
 
 #endif
 
+// ──────────────────── NVIDIA AMGX ────────────────────
+#if defined(APXCHOL_USE_CUDA) && defined(HAVE_AMGX)
+// AMGX_initialize and the resources object are process-wide, like HYPRE_Init.
+// main() times them once after the CUDA warm-up and charges the cost once to
+// each reported AMGX row.
+static double g_amgx_init_seconds = 0.0;
+static AMGX_config_handle g_amgx_resources_config = nullptr;
+static AMGX_resources_handle g_amgx_resources = nullptr;
+
+static void amgx_call(AMGX_RC rc, const char* call) {
+    if (rc == AMGX_RC_OK) return;
+    char message[4096] = {};
+    AMGX_get_error_string(rc, message, sizeof message);
+    throw std::runtime_error(std::string("AMGX call failed: ") + call + ": " + message);
+}
+#define AMGX_CALL(expr) amgx_call((expr), #expr)
+
+// AMGX prints through this callback; keep stdout for the CSV.
+static void amgx_print_to_stderr(const char* message, int length) {
+    std::cerr.write(message, length);
+}
+
+static void amgx_initialize_once() {
+    AMGX_CALL(AMGX_register_print_callback(&amgx_print_to_stderr));
+    AMGX_CALL(AMGX_initialize());
+    AMGX_CALL(AMGX_config_create(&g_amgx_resources_config, "config_version=2"));
+    AMGX_CALL(AMGX_resources_create_simple(&g_amgx_resources, g_amgx_resources_config));
+}
+
+static void amgx_finalize() {
+    if (g_amgx_resources) AMGX_resources_destroy(g_amgx_resources);
+    if (g_amgx_resources_config) AMGX_config_destroy(g_amgx_resources_config);
+    AMGX_finalize();
+}
+
+// AMGX classical AMG + PCG in double precision (dDDI) with the pinned config in
+// benchmarks/amgx. A singular Laplacian is grounded with the same multi-component
+// Dirichlet pin as the other AMG adapters; every original-v1 check grades the
+// ORIGINAL operator. AMGX's PCG tests the unpreconditioned recurrence residual
+// against an ABSOLUTE threshold, set per pass to request * ||b_solve||, so each
+// pass is relative to the right-hand side whatever its warm start.
+static BenchResult run_amgx(
+    const Eigen::SparseMatrix<double>& L,
+    const Eigen::VectorXd& b,
+    const std::string& graph_name,
+    double tol, int maxiter)
+{
+    BenchResult r;
+    r.solver_name = "AMG+PCG [AMGX;cuda]";
+    r.graph_name = graph_name;
+    r.n = static_cast<int>(L.rows());
+    r.nnz = static_cast<int>(L.nonZeros());
+    const int n = r.n;
+    const bool is_laplacian = g_laplacian_mode;   // DECLARED class, never re-derived
+
+    // Setup: grounding, CSR conversion, AMGX objects, matrix upload and hierarchy.
+    Timer t;
+    t.start();
+    std::vector<int> pinned;
+    Eigen::SparseMatrix<double, Eigen::RowMajor> A;
+    Eigen::VectorXd bsub = b;
+    if (is_laplacian) {
+        A = dirichlet_pin(L, pinned);
+        for (int p : pinned) bsub(p) = 0.0;
+    } else {
+        A = L;
+    }
+    A.makeCompressed();
+    const double bsub_norm = bsub.norm() > 0 ? bsub.norm() : 1.0;
+
+    // The solver keeps a pointer to this config and re-reads `tolerance` at the
+    // start of every solve; `max_iters` is fixed at creation and changed with the
+    // patched AMGX_solver_set_max_iters.
+    AMGX_config_handle cfg = nullptr;
+    AMGX_CALL(AMGX_config_create(&cfg, kAmgxConfigJson));
+    auto set_native_tolerance = [&](double request) {
+        char option[128];
+        std::snprintf(option, sizeof option, "config_version=2, main:tolerance=%.17g",
+                      request * bsub_norm);
+        AMGX_CALL(AMGX_config_add_parameters(&cfg, option));
+    };
+    set_native_tolerance(tol);
+    {
+        const std::string budget = "config_version=2, main:max_iters=" + std::to_string(maxiter);
+        AMGX_CALL(AMGX_config_add_parameters(&cfg, budget.c_str()));
+    }
+    AMGX_matrix_handle matrix = nullptr;
+    AMGX_vector_handle rhs = nullptr, solution = nullptr;
+    AMGX_solver_handle solver = nullptr;
+    AMGX_CALL(AMGX_matrix_create(&matrix, g_amgx_resources, AMGX_mode_dDDI));
+    AMGX_CALL(AMGX_vector_create(&rhs, g_amgx_resources, AMGX_mode_dDDI));
+    AMGX_CALL(AMGX_vector_create(&solution, g_amgx_resources, AMGX_mode_dDDI));
+    AMGX_CALL(AMGX_solver_create(&solver, g_amgx_resources, AMGX_mode_dDDI, cfg));
+    AMGX_CALL(AMGX_matrix_upload_all(matrix, n, static_cast<int>(A.nonZeros()), 1, 1,
+                                     A.outerIndexPtr(), A.innerIndexPtr(), A.valuePtr(),
+                                     nullptr));
+    AMGX_CALL(AMGX_solver_setup(solver, matrix));
+    cudaDeviceSynchronize();
+    r.setup_time = t.elapsed();
+    r.setup_vram_mb = read_vram_mb();   // outside both timers
+
+    // Solve: RHS upload, PCG passes (warm-started from the device iterate),
+    // original-operator checks and every copy of the solution back to the host.
+    t.start();
+    AMGX_CALL(AMGX_vector_upload(rhs, n, 1, bsub.data()));
+    AMGX_CALL(AMGX_vector_set_zero(solution, n, 1));
+    std::vector<double> x_host(n);
+    Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
+        [&](double request, int remaining, bool, Eigen::VectorXd& current) {
+            set_native_tolerance(request);
+            AMGX_CALL(AMGX_solver_set_max_iters(solver, remaining));
+            AMGX_CALL(AMGX_solver_solve(solver, rhs, solution));
+            int used = 0;
+            AMGX_CALL(AMGX_solver_get_iterations_number(solver, &used));
+            AMGX_CALL(AMGX_vector_download(solution, x_host.data()));
+            current = Eigen::Map<const Eigen::VectorXd>(x_host.data(), n);
+            return used;
+        });
+    r.solve_time = t.elapsed();
+    r.total_time = r.setup_time + r.solve_time;
+    r.solve_rss_mb = read_vmrss_mb();
+    r.solve_vram_mb = read_vram_mb();   // hierarchy, operator and vectors still held
+    r.fillin = 0;
+    r.us_per_nnz = r.total_time / std::max(1, r.nnz) * 1e6;
+
+    center_if_laplacian(x);
+    Eigen::VectorXd res = b - L * x;
+    center_if_laplacian(res);
+    const double bnorm = b.norm() > 0 ? b.norm() : 1.0;
+    r.rel_residual = res.norm() / bnorm;
+
+    AMGX_solver_destroy(solver);
+    AMGX_vector_destroy(solution);
+    AMGX_vector_destroy(rhs);
+    AMGX_matrix_destroy(matrix);
+    AMGX_config_destroy(cfg);
+    return r;
+}
+#endif
+
 // ──────────────────── main ────────────────────
 int main(int argc, char** argv) try {
     // First, before anything can fail or hang: a cell recorded as `timeout` or
@@ -2890,8 +3119,22 @@ int main(int argc, char** argv) try {
     // Printed rather than hidden. Nothing else about the timing logic changes.
     // v1 resolves each configuration first and calls the same helper only for
     // its GPU route. Competitor GPU initialization stays at this process point.
-    if (args.solvers.count("amgcl_cuda") || args.solvers.count("hypre_boomeramg_gpu"))
+    if (args.solvers.count("amgcl_cuda") || args.solvers.count("hypre_boomeramg_gpu") ||
+        args.solvers.count("amgx"))
         warm_up_cuda_once();
+#endif
+
+#if defined(APXCHOL_USE_CUDA) && defined(HAVE_AMGX)
+    const bool amgx_requested = args.solvers.count("amgx") != 0;
+    if (amgx_requested) {
+        const auto t_amgx_init = std::chrono::high_resolution_clock::now();
+        amgx_initialize_once();
+        g_amgx_init_seconds = std::chrono::duration<double>(
+            std::chrono::high_resolution_clock::now() - t_amgx_init).count();
+        std::cerr << "[bench] amgx_init (charged once per AMGX row): "
+                  << std::fixed << std::setprecision(6)
+                  << g_amgx_init_seconds << " s\n";
+    }
 #endif
 
 #ifdef HAVE_HYPRE
@@ -2957,9 +3200,8 @@ int main(int argc, char** argv) try {
                "                     nullspace): it is grounded, and its solution and residual\n"
                "                     are scored mean-centred, being defined only modulo\n"
                "                     constants.\n"
-               "  --class sddm       the operator is FULL-RANK: it has a unique solution, is\n"
-               "                     handed to every solver untouched, and is scored untouched\n"
-               "                     — no pin, no mean-centring.\n"
+               "  --class sddm       use the published operator. In disconnected inputs,\n"
+               "                     ground only blocks with a constant Laplacian null mode.\n"
                "There is deliberately no default and no detection. The ratio test this\n"
                "replaced (max|rowsum| / max|diag| < 1e-10) called three of the four IPM\n"
                "matrices singular because their uniform +1e-6 diagonal shift moves the\n"
@@ -3032,7 +3274,9 @@ int main(int argc, char** argv) try {
         // adjacency signature) with counts, so a file mis-declared `operator`
         // dies here with a diagnosis instead of quietly producing nonsense.
         try {
-            op_scan = apxchol::detail::require_operator(L,
+            L.makeCompressed();   // apxchol borrows the compressed arrays
+            op_scan = apxchol::detail::require_operator(
+                apxchol::detail::csc_input(apxchol_view(L)),
 #ifdef HAVE_APXCHOL_V1
                 args.v1_options.factor_opts.lump_max_mass
 #else
@@ -3071,9 +3315,9 @@ int main(int argc, char** argv) try {
                 << "--class " << args.cls << " CONTRADICTS the structure of "
                 << args.mtx_path << ".\n"
                    "  declared: " << (declared_laplacian ? "laplacian (singular)"
-                                                         : "sddm (full-rank)") << "\n"
+                                                         : "sddm") << "\n"
                    "  scanned:  " << (scan_laplacian ? "laplacian (singular)"
-                                                     : "sddm (full-rank)") << "\n"
+                                                     : "sddm") << "\n"
                    "  apxchol::detail::scan_operator over " << op_scan.rows << " rows: "
                 << op_scan.excess_rows << " with a positive diagonal excess, "
                 << op_scan.deficient_rows << " with a negative row sum";
@@ -3105,6 +3349,7 @@ int main(int argc, char** argv) try {
         std::cerr << "[reg] L += " << eps << " * I (reg_rel=" << args.reg_rel << ")\n";
     }
 
+    L.makeCompressed();   // apxchol borrows the compressed arrays
     int nnz = static_cast<int>(L.nonZeros());
     std::cerr << ", nnz=" << nnz << "\n";
 
@@ -3115,7 +3360,7 @@ int main(int argc, char** argv) try {
     // regularized Laplacian is full-rank from here on no matter what was declared
     // about the file. That is a property of the shift we applied, not a guess
     // about the input.
-    g_laplacian_mode = declared_laplacian && !(args.reg_rel > 0.0);
+    const bool mixed = prepare_components(L, declared_laplacian && !(args.reg_rel > 0.0));
     {
         const char* kname = (kind == matrix_kind::op) ? "operator" : "graph";
         std::cerr << "[matrix] " << graph_name << ": kind=" << kname
@@ -3127,9 +3372,10 @@ int main(int argc, char** argv) try {
             : (kind == matrix_kind::op) ? "declared --class, checked against the scan"
                                         : "by construction (L = D - A)";
         std::cerr << "[matrix] operator is "
-                  << (g_laplacian_mode ? "a SINGULAR LAPLACIAN: grounded, solution and "
+                  << (mixed ? "mixed: only Laplacian components are grounded and centred"
+                            : g_laplacian_mode ? "a SINGULAR LAPLACIAN: grounded, solution and "
                                          "residual mean-centred per connected component"
-                                       : "FULL-RANK SDDM: solved and scored untouched, "
+                                       : "assembled operator: solved and scored untouched, "
                                          "no pin, no mean-centring")
                   << " (" << provenance << ")\n";
         if (kind == matrix_kind::op) {
@@ -3161,10 +3407,10 @@ int main(int argc, char** argv) try {
         // One machine-readable line for the runners to lift into the cell's
         // matrix_meta, so every stored result carries its own interpretation.
         std::cerr << "MATRIX_META kind=" << kname
-                  << " class=" << (g_laplacian_mode ? "laplacian" : "sddm")
+                  << " class=" << (mixed ? "mixed" : g_laplacian_mode ? "laplacian" : "sddm")
                   << " class_declared=" << (kind == matrix_kind::op ? 1 : 0)
                   << " n=" << n << " nnz=" << nnz
-                  << " laplacian=" << (g_laplacian_mode ? 1 : 0)
+                  << " laplacian=" << (g_laplacian_mode && !mixed ? 1 : 0)
                   << " grounding=" << (g_laplacian_mode ? "pin_or_native" : "none");
         if (kind == matrix_kind::op)
             std::cerr << " pos_offdiag=" << op_scan.offdiag_pos
@@ -3180,16 +3426,14 @@ int main(int argc, char** argv) try {
     // only one null vector.  Matrix parsing/assembly is shared benchmark input
     // work and deliberately outside this timer; no derived matrix is serialized.
     if (args.component_info) {
-        if (!g_laplacian_mode) {
+        if (!g_laplacian_mode || mixed) {
             std::cerr << "--component-info requires a singular Laplacian input\n";
             return 1;
         }
-        const auto component_begin = std::chrono::high_resolution_clock::now();
-        const auto comps = connected_components(L);
+        const auto& comps = g_laplacian_components;
         size_t largest = 0;
         for (const auto& comp : comps) largest = std::max(largest, comp.size());
-        const double discovery_s = std::chrono::duration<double>(
-            std::chrono::high_resolution_clock::now() - component_begin).count();
+        const double discovery_s = g_component_discovery_seconds;
         std::cerr << "[component-info] " << comps.size() << " components: largest "
                   << largest << " / " << L.rows() << " nodes\n"
                   << "APX component discovery time: " << std::setprecision(17)
@@ -3215,7 +3459,7 @@ int main(int argc, char** argv) try {
             // mode on each connected Laplacian. Report the component count and size
             // so the runner knows when to stop.
             const auto component_begin = std::chrono::high_resolution_clock::now();
-            auto comps = connected_components(L);
+            const auto& comps = g_laplacian_components;
             std::vector<size_t> order(comps.size());
             std::iota(order.begin(), order.end(), static_cast<size_t>(0));
             std::sort(order.begin(), order.end(),
@@ -3266,7 +3510,7 @@ int main(int argc, char** argv) try {
         std::cerr << "dumped " << entries << " lower-triangle entries to " << args.dump_mtx << "\n";
         if (args.giant_dump) {
             std::cerr << "APX component discovery time: " << std::setprecision(17)
-                      << component_discovery_s << "\n"
+                      << component_discovery_s + g_component_discovery_seconds << "\n"
                       << "APX component serialization time: "
                       << std::max(0.0, dump_s - component_discovery_s) << "\n";
         }
@@ -3274,22 +3518,8 @@ int main(int argc, char** argv) try {
         return 0;
     }
 
-    // The null space of a disconnected Laplacian has one constant vector per
-    // component. Keep the partition once: RHS projection and true-residual
-    // grading use it, and split-mode solvers no longer rediscover it per row.
-    g_laplacian_components.clear();
-    g_laplacian_dimension = 0;
-    g_component_count = 0;
-    const auto component_begin = std::chrono::steady_clock::now();
-    auto components = connected_components(L);
-    g_component_discovery_seconds = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - component_begin).count();
-    g_component_count = components.size();
-    if (components.size() > 1) {
-        g_laplacian_dimension = L.rows();
-        g_laplacian_components = std::move(components);
-    }
-
+    // Connected solves need only a single mean; release the vertex list.
+    if (g_component_count <= 1) g_laplacian_components.clear();
     Eigen::VectorXd b = make_rhs(L, args.seed);
     if (!args.dump_rhs.empty()) {
         std::ofstream output(args.dump_rhs);
@@ -3311,8 +3541,8 @@ int main(int argc, char** argv) try {
 
     const int R = args.repeat;
 
-    // Whether L is disconnected -- computed once (benchmark-only classification, not
-    // timed); drives decompose=auto + the whole+coarse validity gate.
+    // Whether L is disconnected -- computed once and
+    // timed in the selected route); drives auto and the whole+coarse validity gate.
     const bool disconnected = g_component_count > 1;
 
     // De-singularization dispatch (2 axes; see resolve_desing). `single(L,b,nm,tol,mi,
@@ -3328,7 +3558,8 @@ int main(int argc, char** argv) try {
     };
     [[maybe_unused]] auto run_desing = [&](const std::string& key, const std::string& base,
                           auto single) -> BenchResult {
-        auto plan = resolve_desing(key, args.decompose, args.ground, disconnected);
+        auto plan = resolve_desing(key, args.decompose, args.ground, disconnected,
+                                   g_laplacian_mode);
         if (!plan.supported) return make_na(base);
         if (plan.decompose == decompose_mode::split)
             return run_split([&, g = plan.ground](const Eigen::SparseMatrix<double>& sL,
@@ -3338,7 +3569,11 @@ int main(int argc, char** argv) try {
                    }, L, b, graph_name, args.tol, args.maxiter,
                    g_laplacian_components, g_component_count,
                    g_component_discovery_seconds);
-        return single(L, b, graph_name, args.tol, args.maxiter, plan.ground);
+        auto result = single(L, b, graph_name, args.tol, args.maxiter, plan.ground);
+        result.setup_time += g_component_discovery_seconds;
+        result.total_time += g_component_discovery_seconds;
+        result.us_per_nnz = result.total_time / std::max(1, result.nnz) * 1e6;
+        return result;
     };
 
     // All solvers use L; release adjacency staging before running them.
@@ -3419,7 +3654,7 @@ int main(int argc, char** argv) try {
 #endif
 
     // AMG solvers use run_desing (--decompose/--ground). Auto pins Laplacians;
-    // AMGCL solves the whole operator, while BoomerAMG splits disconnected inputs.
+    // Both pinned routes use the whole operator by default.
 #ifdef HAVE_AMGCL
     if (args.solvers.count("amgcl"))
         print(median_run([&]() { return run_desing("amgcl", "AMG+CG [AMGCL]",
@@ -3436,10 +3671,6 @@ int main(int argc, char** argv) try {
 #endif
 
 #ifdef HAVE_HYPRE
-    // BoomerAMG routes through run_desing. auto = split (A/B: ~3-5% faster than
-    // whole-matrix multi-pin, both reach tol once the PCG stop is relative). The
-    // connected-grounding under split is `pin` (one Dirichlet pin per component);
-    // native/nullspace are n/a (Hypre has no scalar singular-nullspace API).
     if (args.solvers.count("hypre_boomeramg")) {
         auto result = median_run([&]() { return run_desing("boomeramg", "BoomerAMG+PCG [Hypre]",
             [](const Eigen::SparseMatrix<double>& L_, const Eigen::VectorXd& b_,
@@ -3464,6 +3695,22 @@ int main(int argc, char** argv) try {
     }
 #endif
 
+#endif
+
+#if defined(APXCHOL_USE_CUDA) && defined(HAVE_AMGX)
+    // AMGX uses run_desing with the AMGCL policy: one Dirichlet pin per
+    // component on the whole operator (auto = whole + pin).
+    if (amgx_requested) {
+        auto result = median_run([&]() { return run_desing("amgx", "AMG+PCG [AMGX;cuda]",
+            [](const Eigen::SparseMatrix<double>& L_, const Eigen::VectorXd& b_,
+               const std::string& nm, double tl, int mi, ground_mode) {
+                return run_amgx(L_, b_, nm, tl, mi); }); }, R);
+        result.setup_time += g_amgx_init_seconds;
+        result.total_time += g_amgx_init_seconds;
+        result.us_per_nnz = result.total_time / std::max(1, result.nnz) * 1e6;
+        print(result);
+        amgx_finalize();
+    }
 #endif
 
 #ifdef HAVE_HYPRE

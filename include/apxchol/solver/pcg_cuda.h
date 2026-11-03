@@ -3,8 +3,9 @@
 // fixed reductions and the shared device recurrence; the host reads only the
 // completed state, once per batch of iterations. The core links cudart alone.
 
-#include <Eigen/Sparse>
-#include <Eigen/Core>
+#include "apxchol/detail/buffer.h"
+#include "apxchol/detail/csc_matrix.h"
+#include "apxchol/detail/dense.h"
 #include <cmath>
 #include <array>
 #include <cstdint>
@@ -63,21 +64,27 @@ public:
     /// preconditioner's trsv_.solve_LLt_dev expects permuted input and gives
     /// permuted output. Running PCG entirely in permuted space lets us avoid
     /// per-iter permute/unpermute on device.
-    void setup(const Eigen::SparseMatrix<double>& L,
+    void setup(csc_ref<double> L,
                const std::vector<node_index>& perm, bool verbose = false)
     {
         destroy();
-        n_ = static_cast<int64_t>(L.rows());
+        n_ = static_cast<int64_t>(L.n);
 
         // This owner has one operator-construction route. Unsupported stored
         // formats fail before PCG state is allocated; no host CSR is built.
         if constexpr (sizeof(node_index) != sizeof(std::uint32_t))
             throw std::invalid_argument("GPU PCG requires 32-bit node indices; request CPU explicitly");
-        if (!L.isCompressed() || L.rows() != L.cols() ||
-            L.rows() > std::numeric_limits<int>::max() ||
-            L.nonZeros() > std::numeric_limits<int>::max() ||
+        if (static_cast<std::uint64_t>(L.n) > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
+            static_cast<std::uint64_t>(L.nnz()) > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
             perm.size() < static_cast<std::size_t>(n_))
             throw std::invalid_argument("GPU PCG requires a compressed square int32-sized operator and a complete permutation");
+        // The device builder reads int offsets; narrow 64-bit ones.
+        std::vector<int> narrowed_offsets;
+        const int* offsets = reinterpret_cast<const int*>(L.ptr);
+        if constexpr (sizeof(edge_index) != sizeof(int)) {
+            narrowed_offsets.assign(L.ptr, L.ptr + static_cast<std::size_t>(n_) + 1);
+            offsets = narrowed_offsets.data();
+        }
 
         // Allocate the permutation before accepting device ownership. The
         // factor supplied this validated bijection; the builder checks the CSC.
@@ -86,8 +93,8 @@ public:
         APXCHOL_PCG_CUDA_CHECK(cudaGetDevice(&device_));
         op->device = device_;
         if (!cuda_pcg_kernels::try_build_permuted_operator_csr(
-                static_cast<int>(n_), static_cast<int>(L.nonZeros()),
-                L.outerIndexPtr(), L.innerIndexPtr(), L.valuePtr(),
+                static_cast<int>(n_), static_cast<int>(L.nnz()),
+                offsets, reinterpret_cast<const int*>(L.idx), L.val,
                 reinterpret_cast<const std::uint32_t*>(perm.data()), -1, op->matrix))
             throw std::invalid_argument("GPU PCG requires sorted, unique, fully paired CSC storage; request CPU explicitly");
         op_ = std::move(op);
@@ -109,11 +116,11 @@ public:
     /// Solve A*X = B for one, two or four columns via PCG using a
     /// device-capable preconditioner, whose `trsv().solve_LLt_dev` runs per
     /// iteration. Reports iteration counts and final relative residuals.
-    template<unsigned Columns, class Precond, class Input, class Output>
-    void solve_panel(const Precond& precond, const Input& b_host, Output& x_host,
+    template<unsigned Columns, class Precond>
+    void solve_panel(const Precond& precond, const_matrix_ref b_host, matrix_ref x_host,
                     double tol, int max_iter, std::array<int, Columns>& iterations,
                     std::array<double, Columns>& residuals, bool laplacian,
-                    const Input* x0 = nullptr) {
+                    const const_matrix_ref* x0 = nullptr) {
         solve_columns<Columns>(precond, b_host, x_host, tol, max_iter, iterations,
                                residuals, laplacian, x0);
     }
@@ -134,11 +141,11 @@ public:
     int spmv_lanes() const { return spmv_lanes_; }
 
 private:
-    template<unsigned Columns, class Precond, class Input, class Output>
-    void solve_columns(const Precond& precond, const Input& b_host, Output& x_host,
+    template<unsigned Columns, class Precond>
+    void solve_columns(const Precond& precond, const_matrix_ref b_host, matrix_ref x_host,
                        double tol, int max_iter, std::array<int, Columns>& iterations,
                        std::array<double, Columns>& residuals, bool laplacian,
-                       const Input* x0) {
+                       const const_matrix_ref* x0) {
         auto stopped = solve_columns_once<Columns>(precond, b_host, x_host, tol, max_iter,
                                                     iterations, residuals, laplacian, x0);
         for (unsigned q = 0; q < Columns; ++q) {
@@ -148,30 +155,31 @@ private:
                                            progress, max_iter - iterations[q]);
             };
             if (!restart()) continue;
-            Eigen::VectorXd solution = x_host.col(q);
-            using column_view = Eigen::Ref<const Eigen::VectorXd, 0,
-                                           Eigen::InnerStride<Eigen::Dynamic>>;
-            const column_view rhs(b_host.col(q)), initial(solution);
+            buffer<double> solution(static_cast<std::size_t>(n_));
+            const auto output = x_host.col(q);
+            for (int64_t v = 0; v < n_; ++v) solution[v] = output[v];
+            const matrix_ref current(solution.data(), n_);
+            const const_matrix_ref rhs = b_host.col(q), initial = current;
             while (restart()) {
                 std::array<int, 1> count{};
                 std::array<double, 1> residual{};
-                const auto next = solve_columns_once<1>(precond, rhs, solution, tol,
+                const auto next = solve_columns_once<1>(precond, rhs, current, tol,
                     max_iter - iterations[q], count, residual, laplacian, &initial);
                 progress = count[0];
                 iterations[q] += progress;
                 residuals[q] = residual[0];
                 stopped[q] = next[0];
             }
-            x_host.col(q) = solution;
+            for (int64_t v = 0; v < n_; ++v) output[v] = solution[v];
         }
     }
 
-    template<unsigned Columns, class Precond, class Input, class Output>
+    template<unsigned Columns, class Precond>
     std::array<bool, Columns> solve_columns_once(const Precond& precond,
-                       const Input& b_host, Output& x_host, double tol, int max_iter,
+                       const_matrix_ref b_host, matrix_ref x_host, double tol, int max_iter,
                        std::array<int, Columns>& iterations,
                        std::array<double, Columns>& residuals, bool laplacian,
-                       const Input* x0) {
+                       const const_matrix_ref* x0) {
         static_assert(Columns == 1 || Columns == 2 || Columns == 4);
         if (std::uint64_t(n_) > std::numeric_limits<unsigned>::max() / Columns)
             throw std::overflow_error("GPU RHS panel exceeds packed index range");
@@ -183,23 +191,26 @@ private:
         const detail::cuda_device_scope device(device_, detail::cuda_device_scope::checked{});
         reserve_columns(Columns);
         const auto& perm = op_->perm;
-        using host_panel = Eigen::Matrix<double, Eigen::Dynamic, Columns,
-            Columns == 1 ? Eigen::ColMajor : Eigen::RowMajor>;
-        host_panel packed(n_, Columns);
+        // Row-interleaved host panel: entry (v, q) at v * Columns + q.
+        buffer<double> packed(static_cast<std::size_t>(n_) * Columns);
+        const auto lane = [&](buffer<double>& panel, unsigned q) {
+            return matrix_ref(panel.data() + q, n_, 1, Columns, n_ * Columns);
+        };
         std::array<double, Columns> scales{}, bnorm{}, max_b{}, max_x0{};
         bool any_active = false, any_warm = false;
         std::fill_n(h_state_, Columns, cuda_pcg_kernels::solve_state{});
         for (int64_t v = 0; v < n_; ++v) {
             for (unsigned q = 0; q < Columns; ++q) {
                 const double rhs = b_host(v, q);
-                packed(perm[v], q) = rhs;
+                packed[perm[v] * Columns + q] = rhs;
                 max_b[q] = std::max(max_b[q], std::abs(rhs));
                 if (x0) max_x0[q] = std::max(max_x0[q], std::abs((*x0)(v, q)));
             }
         }
         for (double maximum : max_b) any_active |= maximum != 0;
         if (!any_active) {
-            x_host.setZero();
+            for (int64_t q = 0; q < x_host.cols(); ++q)
+                for (int64_t v = 0; v < n_; ++v) x_host(v, q) = 0.0;
             iterations.fill(0);
             residuals.fill(0);
             return {};
@@ -213,11 +224,7 @@ private:
             scales[q] = detail::gpu_scaling::fp32_scale(std::max(max_b[q], max_x0[q]));
             // packed stays unchanged until the stream syncs: the upload above
             // may still read it. Fold the scaled column's norm contiguously.
-            if (Columns == 1 && scales[q] == 1) bnorm[q] = detail::gpu_scaling::norm(packed);
-            else {
-                const Eigen::VectorXd rhs_column = packed.col(q) * scales[q];
-                bnorm[q] = detail::gpu_scaling::norm(rhs_column);
-            }
+            bnorm[q] = detail::gpu_scaling::scaled_norm(lane(packed, q), scales[q]);
             if (!std::isnormal(bnorm[q] * bnorm[q]))
                 throw std::invalid_argument("CUDA solve: RHS and initial guess exceed the common scaling range");
             auto& st = h_state_[q];
@@ -232,15 +239,19 @@ private:
         if (laplacian && n_)
             APXCHOL_PCG_CUDA_CHECK(cudaMemsetAsync(vectors_.z + (n_ - 1) * Columns, 0, Columns * sizeof(double), stream_));
         iteration<Precond, Columns> commands{*this, precond, bnorm};
-        host_panel warm;
+        buffer<double> warm;
         if (any_warm) {
-            warm.resize(n_, Columns);
+            warm.resize(static_cast<std::size_t>(n_) * Columns);
             for (int64_t v = 0; v < n_; ++v)
                 for (unsigned q = 0; q < Columns; ++q)
-                    warm(perm[v], q) = h_state_[q].alpha ? (*x0)(v, q) * scales[q] : 0;
+                    warm[perm[v] * Columns + q] = h_state_[q].alpha ? (*x0)(v, q) * scales[q] : 0;
             if (laplacian)
                 for (unsigned q = 0; q < Columns; ++q)
-                    if (h_state_[q].alpha) warm.col(q).array() -= warm.col(q).mean();
+                    if (h_state_[q].alpha) {
+                        const auto column = lane(warm, q);
+                        const double mean = vec::mean(column);
+                        for (int64_t v = 0; v < n_; ++v) column[v] -= mean;
+                    }
             APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(vectors_.p, warm.data(), vector_bytes, cudaMemcpyHostToDevice, stream_));
             // alpha=1 only for warm columns; cold p=0 and alpha=0. Their
             // iteration-zero convergence check is suppressed by finalize.
@@ -262,7 +273,7 @@ private:
         }
         for (int64_t v = 0; v < n_; ++v)
             for (unsigned q = 0; q < Columns; ++q)
-                x_host(v, q) = packed(perm[v], q);
+                x_host(v, q) = packed[perm[v] * Columns + q];
         std::array<bool, Columns> stopped{};
         for (unsigned q = 0; q < Columns; ++q) {
             iterations[q] = h_state_[q].iters;

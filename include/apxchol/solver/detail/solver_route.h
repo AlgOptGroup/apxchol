@@ -10,12 +10,14 @@
 #include "apxchol/solver/detail/metal_route.h"
 #endif
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <variant>
 
 namespace apxchol::detail {
 
-// Every route is constructed from (A, opts, cp, F) and provides solve_widths,
+// Every route is constructed from (A, opts, cp, F), A a square csc_ref, and
+// provides solve_widths,
 // apply_widths, solve_columns, apply_columns, factor (metadata),
 // installed_factor, factor_nnz, factor_storage and original_operator.
 using solver_route = std::variant<cpu_route
@@ -28,15 +30,20 @@ using solver_route = std::variant<cpu_route
 
 struct solver_access {
     static const solver_route& route(const solver& owner);
-    // Attach a timing tree for the CLI's -v report, tests and the benchmark:
-    // setup records under "setup", and every solve on the returned solver
-    // under "pcg". The tree must outlive the solver; copies start without one.
-    static solver with_timings(const Eigen::SparseMatrix<double>& A,
-                               const solve_options& opts, checkpoint& timings);
+    // A solver for an operator in the library's own storage (the CLI, tests
+    // and the benchmark). A timing tree, when given, records setup under
+    // "setup" and every solve on the returned solver under "pcg"; it must
+    // outlive the solver, and copies start without one.
+    static solver make(csc_ref<double> A, const solve_options& opts,
+                       checkpoint* timings = nullptr);
+    // A solver adopting F for an operator in the library's own storage.
+    static solver make(csc_ref<double> A, factorization F, const solve_options& opts);
     static void save(const std::filesystem::path& path, const solver& owner);
     // started is when load() began, so setup_seconds includes reading the file.
-    static void finish_load(solver& owner, Eigen::Index entries,
+    static void finish_load(solver& owner, std::int64_t entries,
                             std::chrono::steady_clock::time_point started);
+    // Measure setup_seconds from started, e.g. before checking a public view.
+    static void set_setup_start(solver& owner, std::chrono::steady_clock::time_point started);
 };
 
 } // namespace apxchol::detail

@@ -19,10 +19,7 @@ option(APXCHOL_BUILD_TESTS "Build the unit tests (fetches GoogleTest)" ON)
 option(APXCHOL_BUILD_EXAMPLES "Build the examples/ programs" ON)
 add_subdirectory(../.. apxchol)
 
-# Compile this probe as part of the core to observe its actual Eigen alignment.
-target_sources(apxchol_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/core_alignment.cpp")
-# apxchol's architecture flag must not reach consumers; only the Eigen
-# alignment it implies does.
+# apxchol's architecture flag must not reach consumers.
 get_target_property(_options apxchol::core INTERFACE_COMPILE_OPTIONS)
 if (_options MATCHES "-m(arch|cpu)=")
     message(FATAL_ERROR "apxchol::core exports an architecture flag: ${_options}")

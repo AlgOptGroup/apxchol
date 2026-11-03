@@ -11,7 +11,9 @@ python3 benchmarks/sweep_fair.py --threads N --store results/cells
 ```
 
 For CUDA, use a separate build directory and add `-DAPXCHOL_DEVICE=CUDA
--DBENCH_HYPRE_USE_CUDA=ON -DBUILD_GPU_RCHOL=ON`; sweep with `--device gpu`.
+-DBENCH_HYPRE_USE_CUDA=ON -DBUILD_GPU_RCHOL=ON -DBENCH_AMGX=ON`; sweep with
+`--device gpu`. `BENCH_AMGX` builds AMGX as a separate CMake project with the
+same C/C++/CUDA compilers, `CMAKE_CUDA_ARCHITECTURES` and `CMAKE_CUDA_FLAGS`.
 
 On macOS, build `benchmarks/build-metal` with `-DAPXCHOL_DEVICE=METAL
 -DOpenMP_ROOT=$(brew --prefix libomp)` (Apple Clang; Hypre needs `OpenMP_ROOT` to
@@ -40,6 +42,29 @@ Machine-local paths belong in ignored `paths_local.py`/`paths_local.cmake`;
 The C++ benchmark accepts `--factor-storage auto|float16|float32`, `--cpu-schedule auto|levels`, `--factor-drop`, `--regularization`, `--lump-max-mass` and `--degree-quantile` for apxchol v1. These pass directly to the library's options; named configurations retain their sampler/partitioner choices. `--profile` prints its timing breakdown. Timing collection remains enabled so Setup and Solve retain their measured boundaries; ambient `APXCHOL_*` solver overrides are not read.
 
 ## Measurement contract
+
+### Configuration selection
+
+Before scoring, choose one configuration rule per solver and backend, including
+apxchol. Use a documented upstream recommendation when it applies to the input
+class and hardware. Otherwise use the shipped default. Record the version,
+options, recommendation source and any adapter choices needed to solve the
+original system. Charge required preparation to setup.
+
+Disclose when the suite informed a solver's defaults. If a tested alternative
+materially changes the comparison, show it alongside the primary result under
+its own configuration name, whichever solver benefits. Label choices made after
+timing an individual matrix as instance-specific.
+
+For a tuning study, specify the objective (such as total time for one or 32
+right-hand sides), search space and comparable tuning budget for each solver
+before running the search. Select settings on development inputs. To evaluate
+performance on unseen workloads, freeze those settings and use held-out matrix
+families. Report failures and unsupported inputs in the coverage totals.
+
+For examples and rationale, see [Gould and Scott on sparse preconditioners](https://centaur.reading.ac.uk/70342/1/ls_study_toms.pdf),
+[Beiranvand, Hare and Lucet on parameter tuning (§4.4)](https://arxiv.org/pdf/1709.08242#page=12),
+and the [ParamILS training and test sets](https://www.cs.ubc.ca/labs/algorithms/Projects/ParamILS/results.html).
 
 ### Hosted checks
 
@@ -82,12 +107,12 @@ comments, Pages or README measurements.
 - Inputs declare graph adjacency (`L=D-A`) or an assembled operator, and Laplacian
   or SDDM class. Preserve the original operator/RHS and component-wise nullspace.
 - Accept only when **every retained true residual** `||b-Ax||/||b|| ≤ 1e-8`.
-  A recurrence residual is insufficient. Keep shifted CMG series separately labelled.
+  A recurrence residual is insufficient.
 - `original-v1` stopping checks that residual at native solver exits and continues
   when needed, within one total iteration budget and at most eight attempts.
   Disconnected split solves apply the budget per component. Direct solvers count
   a solve/refinement as one work unit. Exhaustion remains `not_converged`.
-- CPU apxchol, Eigen CG, AMGCL and Hypre warm-start native retries. GPU apxchol
+- CPU apxchol, Eigen CG, AMGCL, Hypre and AMGX warm-start native retries. GPU apxchol
   and RCHOL reuse setup with cold native restarts. Julia AC/AC2 reuse their native
   solver closures; Julia CG, regularized ICC and direct methods can use residual
   corrections. These are adapter stopping policies, not vendor kernel rewrites.
@@ -104,7 +129,8 @@ comments, Pages or README measurements.
   transfers and returning the solution. Total is setup + solve.
 - Common parsing/assembly and independent grading are excluded. Process-wide CUDA
   initialization is separately reported; solver-specific allocations/module loading
-  remain charged. Hypre initialization is charged once per row. Metal device
+  remain charged. Hypre initialization is charged once per row, and so are
+  `AMGX_initialize` and AMGX resource creation (`[bench] amgx_init`). Metal device
   creation and kernel compilation are excluded the same way: one small Metal
   setup and solve runs before the first timed Metal owner, reported once as
   `metal_init_s`.
@@ -115,7 +141,7 @@ comments, Pages or README measurements.
   boundary correction.
 - GPU memory is this process's device memory as NVML attributes it to its PID on
   the benchmark's device, in MiB. Every GPU solver in the benchmark binary (apxchol,
-  AMGCL, Hypre) is measured the same way. Right after CUDA context creation, before
+  AMGCL, Hypre, AMGX) is measured the same way. Right after CUDA context creation, before
   any solver allocates, the binary prints
   `[bench] gpu_memory pid=… bus_id=… baseline_mib=… other_processes=… other_mib=…`.
   - `vram_baseline_mb`: that raw baseline (CUDA context only).
@@ -218,7 +244,8 @@ ETH Euler's `eu-g6` nodes (2 × EPYC 9554, 8 × RTX 4090) in October 2026.
 
 ## Solvers
 
-Hypre/BoomerAMG and AMGCL have CPU/CUDA series; AC/AC2 are Julia references.
+Hypre/BoomerAMG and AMGCL have CPU/CUDA series, and NVIDIA AMGX has a CUDA
+series (`amgx`); AC/AC2 are Julia references.
 RCHOL/pRCHOL retain upstream factors with labelled MKL or portable PCG.
 
 RCHOL prints progress to `std::cout`, and pRCHOL does so from its worker
@@ -240,6 +267,36 @@ nodes in October 2026 they failed in Hypre's device-to-device `cudaMemcpy`
 ordinal". Input staging and the solution buffer are charged to Hypre GPU
 setup; each solve attempt's copy of the solution back to the host is charged
 to Solve.
+
+AMGX is pinned to upstream commit `91a8413` (tarball SHA-256 in
+[CMakeLists.txt](CMakeLists.txt)). Release v2.5.0 does not compile with CUDA
+13.x: CCCL 3 removed the legacy `thrust::tuple` API that its headers use.
+`91a8413` maps it to `cuda::std::tuple`. Other changes since v2.5.0 include
+C++17 support, an export macro and an example convergence-status fix. [Patch 0001](patches/amgx/) adds
+`AMGX_solver_set_max_iters`, so a retry uses only the remaining iteration
+budget without rebuilding the hierarchy.
+
+The solver configuration is
+[amgx/PCG_CLASSICAL_V_JACOBI.json](amgx/PCG_CLASSICAL_V_JACOBI.json), compiled
+into the binary and recorded with its SHA-256 in `BUILD_META`. It is AMGX's
+shipped `PCG_CLASSICAL_V_JACOBI.json`: PCG preconditioned by one classical AMG
+V-cycle (two aggressive levels, D2 interpolation, block-Jacobi smoothing), in
+double precision (`dDDI`). This benchmark selects that shipped sample for all
+matrices. The upstream README describes these as sample configurations.
+Classical AMG matches the BoomerAMG GPU series.
+`PCG_AGGREGATION_JACOBI.json` uses size-2 aggregates without a coarse solver.
+Changes from the shipped file: printing and timing collection are off, and
+`convergence` is `ABSOLUTE`. The adapter sets `max_iters` to the remaining
+budget and `tolerance` to `request x ||b||` before each pass, so AMGX stops on
+its unpreconditioned recurrence residual relative to the RHS norm, whatever the
+warm start. The original-v1 check then grades the original operator.
+
+AMGX defaults to the whole operator and supports explicit component splitting.
+Grounding follows AMGCL's pinned route, with one pin per singular Laplacian
+component. Nonsingular components retain their equations.
+Setup covers grounding, CSR conversion, AMGX object creation, the matrix
+upload and the hierarchy. Solve covers the RHS upload, PCG passes, checks and
+each copy of the solution back to the host.
 
 Accelerate's sparse Cholesky (`SparseFactor`, default AMD ordering) factors the
 operator with the same Dirichlet pin as AMGCL and BoomerAMG. Setup includes the
@@ -265,17 +322,38 @@ no untimed, matrix-specific tolerance calibration before retained runs.
 Julia uses fixed tiny connected/disconnected/SDDM fixtures to warm its native closure
 types before timing; these fixtures do not depend on the measured matrix.
 
-The MATLAB CMG adapter is excluded from comparisons until it uses the shared
-operator and RHS: it currently generates its own RHS and shifts Laplacians.
-The Linux container recipe remains in [cmg/Dockerfile.matlab](cmg/Dockerfile.matlab):
-
-```sh
-docker build -t apxchol-matlab-cmg:r2026a -f benchmarks/cmg/Dockerfile.matlab benchmarks/cmg
-```
+Canonical MATLAB CMG (`cmg_matlab_runner.py`) runs on the CPU axis on the same
+exported operator A and RHS b as the other external solvers. One MATLAB process
+per cell runs [cmg/bench_cmg_common.m](cmg/bench_cmg_common.m): one warmup and
+`--repeat` retained repetitions, each building the hierarchy with
+`cmg_precondition` and solving with MATLAB `pcg` (tol 1e-8, at most 500
+iterations) under `-singleCompThread`, pinned to one CPU. A disconnected
+Laplacian gets one grounded coordinate per Laplacian component
+([cmg/component_gauge.h](cmg/component_gauge.h)); coefficients and RHS values
+are kept unchanged, with no shift or RHS projection. Setup covers the component
+gauge and hierarchy. Solve covers PCG, reconstruction and original-residual
+checks. A failed check can tighten the native tolerance and warm-start another
+PCG call on the same hierarchy, within one total iteration budget and at most
+eight calls. Numerical breakdown stops retries. Every repetition is independently
+graded by `||Ax-b||/||b||` on the original A and b, and the cell follows the
+same status and per-solve cap rules as the other competitors. The
+`shared-timed-original-v1` provenance marker distinguishes these cells from
+older CMG timings that excluded the stopping check. An empty hierarchy,
+which CMG returns for operators it does not support such as positive
+off-diagonals, is recorded as `n/a`.
 
 Set `APXCHOL_MATLAB_ROOT` to a licensed MATLAB R2026a installation and
 `APXCHOL_CMG_SOLVER` to a CMG checkout whose MEX files were built with `makeCMG`
-for that MATLAB version.
+for that MATLAB version. The first cell compiles the gauge MEX into the dump
+directory. Without these settings the sweep prints why and plans no CMG cells.
+To run MATLAB in the Linux container from
+[cmg/Dockerfile.matlab](cmg/Dockerfile.matlab) instead, build the image and
+set `APXCHOL_CMG_IMAGE`:
+
+```sh
+docker build -t apxchol-matlab-cmg:r2026a -f benchmarks/cmg/Dockerfile.matlab benchmarks/cmg
+export APXCHOL_CMG_IMAGE=apxchol-matlab-cmg:r2026a
+```
 
 ## Weighted and additional inputs
 

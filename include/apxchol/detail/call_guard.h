@@ -38,8 +38,8 @@ public:
             return scope(this);
         if (owner == self) return scope();
         throw std::runtime_error(
-            "this solver is already in use by another thread; use a separate solver "
-            "per thread, or pass all right-hand sides to solve() as one matrix");
+            "this solver is in use by another thread. A solver runs 1 call at a time. "
+            "Give each thread its own copy, or pass all right-hand sides to solve() as one matrix");
     }
 
 private:
