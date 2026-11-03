@@ -9,7 +9,8 @@
 #include <random>
 
 namespace {
-using Matrix = Eigen::SparseMatrix<double>;
+using Matrix = apxchol::test::sparse_matrix;
+using Triplet = apxchol::test::triplet;
 using apxchol::node_index;
 struct Csr {
     std::vector<int> ptr, idx;
@@ -17,13 +18,13 @@ struct Csr {
     bool exact = true;
 };
 Csr serial_reference(const Matrix& L, const std::vector<node_index>& perm) {
-    std::vector<std::vector<std::pair<int, double>>> rows(L.rows());
+    std::vector<std::vector<std::pair<int, double>>> rows(L.rows);
     Csr ref;
-    for (int col = 0; col < L.cols(); ++col)
-        for (Matrix::InnerIterator it(L, col); it; ++it) {
-            const int row = it.row();
+    for (int col = 0; col < L.cols; ++col)
+        for (auto p = L.col_ptr[col]; p < L.col_ptr[col + 1]; ++p) {
+            const int row = L.row_idx[p];
             if (row < col) continue;
-            const double value = it.value();
+            const double value = L.values[p];
             ref.exact &= static_cast<double>(static_cast<float>(value)) == value;
             rows[perm[row]].emplace_back(perm[col], value);
             if (row != col) rows[perm[col]].emplace_back(perm[row], value);
@@ -40,9 +41,9 @@ void check(const Matrix& L, const std::vector<node_index>& perm, bool use_full_b
     const auto ref = serial_reference(L, perm);
     apxchol::detail::permuted_operator_csr out;
     if (use_full_builder)
-        out = apxchol::detail::build_permuted_full_symmetric_csr(apxchol::test::eigen_csc(L), perm);
+        out = apxchol::detail::build_permuted_full_symmetric_csr(apxchol::test::internal_csc(L), perm);
     else
-        ASSERT_TRUE(apxchol::detail::try_build_permuted_symmetric_csr(apxchol::test::eigen_csc(L), perm, out));
+        ASSERT_TRUE(apxchol::detail::try_build_permuted_symmetric_csr(apxchol::test::internal_csc(L), perm, out));
     const auto nnz = out.ptr.back();
     ASSERT_EQ(nnz, static_cast<std::int64_t>(ref.idx.size()));
     EXPECT_EQ(out.ptr, ref.ptr);
@@ -52,13 +53,21 @@ void check(const Matrix& L, const std::vector<node_index>& perm, bool use_full_b
         EXPECT_EQ(0, std::memcmp(out.vals.get(), ref.vals.data(), nnz * sizeof(double)));
     }
 }
-Matrix from_entries(int n, std::initializer_list<Eigen::Triplet<double>> entries) {
-    Matrix L(n, n); L.setFromTriplets(entries.begin(), entries.end()); return L;
+Matrix from_entries(int n, std::initializer_list<Triplet> entries) {
+    return apxchol::test::from_triplets(n, n, std::vector<Triplet>(entries));
+}
+// A matrix with the given arrays as they are: unsorted or duplicate rows kept.
+Matrix from_arrays(int n, std::vector<int> outer, std::vector<int> inner, std::vector<double> values) {
+    Matrix L(n, n);
+    L.col_ptr = std::move(outer);
+    L.row_idx = std::move(inner);
+    L.values = std::move(values);
+    return L;
 }
 bool accepted(const Matrix& L) {
-    std::vector<node_index> perm(L.rows()); std::iota(perm.begin(), perm.end(), 0);
+    std::vector<node_index> perm(L.rows); std::iota(perm.begin(), perm.end(), 0);
     apxchol::detail::permuted_operator_csr out;
-    return apxchol::detail::try_build_permuted_symmetric_csr(apxchol::test::eigen_csc(L), perm, out);
+    return apxchol::detail::try_build_permuted_symmetric_csr(apxchol::test::internal_csc(L), perm, out);
 }
 } // namespace
 
@@ -68,19 +77,19 @@ TEST(PermutedOperator, PermutedArraysMatchIndependentLowerTriangleReference) {
         scoped_omp_threads threads(team);
         for (int trial = 0; trial < 80; ++trial) {
             const int n = trial * 13 % 131;
-            std::vector<Eigen::Triplet<double>> entries;
+            std::vector<Triplet> entries;
             for (int col = 0; col < n; ++col) {
-                if (trial % 3) entries.emplace_back(col, col, 4.0);
+                if (trial % 3) entries.push_back({col, col, 4.0});
                 for (int row = col + 1; row < n; ++row) {
                     if ((trial % 2 && row / 8 != col / 8) || rng() % 13) continue;
                     const double value = trial % 5 ? -0.25 * (rng() % 8) : -0.1;
-                    entries.emplace_back(row, col, value);
+                    entries.push_back({row, col, value});
                     // Deliberately different, possibly inexact upper values:
                     // only canonical lower values determine the operator and its precision.
-                    entries.emplace_back(col, row, value + 1e-10);
+                    entries.push_back({col, row, value + 1e-10});
                 }
             }
-            Matrix L(n, n); L.setFromTriplets(entries.begin(), entries.end());
+            const Matrix L = apxchol::test::from_triplets(n, n, entries);
             std::vector<node_index> perm(n); std::iota(perm.begin(), perm.end(), 0);
             std::shuffle(perm.begin(), perm.end(), rng);
             SCOPED_TRACE("team=" + std::to_string(team) + " trial=" + std::to_string(trial));
@@ -112,23 +121,17 @@ TEST(PermutedOperator, MissingPartnerDoesNotPublishPartiallyWrittenArrays) {
     const auto* original_vals = out.vals.get();
     out.fp32_exact = false;
     EXPECT_FALSE(apxchol::detail::try_build_permuted_symmetric_csr(
-        apxchol::test::eigen_csc(L), {2, 0, 1}, out));
+        apxchol::test::internal_csc(L), {2, 0, 1}, out));
     EXPECT_EQ(out.idx.get(), original_idx); EXPECT_EQ(out.vals.get(), original_vals);
     EXPECT_EQ(out.idx[0], 23); EXPECT_EQ(out.vals[0], 4.5);
     EXPECT_FALSE(out.fp32_exact);
 }
 
-// Uncompressed Eigen storage is compressed at the library boundary.
 TEST(PermutedOperator, RejectsDuplicatesAndUnsortedStorage) {
-    Matrix duplicate(2, 2);
-    duplicate.resizeNonZeros(4);
-    std::copy_n(std::array<int, 3>{0, 2, 4}.data(), 3, duplicate.outerIndexPtr());
-    std::copy_n(std::array<int, 4>{1, 1, 0, 0}.data(), 4, duplicate.innerIndexPtr());
-    std::fill_n(duplicate.valuePtr(), 4, -1.0);
-    EXPECT_FALSE(accepted(duplicate));
+    EXPECT_FALSE(accepted(from_arrays(2, {0, 2, 4}, {1, 1, 0, 0}, {-1.0, -1.0, -1.0, -1.0})));
     Matrix unsorted = from_entries(3, {{0, 0, 2.}, {1, 0, -1.}, {0, 1, -1.}, {1, 1, 2.}});
-    std::swap(unsorted.innerIndexPtr()[0], unsorted.innerIndexPtr()[1]);
-    std::swap(unsorted.valuePtr()[0], unsorted.valuePtr()[1]);
+    std::swap(unsorted.row_idx[0], unsorted.row_idx[1]);
+    std::swap(unsorted.values[0], unsorted.values[1]);
     EXPECT_FALSE(accepted(unsorted));
 }
 
@@ -144,17 +147,17 @@ TEST(PermutedOperator, GeneralFallbackMatchesIndependentLowerTriangleReference) 
         for (int trial = 0; trial < 40; ++trial) {
             const int n = 2 + trial * 17 % 97;
             const bool lower_only = trial % 2 == 0;
-            std::vector<Eigen::Triplet<double>> entries;
+            std::vector<Triplet> entries;
             for (int col = 0; col < n; ++col) {
-                entries.emplace_back(col, col, trial % 3 ? 4.0 : 4.1);
+                entries.push_back({col, col, trial % 3 ? 4.0 : 4.1});
                 for (int row = col + 1; row < n; ++row) {
                     if (!(row == 1 && col == 0) && rng() % 7) continue;
                     const double value = (trial % 4 ? -0.25 : -0.1) * (1 + rng() % 8);
-                    entries.emplace_back(row, col, value);
-                    if (!lower_only) entries.emplace_back(col, row, value);
+                    entries.push_back({row, col, value});
+                    if (!lower_only) entries.push_back({col, row, value});
                 }
             }
-            Matrix L(n, n); L.setFromTriplets(entries.begin(), entries.end());
+            const Matrix L = apxchol::test::from_triplets(n, n, entries);
             std::vector<node_index> perm(n); std::iota(perm.begin(), perm.end(), 0);
             std::shuffle(perm.begin(), perm.end(), rng);
             SCOPED_TRACE("team=" + std::to_string(team) + " trial=" + std::to_string(trial));
@@ -170,7 +173,6 @@ TEST(PermutedOperator, GeneralFallbackOrdersDuplicateCoordinatesDeterministicall
     // slot order depends on the threads, the sorted result must not.
     const int n = 600;
     std::mt19937 rng(11);
-    Matrix L(n, n);
     std::vector<int> outer{0}, inner;
     std::vector<double> values;
     for (int col = 0; col < n; ++col) {
@@ -184,10 +186,7 @@ TEST(PermutedOperator, GeneralFallbackOrdersDuplicateCoordinatesDeterministicall
         }
         outer.push_back(static_cast<int>(inner.size()));
     }
-    L.resizeNonZeros(static_cast<Eigen::Index>(inner.size()));
-    std::copy(outer.begin(), outer.end(), L.outerIndexPtr());
-    std::copy(inner.begin(), inner.end(), L.innerIndexPtr());
-    std::copy(values.begin(), values.end(), L.valuePtr());
+    const Matrix L = from_arrays(n, outer, inner, values);
     ASSERT_FALSE(accepted(L));
     std::vector<node_index> perm(n); std::iota(perm.begin(), perm.end(), 0);
     std::shuffle(perm.begin(), perm.end(), rng);
@@ -204,17 +203,10 @@ TEST(PermutedOperator, GeneralFallbackRejectsNonFiniteValuesBeforeSorting) {
     // Lower-only duplicates force the fallback, whose row sort needs finite values.
     for (double bad : {std::numeric_limits<double>::quiet_NaN(),
                        std::numeric_limits<double>::infinity()}) {
-        Matrix L(2, 2);
-        const std::array<int, 3> outer{0, 3, 4};
-        const std::array<int, 4> inner{0, 1, 1, 1};
-        const std::array<double, 4> values{2.0, bad, -1.0, 2.0};
-        L.resizeNonZeros(4);
-        std::copy(outer.begin(), outer.end(), L.outerIndexPtr());
-        std::copy(inner.begin(), inner.end(), L.innerIndexPtr());
-        std::copy(values.begin(), values.end(), L.valuePtr());
+        const Matrix L = from_arrays(2, {0, 3, 4}, {0, 1, 1, 1}, {2.0, bad, -1.0, 2.0});
         ASSERT_FALSE(accepted(L));
         const std::vector<node_index> perm{0, 1};
-        EXPECT_THROW(apxchol::detail::build_permuted_full_symmetric_csr(apxchol::test::eigen_csc(L), perm),
+        EXPECT_THROW(apxchol::detail::build_permuted_full_symmetric_csr(apxchol::test::internal_csc(L), perm),
                      std::invalid_argument);
     }
 }

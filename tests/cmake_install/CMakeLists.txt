@@ -5,8 +5,7 @@ find_package(apxchol CONFIG REQUIRED)
 if (COMMAND apxchol_openmp_runtime)
     message(FATAL_ERROR "The package config exposed an internal helper")
 endif()
-# apxchol's architecture flag must not reach consumers; only the Eigen
-# alignment it implies does.
+# apxchol's architecture flag must not reach consumers.
 get_target_property(_options apxchol::core INTERFACE_COMPILE_OPTIONS)
 if (_options MATCHES "-m(arch|cpu)=")
     message(FATAL_ERROR "apxchol::core exports an architecture flag: ${_options}")

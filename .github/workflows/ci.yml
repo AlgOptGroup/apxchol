@@ -15,6 +15,7 @@ on:
       - 'benchmarks/**/*.py'
       - 'benchmarks/requirements.txt'
       - 'benchmarks/CMakeLists.txt'
+      - 'benchmarks/eigen.cmake'
       - 'benchmarks/src/**'
       - 'benchmarks/tests/**'
       - 'benchmarks/patches/**'
@@ -154,7 +155,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ${{ matrix.packages }} libeigen3-dev ninja-build ccache
+          sudo apt-get install -y ${{ matrix.packages }} ninja-build ccache
       - uses: ./.github/actions/ccache
         with:
           key: native-${{ matrix.cc }}-${{ matrix.native_arch }}
@@ -183,31 +184,25 @@ jobs:
                 -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
                 -DCMAKE_CXX_FLAGS=-march=x86-64-v3 | tee subdirectory-march.log
           grep -q "using the -march/-mcpu flag from CMAKE_CXX_FLAGS" subdirectory-march.log
-          grep -q "exporting EIGEN_MAX_ALIGN_BYTES=32" subdirectory-march.log
           cmake --build build-subdirectory-march --parallel 2
           ctest --test-dir build-subdirectory-march --no-tests=error --output-on-failure
           # A portable core with a consumer built for a wider instruction set.
           cmake -S tests/cmake_subdirectory -B build-subdirectory-avx2 -G Ninja \
                 -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
-                -DAPXCHOL_TEST_CONSUMER_FLAGS=-mavx2 | tee subdirectory-avx2.log
-          grep -q "exporting EIGEN_MAX_ALIGN_BYTES=16" subdirectory-avx2.log
+                -DAPXCHOL_TEST_CONSUMER_FLAGS=-mavx2
           cmake --build build-subdirectory-avx2 --parallel 2
           ctest --test-dir build-subdirectory-avx2 --no-tests=error --output-on-failure
-      - name: Test relocated SDK with fetched Eigen
+      - name: Test relocated SDK
         if: matrix.cxx == 'clang++-18'
         run: |
-          eigen_config="$(sed -n 's/^Eigen3_DIR:[^=]*=//p' build/CMakeCache.txt)"
-          test -d "$eigen_config"
           cmake -S cmake/core -B build-sdk -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                -DAPXCHOL_NATIVE_ARCH=OFF -DCMAKE_DISABLE_FIND_PACKAGE_Eigen3=ON \
-                -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+                -DAPXCHOL_NATIVE_ARCH=OFF -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
           cmake --build build-sdk
           cmake --install build-sdk --prefix "$RUNNER_TEMP/apxchol-sdk"
           mv "$RUNNER_TEMP/apxchol-sdk" "$RUNNER_TEMP/apxchol-sdk-relocated"
           mv build-sdk build-sdk-relocated
           cmake -S tests/cmake_install -B build-sdk-consumer -G Ninja \
                 -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/apxchol-sdk-relocated" \
-                -DCMAKE_IGNORE_PATH="$eigen_config" \
                 -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF \
                 -DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF
           cmake --build build-sdk-consumer
@@ -229,7 +224,7 @@ jobs:
       - name: Install dependencies
         run: |
           apt-get update -qq
-          apt-get install -y --no-install-recommends cmake ninja-build libeigen3-dev ccache
+          apt-get install -y --no-install-recommends cmake ninja-build ccache
       - uses: ./.github/actions/ccache
         with:
           key: native-gcc15
@@ -261,7 +256,7 @@ jobs:
             https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i "$RUNNER_TEMP/cuda-keyring.deb"
           sudo apt-get update -qq
-          sudo apt-get install -y g++-14 libeigen3-dev ninja-build cuda-nvcc-13-4 cuda-cudart-dev-13-4 ccache
+          sudo apt-get install -y g++-14 ninja-build cuda-nvcc-13-4 cuda-cudart-dev-13-4 ccache
       - uses: ./.github/actions/ccache
         with:
           key: cuda13.4-gcc14-sm80
@@ -328,7 +323,7 @@ jobs:
           # Skip optional Java, plotting and documentation packages. Keep the
           # pthread BLAS/LAPACK runtime selected by the full Octave install.
           sudo apt-get install -y --no-install-recommends \
-            g++-14 octave octave-dev libeigen3-dev libopenblas0-pthread
+            g++-14 octave octave-dev libopenblas0-pthread
       - name: Build MEX + run tests
         env:
           CC: gcc-14
@@ -351,7 +346,7 @@ jobs:
           # Use the runner's official HTTPS mirrors for MATLAB's dependency downloads.
           sudo sed -i.bak '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update -qq
-          sudo apt-get install -y g++-13 libeigen3-dev
+          sudo apt-get install -y g++-13
       - uses: matlab-actions/setup-matlab@v3
         with:
           release: R2026b

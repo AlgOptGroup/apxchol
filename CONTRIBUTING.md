@@ -11,7 +11,7 @@ also runs the examples. Run one test while iterating with
 
 CI builds `tests/cmake_consumer` to check the
 [CMake consumer](docs/cpp.md#use-from-cmake) requirements with warnings as errors. The root-embedding
-consumer reuses the same alignment and original-residual checks:
+consumer reuses the same original-residual check:
 
 ```sh
 cmake -S tests/cmake_subdirectory -B build-subdirectory

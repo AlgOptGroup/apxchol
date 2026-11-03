@@ -1,7 +1,7 @@
 #pragma once
 // Serial matrix-to-adjacency oracle; independent of production graph builders.
 #include "apxchol/types.h"
-#include <Eigen/Sparse>
+#include "csc_test_util.h"
 #include <vector>
 
 class reference_graph {
@@ -10,17 +10,19 @@ class reference_graph {
     std::vector<double> excess_;
     apxchol::edge_index edges_ = 0;
 public:
-    explicit reference_graph(const Eigen::SparseMatrix<double>& A)
-        : adjacent_(A.rows()), excess_(A.rows()) {
-        for (int col = 0; col < A.outerSize(); ++col) {
+    explicit reference_graph(const apxchol::test::sparse_matrix& A)
+        : adjacent_(A.rows), excess_(A.rows) {
+        for (std::int64_t col = 0; col < A.cols; ++col) {
             double diagonal = 0, degree = 0;
-            for (Eigen::SparseMatrix<double>::InnerIterator it(A, col); it; ++it) {
-                if (it.row() == col) diagonal = it.value();
-                else degree -= it.value();
-                if (it.row() <= col) continue;
-                const double weight = static_cast<float>(-it.value());
-                adjacent_[col].push_back({static_cast<apxchol::node_index>(it.row()), weight});
-                adjacent_[it.row()].push_back({static_cast<apxchol::node_index>(col), weight});
+            for (auto p = A.col_ptr[col]; p < A.col_ptr[col + 1]; ++p) {
+                const std::int64_t row = A.row_idx[p];
+                const double value = A.values[p];
+                if (row == col) diagonal = value;
+                else degree -= value;
+                if (row <= col) continue;
+                const double weight = static_cast<float>(-value);
+                adjacent_[col].push_back({static_cast<apxchol::node_index>(row), weight});
+                adjacent_[row].push_back({static_cast<apxchol::node_index>(col), weight});
                 ++edges_;
             }
             const double excess = diagonal - degree;
