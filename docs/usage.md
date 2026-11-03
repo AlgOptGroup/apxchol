@@ -43,10 +43,10 @@ does not invent missing symmetric entries.
 C++ borrows the matrix as a `csc_view` (32-bit indices) or `csc_view64`
 (64-bit indices) from `apxchol/views.h`: the dimension `n`, `col_ptr` with
 `n + 1` offsets starting at 0, and `row_idx` and `values` with `col_ptr[n]`
-entries each. Rows must be sorted and unique within each column; an invalid
+entries each. Rows must be sorted and unique within each column. An invalid
 view throws `std::invalid_argument`. Because `A` is symmetric, CSR arrays can
-be passed unchanged. Index arrays as wide as the build's indices are used in
-place; the others are converted once during setup. The solver copies what it
+be passed unchanged. Setup uses index arrays of the build's width in place
+and converts other widths once. The solver copies what it
 needs, so the arrays only have to outlive the call that receives the view.
 [Input formats](input-formats.md) shows conversions from Eigen, CHOLMOD,
 SciPy, MATLAB/Octave and Matrix Market.
@@ -154,8 +154,11 @@ auto batch = solver.solve(apxchol::const_matrix_view{B.data(), n, k, n},
 ```
 
 Vectors are `std::span<double>` arguments, so a `std::vector`, an array or a
-pointer and length all work; `result.x` is a `std::vector<double>`. Matrix
-views are column-major with column stride `col_stride >= rows`. An empty `x0`
+pointer and length all work. The returned `result.x` is a `std::vector<double>`.
+Matrix views are column-major with column stride `col_stride >= rows`. For
+solve and apply, each view spans the range from its first element through its
+last, including padding between columns. The output range must be disjoint
+from each input range. An empty `x0`
 (the default) or a `const_matrix_view` with a null `data` starts from zero.
 
 One-shot `apxchol::solve(A, b, tol, max_iter, x0, opts)` uses the same backend
