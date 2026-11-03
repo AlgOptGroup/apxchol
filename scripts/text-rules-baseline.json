@@ -51,7 +51,7 @@
   "R7": 1
  },
  "docs/usage.md": {
-  "R1": 18,
+  "R1": 17,
   "R7": 1
  },
  "include/apxchol/solver/pcg_cuda.h": {

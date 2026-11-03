@@ -310,6 +310,34 @@ jobs:
   sdk:
     uses: ./.github/workflows/sdk.yml
 
+  input-formats:
+    name: input-format examples (Eigen, CHOLMOD, Matrix Market)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CC: gcc-14
+      CXX: g++-14
+      CMAKE_BUILD_PARALLEL_LEVEL: '3'
+    steps:
+      - uses: actions/checkout@v4
+      # Eigen and SuiteSparse are installed for these examples only; the
+      # library itself does not use them.
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y g++-14 libeigen3-dev libsuitesparse-dev ninja-build ccache
+      - uses: ./.github/actions/ccache
+        with:
+          key: input-formats-gcc14
+      - name: Build the examples of docs/input-formats.md
+        run: |
+          cmake -S examples/input_formats -B build-input-formats -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DAPXCHOL_NATIVE_ARCH=OFF -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+          cmake --build build-input-formats
+      - name: Run the examples
+        run: ctest --test-dir build-input-formats --no-tests=error --output-on-failure
+      - *ccache-stats
+
   octave:
     name: octave (mkoctfile + tests)
     runs-on: ubuntu-latest
@@ -332,6 +360,8 @@ jobs:
           cd octave
           ./build.sh
           octave --no-gui --eval "addpath(pwd); run('tests/test_apxchol.m')"
+      - name: Run the input-formats example
+        run: octave --no-gui --eval "addpath(fullfile(pwd, 'octave')); run('examples/input_formats/octave_input.m')"
 
   matlab:
     name: MATLAB (R2026b, GCC 13, MEX + tests)
