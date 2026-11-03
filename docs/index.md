@@ -17,6 +17,7 @@ Examples <docs/examples>
 :caption: User guide
 
 Using the solver <docs/usage>
+Input formats <docs/input-formats>
 Batching and factor reuse <docs/batching>
 Saving and loading <docs/serialization>
 Precision and convergence <docs/precision>
