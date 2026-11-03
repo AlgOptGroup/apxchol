@@ -7,10 +7,9 @@ defines their compatibility guarantees.
 
 ## Input views
 
-Every C++ call borrows the caller's arrays through these views; nothing is
-copied when a view is made. A `csc_view` holds 32-bit indices and a
-`csc_view64` 64-bit indices; both are checked at the call and an invalid view
-throws `std::invalid_argument`. Dense views are column-major.
+A view borrows the caller's arrays. Use `csc_view` for 32-bit indices and
+`csc_view64` for 64-bit indices. Calls check the view and throw
+`std::invalid_argument` for invalid input. Dense views are column-major.
 
 ```{doxygenstruct} apxchol::basic_csc_view
 :members: n, col_ptr, row_idx, values
