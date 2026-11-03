@@ -2097,10 +2097,10 @@ TEST(GpuBoundedSelection, OwnedZeroDegreeCandidatesMakeProgress) {
         std::vector<Eigen::Triplet<double>> diagonal;
         for (bounded_vertex v = 0; v < n; ++v) diagonal.emplace_back(v, v, 0.0);
         A.setFromTriplets(diagonal.begin(), diagonal.end());
-        ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(A));
+        ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(apxchol::detail::eigen_csc(A)));
         apxchol::detail::gpu_round_shadow_session owner(true);
         std::unique_ptr<apxchol::detail::gpu_block_frontend> gpu;
-        owner.initialize_owned_csc(apxchol::detail::gpu_owned_csc_host_buffers(A), gpu);
+        owner.initialize_owned_csc(apxchol::detail::gpu_owned_csc_host_buffers(apxchol::detail::eigen_csc(A)), gpu);
         std::vector<bounded_vertex> active(n);
         std::iota(active.begin(), active.end(), bounded_vertex{0});
         apxchol::partition_options options;

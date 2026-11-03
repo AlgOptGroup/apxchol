@@ -1506,8 +1506,11 @@ TEST(MetalOptions, AutomaticSelectionRejectsResidentIncompatibleOptions) {
     options.factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
     EXPECT_EQ(apxchol::detail::select_solve_backend(options, &A), apxchol::solve_backend::cpu);
     options.factor_opts.sampler = apxchol::clique_sampler::gks;
+    // Uncompressed Eigen storage is compressed at the library boundary.
+    const Sparse compressed = A;
     A.uncompress();
-    EXPECT_EQ(apxchol::detail::select_solve_backend(options, &A), apxchol::solve_backend::cpu);
+    EXPECT_EQ(apxchol::detail::select_solve_backend(options, &A),
+              apxchol::detail::select_solve_backend(options, &compressed));
     options.backend = apxchol::solve_backend::gpu;
     EXPECT_EQ(apxchol::detail::select_solve_backend(options, &A), apxchol::solve_backend::gpu);
 }

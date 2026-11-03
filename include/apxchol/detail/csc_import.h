@@ -1,5 +1,7 @@
 #pragma once
 
+#include "apxchol/detail/csc_matrix.h"
+#include "apxchol/detail/eigen_boundary.h"
 #include <Eigen/Sparse>
 #include <concepts>
 #include <cstdint>
@@ -10,8 +12,9 @@
 
 namespace apxchol::detail {
 
-// Copy foreign CSC arrays into Eigen's 32-bit layout. Operator validation is
-// separate; unsorted columns and duplicates retain setFromTriplets semantics.
+// Copy foreign CSC arrays into Eigen's 32-bit layout for the bindings.
+// Operator validation is separate; unsorted columns and duplicates are
+// assembled with setFromTriplets semantics (csc_from_triplets).
 template<std::integral Offset, std::integral Index>
 Eigen::SparseMatrix<double> import_csc(std::int64_t n, const Offset* outer,
                                      const Index* inner, const double* values,
@@ -58,13 +61,15 @@ Eigen::SparseMatrix<double> import_csc(std::int64_t n, const Offset* outer,
         return A;
     }
 
-    std::vector<Eigen::Triplet<double>> triplets;
+    std::vector<triplet> triplets;
     triplets.reserve(static_cast<std::size_t>(nnz));
     for (int j = 0; j < size; ++j)
         for (auto p = outer[j] - base; p < outer[j + 1] - base; ++p)
-            triplets.emplace_back(static_cast<int>(inner[p] - base), j, values[p]);
-    A.setFromTriplets(triplets.begin(), triplets.end());
-    return A;
+            triplets.push_back({static_cast<node_index>(inner[p] - base),
+                                static_cast<node_index>(j), values[p]});
+    const auto assembled = csc_from_triplets(static_cast<node_index>(size), triplets);
+    std::vector<triplet>().swap(triplets);
+    return to_eigen(assembled.ref());
 }
 
 } // namespace apxchol::detail

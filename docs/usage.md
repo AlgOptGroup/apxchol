@@ -62,9 +62,9 @@ selected backend. The MATLAB/Octave binding currently uses CPU only.
 
 ### Native GPU input and options
 
-For direct C++ input, GPU setup needs compressed CSC storage: column offsets
-must cover only stored entries, row indices within each column must be sorted
-and unique, and every stored off-diagonal `(i, j)` needs its matching `(j, i)`.
+For direct C++ input, GPU setup needs sorted CSC storage: row indices within
+each column must be sorted and unique, and every stored off-diagonal `(i, j)`
+needs its matching `(j, i)`. Uncompressed Eigen matrices are compressed first.
 GPU setup also requires 32-bit vertex indices.
 
 CPU setup supports custom partitioners and eliminators. CUDA setup supports

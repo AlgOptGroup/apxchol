@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "apxchol/detail/eigen_boundary.h"
 #include <Eigen/Core>
 
 #include "apxchol/solver/detail/metal_host.h"
@@ -115,6 +116,10 @@ TEST(MetalHost, ScalingRemainsFiniteAtFloatingPointLimits) {
     }
 }
 
+// Eigen test vectors as the library's strided views.
+template<class Vector>
+apxchol::detail::const_matrix_ref view(const Vector& v) { return apxchol::detail::dense_of(v); }
+
 TEST(MetalHost, NormAcrossMagnitudes) {
     for (const double scale : {0.0, std::numeric_limits<double>::denorm_min(),
                                0x1p-530, 1e-200, 1.0, 1e200,
@@ -122,20 +127,20 @@ TEST(MetalHost, NormAcrossMagnitudes) {
         SCOPED_TRACE(scale);
         const Eigen::Vector2d v(3 * scale, 4 * scale);
         const double expected = std::hypot(v[0], v[1]);
-        if (expected == 0.0) EXPECT_EQ(mh::norm(v), 0.0);
-        else EXPECT_NEAR(mh::norm(v) / expected, 1.0, 4 * std::numeric_limits<double>::epsilon());
+        if (expected == 0.0) EXPECT_EQ(mh::norm(view(v)), 0.0);
+        else EXPECT_NEAR(mh::norm(view(v)) / expected, 1.0, 4 * std::numeric_limits<double>::epsilon());
     }
     for (const Eigen::Vector2d& v : {Eigen::Vector2d(1.0, 1e-200),
                                      Eigen::Vector2d(1e200, 1e-200)}) {
         const double expected = std::hypot(v[0], v[1]);
-        EXPECT_NEAR(mh::norm(v) / expected, 1.0, 4 * std::numeric_limits<double>::epsilon());
+        EXPECT_NEAR(mh::norm(view(v)) / expected, 1.0, 4 * std::numeric_limits<double>::epsilon());
     }
     const Eigen::Vector2f narrow(1e-22f, 3e-22f);
     const double expected = std::hypot(double(narrow[0]), double(narrow[1]));
-    EXPECT_NEAR(mh::norm(narrow) / expected, 1.0, 4 * std::numeric_limits<float>::epsilon());
-    EXPECT_EQ(mh::norm(Eigen::VectorXd{}), 0.0);
-    EXPECT_TRUE(std::isinf(mh::norm(Eigen::Vector2d(std::numeric_limits<double>::infinity(), 1.0))));
-    EXPECT_TRUE(std::isnan(mh::norm(Eigen::Vector2d(std::numeric_limits<double>::quiet_NaN(), 1.0))));
+    EXPECT_NEAR(mh::norm(view(Eigen::Vector2d(narrow.cast<double>()))) / expected, 1.0, 4 * std::numeric_limits<float>::epsilon());
+    EXPECT_EQ(mh::norm(view(Eigen::VectorXd{})), 0.0);
+    EXPECT_TRUE(std::isinf(mh::norm(view(Eigen::Vector2d(std::numeric_limits<double>::infinity(), 1.0)))));
+    EXPECT_TRUE(std::isnan(mh::norm(view(Eigen::Vector2d(std::numeric_limits<double>::quiet_NaN(), 1.0)))));
 }
 
 TEST(MetalHost, RelativeNormSurvivesOverflowingVectorNorm) {
@@ -143,10 +148,10 @@ TEST(MetalHost, RelativeNormSurvivesOverflowingVectorNorm) {
         const Eigen::VectorXd rhs = Eigen::VectorXd::Constant(16, magnitude);
         Eigen::VectorXd residual = Eigen::VectorXd::Zero(16);
         residual[0] = magnitude;
-        const mh::norm_reference reference(rhs);
-        EXPECT_DOUBLE_EQ(reference.relative(residual), 0.25);
+        const mh::norm_reference reference(view(rhs));
+        EXPECT_DOUBLE_EQ(reference.relative(view(residual)), 0.25);
         const double scale = mh::pow2_scale(magnitude);
-        EXPECT_DOUBLE_EQ(reference.scaled(scale), mh::norm(rhs * scale));
+        EXPECT_DOUBLE_EQ(reference.scaled(scale), mh::norm(view(Eigen::VectorXd(rhs * scale))));
         EXPECT_TRUE(std::isfinite(reference.scaled(scale)));
     }
 }
@@ -156,15 +161,15 @@ TEST(MetalHost, RelativeNormDoesNotUnderflowBeforeReduction) {
     rhs.head(4).setConstant(1e308);
     Eigen::VectorXd residual = rhs;
     residual.head(4).setZero();
-    const mh::norm_reference reference(rhs);
+    const mh::norm_reference reference(view(rhs));
     // sqrt(97) * 2e-16 / 2e308 rounds to two binary64 subnormal units.
-    EXPECT_EQ(reference.relative(residual), 2 * std::numeric_limits<double>::denorm_min());
+    EXPECT_EQ(reference.relative(view(residual)), 2 * std::numeric_limits<double>::denorm_min());
 }
 
 TEST(MetalHost, RelativeNormHandlesOverflowingResidualNorm) {
     const Eigen::Vector4d rhs = Eigen::Vector4d::Constant(5e307);
     const Eigen::Vector4d residual = Eigen::Vector4d::Constant(1e308);
-    EXPECT_DOUBLE_EQ(mh::norm_reference(rhs).relative(residual), 2.0);
+    EXPECT_DOUBLE_EQ(mh::norm_reference(view(rhs)).relative(view(residual)), 2.0);
 }
 
 TEST(MetalHost, FactorStorageReconstructsFiniteValues) {

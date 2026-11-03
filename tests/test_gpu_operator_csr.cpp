@@ -21,8 +21,29 @@
 #include "apxchol/solver/pcg_cuda_kernels.h"
 #include "apxchol/solver/pcg_cuda.h"
 #include "apxchol/solver/detail/solver_route.h"
+#include "apxchol/detail/eigen_boundary.h"
+#include <optional>
 #include <cuda_runtime.h>
 namespace {
+
+// cuda_pcg takes the library's own CSC and dense views; convert Eigen fixtures.
+[[maybe_unused]] void setup(apxchol::detail::cuda_pcg& pcg, const Eigen::SparseMatrix<double>& A,
+           const std::vector<apxchol::node_index>& perm, bool verbose = false) {
+    const apxchol::detail::eigen_csc input(A);
+    if (!input.square()) throw std::invalid_argument("GPU PCG requires a square operator");
+    pcg.setup(input.ref(), perm, verbose);
+}
+
+template<unsigned C, class Precond, class Input, class Output>
+void solve_panel(apxchol::detail::cuda_pcg& pcg, const Precond& precond, const Input& b,
+                 Output& x, double tol, int max_iter, std::array<int, C>& iterations,
+                 std::array<double, C>& residuals, bool laplacian, const Input* x0 = nullptr) {
+    std::optional<apxchol::detail::const_matrix_ref> initial;
+    if (x0) initial.emplace(apxchol::detail::dense_of(*x0));
+    pcg.solve_panel<C>(precond, apxchol::detail::dense_of(b), apxchol::detail::dense_of(x), tol,
+                       max_iter, iterations, residuals, laplacian, initial ? &*initial : nullptr);
+}
+
 using apxchol::detail::cuda_pcg_kernels::operator_csr;
 using apxchol::detail::cuda_pcg_kernels::try_build_permuted_operator_csr;
 struct HostCsc {
@@ -203,7 +224,7 @@ void pcg_solve(apxchol::detail::cuda_pcg& pcg, const Precond& precond, const Eig
     std::array<int, 1> count{};
     std::array<double, 1> rr{};
     x.resize(b.size());
-    pcg.solve_panel<1>(precond, b, x, tol, max_iter, count, rr, laplacian, x0);
+    solve_panel<1>(pcg, precond, b, x, tol, max_iter, count, rr, laplacian, x0);
     iterations = count[0];
     residual = rr[0];
 }
@@ -432,7 +453,7 @@ TEST(GpuOperatorCsr, ConsumingSolveKeepsDefaultStorageAndOriginalResidual) {
         EXPECT_TRUE(preconditioner.trsv().fp16());
         EXPECT_GT(preconditioner.trsv().drop_stats().rel,0.0);
         apxchol::detail::cuda_pcg solver;
-        solver.setup(A,preconditioner.factor().perm);
+        setup(solver, A,preconditioner.factor().perm);
         EXPECT_TRUE(solver.fp32_operator());
         Eigen::VectorXd result;int iterations=0;double reported=0;
         pcg_solve(solver, preconditioner,b,result,1e-8,1000,iterations,reported,shift==0.0);
@@ -464,7 +485,7 @@ TEST(GpuSolveHonesty, ScalarAndBatchContinueAfterSlowProgress) {
     std::vector<apxchol::node_index> permutation(n);
     std::iota(permutation.begin(), permutation.end(), 0);
     apxchol::detail::cuda_pcg solver;
-    solver.setup(matrix, permutation);
+    setup(solver, matrix, permutation);
     const TestPreconditioner identity{n};
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(n);
     Eigen::MatrixXd B(n, 4), X(n, 4);
@@ -495,7 +516,7 @@ TEST(GpuSolveHonesty, ScalarAndBatchContinueAfterSlowProgress) {
         check(rhs, x, iterations, residual);
         std::array<int, 4> counts{};
         std::array<double, 4> residuals{};
-        solver.solve_panel<4>(identity, B, X, 1e-8, budget, counts, residuals, false);
+        solve_panel<4>(solver, identity, B, X, 1e-8, budget, counts, residuals, false);
         EXPECT_EQ(counts[1], 0);
         EXPECT_EQ(residuals[1], 0.0);
         EXPECT_TRUE(X.col(1).isZero(0.0));
@@ -524,7 +545,7 @@ TEST(GpuSolveHonesty, FinalResidualChecksReturnedScalarAndPairOnReuse) {
         std::vector<apxchol::node_index> perm(n);
         for (int i = 0; i < n; ++i) perm[i] = n - 1 - i;
         apxchol::detail::cuda_pcg solver;
-        solver.setup(a, perm);
+        setup(solver, a, perm);
         EXPECT_EQ(solver.fp32_operator(), fp32);
         TestPreconditioner preconditioner{n};
         Eigen::VectorXd exact(n);
@@ -550,7 +571,7 @@ TEST(GpuSolveHonesty, FinalResidualChecksReturnedScalarAndPairOnReuse) {
             std::array<double, 2> residuals{};
             for (int limit : {0, 2, 100}) {
                 SCOPED_TRACE(limit);
-                solver.solve_panel<2>(preconditioner, rhs, output, 1e-12, limit,
+                solve_panel<2>(solver, preconditioner, rhs, output, 1e-12, limit,
                                   counts, residuals, laplacian, &warm);
                 for (int q = 0; q < 2; ++q)
                     EXPECT_NEAR(residuals[q], independent_residual(a, rhs.col(q), output.col(q)), 2e-14);
@@ -588,7 +609,7 @@ TEST(GpuSolveHonesty, FinalResidualChecksReturnedScalarAndPairOnReuse) {
         std::array<int, 4> counts{};
         std::array<double, 4> residuals{};
         preconditioner.calls = 0;
-        solver.solve_panel<4>(preconditioner, rhs, panel, 1e-12, 100, counts, residuals, laplacian);
+        solve_panel<4>(solver, preconditioner, rhs, panel, 1e-12, 100, counts, residuals, laplacian);
         EXPECT_EQ(preconditioner.calls, one_batch);
         EXPECT_EQ(counts, (std::array<int, 4>{1, 0, 1, 1}));
         for (unsigned q = 0; q < 4; ++q)
@@ -608,7 +629,7 @@ TEST(GpuSolveHonesty, ResidualIncludesRoundingWhenRestoringSubnormalSolutions) {
     a.makeCompressed();
     const std::vector<apxchol::node_index> perm{2, 0, 1};
     apxchol::detail::cuda_pcg solver;
-    solver.setup(a, perm);
+    setup(solver, a, perm);
     TestPreconditioner preconditioner{n};
     const double tiny = std::numeric_limits<double>::denorm_min();
     Eigen::MatrixXd b(n, 2), output(n, 2);
@@ -616,7 +637,7 @@ TEST(GpuSolveHonesty, ResidualIncludesRoundingWhenRestoringSubnormalSolutions) {
     b.col(1).setOnes();
     std::array<int, 2> iterations{};
     std::array<double, 2> residuals{};
-    solver.solve_panel<2>(preconditioner, b, output, 1e-12, 10, iterations, residuals, false);
+    solve_panel<2>(solver, preconditioner, b, output, 1e-12, 10, iterations, residuals, false);
     EXPECT_GT(residuals[0], 1e-3);
     for (int q = 0; q < 2; ++q)
         EXPECT_NEAR(residuals[q], independent_residual(a, b.col(q), output.col(q)), 2e-14);
@@ -632,7 +653,7 @@ TEST(GpuSolveHonesty, ResidualIncludesRoundingWhenRestoringSubnormalSolutions) {
     EXPECT_NEAR(residual, independent_residual(a, ordinary, x), 2e-14);
 
     a *= 1.0 / 13.0; // 0.25 I: the restored solution exceeds the finite range.
-    solver.setup(a, perm);
+    setup(solver, a, perm);
     const Eigen::VectorXd overflow = Eigen::VectorXd::Constant(n, std::numeric_limits<double>::max() / 2);
     EXPECT_THROW(pcg_solve(solver, preconditioner, overflow, x, 1e-12, 10, count, residual, false),
                  std::overflow_error);
@@ -655,7 +676,7 @@ TEST(GpuSolveHonesty, FinalResidualDoesNotSquareAwayTinyErrors) {
         std::vector<apxchol::node_index> perm(n);
         std::iota(perm.begin(), perm.end(), 0);
         apxchol::detail::cuda_pcg solver;
-        solver.setup(a, perm);
+        setup(solver, a, perm);
         TestPreconditioner preconditioner{n};
         const double expected = test.residual;
         Eigen::VectorXd b = Eigen::VectorXd::Constant(n, test.tail);
@@ -676,7 +697,7 @@ TEST(GpuSolveHonesty, FinalResidualDoesNotSquareAwayTinyErrors) {
         initial.col(1).setZero();
         std::array<int, 2> counts{};
         std::array<double, 2> residuals{};
-        solver.solve_panel<2>(preconditioner, rhs, output, 1e-250, 0, counts, residuals, false, &initial);
+        solve_panel<2>(solver, preconditioner, rhs, output, 1e-250, 0, counts, residuals, false, &initial);
         EXPECT_GT(residuals[0], 0);
         EXPECT_DOUBLE_EQ(residuals[0] / expected, 1.0);
         EXPECT_DOUBLE_EQ(residuals[1], 0.0);
@@ -696,7 +717,7 @@ TEST(GpuSolveHonesty, FinalResidualDoesNotOverflowBeforeNormalization) {
     for (int i = 0; i < n; ++i) a.insert(i, i) = coefficient;
     a.makeCompressed();
     apxchol::detail::cuda_pcg solver;
-    solver.setup(a, {0, 1, 2, 3, 4});
+    setup(solver, a, {0, 1, 2, 3, 4});
     TestPreconditioner preconditioner{n};
     const Eigen::VectorXd b = Eigen::VectorXd::Constant(n, 2);
     const Eigen::VectorXd warm = Eigen::VectorXd::Ones(n);
@@ -713,7 +734,7 @@ TEST(GpuSolveHonesty, FinalResidualDoesNotOverflowBeforeNormalization) {
     initial.col(1).setZero();
     std::array<int, 2> counts{};
     std::array<double, 2> residuals{};
-    solver.solve_panel<2>(preconditioner, rhs, output, 1e-8, 0, counts, residuals, false, &initial);
+    solve_panel<2>(solver, preconditioner, rhs, output, 1e-8, 0, counts, residuals, false, &initial);
     EXPECT_DOUBLE_EQ(residuals[0] / (coefficient / 2), 1.0);
     EXPECT_DOUBLE_EQ(residuals[1], 0.0);
     EXPECT_EQ(counts, (std::array<int, 2>{0, 0}));
@@ -742,7 +763,7 @@ TEST(GpuOperatorCsr, DeviceSetupRejectsUnsupportedStorage) {
     ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
     apxchol::detail::cuda_pcg solver;
     testing::internal::CaptureStderr();
-    solver.setup(A, preconditioner.factor().perm, true);
+    setup(solver, A, preconditioner.factor().perm, true);
     const auto diagnostic = testing::internal::GetCapturedStderr();
     EXPECT_NE(diagnostic.find("[gpu-operator-builder] route=device completion_wait=1"),
               std::string::npos);
@@ -762,20 +783,19 @@ TEST(GpuOperatorCsr, DeviceSetupRejectsUnsupportedStorage) {
     // mandatory. None of these failures may invoke the retired host builder.
     Eigen::SparseMatrix<double> lower = A.triangularView<Eigen::Lower>();
     Eigen::SparseMatrix<double> upper = A.triangularView<Eigen::Upper>();
-    auto uncompressed = A;
-    uncompressed.uncompress();
-    for (const auto* bad : {&lower, &upper, &uncompressed}) {
+    // Uncompressed Eigen storage is compressed at the library boundary.
+    for (const auto* bad : {&lower, &upper}) {
         apxchol::detail::cuda_pcg rejected;
-        EXPECT_THROW(rejected.setup(*bad, preconditioner.factor().perm),
+        EXPECT_THROW(setup(rejected, *bad, preconditioner.factor().perm),
                      std::invalid_argument);
     }
     Eigen::SparseMatrix<double> nonsquare(n, n + 1);
     apxchol::detail::cuda_pcg rejected;
-    EXPECT_THROW(rejected.setup(nonsquare, preconditioner.factor().perm),
+    EXPECT_THROW(setup(rejected, nonsquare, preconditioner.factor().perm),
                  std::invalid_argument);
     auto short_perm = preconditioner.factor().perm;
     short_perm.pop_back();
-    EXPECT_THROW(rejected.setup(A, short_perm), std::invalid_argument);
+    EXPECT_THROW(setup(rejected, A, short_perm), std::invalid_argument);
 #endif
 }
 

@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "apxchol/detail/eigen_boundary.h"
 
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 #include "apxchol/solver/gpu_block_frontend.h"
@@ -63,14 +64,14 @@ TEST(GpuBlockFrontend, OwnedBoundedSelectionMakesIndependentProgress) {
         SCOPED_TRACE(n);
         const auto fixture = make_fixture(n);
         const auto matrix = owned_matrix(fixture);
-        ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(matrix));
+        ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(apxchol::detail::eigen_csc(matrix)));
         for (const bool degree_tiebreak : {false, true}) {
             SCOPED_TRACE(degree_tiebreak);
             // Destruction is ordered: the borrowing frontend dies before its
             // numerical owner; both die before the input matrix's outer scope.
             apxchol::detail::gpu_round_shadow_session owner(true);
             std::unique_ptr<gpu_block_frontend> gpu;
-            owner.initialize_owned_csc(apxchol::detail::gpu_owned_csc_host_buffers(matrix), gpu);
+            owner.initialize_owned_csc(apxchol::detail::gpu_owned_csc_host_buffers(apxchol::detail::eigen_csc(matrix)), gpu);
             ASSERT_TRUE(gpu);
             apxchol::partition_options options;
             options.degree_quantile = 0.0;

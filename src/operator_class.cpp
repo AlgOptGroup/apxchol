@@ -20,7 +20,7 @@ namespace {
 /// SDDM excess). Absorbs fp accumulation-order ulps.
 constexpr double kRowSumRelTol = 1e-10;
 
-std::string count_of(Eigen::Index k, Eigen::Index n, const char* what) {
+std::string count_of(std::int64_t k, std::int64_t n, const char* what) {
     return std::to_string(k) + " of " + std::to_string(n) + " " + what;
 }
 
@@ -30,13 +30,13 @@ std::string num(double v) {
     return buf;
 }
 
-/// Half-open stored range of column `k`, valid for a compressed OR uncompressed
-/// SparseMatrix. Eigen keeps each column's inner indices sorted either way,
-/// which is what the binary search below relies on.
+/// Half-open stored range of column `k`. Binary searches below need sorted
+/// columns; unsorted input only loses their exactness, which the scan's own
+/// `ordered` flag reports.
 struct col_range {
-    const int* inner;
+    const node_index* inner;
     const double* value;
-    Eigen::Index begin, end;
+    std::int64_t begin, end;
 };
 
 /// Merge sums in thread order for reproducibility at a fixed team size.
@@ -45,38 +45,34 @@ struct col_range {
 struct alignas(64) witness {
     double abs_mass = 0.0;
     double pos_mass = 0.0;
-    Eigen::Index bad_diag = -1;
+    std::int64_t bad_diag = -1;
     double bad_diag_value = 0.0;
     double asym_rel = 0.0;
-    Eigen::Index asym_row = -1, asym_col = -1;
+    std::int64_t asym_row = -1, asym_col = -1;
     double asym_a = 0.0, asym_b = 0.0;
     double row_sum = 0.0;
-    Eigen::Index row = -1;
+    std::int64_t row = -1;
 };
 
-col_range column(const Eigen::SparseMatrix<double>& A, Eigen::Index k) {
-    const int* outer = A.outerIndexPtr();
-    const Eigen::Index b = outer[k];
-    const Eigen::Index e = A.isCompressed() ? outer[k + 1]
-                                            : b + A.innerNonZeroPtr()[k];
-    return {A.innerIndexPtr(), A.valuePtr(), b, e};
+col_range column(csc_ref<double> A, std::int64_t k) {
+    return {A.idx, A.val, static_cast<std::int64_t>(A.ptr[k]),
+            static_cast<std::int64_t>(A.ptr[k + 1])};
 }
 
 /// A(row, col) by binary search inside `A` itself. 0 when not stored.
 /// No transpose is materialized, so the symmetry test costs no memory.
-double lookup(const Eigen::SparseMatrix<double>& A, Eigen::Index row,
-              Eigen::Index col) {
+double lookup(csc_ref<double> A, std::int64_t row, std::int64_t col) {
     const col_range c = column(A, col);
-    const int* first = c.inner + c.begin;
-    const int* last  = c.inner + c.end;
-    const int* it = std::lower_bound(first, last, static_cast<int>(row));
-    if (it == last || *it != static_cast<int>(row)) return 0.0;
+    const node_index* first = c.inner + c.begin;
+    const node_index* last  = c.inner + c.end;
+    const node_index* it = std::lower_bound(first, last, static_cast<node_index>(row));
+    if (it == last || *it != static_cast<node_index>(row)) return 0.0;
     return c.value[c.begin + (it - first)];
 }
 
 } // namespace
 
-operator_scan scan_operator(const Eigen::SparseMatrix<double>& A) {
+operator_scan scan_operator(csc_ref<double> A) {
     operator_scan s;
     s.rows = A.rows();
     s.cols = A.cols();
@@ -92,10 +88,10 @@ operator_scan scan_operator(const Eigen::SparseMatrix<double>& A) {
     const int nt = omp_get_max_threads();
     std::vector<witness> wit(static_cast<std::size_t>(nt));
 
-    Eigen::Index stored = 0, nonfinite = 0, offdiag = 0, offpos = 0;
-    Eigen::Index nonempty = 0, diagpos = 0, baddiag = 0;
-    Eigen::Index asym = 0, deficient = 0, excess = 0;
-    Eigen::Index upper = 0, lower = 0;
+    std::int64_t stored = 0, nonfinite = 0, offdiag = 0, offpos = 0;
+    std::int64_t nonempty = 0, diagpos = 0, baddiag = 0;
+    std::int64_t asym = 0, deficient = 0, excess = 0;
+    std::int64_t upper = 0, lower = 0;
     // Symmetry is decided in two stages. This pass streams an order-independent
     // fingerprint of every nonzero off-diagonal entry into one sum per triangle
     // (detail::symmetric_entry_hash) and records whether each column is strictly
@@ -109,7 +105,7 @@ operator_scan scan_operator(const Eigen::SparseMatrix<double>& A) {
     // 0.7 on a grid), so it is worth paying only when something is actually
     // asymmetric.
     std::uint64_t hash_lower = 0, hash_upper = 0;
-    Eigen::Index offdiag_zero = 0;
+    std::int64_t offdiag_zero = 0;
     bool ordered = true;
 
     // schedule(static), not dynamic: it fixes which columns a thread owns, so
@@ -119,14 +115,14 @@ operator_scan scan_operator(const Eigen::SparseMatrix<double>& A) {
                       baddiag, deficient, excess, upper, lower, offdiag_zero, \
                       hash_lower, hash_upper) \
         reduction(&& : ordered)
-    for (Eigen::Index k = 0; k < s.cols; ++k) {
+    for (std::int64_t k = 0; k < s.cols; ++k) {
         const int tid = omp_get_thread_num();
         witness& w = wit[static_cast<std::size_t>(tid)];
         const col_range c = column(A, k);
         double colsum = 0.0, diag = 0.0;
         bool any_nonzero = false;
-        for (Eigen::Index p = c.begin; p < c.end; ++p) {
-            const Eigen::Index i = c.inner[p];
+        for (std::int64_t p = c.begin; p < c.end; ++p) {
+            const std::int64_t i = c.inner[p];
             const double v = c.value[p];
             if (p > c.begin && c.inner[p - 1] >= c.inner[p]) ordered = false;
             ++stored;
@@ -183,12 +179,12 @@ operator_scan scan_operator(const Eigen::SparseMatrix<double>& A) {
         // upper entry is matched too. Same columns per thread as the pass
         // above, and the witness tie-break does not depend on the schedule.
         #pragma omp parallel for schedule(static) reduction(+ : asym)
-        for (Eigen::Index k = 0; k < s.cols; ++k) {
+        for (std::int64_t k = 0; k < s.cols; ++k) {
             const int tid = omp_get_thread_num();
             witness& w = wit[static_cast<std::size_t>(tid)];
             const col_range c = column(A, k);
-            for (Eigen::Index p = c.begin; p < c.end; ++p) {
-                const Eigen::Index i = c.inner[p];
+            for (std::int64_t p = c.begin; p < c.end; ++p) {
+                const std::int64_t i = c.inner[p];
                 const double v = c.value[p];
                 if (i <= k || v == 0.0 || !std::isfinite(v)) continue;
                 const double t = lookup(A, k, i);
@@ -247,6 +243,9 @@ operator_scan scan_operator(const Eigen::SparseMatrix<double>& A) {
     return s;
 }
 
+static const char* const kConversion =
+    "Input conversion needs a square, finite, symmetric matrix. ";
+
 // Shared by the operator check and the input conversion.
 static std::string nonfinite_entries(const operator_scan& s) {
     return count_of(s.nonfinite, s.stored_nnz, "stored entries") + " are NaN or infinite.";
@@ -276,31 +275,31 @@ static std::string adjacency_hint(const operator_scan& s) {
            "MATLAB/Octave.";
 }
 
-operator_scan require_operator(const Eigen::SparseMatrix<double>& A, double lump_max_mass) {
+static const char* const kContract =
+    "apxchol solves symmetric SDDM / Laplacian operators (A = A^T, "
+    "a_ii > 0, a_ij <= 0 for i != j). ";
+
+void throw_operator_not_square(std::int64_t rows, std::int64_t cols) {
+    throw std::invalid_argument(
+        std::string(kContract) + "This matrix is not square: " +
+        std::to_string(rows) + " rows, " + std::to_string(cols) + " columns.");
+}
+
+operator_scan require_operator(csc_ref<double> A, double lump_max_mass) {
     detail::validate_lump_max_mass(lump_max_mass);
-    const std::string kContract =
-        "apxchol solves symmetric SDDM / Laplacian operators (A = A^T, "
-        "a_ii > 0, a_ij <= 0 for i != j). ";
-
-    if (A.rows() != A.cols())
-        throw std::invalid_argument(
-            kContract + "This matrix is not square: " +
-            std::to_string(A.rows()) + " rows, " + std::to_string(A.cols()) +
-            " columns.");
-
     const operator_scan s = scan_operator(A);
 
     if (s.nonfinite > 0)
         throw std::invalid_argument(
-            kContract + "Condition FAILED: finite values. " + nonfinite_entries(s));
+            std::string(kContract) + "Condition FAILED: finite values. " + nonfinite_entries(s));
 
     if (s.asymmetric > 0) {
-        std::string msg = kContract + "Condition FAILED: symmetry. " + asymmetry(s);
+        std::string msg = std::string(kContract) + "Condition FAILED: symmetry. " + asymmetry(s);
         throw std::invalid_argument(msg);
     }
 
     if (s.bad_diag > 0) {
-        std::string msg = kContract + "Condition FAILED: positive diagonal. " +
+        std::string msg = std::string(kContract) + "Condition FAILED: positive diagonal. " +
             count_of(s.bad_diag, s.nonempty, "non-empty rows") +
             " carry a diagonal entry that is missing or <= 0";
         if (s.first_bad_diag >= 0)
@@ -318,7 +317,7 @@ operator_scan require_operator(const Eigen::SparseMatrix<double>& A, double lump
         const double rho = s.positive_mass_fraction();
         if (lump_max_mass == 0 || rho > lump_max_mass)
             throw std::invalid_argument(
-                kContract + "Condition FAILED: non-positive off-diagonals. " +
+                std::string(kContract) + "Condition FAILED: non-positive off-diagonals. " +
                 count_of(s.offdiag_pos, s.offdiag_nnz, "off-diagonal entries") +
                 " are positive, carrying " + num(100.0 * rho) +
                 "% of the off-diagonal mass; lump_max_mass permits at most " +
@@ -328,60 +327,94 @@ operator_scan require_operator(const Eigen::SparseMatrix<double>& A, double lump
     return s;
 }
 
-Eigen::Index lump_positive_offdiagonals(Eigen::SparseMatrix<double>& A) {
-    if (A.rows() != A.cols() || A.rows() == 0) return 0;
-    A.makeCompressed();
-
-    const Eigen::Index n = A.cols();
-    const int* outer = A.outerIndexPtr();
-    const int* inner = A.innerIndexPtr();
-    double* value = A.valuePtr();
-
-    // PASS 1: zero every positive off-diagonal and accumulate, per column, the
-    // mass it carried. Column k holds a_ik for all i, so its positive mass is
-    // (by symmetry) row k's — exactly what a_kk must absorb.
-    std::vector<double> add(static_cast<std::size_t>(n), 0.0);
-    Eigen::Index removed = 0;
-    #pragma omp parallel for schedule(dynamic, 1024) reduction(+ : removed)
-    for (Eigen::Index k = 0; k < n; ++k) {
-        double p = 0.0;
-        for (Eigen::Index q = outer[k]; q < outer[k + 1]; ++q) {
-            if (inner[q] == k) continue;
-            const double v = value[q];
-            if (v > 0.0) { p += v; value[q] = 0.0; ++removed; }
-        }
-        add[static_cast<std::size_t>(k)] = p;
-    }
-    if (removed == 0) return 0;
-
-    // PASS 2: move the mass onto the diagonal. `require_operator` has already
-    // established that every row carrying entries carries a positive diagonal,
-    // so the slot always exists and nothing is inserted.
-    #pragma omp parallel for schedule(dynamic, 1024)
-    for (Eigen::Index k = 0; k < n; ++k) {
-        const double p = add[static_cast<std::size_t>(k)];
-        if (p == 0.0) continue;
-        for (Eigen::Index q = outer[k]; q < outer[k + 1]; ++q)
-            if (inner[q] == k) { value[q] += p; break; }
-    }
-
-    // Drop the zeroed entries: a stored 0 would otherwise reach make_graph as a
-    // zero-WEIGHT edge and inflate the vertex degrees it feeds the sampler.
-    A.prune(0.0, 0.0);
-    return removed;
+// Value of a stored entry after lumping: positive off-diagonals become zero
+// and the first stored diagonal entry gains the column's positive mass p.
+static double lumped_value(node_index row, std::int64_t col, double v, double p, bool& absorbed) {
+    if (row != static_cast<node_index>(col)) return v > 0.0 ? 0.0 : v;
+    if (absorbed) return v;
+    absorbed = true;
+    return v + p;
 }
 
-operator_view::operator_view(const Eigen::SparseMatrix<double>& A, double lump_max_mass)
-    : src_(&A), scan_(require_operator(A, lump_max_mass)) {
+csc_matrix<double> lump_positive_offdiagonals(csc_ref<double> A, std::int64_t& removed) {
+    removed = 0;
+    const std::int64_t n = A.n;
+    const edge_index* outer = A.ptr;
+    const node_index* inner = A.idx;
+    const double* value = A.val;
+
+    // PASS 1, per column k: the positive off-diagonal mass it carries (by
+    // symmetry row k's, which a_kk absorbs) in stored order, and the entries
+    // that stay. An entry stays unless its final value is exactly zero: a
+    // positive off-diagonal is zeroed, a diagonal gains the mass, the rest
+    // keep their value -- the same entries Eigen's prune(0, 0) kept after the
+    // in-place transform. Each column's work is serial, so the split cannot
+    // change a value.
+    std::vector<double> add(static_cast<std::size_t>(n), 0.0);
+    std::vector<edge_index> kept(static_cast<std::size_t>(n) + 1, 0);
+    std::int64_t positives = 0;
+    #pragma omp parallel reduction(+ : positives)
+    {
+        const auto [lo, hi] = work_balanced_range(outer, n);
+        for (std::int64_t k = lo; k < hi; ++k) {
+            double p = 0.0;
+            for (edge_index q = outer[k]; q < outer[k + 1]; ++q) {
+                if (inner[q] == static_cast<node_index>(k)) continue;
+                const double v = value[q];
+                if (v > 0.0) { p += v; ++positives; }
+            }
+            add[static_cast<std::size_t>(k)] = p;
+            edge_index count = 0;
+            bool absorbed = p == 0.0;
+            for (edge_index q = outer[k]; q < outer[k + 1]; ++q) {
+                const double result = lumped_value(inner[q], k, value[q], p, absorbed);
+                count += result != 0.0;
+            }
+            kept[static_cast<std::size_t>(k) + 1] = count;
+        }
+    }
+    removed = positives;
+    for (std::int64_t k = 0; k < n; ++k)
+        kept[static_cast<std::size_t>(k) + 1] += kept[static_cast<std::size_t>(k)];
+
+    // PASS 2: write the kept entries. `require_operator` has already
+    // established that every row carrying entries carries a positive
+    // diagonal, so the mass always lands on a stored slot and nothing is
+    // inserted. Dropping the zeroed entries keeps a stored 0 from reaching
+    // make_graph as a zero-WEIGHT edge that would inflate the vertex degrees
+    // it feeds the sampler.
+    csc_matrix<double> out(A.n, kept[static_cast<std::size_t>(n)]);
+    #pragma omp parallel
+    {
+        const auto [lo, hi] = work_balanced_range(outer, n);
+        for (std::int64_t k = lo; k < hi; ++k) {
+            const double p = add[static_cast<std::size_t>(k)];
+            edge_index at = kept[static_cast<std::size_t>(k)];
+            out.ptr()[k] = at;
+            bool absorbed = p == 0.0;
+            for (edge_index q = outer[k]; q < outer[k + 1]; ++q) {
+                const double result = lumped_value(inner[q], k, value[q], p, absorbed);
+                if (result == 0.0) continue;
+                out.idx()[at] = inner[q];
+                out.val()[at] = result;
+                ++at;
+            }
+        }
+    }
+    out.ptr()[n] = kept[static_cast<std::size_t>(n)];
+    return out;
+}
+
+operator_view::operator_view(csc_ref<double> A, double lump_max_mass)
+    : src_(A), scan_(require_operator(A, lump_max_mass)) {
     if (scan_.offdiag_pos > 0) {
         // Only here does a copy happen: a Laplacian or SDDM operator (nothing
         // positive off the diagonal) is handed straight through.
-        lumped_ = A;
-        lumped_entries_ = lump_positive_offdiagonals(lumped_);
+        lumped_ = lump_positive_offdiagonals(A, lumped_entries_);
     }
 }
 
-std::string describe_operator(const operator_scan& s, Eigen::Index lumped) {
+std::string describe_operator(const operator_scan& s, std::int64_t lumped) {
     std::string out = "operator: n = " + std::to_string(s.rows) + ", nnz = " +
                       std::to_string(s.stored_nnz);
     if (s.offdiag_pos == 0 && s.deficient_rows == 0 && s.excess_rows == 0)
@@ -407,41 +440,39 @@ std::string describe_operator(const operator_scan& s, Eigen::Index lumped) {
     return out;
 }
 
-bool is_graph_adjacency(const Eigen::SparseMatrix<double>& M) {
-    const std::string kConversion = "Input conversion needs a square, finite, symmetric matrix. ";
-    if (M.rows() != M.cols())
-        throw std::invalid_argument(kConversion + "This matrix has " +
-            std::to_string(M.rows()) + " rows and " + std::to_string(M.cols()) + " columns.");
+bool is_graph_adjacency(csc_ref<double> M) {
     const operator_scan s = scan_operator(M);
     if (s.nonfinite > 0)
-        throw std::invalid_argument(kConversion + nonfinite_entries(s));
+        throw std::invalid_argument(std::string(kConversion) + nonfinite_entries(s));
     if (s.asymmetric > 0)
-        throw std::invalid_argument(kConversion + asymmetry(s));
+        throw std::invalid_argument(std::string(kConversion) + asymmetry(s));
     // Any negative off-diagonal marks an operator, which the solver validates.
     // A matrix without off-diagonal entries is a diagonal operator, not a graph.
     return s.offdiag_nnz > 0 && s.offdiag_pos == s.offdiag_nnz;
 }
 
-Eigen::SparseMatrix<double> adjacency_laplacian(const Eigen::SparseMatrix<double>& M) {
-    if (M.rows() != M.cols())
-        throw std::invalid_argument("adjacency matrix must be square");
-    const Eigen::Index n = M.rows();
-    std::vector<Eigen::Triplet<double>> entries;
-    entries.reserve(static_cast<std::size_t>(M.nonZeros() + n));
-    Eigen::VectorXd degree = Eigen::VectorXd::Zero(n);
+void throw_adjacency_not_square(std::int64_t rows, std::int64_t cols) {
+    throw std::invalid_argument(std::string(kConversion) + "This matrix has " +
+        std::to_string(rows) + " rows and " + std::to_string(cols) + " columns.");
+}
+
+csc_matrix<double> adjacency_laplacian(csc_ref<double> M) {
+    const node_index n = M.n;
+    std::vector<triplet> entries;
+    entries.reserve(static_cast<std::size_t>(M.nnz()) + n);
+    std::vector<double> degree(n, 0.0);
     // L = D - M: a self-loop m_ii adds to D_ii and is subtracted again.
-    for (Eigen::Index k = 0; k < M.outerSize(); ++k)
-        for (Eigen::SparseMatrix<double>::InnerIterator it(M, k); it; ++it) {
-            const double w = it.value();
-            if (it.row() == it.col() || w == 0.0) continue;
-            entries.emplace_back(it.row(), it.col(), -w);
-            degree[it.row()] += w;
+    for (node_index k = 0; k < n; ++k)
+        for (edge_index p = M.ptr[k]; p < M.ptr[k + 1]; ++p) {
+            const node_index row = M.idx[p];
+            const double w = M.val[p];
+            if (row == k || w == 0.0) continue;
+            entries.push_back({row, k, -w});
+            degree[row] += w;
         }
-    for (Eigen::Index i = 0; i < n; ++i)
-        if (degree[i] != 0.0) entries.emplace_back(i, i, degree[i]);
-    Eigen::SparseMatrix<double> L(n, n);
-    L.setFromTriplets(entries.begin(), entries.end());
-    return L;
+    for (node_index i = 0; i < n; ++i)
+        if (degree[i] != 0.0) entries.push_back({i, i, degree[i]});
+    return csc_from_triplets(n, entries);
 }
 
 } // namespace apxchol::detail

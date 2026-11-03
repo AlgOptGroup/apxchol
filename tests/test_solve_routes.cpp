@@ -324,14 +324,21 @@ TEST(SolveRoutes, UnsupportedStoredLayoutSelectsCpuBeforeSetup) {
 #if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
     GTEST_SKIP() << "32-bit-node CUDA route required";
 #else
-    for (bool stored_zero : {false, true}) {
-        SCOPED_TRACE(stored_zero);
+    {
+        // Uncompressed Eigen storage is compressed at the library boundary,
+        // so it selects the same route as its compressed copy.
+        auto uncompressed = operator_matrix(std::max(65, cpu_guard_rows + 1));
+        const auto compressed = uncompressed;
+        uncompressed.uncompress();
+        const apxchol::solve_options options;
+        EXPECT_EQ(apxchol::detail::select_solve_backend(options, &uncompressed),
+                  apxchol::detail::select_solve_backend(options, &compressed));
+    }
+    {
         auto matrix = operator_matrix(std::max(65, cpu_guard_rows + 1));
-        if (stored_zero) {
-            // Numerically symmetric, but the device builder needs stored mates.
-            matrix.coeffRef(0, 2) = 0.0;
-            matrix.makeCompressed();
-        } else matrix.uncompress();
+        // Numerically symmetric, but the device builder needs stored mates.
+        matrix.coeffRef(0, 2) = 0.0;
+        matrix.makeCompressed();
         const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(matrix.rows());
         apxchol::solve_options options;
         ASSERT_EQ(apxchol::detail::select_solve_backend(options, &matrix), apxchol::solve_backend::cpu);
