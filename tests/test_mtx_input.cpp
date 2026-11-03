@@ -20,20 +20,28 @@
 
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"
+#include "csc_test_util.h"
 #include "mtx_input.h"
 #include "test_rhs.h"
 
 using apxchol::describe_input;
-using apxchol::detail::adjacency_laplacian;
-using apxchol::detail::is_graph_adjacency;
 using apxchol::input_scan;
-using apxchol::project_laplacian_rhs_components;
-using apxchol::scan_input;
+using apxchol::test::adjacency_laplacian;
+using apxchol::test::is_graph_adjacency;
 
 namespace {
 
 using Sparse = Eigen::SparseMatrix<double>;
 using Trip   = Eigen::Triplet<double>;
+
+input_scan scan_input(const Sparse& M) {
+    return apxchol::scan_input(apxchol::test::eigen_csc(M));
+}
+
+std::int64_t project_laplacian_rhs_components(const Sparse& L, Eigen::VectorXd& b) {
+    return apxchol::project_laplacian_rhs_components(apxchol::test::eigen_csc(L),
+                                                     apxchol::test::mspan(b));
+}
 
 /// Symmetric adjacency matrix of a rows x cols 4-neighbour grid, both
 /// triangles stored (what a MatrixMarket `symmetric` file expands to).
@@ -272,11 +280,12 @@ TEST(AdjacencyInputRegression, RawAdjacencyIsRefusedByTheOperatorContract) {
     ASSERT_EQ(A.nonZeros(), 2 * kEdges);           // both triangles stored
 
     for (auto call : {+[](const Sparse& M) {
-                          (void)apxchol::factorize(M);
+                          (void)apxchol::factorize(apxchol::test::csc(M));
                       },
                       +[](const Sparse& M) {
                           (void)apxchol::solve(
-                              M, apxchol::test::random_rhs(M.rows()),
+                              apxchol::test::csc(M),
+                              apxchol::test::cspan(apxchol::test::random_rhs(M.rows())),
                               1e-8, 200);
                       }}) {
         try {
@@ -298,14 +307,14 @@ TEST(AdjacencyInputRegression, ConvertedAdjacencyHasPlausibleFillAndConverges) {
     Sparse L = grid_adjacency(20, 20);
     L = adjacency_laplacian(L);
 
-    const auto F = apxchol::factorize(L);
+    const auto F = apxchol::factorize(apxchol::test::csc(L));
     // With the operator right, the randomized elimination emits sampled clique
     // edges, so the factor must hold strictly more than the fill-free count.
     EXPECT_GT(offdiag_factor_nnz(F), kEdges)
         << "factor shows no fill at all -- the clique sampler bailed out again";
 
     const Eigen::VectorXd b = apxchol::test::random_rhs(L.rows());
-    const auto res = apxchol::solve(L, b, 1e-8, 200);
+    const auto res = apxchol::solve(apxchol::test::csc(L), apxchol::test::cspan(b), 1e-8, 200);
     EXPECT_GT(res.iterations, 0);
     EXPECT_LT(res.residual, 1e-8);
 }
@@ -318,7 +327,7 @@ TEST(AdjacencyInputRegression, ConversionRoutesAnAdjacencyMatrixToConvergence) {
     M = adjacency_laplacian(M);
 
     const Eigen::VectorXd b = apxchol::test::random_rhs(M.rows());
-    const auto res = apxchol::solve(M, b, 1e-8, 200);
+    const auto res = apxchol::solve(apxchol::test::csc(M), apxchol::test::cspan(b), 1e-8, 200);
     EXPECT_GT(res.iterations, 0);
     EXPECT_LT(res.residual, 1e-8);
 }
@@ -334,7 +343,7 @@ TEST(AdjacencyInputRegression, SddmInputIsStillSolvedAsAnOperator) {
     ASSERT_FALSE(is_graph_adjacency(L));
 
     const Eigen::VectorXd b = apxchol::test::random_rhs(L.rows());
-    const auto res = apxchol::solve(L, b, 1e-8, 200);
+    const auto res = apxchol::solve(apxchol::test::csc(L), apxchol::test::cspan(b), 1e-8, 200);
     EXPECT_GT(res.iterations, 0);
     EXPECT_LT(res.residual, 1e-8);
 }

@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "csc_test_util.h"
 #include "grid_laplacian.h"
 #include "test_rhs.h"
 #include "scoped_omp_threads.h"
@@ -149,23 +150,26 @@ static Eigen::SparseMatrix<double> path_laplacian(int n) {
     apxchol::detail::graph G(n);
     for (int i = 0; i + 1 < n; ++i)
         G.add_edge(i, i + 1, 1.0);
-    return apxchol::detail::laplacian(G);
+    return apxchol::test::to_eigen(apxchol::detail::laplacian(G).ref());
 }
 
 using apxchol::test::grid_laplacian;
+using apxchol::test::csc;
+using apxchol::test::cspan;
+using apxchol::test::vec;
 
 static Eigen::SparseMatrix<double> star_laplacian(int n) {
     apxchol::detail::graph G(n);
     for (int i = 1; i < n; ++i)
         G.add_edge(0, i, 1.0);
-    return apxchol::detail::laplacian(G);
+    return apxchol::test::to_eigen(apxchol::detail::laplacian(G).ref());
 }
 
 static Eigen::SparseMatrix<double> cycle_laplacian(int n) {
     apxchol::detail::graph G(n);
     for (int i = 0; i < n; ++i)
         G.add_edge(i, (i + 1) % n, 1.0);
-    return apxchol::detail::laplacian(G);
+    return apxchol::test::to_eigen(apxchol::detail::laplacian(G).ref());
 }
 
 static Eigen::SparseMatrix<double> weighted_grid_laplacian(int rows, int cols,
@@ -178,7 +182,7 @@ static Eigen::SparseMatrix<double> weighted_grid_laplacian(int rows, int cols,
             if (r + 1 < rows) G.add_edge(id(r, c), id(r + 1, c), w_vert);
             if (c + 1 < cols) G.add_edge(id(r, c), id(r, c + 1), w_horiz);
         }
-    return apxchol::detail::laplacian(G);
+    return apxchol::test::to_eigen(apxchol::detail::laplacian(G).ref());
 }
 
 TEST(PartitionerHelpers, ParallelDegreeQuantileMatchesNthElementExactly) {
@@ -248,7 +252,7 @@ class FactorizeTest : public ::testing::Test {
 protected:
     apxchol::factorization factorize_with(
         const Eigen::SparseMatrix<double>& L, unsigned seed = 42) {
-        return apxchol::factorize(L, {.seed = seed});
+        return apxchol::factorize(csc(L), {.seed = seed});
     }
 };
 
@@ -429,7 +433,8 @@ TEST_F(FactorizeTest, ParallelEliminatorFailureReachesCaller) {
     apxchol::factor_options options;
     options.experimental.omp_threshold = 0;
     options.experimental.parallel_residual_threshold = 0;
-    EXPECT_THROW(apxchol::factorize(apxchol::detail::laplacian(failure_test_graph()), throwing_eliminator{},
+    EXPECT_THROW(apxchol::factorize(csc(apxchol::test::to_eigen(apxchol::detail::laplacian(failure_test_graph()).ref())),
+                                    throwing_eliminator{},
                                     options),
                  eliminator_failure);
 }
@@ -622,7 +627,7 @@ TEST(FactorRegularization, RejectsUnrepresentableExcess) {
             const Eigen::SparseMatrix<double> A = scale * L;
             apxchol::factor_options opts;
             opts.regularization = regularization;
-            EXPECT_THROW(apxchol::factorize(A, opts), std::range_error);
+            EXPECT_THROW(apxchol::factorize(csc(A), opts), std::range_error);
         }
     }
 }
@@ -636,7 +641,7 @@ TEST(FactorRegularization, RejectsUnrepresentableStoredDiagonal) {
         opts.backend = apxchol::solve_backend::cpu;
         opts.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
         opts.factor_opts.regularization = regularization;
-        EXPECT_THROW(apxchol::solver(L, opts), std::range_error);
+        EXPECT_THROW(apxchol::solver(csc(L), opts), std::range_error);
     }
 }
 
@@ -649,16 +654,16 @@ TEST(FactorRegularization, AcceptsRepresentableExtremesAndGroundedDefaults) {
         apxchol::solve_options opts;
         opts.backend = apxchol::solve_backend::cpu;
         opts.factor_opts.regularization = regularization;
-        const auto result = apxchol::solve(L, b, std::nullopt, std::nullopt, nullptr, opts);
+        const auto result = apxchol::solve(csc(L), cspan(b), std::nullopt, std::nullopt, {}, opts);
         EXPECT_TRUE(result.converged);
-        EXPECT_LT((L * result.x - b).norm() / b.norm(), apxchol::default_tol);
+        EXPECT_LT((L * vec(result.x) - b).norm() / b.norm(), apxchol::default_tol);
     }
     Eigen::SparseMatrix<double> identity(3, 3);
     identity.setIdentity();
     for (double regularization : {1e-300, 1e50}) {
         apxchol::factor_options opts;
         opts.regularization = regularization;
-        const auto factor = apxchol::factorize(identity, opts);
+        const auto factor = apxchol::factorize(csc(identity), opts);
         EXPECT_TRUE(factor.sddm);
         for (int col = 0; col < 3; ++col) {
             const auto diagonal = factor_diag(factor.L, col);
@@ -678,9 +683,9 @@ TEST(VecPoolAos, ParallelRebuiltFactorsPreserveSolveContract) {
     opts.experimental.omp_threshold = 256;
 
     const auto baseline = apxchol::factorize(
-        L, opts);
+        csc(L), opts);
     const auto repeated = apxchol::factorize(
-        L, opts);
+        csc(L), opts);
     expect_same_factor(baseline, repeated,
                        "AoS preassigned endpoint offsets at T=16");
     // Exact production slot/scatter coverage lives in
@@ -716,7 +721,7 @@ TEST(VecPoolAos, AutoIncrementalDegreesPreserveTheFactorByteForByte) {
     using degree_cache = apxchol::detail::factorization_controls::degree_cache;
     std::vector<double> baseline_degrees;
     auto run = [&](degree_cache mode, std::vector<double>* degrees = nullptr) {
-        return factorize_controlled(apxchol::detail::make_graph(L), opts,
+        return factorize_controlled(apxchol::detail::make_graph(apxchol::test::eigen_csc(L).ref()), opts,
                                     {.incremental_degrees = mode,
                                      .round_average_degrees = degrees});
     };
@@ -764,7 +769,7 @@ TEST(VecPoolAos, IncrementalDegreeCacheDoesNotLeakIntoBkResidualLoop) {
     using degree_cache = apxchol::detail::factorization_controls::degree_cache;
     std::vector<double> baseline_degrees;
     auto run = [&](degree_cache mode, std::vector<double>* degrees = nullptr) {
-        return factorize_controlled(apxchol::detail::make_graph(L), opts,
+        return factorize_controlled(apxchol::detail::make_graph(apxchol::test::eigen_csc(L).ref()), opts,
                                     {.incremental_degrees = mode,
                                      .round_average_degrees = degrees});
     };
@@ -875,17 +880,17 @@ TEST(PruneSkip, HubGridSolvesAtEveryFactorIncludingTheAggressiveOne) {
     opts.factor_opts.seed = 7;
     opts.factor_opts.experimental.omp_threshold = 16;
     auto run = [&](double skip_factor) {
-        auto factor = factorize_controlled(apxchol::detail::make_graph(A), opts.factor_opts,
+        auto factor = factorize_controlled(apxchol::detail::make_graph(apxchol::test::eigen_csc(A).ref()), opts.factor_opts,
                                            {.prune_skip_factor = skip_factor});
-        apxchol::solver solver(A, std::move(factor), opts);
-        return solver.solve(b, 1e-8, 500);
+        apxchol::solver solver(csc(A), std::move(factor), opts);
+        return solver.solve(cspan(b), 1e-8, 500);
     };
     const auto off = run(0);
     const auto standard = run(4);
     const auto aggressive = run(1);
     for (const auto* result : {&off, &standard, &aggressive}) {
         EXPECT_LT(result->residual, 1e-8);
-        EXPECT_LT((A * result->x - b).norm() / b.norm(), 1e-7);
+        EXPECT_LT((A * vec(result->x) - b).norm() / b.norm(), 1e-7);
     }
     EXPECT_LE(standard.iterations, off.iterations + 3);
     EXPECT_LE(aggressive.iterations, 2 * off.iterations);
@@ -895,7 +900,7 @@ TEST(PruneSkip, HubGridSolvesAtEveryFactorIncludingTheAggressiveOne) {
     // larger than the exact one.
     auto round_degrees = [&](double skip_factor) {
         std::vector<double> avg;
-        factorize_controlled(apxchol::detail::make_graph(A), opts.factor_opts,
+        factorize_controlled(apxchol::detail::make_graph(apxchol::test::eigen_csc(A).ref()), opts.factor_opts,
                              {.prune_skip_factor = skip_factor, .round_average_degrees = &avg});
         return avg;
     };
@@ -968,10 +973,10 @@ TEST(FactorizeDeterminism, ParallelRebuiltFactorsPreserveSolveContract) {
         opts.seed = 3;
         opts.experimental.omp_threshold = 256;
         opts.partitioner = kind;
-        const auto ref = apxchol::factorize(L, opts);
+        const auto ref = apxchol::factorize(csc(L), opts);
         ASSERT_GT(ref.L.nonZeros(), 70000) << sel;   // the parallel path really ran
         for (int rep = 1; rep <= 3; ++rep) {
-            const auto F = apxchol::factorize(L, opts);
+            const auto F = apxchol::factorize(csc(L), opts);
             expect_same_factor(ref, F, std::string(sel) + " rep " + std::to_string(rep));
             if (::testing::Test::HasFatalFailure()) return;
         }
@@ -985,8 +990,8 @@ TEST(FactorizeDeterminism, SingleThreadedFactorizationIsByteIdentical) {
     const auto L = grid_laplacian(60, 60);
     apxchol::factor_options opts;
     opts.seed = 11;
-    const auto a = apxchol::factorize(L, opts);
-    const auto b = apxchol::factorize(L, opts);
+    const auto a = apxchol::factorize(csc(L), opts);
+    const auto b = apxchol::factorize(csc(L), opts);
     expect_same_factor(a, b, "T=1");
 }
 
@@ -1036,7 +1041,7 @@ protected:
         const Eigen::SparseMatrix<double>& L,
         const Eigen::VectorXd& b,
         double tol = 1e-6, int max_iter = 500) {
-        return apxchol::solve(L, b, tol, max_iter, nullptr, {.factor_opts = {.seed = 42}});
+        return apxchol::solve(csc(L), cspan(b), tol, max_iter, {}, {.factor_opts = {.seed = 42}});
     }
 };
 
@@ -1088,7 +1093,7 @@ TEST_F(SolveTest, SolutionSatisfiesSystem) {
     auto b = apxchol::test::random_rhs(100);
     auto res = this->solve_with(L, b, 1e-8);
 
-    Eigen::VectorXd Lx = L * res.x;
+    Eigen::VectorXd Lx = L * vec(res.x);
     Lx.array() -= Lx.mean();
     Eigen::VectorXd bc = b;
     bc.array() -= bc.mean();
@@ -1112,7 +1117,7 @@ TEST(Solve, TimingsReported) {
     auto L = grid_laplacian(10, 10);
     auto b = apxchol::test::random_rhs(100);
     apxchol::detail::checkpoint timings;
-    auto res = apxchol::detail::solver_access::with_timings(L, {}, timings).solve(b);
+    auto res = apxchol::test::with_timings(L, {}, timings).solve(cspan(b));
     EXPECT_GT(timings.total("setup"), 0.0);
     // CPU triangular solves are timed under pcg.solve; GPU-resident PCG
     // records one pcg.gpu_pcg_loop leaf.
@@ -1176,37 +1181,37 @@ static void expect_repeated_solves_bit_identical(const Eigen::SparseMatrix<doubl
     apxchol::solve_options opts;
     opts.factor_opts.seed = 42;
     opts.backend = apxchol::solve_backend::cpu;
-    apxchol::solver slv(A, opts);
-    auto r1 = slv.solve(b, 1e-8, 500);
-    auto r2 = slv.solve(b, 1e-8, 500);
+    apxchol::solver slv(csc(A), opts);
+    auto r1 = slv.solve(cspan(b), 1e-8, 500);
+    auto r2 = slv.solve(cspan(b), 1e-8, 500);
     ASSERT_LT(r1.residual, 1e-8);
     EXPECT_EQ(r1.iterations, r2.iterations);
     EXPECT_EQ(r1.residual, r2.residual);                    // exact, not ULP-tolerant
-    EXPECT_TRUE((r1.x.array() == r2.x.array()).all());
+    EXPECT_TRUE((vec(r1.x).array() == vec(r2.x).array()).all());
     // Warm start (x0 path: r = b - A x0 in one fused pass) is deterministic too.
-    auto w1 = slv.solve(b, 1e-10, 500, &r1.x);
-    auto w2 = slv.solve(b, 1e-10, 500, &r1.x);
+    auto w1 = slv.solve(cspan(b), 1e-10, 500, r1.x);
+    auto w2 = slv.solve(cspan(b), 1e-10, 500, r1.x);
     EXPECT_EQ(w1.iterations, w2.iterations);
     EXPECT_EQ(w1.residual, w2.residual);
-    EXPECT_TRUE((w1.x.array() == w2.x.array()).all());
+    EXPECT_TRUE((vec(w1.x).array() == vec(w2.x).array()).all());
     // Public applications are independent of prior solve/apply calls.
-    Eigen::VectorXd z1 = slv.apply(b);
-    Eigen::VectorXd z2 = slv.apply(b);
+    Eigen::VectorXd z1 = vec(slv.apply(cspan(b)));
+    Eigen::VectorXd z2 = vec(slv.apply(cspan(b)));
     EXPECT_TRUE((z1.array() == z2.array()).all());
     if (laplacian) {
         EXPECT_NEAR(z1.mean(), 0.0, 1e-13 * z1.cwiseAbs().maxCoeff());
         // The returned SOLUTION is min-norm regardless of the schedule
         // (the CPU solve centres x once at the end).
-        EXPECT_NEAR(r1.x.mean(), 0.0, 1e-14 * r1.x.cwiseAbs().maxCoeff());
-        EXPECT_NEAR(w1.x.mean(), 0.0, 1e-14 * w1.x.cwiseAbs().maxCoeff());
+        EXPECT_NEAR(vec(r1.x).mean(), 0.0, 1e-14 * vec(r1.x).cwiseAbs().maxCoeff());
+        EXPECT_NEAR(vec(w1.x).mean(), 0.0, 1e-14 * vec(w1.x).cwiseAbs().maxCoeff());
     }
 }
 
 TEST(Grounding, PublicApplyIsIndependentOfCallOrderAndPanelWidth) {
     const auto matrix = grid_laplacian(8, 8);
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 64.0);
-    apxchol::solver owner(matrix, {.backend = apxchol::solve_backend::cpu});
-    const Eigen::VectorXd expected = owner.apply(rhs);
+    apxchol::solver owner(csc(matrix), {.backend = apxchol::solve_backend::cpu});
+    const Eigen::VectorXd expected = vec(owner.apply(cspan(rhs)));
     ASSERT_GT(expected.norm(), 0.0);
     const double tolerance = 1e-12 * expected.norm();
     EXPECT_NEAR(expected.mean(), 0.0, tolerance);
@@ -1218,10 +1223,10 @@ TEST(Grounding, PublicApplyIsIndependentOfCallOrderAndPanelWidth) {
     // Cross the internal PCG centering period while mixing public entry points.
     for (int repeat = 0; repeat < 12; ++repeat) {
         SCOPED_TRACE(repeat);
-        const Eigen::VectorXd scalar = owner.apply(rhs);
+        const Eigen::VectorXd scalar = vec(owner.apply(cspan(rhs)));
         EXPECT_TRUE((scalar.array() == expected.array()).all());
-        EXPECT_GT(owner.solve(rhs, std::nullopt, 2).iterations, 0);
-        owner.apply(panel, output);
+        EXPECT_GT(owner.solve(cspan(rhs), std::nullopt, 2).iterations, 0);
+        owner.apply(apxchol::test::cmat(panel), apxchol::test::mmat(output));
         EXPECT_LE((output.col(0) - expected).norm(), tolerance);
         EXPECT_LE((output.col(1) - 2 * expected).norm(), 2 * tolerance);
         EXPECT_LE((output.col(2) - expected).norm(), tolerance);
@@ -1255,26 +1260,26 @@ TEST(Grounding, LaplacianSolutionIsMinNorm) {
     apxchol::solve_options opts;
     opts.factor_opts.seed = 42;
     opts.backend = apxchol::solve_backend::cpu;
-    apxchol::solver slv(L, opts);
-    auto r = slv.solve(b, 1e-8, 500);
+    apxchol::solver slv(csc(L), opts);
+    auto r = slv.solve(cspan(b), 1e-8, 500);
     ASSERT_LT(r.residual, 1e-8);
-    EXPECT_NEAR(r.x.mean(), 0.0, 1e-14 * r.x.cwiseAbs().maxCoeff());
-    EXPECT_LT((L * r.x - b).norm() / b.norm(), 1e-6);
+    EXPECT_NEAR(vec(r.x).mean(), 0.0, 1e-14 * vec(r.x).cwiseAbs().maxCoeff());
+    EXPECT_LT((L * vec(r.x) - b).norm() / b.norm(), 1e-6);
     // Warm start shifted by a constant, tightened tolerance -> PCG iterates
     // from x0; the answer is still mean-zero and still solves the system.
-    Eigen::VectorXd x0 = r.x.array() + 5.0;
+    Eigen::VectorXd x0 = vec(r.x).array() + 5.0;
     // Subtracting the offset incurs roundoff at the warm start's scale.
     const double warm_centering_tol = 1e-14 * x0.cwiseAbs().maxCoeff();
-    auto w = slv.solve(b, 1e-10, 500, &x0);
+    auto w = slv.solve(cspan(b), 1e-10, 500, cspan(x0));
     EXPECT_GT(w.iterations, 0);
-    EXPECT_NEAR(w.x.mean(), 0.0, warm_centering_tol);
-    EXPECT_LT((L * w.x - b).norm() / b.norm(), 1e-8);
+    EXPECT_NEAR(vec(w.x).mean(), 0.0, warm_centering_tol);
+    EXPECT_LT((L * vec(w.x) - b).norm() / b.norm(), 1e-8);
     // Already-converged warm start (loose tolerance -> 0 iterations): the
     // early exit centres too.
-    auto e = slv.solve(b, 1e-6, 500, &x0);
+    auto e = slv.solve(cspan(b), 1e-6, 500, cspan(x0));
     EXPECT_EQ(e.iterations, 0);
-    EXPECT_NEAR(e.x.mean(), 0.0, warm_centering_tol);
-    EXPECT_LT((L * e.x - b).norm() / b.norm(), 1e-6);
+    EXPECT_NEAR(vec(e.x).mean(), 0.0, warm_centering_tol);
+    EXPECT_LT((L * vec(e.x) - b).norm() / b.norm(), 1e-6);
 }
 
 // Build a weighted grid Laplacian DIRECTLY from fp64 triplets. Deliberately
@@ -1360,8 +1365,8 @@ TEST_P(StrategyConvergenceTest, GridConverges) {
     auto [is, name] = GetParam();
     auto L = grid_laplacian(15, 15);
     auto b = apxchol::test::random_rhs(225);
-    auto res = apxchol::solve(L, b, 1e-6, 1000,
-        nullptr, {.factor_opts = {.seed = 42, .partitioner = is}});
+    auto res = apxchol::solve(csc(L), cspan(b), 1e-6, 1000,
+        {}, {.factor_opts = {.seed = 42, .partitioner = is}});
     EXPECT_LT(res.residual, 1e-4)
         << "strategy " << name << " failed: iters=" << res.iterations
         << " residual=" << res.residual;
@@ -1371,8 +1376,8 @@ TEST_P(StrategyConvergenceTest, SDDMConverges) {
     auto [is, name] = GetParam();
     auto M = sddm_grid(10, 10, 2.0);
     Eigen::VectorXd b = Eigen::VectorXd::Random(100);
-    auto res = apxchol::solve(M, b, 1e-6, 1000,
-        nullptr, {.factor_opts = {.seed = 42, .partitioner = is}});
+    auto res = apxchol::solve(csc(M), cspan(b), 1e-6, 1000,
+        {}, {.factor_opts = {.seed = 42, .partitioner = is}});
     EXPECT_LT(res.residual, 1e-4)
         << "strategy " << name << " failed on SDDM: iters=" << res.iterations
         << " residual=" << res.residual;
@@ -1414,7 +1419,7 @@ static double factor_residual(const apxchol::factorization& F,
 static apxchol::factorization factorize_tree(
         const Eigen::SparseMatrix<double>& A, unsigned seed = 42) {
     apxchol::factor_options opts{.seed = seed};
-    return apxchol::factorize(A, opts);
+    return apxchol::factorize(csc(A), opts);
 }
 
 TEST(FactorQualityTest, Grid20Tree) {
@@ -1436,9 +1441,9 @@ TEST(ExactCliqueOption, Grid40_FewerItersThanSampled) {
     apxchol::factor_options opts;
     opts.seed = 42;
     opts.partitioner = apxchol::partitioner_kind::block_greedy;
-    auto sampled = apxchol::solve(L, b, 1e-8, 200, nullptr, {.factor_opts = opts});
+    auto sampled = apxchol::solve(csc(L), cspan(b), 1e-8, 200, {}, {.factor_opts = opts});
     opts.experimental.exact_clique_max_degree = 8;
-    auto exact = apxchol::solve(L, b, 1e-8, 200, nullptr, {.factor_opts = opts});
+    auto exact = apxchol::solve(csc(L), cspan(b), 1e-8, 200, {}, {.factor_opts = opts});
     EXPECT_LT(exact.residual, 1e-6);
     EXPECT_LE(exact.iterations, sampled.iterations)
         << "exact low-degree cliques should not need more PCG iterations: "
@@ -1539,7 +1544,7 @@ TEST(ResidualSparsifyGate, DuplicateHeavyIndexedGraphConvergesWithEitherSetting)
         for (apxchol::node_index v = u + 1; v < n; ++v)
             for (int duplicate = 0; duplicate < 4; ++duplicate)
                 graph.add_edge(u, v, 0.25 * (1 + (u + v + duplicate) % 7));
-    const auto L = apxchol::detail::laplacian(graph);
+    const auto L = apxchol::test::to_eigen(apxchol::detail::laplacian(graph).ref());
     const auto b = apxchol::test::random_rhs(n);
     apxchol::factor_options options;
     options.experimental.parallel_residual_threshold = 5;
@@ -1550,9 +1555,9 @@ TEST(ResidualSparsifyGate, DuplicateHeavyIndexedGraphConvergesWithEitherSetting)
         auto factor = factorize_controlled(graph, options, {.residual_sparsify = sparsify}, &timings);
         EXPECT_EQ(timings.total("setup.sparsify_residual") > 0.0, sparsify)
             << "fixture must exercise the residual sparsification gate";
-        apxchol::solver solver(L, std::move(factor));
-        const auto result = solver.solve(b, 1e-8, 500);
-        EXPECT_LT((L * result.x - b).norm() / b.norm(), 1e-8);
+        apxchol::solver solver(csc(L), std::move(factor));
+        const auto result = solver.solve(cspan(b), 1e-8, 500);
+        EXPECT_LT((L * vec(result.x) - b).norm() / b.norm(), 1e-8);
     }
 }
 
@@ -1627,7 +1632,7 @@ TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
         with_loop.seed = seed;                      // then the peel takes the
         with_loop.experimental.parallel_residual_threshold = thresh;   // rest.
         const auto c = apxchol::factorize(
-            L, with_loop);
+            csc(L), with_loop);
         ASSERT_FALSE(c.rounds.empty());
         EXPECT_EQ(c.rounds.front().active, static_cast<size_t>(n))
             << "the clique should hand the full residual to BK";
@@ -1642,13 +1647,13 @@ TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
 
         // Same (input, seed, thread count) => same factor, bit for bit.
         const auto c2 = apxchol::factorize(
-            L, with_loop);
+            csc(L), with_loop);
         expect_same_factor(c, c2, "BK residual loop, seed " +
                                   std::to_string(seed));
         if (::testing::Test::HasFatalFailure()) return;
 
         // And it is still a usable preconditioner.
-        const auto res = apxchol::solve(L, b, 1e-8, 200, nullptr, {.factor_opts = with_loop});
+        const auto res = apxchol::solve(csc(L), cspan(b), 1e-8, 200, {}, {.factor_opts = with_loop});
         EXPECT_LT(res.residual, 1e-8) << "seed " << seed;
     }
 }
@@ -1671,7 +1676,7 @@ TEST(BaumannKyngSeeding, Round0UsesTheSeedInsteadOfTwoMOverActive) {
     std::iota(active.begin(), active.end(), apxchol::node_index{0});
 
     auto is_size = [&](double seed) {
-        auto G = apxchol::detail::make_graph(L);
+        auto G = apxchol::detail::make_graph(apxchol::test::eigen_csc(L).ref());
         apxchol::detail::baumann_kyng_partitioner bk;
         bk.est_avg_degree = seed;                   // 0 = "work it out yourself"
         apxchol::selection sel;
@@ -1693,7 +1698,7 @@ TEST(BaumannKyngSeeding, Round0UsesTheSeedInsteadOfTwoMOverActive) {
 
 TEST(BaumannKyngWorkHint, MatchesSelectedLiveDegreeSum) {
     const auto L = grid_laplacian(30, 30);
-    auto G = apxchol::detail::make_graph(L);
+    auto G = apxchol::detail::make_graph(apxchol::test::eigen_csc(L).ref());
     std::vector<apxchol::node_index> active(900);
     std::iota(active.begin(), active.end(), apxchol::node_index{0});
     apxchol::partition_context ctx{
@@ -1853,7 +1858,7 @@ TEST(FactorAdoption, RejectsMalformedArraysPermutationAndRounds) {
         mutate(factor);
         for (const auto backend : {apxchol::solve_backend::cpu, apxchol::solve_backend::gpu}) {
             if (!apxchol::backend_available(backend)) continue;
-            EXPECT_THROW(apxchol::solver(A, factor, {.backend = backend}), std::invalid_argument);
+            EXPECT_THROW(apxchol::solver(csc(A), factor, {.backend = backend}), std::invalid_argument);
         }
     }
 }
@@ -1871,13 +1876,13 @@ TEST(FactorAdoption, PreservesCustomEntriesAndRoundMetadata) {
         for (int col = 0; col < 3; ++col)
             A(row, col) = permuted(factor.perm[row], factor.perm[col]);
     const Eigen::SparseMatrix<double> sparse = A.sparseView();
-    apxchol::solver owner(sparse, factor, {
+    apxchol::solver owner(csc(sparse), factor, {
         .factor_opts = {.drop_tolerance = 0}, .backend = apxchol::solve_backend::cpu});
     EXPECT_EQ(csc_access::inner(owner.factor().L), csc_access::inner(factor.L));
     EXPECT_EQ(csc_access::vals(owner.factor().L), csc_access::vals(factor.L));
     EXPECT_EQ(owner.factor().rounds.size(), factor.rounds.size());
     const Eigen::Vector3d b(1, 2, -3);
-    const Eigen::Vector3d x = owner.apply(b);
+    const Eigen::Vector3d x = vec(owner.apply(cspan(b)));
     EXPECT_LT((A * x - b).norm(), 1e-12);
 }
 
@@ -1888,9 +1893,11 @@ TEST(FactorAdoption, GroundedColumnMayBeEmptyOrZero) {
         csc_access::n(factor.L) = 1;
         csc_access::outer(factor.L) = {0, apxchol::edge_index(!empty)};
         if (!empty) { csc_access::inner(factor.L) = {0}; csc_access::vals(factor.L) = {0}; }
-        apxchol::solver owner(Eigen::SparseMatrix<double>(1, 1), std::move(factor),
+        const Eigen::SparseMatrix<double> zero(1, 1);
+        apxchol::solver owner(csc(zero), std::move(factor),
                               {.backend = apxchol::solve_backend::cpu});
-        const Eigen::VectorXd result = owner.apply(Eigen::VectorXd::Zero(1));
+        const Eigen::VectorXd rhs = Eigen::VectorXd::Zero(1);
+        const Eigen::VectorXd result = vec(owner.apply(cspan(rhs)));
         EXPECT_TRUE(result.isZero());
     }
 }
@@ -2097,10 +2104,11 @@ TEST(GpuBoundedSelection, OwnedZeroDegreeCandidatesMakeProgress) {
         std::vector<Eigen::Triplet<double>> diagonal;
         for (bounded_vertex v = 0; v < n; ++v) diagonal.emplace_back(v, v, 0.0);
         A.setFromTriplets(diagonal.begin(), diagonal.end());
-        ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(apxchol::detail::eigen_csc(A)));
+        const apxchol::test::eigen_csc input(A);
+        ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(input.ref()));
         apxchol::detail::gpu_round_shadow_session owner(true);
         std::unique_ptr<apxchol::detail::gpu_block_frontend> gpu;
-        owner.initialize_owned_csc(apxchol::detail::gpu_owned_csc_host_buffers(apxchol::detail::eigen_csc(A)), gpu);
+        owner.initialize_owned_csc(apxchol::detail::gpu_owned_csc_host_buffers(input.ref()), gpu);
         std::vector<bounded_vertex> active(n);
         std::iota(active.begin(), active.end(), bounded_vertex{0});
         apxchol::partition_options options;
@@ -2137,26 +2145,26 @@ TEST(GpuBoundedSelection, ConsumingSolveChecksOriginalOperatorResidual) {
         Eigen::Index first_iterations = 0;
         for (unsigned repeat = 0; repeat < 2; ++repeat) {
             apxchol::detail::checkpoint timings;
-            const auto solved = apxchol::detail::solver_access::with_timings(A, options, timings).solve(b, 1e-8, 500);
+            const auto solved = apxchol::test::with_timings(A, options, timings).solve(cspan(b), 1e-8, 500);
             EXPECT_GT(timings.total("setup.gpu_owned_factorization"), 0.0);
-            const double rr = (A * solved.x - b).norm() / b.norm();
+            const double rr = (A * vec(solved.x) - b).norm() / b.norm();
             EXPECT_TRUE(std::isfinite(rr)); EXPECT_LE(rr, 1e-8);
             std::ostringstream receipt;
             receipt.precision(std::numeric_limits<double>::max_digits10); receipt << rr;
             RecordProperty("bounded_original_rr_" + std::to_string(seed) + "_" +
                            std::to_string(repeat), receipt.str());
             if (repeat == 0) {
-                first_solution = solved.x; first_iterations = solved.iterations;
+                first_solution = vec(solved.x); first_iterations = solved.iterations;
                 std::string bytes = std::to_string(first_iterations);
                 for (Eigen::Index i = 0; i < first_solution.size(); ++i)
                     bytes += ":" + std::to_string(std::bit_cast<std::uint64_t>(first_solution[i]));
                 RecordProperty("bounded_solution_" + std::to_string(seed), bytes);
             } else {
                 EXPECT_EQ(solved.iterations, first_iterations);
-                ASSERT_EQ(solved.x.size(), first_solution.size());
-                for (Eigen::Index i = 0; i < solved.x.size(); ++i)
+                ASSERT_EQ(solved.x.size(), static_cast<std::size_t>(first_solution.size()));
+                for (std::size_t i = 0; i < solved.x.size(); ++i)
                     EXPECT_EQ(std::bit_cast<std::uint64_t>(solved.x[i]),
-                              std::bit_cast<std::uint64_t>(first_solution[i]));
+                              std::bit_cast<std::uint64_t>(first_solution[static_cast<Eigen::Index>(i)]));
             }
         }
         // The consuming solve exposes solution/iterations, not an exportable

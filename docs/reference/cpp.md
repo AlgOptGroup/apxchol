@@ -5,6 +5,34 @@ Include `apxchol.h` and link `apxchol::core`. Start with the
 This page lists the existing public controls; the [API policy](../api.md)
 defines their compatibility guarantees.
 
+## Input views
+
+Every C++ call borrows the caller's arrays through these views; nothing is
+copied when a view is made. A `csc_view` holds 32-bit indices and a
+`csc_view64` 64-bit indices; both are checked at the call and an invalid view
+throws `std::invalid_argument`. Dense views are column-major.
+
+```{doxygenstruct} apxchol::basic_csc_view
+:members: n, col_ptr, row_idx, values
+:undoc-members:
+```
+
+```{doxygentypedef} apxchol::csc_view
+```
+
+```{doxygentypedef} apxchol::csc_view64
+```
+
+```{doxygenstruct} apxchol::matrix_view
+:members: data, rows, cols, col_stride
+:undoc-members:
+```
+
+```{doxygenstruct} apxchol::const_matrix_view
+:members: data, rows, cols, col_stride
+:undoc-members:
+```
+
 ## Reusable solver
 
 Use `solver` for CPU, CUDA and Metal operation; there is no separate class per
@@ -115,7 +143,7 @@ GPU routes require the defaults of `cpu_schedule`, `exact_clique_max_degree`,
 Custom partitioner and eliminator overloads are described in the
 [extension guide](../extending.md).
 
-```{doxygenfunction} apxchol::factorize(const Eigen::SparseMatrix<double> &, const factor_options &)
+```{doxygenfunction} apxchol::factorize(basic_csc_view<Index> L, const factor_options &opts = {})
 ```
 
 ```{doxygenstruct} apxchol::factorization
@@ -156,7 +184,9 @@ For cross-process reuse, `solver.save(path)` and `solver::load(path, opts)`
 
 ## One-shot solve and availability
 
-```{doxygenfunction} apxchol::solve
+The one-shot solve takes a `csc_view` or a `csc_view64`.
+
+```{doxygenfunction} apxchol::solve(csc_view A, std::span<const double> b, std::optional<double> tol = std::nullopt, std::optional<int> max_iter = std::nullopt, std::span<const double> x0 = {}, const solve_options &opts = {})
 ```
 
 ```{doxygenfunction} apxchol::backend_available

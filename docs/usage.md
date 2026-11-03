@@ -40,6 +40,21 @@ Python accepts SciPy sparse matrices and arrays. It converts them to CSC
 entries. Supply the full symmetric matrix, not just one triangle. Format conversion
 does not invent missing symmetric entries.
 
+C++ borrows the matrix as a `csc_view` (32-bit indices) or `csc_view64`
+(64-bit indices) from `apxchol/views.h`: the dimension `n`, `col_ptr` with
+`n + 1` offsets starting at 0, and `row_idx` and `values` with `col_ptr[n]`
+entries each. Rows must be sorted and unique within each column; an invalid
+view throws `std::invalid_argument`. Because `A` is symmetric, CSR arrays can
+be passed unchanged. Index arrays as wide as the build's indices are used in
+place; the others are converted once during setup. The solver copies what it
+needs, so the arrays only have to outlive the call that receives the view.
+
+```cpp
+std::vector<std::int32_t> col_ptr, row_idx;   // filled by the caller
+std::vector<double> values;
+const apxchol::csc_view A{n, col_ptr, row_idx, values};
+```
+
 ## Choosing CPU or GPU
 
 The `CPU` build contains the CPU solver. `CUDA` and `METAL` builds add their
@@ -62,10 +77,8 @@ selected backend. The MATLAB/Octave binding currently uses CPU only.
 
 ### Native GPU input and options
 
-For direct C++ input, GPU setup needs sorted CSC storage: row indices within
-each column must be sorted and unique, and every stored off-diagonal `(i, j)`
-needs its matching `(j, i)`. Uncompressed Eigen matrices are compressed first.
-GPU setup also requires 32-bit vertex indices.
+For direct C++ input, GPU setup needs every stored off-diagonal `(i, j)` to
+have its matching `(j, i)`. GPU setup also requires 32-bit vertex indices.
 
 CPU setup supports custom partitioners and eliminators. CUDA setup supports
 `block_greedy` and GKS or trace-cycle sampling; the experimental exact-clique,
@@ -128,13 +141,20 @@ For C++:
 
 ```cpp
 #include "apxchol.h"
-apxchol::solver solver(A);
-auto result = solver.solve(b, 1e-8);
+apxchol::solver solver(A);                   // A: csc_view
+auto result = solver.solve(b, 1e-8);         // b: std::vector<double> or span
 // std::nullopt selects the default tolerance or iteration budget.
-auto warm = solver.solve(b2, std::nullopt, std::nullopt, &result.x);
-Eigen::MatrixXd X(B.rows(), B.cols());
-auto batch = solver.solve(B, X);
+auto warm = solver.solve(b2, std::nullopt, std::nullopt, result.x);
+// k right-hand sides, column-major: column j starts at B.data() + j * n.
+std::vector<double> X(n * k);
+auto batch = solver.solve(apxchol::const_matrix_view{B.data(), n, k, n},
+                          apxchol::matrix_view{X.data(), n, k, n});
 ```
+
+Vectors are `std::span<double>` arguments, so a `std::vector`, an array or a
+pointer and length all work; `result.x` is a `std::vector<double>`. Matrix
+views are column-major with column stride `col_stride >= rows`. An empty `x0`
+(the default) or a `const_matrix_view` with a null `data` starts from zero.
 
 One-shot `apxchol::solve(A, b, tol, max_iter, x0, opts)` uses the same backend
 selection. For explicit CPU execution, set
@@ -220,7 +240,9 @@ Each application computes `z = M^{-1} r` with the prepared factor; the other
 solver controls the iteration and its stopping test.
 
 For Eigen's iterative solvers, a small adapter is enough. It is an example
-outside apxchol's stable API; copy it into your code:
+outside apxchol's stable API; copy it into your code. `A` is the
+`Eigen::SparseMatrix<double>` the conjugate gradient iterates on, compressed,
+and the solver borrows its arrays:
 
 ```cpp
 #include <apxchol.h>
@@ -245,13 +267,21 @@ public:
     Eigen::ComputationInfo info() const { return Eigen::Success; }
 
     template<class Rhs, class Dest>
-    void _solve_impl(const Rhs& b, Dest& x) const { x = solver_->apply(b); }
+    void _solve_impl(const Rhs& b, Dest& x) const {
+        const Eigen::VectorXd r = b;
+        const std::vector<double> z =
+            solver_->apply({r.data(), static_cast<std::size_t>(r.size())});
+        x = Eigen::Map<const Eigen::VectorXd>(z.data(), static_cast<Eigen::Index>(z.size()));
+    }
 
 private:
     apxchol::solver* solver_ = nullptr;
 };
 
-apxchol::solver s(A);
+A.makeCompressed();
+const auto n = static_cast<std::size_t>(A.rows()), nnz = static_cast<std::size_t>(A.nonZeros());
+apxchol::solver s(apxchol::csc_view{A.rows(), {A.outerIndexPtr(), n + 1},
+                                    {A.innerIndexPtr(), nnz}, {A.valuePtr(), nnz}});
 Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower | Eigen::Upper,
                          apxchol_preconditioner> cg;
 cg.preconditioner().attach(s);

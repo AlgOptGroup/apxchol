@@ -162,8 +162,8 @@ operator_scan require_operator(csc_ref<double> A,
 
 /// The M-matrix lumping of `A` as a new matrix; `removed` receives the number
 /// of stored positive off-diagonal ENTRIES removed (two per pair, both
-/// triangles). Every entry that ends up exactly zero is dropped, as by
-/// Eigen's prune(0, 0); the remaining entries keep their order.
+/// triangles). Every entry that ends up exactly zero is dropped; the
+/// remaining entries keep their order.
 ///
 /// Precondition: `A` is symmetric and every non-empty row carries a stored
 /// positive diagonal — i.e. `require_operator` has accepted it. That is what
@@ -222,7 +222,3 @@ bool is_graph_adjacency(csc_ref<double> M);
 csc_matrix<double> adjacency_laplacian(csc_ref<double> M);
 
 } // namespace apxchol::detail
-
-// Eigen overloads of these checks for the CLI, the bindings and the benchmark,
-// which still hold Eigen matrices.
-#include "apxchol/detail/eigen_boundary.h"

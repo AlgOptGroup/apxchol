@@ -1,13 +1,18 @@
 /// Basic usage: one-shot, reusable and batched solves.
 #include "apxchol.h"
 #include "example_grid.h"
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <vector>
 
 int main() {
-    auto L = grid_laplacian(100);                       // 10,000 × 10,000
-    Eigen::VectorXd b = Eigen::VectorXd::Zero(L.rows());   // unit source and sink
-    b(0) = 1.0;
-    b(L.rows() - 1) = -1.0;
+    const auto grid = grid_laplacian(100);              // 10,000 × 10,000
+    const apxchol::csc_view L = grid.view();
+    const auto n = static_cast<std::size_t>(L.n);
+    std::vector<double> b(n, 0.0);                      // unit source and sink
+    b.front() = 1.0;
+    b.back() = -1.0;
 
     // One-shot: factorize + PCG in one call.
     auto res = apxchol::solve(L, b, /*tol=*/1e-8, /*max_iter=*/500);
@@ -22,16 +27,21 @@ int main() {
                 long(r1.iterations), long(r2.iterations));
 
     // Matrix columns are independent right-hand sides sharing the same factor.
-    Eigen::MatrixXd B(L.rows(), 2), X(L.rows(), 2);
-    B.col(0) = b;
-    B.col(1) = b.reverse();
-    auto batch = slv.solve(B, X);
+    // Column-major storage: column j starts at j * n.
+    std::vector<double> B(2 * n), X(2 * n);
+    std::copy(b.begin(), b.end(), B.begin());
+    std::reverse_copy(b.begin(), b.end(), B.begin() + n);
+    const auto rows = static_cast<std::int64_t>(n);
+    auto batch = slv.solve(apxchol::const_matrix_view{B.data(), rows, 2, rows},
+                           apxchol::matrix_view{X.data(), rows, 2, rows});
     std::printf("batched  : residuals %.2e, %.2e\n",
                 batch.columns[0].residual, batch.columns[1].residual);
 
     // One preconditioner application z = M^{-1} r (e.g. for your own Krylov loop).
-    Eigen::VectorXd z = slv.apply(b);
-    std::printf("apply    : |M^-1 b| = %.3e\n", z.norm());
+    const std::vector<double> z = slv.apply(b);
+    double norm = 0.0;
+    for (double v : z) norm += v * v;
+    std::printf("apply    : |M^-1 b| = %.3e\n", std::sqrt(norm));
 
     bool converged = res.converged && r1.converged && r2.converged;
     for (const auto& column : batch.columns)

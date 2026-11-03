@@ -1,12 +1,14 @@
 #include "apxchol/operator_class.h"
 
 #include "apxchol/csc_work.h"
+#include "apxchol/detail/csc_input.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -347,8 +349,7 @@ csc_matrix<double> lump_positive_offdiagonals(csc_ref<double> A, std::int64_t& r
     // symmetry row k's, which a_kk absorbs) in stored order, and the entries
     // that stay. An entry stays unless its final value is exactly zero: a
     // positive off-diagonal is zeroed, a diagonal gains the mass, the rest
-    // keep their value -- the same entries Eigen's prune(0, 0) kept after the
-    // in-place transform. Each column's work is serial, so the split cannot
+    // keep their value. Each column's work is serial, so the split cannot
     // change a value.
     std::vector<double> add(static_cast<std::size_t>(n), 0.0);
     std::vector<edge_index> kept(static_cast<std::size_t>(n) + 1, 0);
@@ -474,5 +475,122 @@ csc_matrix<double> adjacency_laplacian(csc_ref<double> M) {
         if (degree[i] != 0.0) entries.push_back({i, i, degree[i]});
     return csc_from_triplets(n, entries);
 }
+
+namespace {
+
+[[noreturn]] void bad_view(const std::string& what) {
+    throw std::invalid_argument("apxchol: invalid CSC view: " + what);
+}
+
+// Index p of a column that holds a row outside [0, n), out of order or
+// repeated, or end when the column is valid.
+template<class Index>
+std::int64_t first_bad_row(const Index* rows, std::int64_t begin, std::int64_t end,
+                           std::int64_t n) {
+    for (std::int64_t p = begin; p < end; ++p) {
+        const auto row = static_cast<std::int64_t>(rows[p]);
+        if (row < 0 || row >= n || (p > begin && row <= static_cast<std::int64_t>(rows[p - 1])))
+            return p;
+    }
+    return end;
+}
+
+} // namespace
+
+template<class Index>
+void csc_input::init(basic_csc_view<Index> A) {
+    const std::int64_t n = A.n;
+    if (n < 0) bad_view("n is negative");
+    if (static_cast<std::uint64_t>(n) >= std::numeric_limits<node_index>::max())
+        bad_view("n = " + std::to_string(n) + " exceeds this build's " +
+                 std::to_string(sizeof(node_index) * 8) + "-bit vertex indices");
+    if (n == 0 && A.col_ptr.empty() && A.row_idx.empty() && A.values.empty()) return;
+    if (A.col_ptr.size() != static_cast<std::size_t>(n) + 1)
+        bad_view("col_ptr has " + std::to_string(A.col_ptr.size()) + " entries, expected n+1 = " +
+                 std::to_string(n + 1));
+    const Index* ptr = A.col_ptr.data();
+    if (ptr[0] != 0) bad_view("col_ptr[0] must be 0");
+    std::int64_t decreasing = n;
+    #pragma omp parallel for schedule(static) reduction(min : decreasing)
+    for (std::int64_t j = 0; j < n; ++j)
+        if (ptr[j + 1] < ptr[j]) decreasing = std::min(decreasing, j);
+    if (decreasing < n)
+        bad_view("col_ptr decreases after column " + std::to_string(decreasing));
+    const auto nnz = static_cast<std::int64_t>(ptr[n]);
+    if (A.row_idx.size() != static_cast<std::size_t>(nnz) ||
+        A.values.size() != static_cast<std::size_t>(nnz))
+        bad_view("row_idx and values must have col_ptr[n] = " + std::to_string(nnz) +
+                 " entries, got " + std::to_string(A.row_idx.size()) + " and " +
+                 std::to_string(A.values.size()));
+    if (static_cast<std::uint64_t>(nnz) > std::numeric_limits<edge_index>::max())
+        bad_view(std::to_string(nnz) + " stored entries exceed this build's " +
+                 std::to_string(sizeof(edge_index) * 8) + "-bit offsets");
+    const Index* rows = A.row_idx.data();
+    std::int64_t bad_column = n;
+    #pragma omp parallel reduction(min : bad_column)
+    {
+        const auto [lo, hi] = work_balanced_range(ptr, n);
+        for (std::int64_t j = lo; j < hi; ++j)
+            if (first_bad_row(rows, ptr[j], ptr[j + 1], n) < static_cast<std::int64_t>(ptr[j + 1])) {
+                bad_column = j;
+                break;
+            }
+    }
+    if (bad_column < n) {
+        const std::int64_t begin = ptr[bad_column];
+        const std::int64_t p = first_bad_row(rows, begin, ptr[bad_column + 1], n);
+        const auto row = static_cast<std::int64_t>(rows[p]);
+        const std::string where = "column " + std::to_string(bad_column) + " row " +
+                                  std::to_string(row);
+        if (row < 0 || row >= n) bad_view(where + " is outside [0, n)");
+        bad_view(where + (row == static_cast<std::int64_t>(rows[p - 1]) ? " is repeated"
+                                                                          : " is out of order") +
+                 "; rows must be sorted with no duplicates within a column");
+    }
+
+    const edge_index* offsets = nullptr;
+    if constexpr (sizeof(Index) == sizeof(edge_index)) {
+        // Same-width signed and unsigned integers may alias; the values are nonnegative.
+        offsets = reinterpret_cast<const edge_index*>(ptr);
+    } else {
+        offsets_.resize(static_cast<std::size_t>(n) + 1);
+        edge_index* out = offsets_.data();
+        #pragma omp parallel for schedule(static)
+        for (std::int64_t j = 0; j <= n; ++j) out[j] = static_cast<edge_index>(ptr[j]);
+        offsets = out;
+    }
+    const node_index* indices = nullptr;
+    if constexpr (sizeof(Index) == sizeof(node_index)) {
+        indices = reinterpret_cast<const node_index*>(rows);
+    } else {
+        rows_.resize(static_cast<std::size_t>(nnz));
+        node_index* out = rows_.data();
+        #pragma omp parallel for schedule(static)
+        for (std::int64_t p = 0; p < nnz; ++p) out[p] = static_cast<node_index>(rows[p]);
+        indices = out;
+    }
+    ref_ = {static_cast<node_index>(n), offsets, indices, A.values.data()};
+}
+
+csc_input::csc_input(csc_view A) { init(A); }
+csc_input::csc_input(csc_view64 A) { init(A); }
+
+namespace {
+
+template<class Ref, class View>
+Ref dense_view(View M) {
+    if (M.rows < 0 || M.cols < 0)
+        throw std::invalid_argument("apxchol: matrix view dimensions must be nonnegative");
+    if (M.col_stride < M.rows)
+        throw std::invalid_argument("apxchol: matrix view col_stride must be at least rows");
+    if (M.data == nullptr && M.rows != 0 && M.cols != 0)
+        throw std::invalid_argument("apxchol: matrix view data is null");
+    return Ref(M.data, M.rows, M.cols, 1, M.col_stride);
+}
+
+} // namespace
+
+const_matrix_ref dense_input(const_matrix_view M) { return dense_view<const_matrix_ref>(M); }
+matrix_ref dense_input(matrix_view M) { return dense_view<matrix_ref>(M); }
 
 } // namespace apxchol::detail

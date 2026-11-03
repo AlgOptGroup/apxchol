@@ -41,6 +41,8 @@ using apxchol::detail::operator_scan;
 using apxchol::detail::operator_view;
 using apxchol::detail::require_operator;
 using apxchol::detail::scan_operator;
+using apxchol::test::require_operator;
+using apxchol::test::scan_operator;
 
 namespace {
 
@@ -182,8 +184,8 @@ apxchol::solve_result unvalidated_route_check(const Sparse& A, apxchol::factoriz
     const apxchol::detail::cpu_route route(input, {}, nullptr, &F);
     apxchol::solve_result result;
     Eigen::VectorXd x(b.size());
-    const auto initial = apxchol::detail::dense_of(x0);
-    route.solve_columns(apxchol::detail::dense_of(b), apxchol::detail::dense_of(x), &initial,
+    const auto initial = apxchol::test::dense_of(x0);
+    route.solve_columns(apxchol::test::dense_of(b), apxchol::test::dense_of(x), &initial,
                         {&result, 1}, nullptr, 1e-15, 0);
     return result;
 }
@@ -467,20 +469,20 @@ TEST(OperatorContract, LumpingCeilingIsExplicitPerCall) {
 
     apxchol::factor_options options;
     options.lump_max_mass = 0;
-    EXPECT_THROW(apxchol::factorize(A, options), std::invalid_argument);
+    EXPECT_THROW(apxchol::factorize(apxchol::test::csc(A), options), std::invalid_argument);
     options.lump_max_mass = 0.25;
-    EXPECT_EQ(apxchol::factorize(A, options).lumped_offdiag, 2);
+    EXPECT_EQ(apxchol::factorize(apxchol::test::csc(A), options).lumped_offdiag, 2);
 }
 
 TEST(OperatorContract, RegularizationIsExplicitPerFactorization) {
     const auto A = grid_laplacian(6, 6);
     apxchol::factor_options options;
-    EXPECT_FALSE(apxchol::factorize(A, options).sddm);
+    EXPECT_FALSE(apxchol::factorize(apxchol::test::csc(A), options).sddm);
     options.regularization = 1e-8;
-    EXPECT_TRUE(apxchol::factorize(A, options).sddm);
-    EXPECT_TRUE(apxchol::factorize(A, apxchol::detail::block_greedy_partitioner{}, options).sddm);
+    EXPECT_TRUE(apxchol::factorize(apxchol::test::csc(A), options).sddm);
+    EXPECT_TRUE(apxchol::factorize(apxchol::test::csc(A), apxchol::detail::block_greedy_partitioner{}, options).sddm);
     options.regularization = 0;
-    EXPECT_FALSE(apxchol::factorize(A, options).sddm);
+    EXPECT_FALSE(apxchol::factorize(apxchol::test::csc(A), options).sddm);
 }
 
 TEST(OperatorContract, NumericalOptionsRejectInvalidValues) {
@@ -491,10 +493,10 @@ TEST(OperatorContract, NumericalOptionsRejectInvalidValues) {
         SCOPED_TRACE(value);
         apxchol::factor_options options;
         options.regularization = value;
-        EXPECT_THROW(apxchol::factorize(empty, options), std::invalid_argument);
+        EXPECT_THROW(apxchol::factorize(apxchol::test::csc(empty), options), std::invalid_argument);
         options = {};
         options.lump_max_mass = value;
-        EXPECT_THROW(apxchol::factorize(empty, options), std::invalid_argument);
+        EXPECT_THROW(apxchol::factorize(apxchol::test::csc(empty), options), std::invalid_argument);
         EXPECT_THROW(operator_view(empty_csc, value), std::invalid_argument);
     }
     EXPECT_THROW(operator_view(empty_csc, 1.01), std::invalid_argument);
@@ -616,8 +618,8 @@ TEST(SpmvLrmBuild, AcceptedNearSymmetryStillUsesCanonicalLowerValues) {
 
     const Eigen::VectorXd x0 = spmv_probe_x();
     const Eigen::VectorXd b = spmv_probe_b();
-    apxchol::solver slv(A, on_cpu);
-    const auto res = slv.solve(b, 1e-15, 0, &x0);
+    apxchol::solver slv(apxchol::test::csc(A), on_cpu);
+    const auto res = slv.solve(apxchol::test::cspan(b), 1e-15, 0, apxchol::test::cspan(x0));
     EXPECT_EQ(res.iterations, 0);
     EXPECT_EQ(res.residual, 0.0);
 }
@@ -653,8 +655,8 @@ TEST(SpmvLrmBuild, BitIdenticalFastPathAndWorkSplitApplyTheExactOperator) {
     for (int threads : {1, 3, 16}) {
         omp_set_num_threads(threads);
         SCOPED_TRACE(threads);
-        apxchol::solver slv(A, on_cpu);
-        const auto res = slv.solve(b, 1e-15, 0, &x0);
+        apxchol::solver slv(apxchol::test::csc(A), on_cpu);
+        const auto res = slv.solve(apxchol::test::cspan(b), 1e-15, 0, apxchol::test::cspan(x0));
         EXPECT_EQ(res.iterations, 0);
         EXPECT_EQ(res.residual, 0.0);
     }
@@ -662,25 +664,23 @@ TEST(SpmvLrmBuild, BitIdenticalFastPathAndWorkSplitApplyTheExactOperator) {
 }
 
 TEST(SpmvLrmBuild, OwnedFp32CopySurvivesCallerMutationAndDestruction) {
-    // Exact binary values select the fp32 operator. Leave the input
-    // uncompressed to exercise the local compression path, then prove the
-    // reusable solver does not retain a map/reference to caller storage.
+    // Exact binary values select the fp32 operator. Prove the reusable solver
+    // does not retain a reference to caller storage.
     auto A = std::make_unique<Sparse>(spmv_probe_sddm());
-    A->uncompress();
-    ASSERT_FALSE(A->isCompressed());
+    A->makeCompressed();
 
     const Eigen::VectorXd x0 = spmv_probe_x();
     const Eigen::VectorXd b = spmv_probe_b();
-    apxchol::solver slv(*A, on_cpu);
+    apxchol::solver slv(apxchol::test::csc(*A), on_cpu);
 
     for (int k = 0; k < A->outerSize(); ++k)
         for (Sparse::InnerIterator it(*A, k); it; ++it)
             it.valueRef() = 0.0;
-    const auto after_mutation = slv.solve(b, 1e-15, 0, &x0);
+    const auto after_mutation = slv.solve(apxchol::test::cspan(b), 1e-15, 0, apxchol::test::cspan(x0));
     EXPECT_EQ(after_mutation.residual, 0.0);
 
     A.reset();
-    const auto after_destruction = slv.solve(b, 1e-15, 0, &x0);
+    const auto after_destruction = slv.solve(apxchol::test::cspan(b), 1e-15, 0, apxchol::test::cspan(x0));
     EXPECT_EQ(after_destruction.residual, 0.0);
 }
 
@@ -699,7 +699,7 @@ TEST(SpmvLrmBuild, BalancedDuplicateMultiplicitiesUseGeneralFallback) {
     };
     Sparse canonical(3, 3);
     canonical.setFromTriplets(canonical_entries.begin(), canonical_entries.end());
-    auto F = apxchol::factorize(canonical);
+    auto F = apxchol::factorize(apxchol::test::csc(canonical));
     Eigen::VectorXd x0(3);
     x0 << 8.0, -4.0, 2.0;
     const Eigen::VectorXd b = A.selfadjointView<Eigen::Lower>() * x0;
@@ -715,7 +715,7 @@ TEST(SpmvLrmBuild, UnsortedCompressedInputUsesGeneralFallback) {
     // makeCompressed() does not sort a matrix that is already compressed.
     // Preserve the matrix values while introducing one inversion per column.
     const Sparse canonical = spmv_probe_sddm();
-    auto F = apxchol::factorize(canonical);
+    auto F = apxchol::factorize(apxchol::test::csc(canonical));
     Sparse unsorted = canonical;
     ASSERT_TRUE(unsorted.isCompressed());
     for (int col = 0; col < unsorted.outerSize(); ++col) {
@@ -742,7 +742,7 @@ TEST(SpmvLrmBuild, LowerOnlyRouteInputUsesGeneralFallback) {
     // input has no reusable CSC-as-CSR layout, so it must take the general
     // lower-reflection build and still apply the full symmetric operator.
     const Sparse A = spmv_probe_sddm();
-    auto F = apxchol::factorize(A);
+    auto F = apxchol::factorize(apxchol::test::csc(A));
     Sparse lower = A.triangularView<Eigen::Lower>();
     lower.makeCompressed();
     ASSERT_LT(lower.nonZeros(), A.nonZeros());
@@ -766,7 +766,7 @@ TEST(SpmvLrmBuild, OneSidedExplicitZeroKeepsGeneralFallback) {
     Sparse A(4, 4);
     A.setFromTriplets(entries.begin(), entries.end());
     A.makeCompressed();
-    auto F = apxchol::factorize(A);
+    auto F = apxchol::factorize(apxchol::test::csc(A));
     auto F_for_direct = F;
     Sparse padded = A;
     padded.coeffRef(0, 3) = 0.0;
@@ -776,9 +776,9 @@ TEST(SpmvLrmBuild, OneSidedExplicitZeroKeepsGeneralFallback) {
     Eigen::VectorXd x0(4);
     x0 << 8.0, -4.0, 2.0, 1.0;
     const Eigen::VectorXd b = A * x0;
-    apxchol::solver direct(A, std::move(F_for_direct), on_cpu);
-    apxchol::solver reflected(padded, std::move(F), on_cpu);
-    const auto res = reflected.solve(b, 1e-15, 0, &x0);
+    apxchol::solver direct(apxchol::test::csc(A), std::move(F_for_direct), on_cpu);
+    apxchol::solver reflected(apxchol::test::csc(padded), std::move(F), on_cpu);
+    const auto res = reflected.solve(apxchol::test::cspan(b), 1e-15, 0, apxchol::test::cspan(x0));
     EXPECT_EQ(res.iterations, 0);
     EXPECT_EQ(res.residual, 0.0);
 
@@ -787,11 +787,11 @@ TEST(SpmvLrmBuild, OneSidedExplicitZeroKeepsGeneralFallback) {
     // drive the entire PCG recurrence bit-identically.
     Eigen::VectorXd rhs(4);
     rhs << 1.0, -2.0, 3.0, 0.5;
-    const auto direct_res = direct.solve(rhs, 1e-12, 50);
-    const auto reflected_res = reflected.solve(rhs, 1e-12, 50);
+    const auto direct_res = direct.solve(apxchol::test::cspan(rhs), 1e-12, 50);
+    const auto reflected_res = reflected.solve(apxchol::test::cspan(rhs), 1e-12, 50);
     EXPECT_EQ(direct_res.iterations, reflected_res.iterations);
     EXPECT_EQ(direct_res.residual, reflected_res.residual);
-    EXPECT_TRUE((direct_res.x.array() == reflected_res.x.array()).all());
+    EXPECT_EQ(direct_res.x, reflected_res.x);
 }
 
 TEST(MMatrixLumping, OperatorIsBitIdenticalAfterPreconditionerConstruction) {
@@ -802,18 +802,18 @@ TEST(MMatrixLumping, OperatorIsBitIdenticalAfterPreconditionerConstruction) {
     Sparse A = nearly_sddm(20, 20, 12);
     const raw_snapshot snap(A);
 
-    apxchol::solver slv(A, {.backend = apxchol::solve_backend::cpu});
+    apxchol::solver slv(apxchol::test::csc(A), {.backend = apxchol::solve_backend::cpu});
     ASSERT_GT(slv.factor().lumped_offdiag, 0)
         << "the test matrix did not actually trigger lumping";
     EXPECT_TRUE(snap.identical_to(A))
         << "preconditioner construction modified the caller's operator";
 
     const Eigen::VectorXd b = apxchol::test::random_rhs(A.rows());
-    const auto res = slv.solve(b, 1e-8, 300);
+    const auto res = slv.solve(apxchol::test::cspan(b), 1e-8, 300);
     EXPECT_TRUE(snap.identical_to(A)) << "solving modified the caller's operator";
 
     // And the residual really is measured against the matrix passed in.
-    const double rel = (b - A * res.x).norm() / b.norm();
+    const double rel = (b - A * apxchol::test::vec(res.x)).norm() / b.norm();
     EXPECT_LT(rel, 1e-8) << "reported residual " << res.residual;
 }
 
@@ -824,12 +824,12 @@ TEST(MMatrixLumping, NearlySddmOperatorConvergesAgainstTheTrueOperator) {
     ASSERT_GT(scan_operator(A).offdiag_pos, 0);
 
     const Eigen::VectorXd b = apxchol::test::random_rhs(A.rows());
-    apxchol::solver slv(A);
+    apxchol::solver slv(apxchol::test::csc(A));
     EXPECT_EQ(slv.factor().lumped_offdiag, 80);   // 40 pairs
-    const auto res = slv.solve(b, 1e-8, 300);
+    const auto res = slv.solve(apxchol::test::cspan(b), 1e-8, 300);
     EXPECT_GT(res.iterations, 0);
     EXPECT_LT(res.residual, 1e-8);
-    EXPECT_LT((b - A * res.x).norm() / b.norm(), 1e-7);
+    EXPECT_LT((b - A * apxchol::test::vec(res.x)).norm() / b.norm(), 1e-7);
 }
 
 TEST(MMatrixLumping, PureLaplacianAndSddmAreUnchangedByTheFeature) {
@@ -838,11 +838,126 @@ TEST(MMatrixLumping, PureLaplacianAndSddmAreUnchangedByTheFeature) {
     for (const Sparse& A : {grid_laplacian(30, 30), grid_sddm(30, 30)}) {
         const raw_snapshot snap(A);
         const Eigen::VectorXd b = apxchol::test::random_rhs(A.rows());
-        apxchol::solver slv(A);
+        apxchol::solver slv(apxchol::test::csc(A));
         EXPECT_EQ(slv.factor().lumped_offdiag, 0);
-        const auto res = slv.solve(b, 1e-8, 300);
+        const auto res = slv.solve(apxchol::test::cspan(b), 1e-8, 300);
         EXPECT_GT(res.iterations, 0);
         EXPECT_LT(res.residual, 1e-8);
         EXPECT_TRUE(snap.identical_to(A));
     }
+}
+
+// ── the public CSC views ────────────────────────────────────────────────────
+
+namespace {
+
+// A grid Laplacian's arrays at the given index width.
+template<class Index>
+struct grid_arrays {
+    std::vector<Index> col_ptr, row_idx;
+    std::vector<double> values;
+    std::int64_t n = 0;
+
+    explicit grid_arrays(const Sparse& A) : n(A.rows()) {
+        col_ptr.assign(A.outerIndexPtr(), A.outerIndexPtr() + A.rows() + 1);
+        row_idx.assign(A.innerIndexPtr(), A.innerIndexPtr() + A.nonZeros());
+        values.assign(A.valuePtr(), A.valuePtr() + A.nonZeros());
+    }
+    apxchol::basic_csc_view<Index> view() const { return {n, col_ptr, row_idx, values}; }
+};
+
+template<class Index>
+void expect_invalid_view(const grid_arrays<Index>& arrays, const char* fragment) {
+    try {
+        apxchol::solver slv(arrays.view(), on_cpu);
+        FAIL() << "expected an invalid view to be refused: " << fragment;
+    } catch (const std::invalid_argument& e) {
+        const std::string message = e.what();
+        EXPECT_EQ(message.rfind("apxchol: invalid CSC view: ", 0), 0u) << message;
+        EXPECT_NE(message.find(fragment), std::string::npos) << message;
+    }
+}
+
+} // namespace
+
+TEST(CscView, BothIndexWidthsSolveBitIdentically) {
+    const Sparse A = grid_sddm(9, 7);
+    const grid_arrays<std::int32_t> narrow(A);
+    const grid_arrays<std::int64_t> wide(A);
+    const Eigen::VectorXd b = apxchol::test::random_rhs(A.rows());
+    apxchol::solver from_narrow(narrow.view(), on_cpu);
+    apxchol::solver from_wide(wide.view(), on_cpu);
+    const auto x_narrow = from_narrow.solve(apxchol::test::cspan(b)).x;
+    const auto x_wide = from_wide.solve(apxchol::test::cspan(b)).x;
+    EXPECT_EQ(x_narrow, x_wide);
+    EXPECT_EQ(apxchol::solve(wide.view(), apxchol::test::cspan(b), {}, {}, {}, on_cpu).x, x_wide);
+    EXPECT_EQ(apxchol::factorize(narrow.view()).perm, apxchol::factorize(wide.view()).perm);
+}
+
+TEST(CscView, InvalidViewsAreRefusedAtTheBoundary) {
+    const Sparse A = grid_sddm(4, 4);
+    const grid_arrays<std::int32_t> valid(A);
+    {
+        auto bad = valid;
+        bad.col_ptr.pop_back();
+        expect_invalid_view(bad, "col_ptr has");
+    }
+    {
+        auto bad = valid;
+        bad.n = -1;
+        expect_invalid_view(bad, "n is negative");
+    }
+    {
+        auto bad = valid;
+        bad.col_ptr[0] = 1;
+        expect_invalid_view(bad, "col_ptr[0] must be 0");
+    }
+    {
+        auto bad = valid;
+        std::swap(bad.col_ptr[2], bad.col_ptr[3]);
+        expect_invalid_view(bad, "col_ptr decreases after column 2");
+    }
+    {
+        auto bad = valid;
+        bad.values.pop_back();
+        expect_invalid_view(bad, "row_idx and values must have");
+    }
+    {
+        auto bad = valid;
+        bad.row_idx[bad.col_ptr[3]] = static_cast<std::int32_t>(bad.n);
+        expect_invalid_view(bad, "column 3 row 16 is outside [0, n)");
+    }
+    {
+        auto bad = valid;
+        bad.row_idx[bad.col_ptr[5]] = -1;
+        expect_invalid_view(bad, "column 5 row -1 is outside [0, n)");
+    }
+    {
+        auto bad = valid;
+        std::swap(bad.row_idx[bad.col_ptr[6]], bad.row_idx[bad.col_ptr[6] + 1]);
+        expect_invalid_view(bad, "out of order");
+    }
+    {
+        auto bad = valid;
+        bad.row_idx[bad.col_ptr[6] + 1] = bad.row_idx[bad.col_ptr[6]];
+        expect_invalid_view(bad, "is repeated");
+    }
+    EXPECT_THROW((void)apxchol::factorize(apxchol::csc_view{2, {}, {}, {}}), std::invalid_argument);
+}
+
+TEST(CscView, DenseViewsAreChecked) {
+    const Sparse A = grid_sddm(4, 4);
+    apxchol::solver slv(apxchol::test::csc(A), on_cpu);
+    const std::int64_t n = A.rows();
+    std::vector<double> B(static_cast<std::size_t>(2 * n), 1.0), X(B.size());
+    const apxchol::const_matrix_view rhs{B.data(), n, 2, n};
+    EXPECT_THROW((void)slv.solve(rhs, {X.data(), n, 2, n - 1}), std::invalid_argument);
+    EXPECT_THROW((void)slv.solve(rhs, {nullptr, n, 2, n}), std::invalid_argument);
+    EXPECT_THROW((void)slv.solve({B.data(), n, -1, n}, {X.data(), n, 2, n}), std::invalid_argument);
+    // A null warm start starts every column from zero.
+    const auto cold = slv.solve(rhs, {X.data(), n, 2, n});
+    std::vector<double> zeros(B.size(), 0.0), Y(B.size());
+    const auto warm = slv.solve(rhs, {Y.data(), n, 2, n}, {}, {}, {zeros.data(), n, 2, n});
+    EXPECT_EQ(X, Y);
+    EXPECT_EQ(cold.columns[0].iterations, warm.columns[0].iterations);
 }

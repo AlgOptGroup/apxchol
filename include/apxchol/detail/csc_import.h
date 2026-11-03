@@ -1,75 +1,75 @@
 #pragma once
+/// CSC arrays from the Python and MATLAB/Octave bindings as a public CSC view.
+/// Not part of the public API.
 
 #include "apxchol/detail/csc_matrix.h"
-#include "apxchol/detail/eigen_boundary.h"
-#include <Eigen/Sparse>
-#include <concepts>
+#include "apxchol/views.h"
+#include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <stdexcept>
-#include <utility>
 #include <vector>
 
 namespace apxchol::detail {
 
-// Copy foreign CSC arrays into Eigen's 32-bit layout for the bindings.
-// Operator validation is separate; unsorted columns and duplicates are
-// assembled with setFromTriplets semantics (csc_from_triplets).
-template<std::integral Offset, std::integral Index>
-Eigen::SparseMatrix<double> import_csc(std::int64_t n, const Offset* outer,
-                                     const Index* inner, const double* values,
-                                     int base = 0) {
-    constexpr auto limit = std::numeric_limits<int>::max();
-    if (n < 0 || n > limit)
-        throw std::invalid_argument("n must be in [0, 2^31-1]");
-    if (outer == nullptr)
-        throw std::invalid_argument("colptr is NULL");
-    if (base != 0 && base != 1)
-        throw std::invalid_argument("index_base must be 0 or 1");
-    if (!std::cmp_equal(outer[0], base))
-        throw std::invalid_argument("colptr[0] must equal index_base");
-    for (std::int64_t j = 0; j < n; ++j)
-        if (outer[j + 1] < outer[j])
-            throw std::invalid_argument("colptr must be nondecreasing");
-    if (std::cmp_greater(outer[n], std::int64_t(limit) + base))
-        throw std::invalid_argument("nnz exceeds 2^31-1");
-    const auto nnz = static_cast<int>(outer[n] - base);
-    if (nnz != 0 && (inner == nullptr || values == nullptr))
-        throw std::invalid_argument("rowval or nzval is NULL");
+/// Foreign n x n CSC arrays (outer has n+1 entries) as a view the solver
+/// accepts. Sorted, duplicate-free columns are borrowed; otherwise the entries
+/// are assembled into owned storage with csc_from_triplets semantics
+/// (duplicates summed in order). Operator validation is separate.
+template<class Index>
+class imported_csc {
+public:
+    imported_csc(std::int64_t n, const Index* outer, const Index* inner, const double* values) {
+        if (n < 0) throw std::invalid_argument("n must be nonnegative");
+        if (outer == nullptr) throw std::invalid_argument("colptr is NULL");
+        if (outer[0] != 0) throw std::invalid_argument("colptr[0] must be 0");
+        for (std::int64_t j = 0; j < n; ++j)
+            if (outer[j + 1] < outer[j])
+                throw std::invalid_argument("colptr must be nondecreasing");
+        const auto nnz = static_cast<std::int64_t>(outer[n]);
+        if (nnz != 0 && (inner == nullptr || values == nullptr))
+            throw std::invalid_argument("rowval or nzval is NULL");
 
-    bool sorted = true;
-    for (std::int64_t j = 0; j < n; ++j) {
-        const auto begin = outer[j] - base, end = outer[j + 1] - base;
-        for (auto p = begin; p < end; ++p) {
-            const auto row = inner[p];
-            if (std::cmp_less(row, base) || std::cmp_greater_equal(row, n + base))
-                throw std::invalid_argument("CSC row index out of range");
-            if (p > begin && row <= inner[p - 1]) sorted = false;
+        bool sorted = true;
+        for (std::int64_t j = 0; j < n; ++j)
+            for (std::int64_t p = outer[j]; p < outer[j + 1]; ++p) {
+                if (inner[p] < 0 || inner[p] >= n)
+                    throw std::invalid_argument("CSC row index out of range");
+                if (p > outer[j] && inner[p] <= inner[p - 1]) sorted = false;
+            }
+        const auto size = static_cast<std::size_t>(n);
+        if (sorted) {
+            view_ = {n, {outer, size + 1}, {inner, static_cast<std::size_t>(nnz)},
+                     {values, static_cast<std::size_t>(nnz)}};
+            return;
         }
-    }
 
-    const auto size = static_cast<int>(n);
-    Eigen::SparseMatrix<double> A(size, size);
-    if (sorted) {
-        A.resizeNonZeros(nnz);
-        for (std::int64_t j = 0; j <= n; ++j)
-            A.outerIndexPtr()[j] = static_cast<int>(outer[j] - base);
-        for (int p = 0; p < nnz; ++p) {
-            A.innerIndexPtr()[p] = static_cast<int>(inner[p] - base);
-            A.valuePtr()[p] = values[p];
-        }
-        return A;
+        if (static_cast<std::uint64_t>(n) >= std::numeric_limits<node_index>::max())
+            throw std::invalid_argument("n exceeds this build's vertex index width");
+        std::vector<triplet> triplets;
+        triplets.reserve(static_cast<std::size_t>(nnz));
+        for (std::int64_t j = 0; j < n; ++j)
+            for (std::int64_t p = outer[j]; p < outer[j + 1]; ++p)
+                triplets.push_back({static_cast<node_index>(inner[p]),
+                                    static_cast<node_index>(j), values[p]});
+        const auto assembled = csc_from_triplets(static_cast<node_index>(n), triplets);
+        std::vector<triplet>().swap(triplets);
+        const auto stored = static_cast<std::size_t>(assembled.ptr()[n]);
+        outer_.assign(assembled.ptr(), assembled.ptr() + size + 1);
+        inner_.assign(assembled.idx(), assembled.idx() + stored);
+        values_.assign(assembled.val(), assembled.val() + stored);
+        view_ = {n, outer_, inner_, values_};
     }
+    imported_csc(const imported_csc&) = delete;
+    imported_csc& operator=(const imported_csc&) = delete;
 
-    std::vector<triplet> triplets;
-    triplets.reserve(static_cast<std::size_t>(nnz));
-    for (int j = 0; j < size; ++j)
-        for (auto p = outer[j] - base; p < outer[j + 1] - base; ++p)
-            triplets.push_back({static_cast<node_index>(inner[p] - base),
-                                static_cast<node_index>(j), values[p]});
-    const auto assembled = csc_from_triplets(static_cast<node_index>(size), triplets);
-    std::vector<triplet>().swap(triplets);
-    return to_eigen(assembled.ref());
-}
+    const basic_csc_view<Index>& view() const noexcept { return view_; }
+
+private:
+    std::vector<Index> outer_, inner_;
+    std::vector<double> values_;
+    basic_csc_view<Index> view_;
+};
 
 } // namespace apxchol::detail

@@ -5,8 +5,8 @@ Include `apxchol.h` and link the `apxchol::core` CMake target:
 ```cpp
 #include "apxchol.h"
 
-apxchol::solver solver(A);            // A: Eigen::SparseMatrix<double>
-auto result = solver.solve(b, 1e-8);  // check result.converged
+apxchol::solver solver(A);            // A: apxchol::csc_view of CSC arrays
+auto result = solver.solve(b, 1e-8);  // b: std::vector<double>; check result.converged
 ```
 
 The [basic example](examples.md#basic-solves) shows one-shot, reusable and

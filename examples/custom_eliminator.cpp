@@ -8,6 +8,7 @@
 #include "apxchol.h"
 #include "example_grid.h"
 #include <cstdio>
+#include <vector>
 
 struct exact_clique_eliminator {
     void sample_clique(std::span<apxchol::weighted_neighbor> neighbors,
@@ -24,10 +25,11 @@ struct exact_clique_eliminator {
 static_assert(apxchol::eliminator<exact_clique_eliminator>);
 
 int main() {
-    auto L = grid_laplacian(60);
-    Eigen::VectorXd b = Eigen::VectorXd::Zero(L.rows());   // unit source and sink
-    b(0) = 1.0;
-    b(L.rows() - 1) = -1.0;
+    const auto grid = grid_laplacian(60);
+    const apxchol::csc_view L = grid.view();
+    std::vector<double> b(static_cast<std::size_t>(L.n), 0.0);   // unit source and sink
+    b.front() = 1.0;
+    b.back() = -1.0;
     apxchol::factor_options opts;
 
     // Reference: the default tree-sampling eliminator (default storage).

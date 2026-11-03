@@ -1,5 +1,6 @@
 #pragma once
 #include "apxchol/graph/conversions.h"
+#include "csc_test_util.h"
 
 namespace apxchol::test {
 
@@ -11,7 +12,7 @@ inline Eigen::SparseMatrix<double> grid_laplacian(int rows, int cols) {
             if (r + 1 < rows) G.add_edge(id(r, c), id(r + 1, c), 1.0);
             if (c + 1 < cols) G.add_edge(id(r, c), id(r, c + 1), 1.0);
         }
-    return apxchol::detail::laplacian(G);
+    return to_eigen(apxchol::detail::laplacian(G).ref());
 }
 
 } // namespace apxchol::test

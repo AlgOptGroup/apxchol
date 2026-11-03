@@ -293,11 +293,4 @@ factorization detail::factorize_for_solver(csc_ref<double> L,
     return do_factorize(std::move(G));
 }
 
-// Public factorization returns an exportable CPU factor.
-factorization factorize(const Eigen::SparseMatrix<double>& L,
-                        const factor_options& opts) {
-    const detail::eigen_csc input(L);
-    return detail::factorize_for_solver(detail::factorize_input(input, opts), opts, nullptr);
-}
-
 } // namespace apxchol

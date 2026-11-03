@@ -9,7 +9,6 @@
 #elif defined(APXCHOL_USE_METAL)
 #include "apxchol/solver/detail/metal_route.h"
 #endif
-#include "apxchol/detail/eigen_boundary.h"
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -31,21 +30,20 @@ using solver_route = std::variant<cpu_route
 
 struct solver_access {
     static const solver_route& route(const solver& owner);
-    // Attach a timing tree for the CLI's -v report, tests and the benchmark:
-    // setup records under "setup", and every solve on the returned solver
-    // under "pcg". The tree must outlive the solver; copies start without one.
-    static solver with_timings(const Eigen::SparseMatrix<double>& A,
-                               const solve_options& opts, checkpoint& timings);
+    // A solver for an operator in the library's own storage (the CLI, tests
+    // and the benchmark). A timing tree, when given, records setup under
+    // "setup" and every solve on the returned solver under "pcg"; it must
+    // outlive the solver, and copies start without one.
+    static solver make(csc_ref<double> A, const solve_options& opts,
+                       checkpoint* timings = nullptr);
     // A solver adopting F for an operator in the library's own storage.
     static solver make(csc_ref<double> A, factorization F, const solve_options& opts);
-    // A converted public input as the route's operator; throws the route's
-    // errors for a matrix that is not square.
-    static const csc_ref<double>& solver_input(const eigen_csc& input,
-                                               const solve_options& opts, bool adopted);
     static void save(const std::filesystem::path& path, const solver& owner);
     // started is when load() began, so setup_seconds includes reading the file.
     static void finish_load(solver& owner, std::int64_t entries,
                             std::chrono::steady_clock::time_point started);
+    // Measure setup_seconds from started, e.g. before checking a public view.
+    static void set_setup_start(solver& owner, std::chrono::steady_clock::time_point started);
 };
 
 } // namespace apxchol::detail
