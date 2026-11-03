@@ -1,4 +1,5 @@
 #include "apxchol/types.h"
+#include <Eigen/Cholesky>
 #include <cmath>
 #include <initializer_list>
 #include <iostream>
@@ -303,6 +304,58 @@ void callback_error_propagates() {
     require_contract(calls == 1 && caught, "component exception was swallowed or replaced");
 }
 
+void auto_split_only_for_disconnected_laplacians() {
+    auto plan = [](const char* solver, const char* ground, bool disconnected, bool laplacian) {
+        return resolve_desing(solver, "auto", ground, disconnected, laplacian);
+    };
+    require_contract(plan("boomeramg", "auto", true, true).decompose == decompose_mode::whole,
+                     "BoomerAMG split a disconnected Laplacian under auto");
+    require_contract(plan("boomeramg", "auto", true, false).decompose == decompose_mode::whole,
+                     "a disconnected SDDM operator splits for BoomerAMG");
+    require_contract(plan("boomeramg", "auto", false, true).decompose == decompose_mode::whole,
+                     "a connected Laplacian splits for BoomerAMG");
+    require_contract(plan("amgcl", "coarse", true, true).decompose == decompose_mode::split,
+                     "a disconnected Laplacian no longer splits under coarse grounding");
+    const auto sddm_coarse = plan("amgcl", "coarse", true, false);
+    require_contract(sddm_coarse.supported && sddm_coarse.decompose == decompose_mode::whole,
+                     "a disconnected SDDM operator is not solved whole under coarse grounding");
+    require_contract(!resolve_desing("amgcl", "whole", "coarse", true, true).supported,
+                     "whole + coarse on a disconnected Laplacian became supported");
+    require_contract(resolve_desing("boomeramg", "split", "auto", true, false).decompose
+                         == decompose_mode::split,
+                     "an explicit split request is ignored for SDDM input");
+}
+
+void mixed_grounding() {
+    // Interleave the Laplacian pair with a grounded pair, a positive scalar
+    // and a zero isolate. Only the first pair and the isolate need a gauge.
+    const auto A = make_matrix(6, {{0,0,1},{2,2,1},{0,2,-1},{2,0,-1},
+                                   {1,1,2},{3,3,1},{1,3,-1},{3,1,-1},{4,4,3}});
+    require_contract(prepare_components(A, false), "mixed operator was missed");
+    require_contract(g_singular_vertices == std::vector<char>({1,0,1,0,0,1}),
+                     "incorrect constant-nullspace mask");
+    std::vector<int> pins;
+    auto P = dirichlet_pin(A, pins);
+    require_contract(pins.size() == 2 && (pins[0] == 0 || pins[0] == 2) && pins[1] == 5,
+                     "expected one gauge for each singular block");
+    Eigen::VectorXd b(6);
+    b << 2,3,-2,4,6,0;
+    auto rhs = b;
+    for (int pin : pins) rhs[pin] = 0;
+    Eigen::VectorXd x = P.toDense().ldlt().solve(rhs);
+    center_if_laplacian(x);
+    require_close((A*x-b).norm(), 0, "whole solve changed a nonsingular equation");
+    const auto result = split(A, b, [&](const Matrix& block, const Eigen::VectorXd& sub_rhs) {
+        require_contract(g_laplacian_mode == (sub_rhs[0] == 2), "wrong split block mode");
+        return run_cg_no_precond(block, sub_rhs, "mixed", requested_tolerance, 37);
+    });
+    require_close(result.rel_residual, 0, "split did not solve the original equations");
+    require_contract(g_laplacian_mode, "split leaked its last block mode");
+    const double shift = std::nextafter(1.0, 2.0);
+    const auto shifted = make_matrix(2, {{0,0,shift},{1,1,1},{0,1,-1},{1,0,-1}});
+    require_contract(!constant_null_component(shifted, {0,1}), "pinned a one-ulp shift");
+}
+
 } // namespace
 
 int main() {
@@ -317,6 +370,8 @@ int main() {
         {"callback_error_propagates", callback_error_propagates},
         {"complete_route_and_fill_propagate", complete_route_and_fill_propagate},
         {"unavailable_sentinel_propagates", unavailable_sentinel_propagates},
+        {"mixed_grounding", mixed_grounding},
+        {"auto_split_only_for_disconnected_laplacians", auto_split_only_for_disconnected_laplacians},
     };
     int passed = 0;
     for (const auto& test : cases) {

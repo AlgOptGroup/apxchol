@@ -61,8 +61,8 @@ if (APXCHOL_DEVICE STREQUAL "CUDA")
 else()
     target_link_libraries(unit_tests PRIVATE apxchol_core)
 endif()
-# The tests are built like the core: a wider default instruction set would
-# compile Eigen with AVX and trip GCC 14's false -Warray-bounds reports.
+# The tests instantiate the library's internal headers; build them for the
+# core's instruction set.
 if (_APXCHOL_ARCH_FLAG)
     target_compile_options(unit_tests PRIVATE "${_APXCHOL_ARCH_FLAG}")
 endif()
@@ -71,7 +71,6 @@ target_compile_definitions(unit_tests PRIVATE
 target_link_libraries(unit_tests PRIVATE
         apxchol_mtx_input
         GTest::gtest_main
-        ZLIB::ZLIB
 )
 
 include(GoogleTest)
@@ -225,6 +224,8 @@ if (APXCHOL_BUILD_CLI)
     endfunction()
     apxchol_cli_rhs_error_test(cli_rhs_without_columns path5_rhs_no_columns "RHS file has no columns")
     apxchol_cli_rhs_error_test(cli_rhs_without_rows rhs_no_rows "RHS length 0 does not match n = 5")
+    apxchol_cli_rhs_error_test(cli_rhs_size_overflow path5_rhs_size_overflow
+        "apxchol: dense matrix file claims 5x4611686018427387904 entries, more than can be stored")
     # --x0: the solution as the guess needs no iterations; a wrong shape is rejected.
     apxchol_cli_rhs_test(cli_x0_solution_needs_no_iterations path5_rhs1 0
         "iterations: 0\n" "array real general\n5 1\n"

@@ -66,8 +66,10 @@ run_config parse_args(int argc, char* argv[]) {
         std::exit(0);
     }, "Print version and build info");
 
+    app.option_defaults()->group("Input/output");
+
     // ── positional ──
-    app.add_option("input", cfg.input_path, "Input graph in MatrixMarket format")
+    app.add_option("input", cfg.input_path, "Matrix A in Matrix Market format. Use --convert-input for a graph adjacency matrix.")
         ->required()
         ->check(CLI::ExistingFile);
 
@@ -76,7 +78,7 @@ run_config parse_args(int argc, char* argv[]) {
     // the excludes keep the "not both" error message specific.
     auto* rhs_group = app.add_option_group("Right-hand side (exactly one required)");
     auto* rhs_opt = rhs_group->add_option("--rhs", rhs_str,
-                   "RHS in dense MatrixMarket format: an n-vector, or an n x k matrix "
+                   "RHS in dense Matrix Market format: an n-vector, or an n x k matrix "
                    "whose k columns are solved as one batch")
         ->check(CLI::ExistingFile);
     auto* rand_flag = rhs_group->add_flag("--random-rhs", cfg.random_rhs,
@@ -86,7 +88,7 @@ run_config parse_args(int argc, char* argv[]) {
     rand_flag->excludes(rhs_opt);
     rhs_group->require_option(1);
     app.add_option("--x0", x0_str,
-                   "Initial guess in dense MatrixMarket format, shaped like the RHS "
+                   "Initial guess in dense Matrix Market format, shaped like the RHS "
                    "(default: zero)")
         ->check(CLI::ExistingFile);
 
@@ -97,14 +99,16 @@ run_config parse_args(int argc, char* argv[]) {
 
     // ── output ──
     app.add_option("-o,--output", output_str,
-                   "Write the solution to a dense MatrixMarket file (n x k for an n x k RHS)");
+                   "Write the solution to a dense Matrix Market file (n x k for an n x k RHS)");
 
+    app.option_defaults()->group("Setup (advanced)");
     const auto samplers = name_map(detail::clique_sampler_names);
     app.add_option("--sampler", cfg.solve_opts.factor_opts.sampler,
                    "Clique sampler: gks or trace_cycle")
         ->default_str("gks")
         ->transform(CLI::IsMember(samplers) & CLI::Transformer(samplers));
 
+    app.option_defaults()->group("Solve");
     app.add_option("--backend", cfg.solve_opts.backend,
                    "Complete setup/solve route: auto, cpu or gpu (no runtime fallback)")
         ->default_str("auto")
@@ -114,6 +118,7 @@ run_config parse_args(int argc, char* argv[]) {
     app.add_option("--threads", cfg.solve_opts.num_threads,
                    "CPU thread ceiling (0 = OpenMP default; small work may use fewer)")
         ->check(CLI::NonNegativeNumber)->capture_default_str();
+    app.option_defaults()->group("Setup (advanced)");
     const auto storages = name_map(detail::factor_storage_names);
     app.add_option("--factor-storage", cfg.solve_opts.factor_opts.factor_storage,
                    "Factor storage: auto, float16 or float32")
@@ -128,6 +133,7 @@ run_config parse_args(int argc, char* argv[]) {
     app.add_option("--lump-max-mass", cfg.solve_opts.factor_opts.lump_max_mass,
                    "Maximum positive off-diagonal mass fraction allowed for lumping")
         ->capture_default_str();
+    app.option_defaults()->group("Solve");
     app.add_option("--tol", cfg.tol, "Relative residual tolerance")
         ->capture_default_str();
     app.add_option("--max-iter", cfg.max_iter, "Maximum PCG iterations")
@@ -135,6 +141,7 @@ run_config parse_args(int argc, char* argv[]) {
     app.add_option("--seed", cfg.solve_opts.factor_opts.seed,
                    "Random seed for factorization and test RHS")
         ->capture_default_str();
+    app.option_defaults()->group("Setup (advanced)");
     app.add_option("--degree-quantile", cfg.solve_opts.factor_opts.partition.degree_quantile,
                    "IS degree cap as a quantile of current degrees in [0, 1); "
                    "0 = use --degree-multiplier; omitted = route default "
@@ -153,6 +160,8 @@ run_config parse_args(int argc, char* argv[]) {
     app.add_option("--partitioner", cfg.solve_opts.factor_opts.partitioner, partitioner_help)
         ->default_str("block_greedy")
         ->transform(CLI::IsMember(partitioners) & CLI::Transformer(partitioners));
+
+    app.option_defaults()->group("Output detail");
 
     // ── verbosity (mutually exclusive) ──
     auto* q_flag = app.add_flag("-q,--quiet", quiet, "Suppress non-error output");

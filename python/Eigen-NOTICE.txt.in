@@ -1,6 +1,0 @@
-This wheel includes code from Eigen @Eigen3_VERSION@, licensed under the Mozilla Public License 2.0.
-
-Upstream source: https://gitlab.com/libeigen/eigen/-/archive/@Eigen3_VERSION@/eigen-@Eigen3_VERSION@.tar.gz
-License: https://www.mozilla.org/MPL/2.0/
-
-These links identify the upstream release. Wheels built with locally patched Eigen headers must also provide the corresponding modified source.

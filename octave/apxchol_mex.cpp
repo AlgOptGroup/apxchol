@@ -13,8 +13,6 @@
 
 #include "mex.h"
 
-#include <Eigen/Core>
-#include <Eigen/Sparse>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -26,9 +24,11 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "apxchol.h"
 #include "apxchol/detail/csc_import.h"
+#include "apxchol/detail/csc_input.h"
 #include "apxchol/operator_class.h"
 
 namespace {
@@ -156,39 +156,39 @@ apxchol::solver& get_solver(const mxArray* mh) {
     return *it->second;
 }
 
-// MATLAB/Octave sparse (CSC: jc/ir/pr) -> Eigen. Same int32 scope guard as the
-// Python binding (this build uses 32-bit Eigen storage indices).
-Eigen::SparseMatrix<double> mx_to_eigen(const mxArray* mA) {
+// MATLAB/Octave sparse (CSC: jc/ir/pr) as a 64-bit CSC view. mwIndex is an
+// unsigned 64-bit integer whose values fit int64, so the arrays are borrowed.
+using mx_csc = apxchol::detail::imported_csc<std::int64_t>;
+static_assert(sizeof(mwIndex) == sizeof(std::int64_t));
+
+std::unique_ptr<mx_csc> mx_to_csc(const mxArray* mA) {
     if (!mxIsSparse(mA) || !mxIsDouble(mA) || mxIsComplex(mA))
         fail("apxchol:badInput", "A must be a real sparse double matrix");
     const mwSize nr = mxGetM(mA), nc = mxGetN(mA);
     if (nr != nc)
         fail("apxchol:badInput", "A must be square (got " + std::to_string(nr) +
                                   "x" + std::to_string(nc) + ")");
-    const mwIndex* jc = mxGetJc(mA);
-    const mwIndex* ir = mxGetIr(mA);
-    const double*  pr = mxGetPr(mA);
-    const std::uint64_t nnz = jc[nc];
-    if (std::cmp_greater(nr, std::numeric_limits<int>::max()) ||
-        std::cmp_greater(nnz, std::numeric_limits<int>::max()))
-        fail("apxchol:badInput",
-             "matrix too large for 32-bit indices (n or nnz exceeds 2^31)");
-
-    return apxchol::detail::import_csc(nr, jc, ir, pr);
+    return std::make_unique<mx_csc>(
+        static_cast<std::int64_t>(nr), reinterpret_cast<const std::int64_t*>(mxGetJc(mA)),
+        reinterpret_cast<const std::int64_t*>(mxGetIr(mA)), mxGetPr(mA));
 }
 
-Eigen::Map<const Eigen::MatrixXd> mx_to_rhs(const mxArray* value, Eigen::Index rows,
-                                           const char* name) {
+apxchol::const_matrix_view mx_to_rhs(const mxArray* value, std::int64_t rows,
+                                     const char* name) {
     if (!mxIsDouble(value) || mxIsComplex(value) || mxIsSparse(value) ||
         mxGetNumberOfDimensions(value) != 2)
         fail("apxchol:badInput", std::string(name) + " must be a dense real double vector or matrix");
     const mwSize nr = mxGetM(value), nc = mxGetN(value);
     // Preserve row-vector input; for a one-row system, columns are separate RHSs.
     if (rows > 1 && nr == 1 && nc == static_cast<mwSize>(rows))
-        return {mxGetPr(value), rows, 1};
+        return {mxGetPr(value), rows, 1, rows};
     if (nr != static_cast<mwSize>(rows))
         fail("apxchol:badInput", std::string(name) + " must have one row per matrix row");
-    return {mxGetPr(value), rows, static_cast<Eigen::Index>(nc)};
+    return {mxGetPr(value), rows, static_cast<std::int64_t>(nc), rows};
+}
+
+std::span<const double> column(const apxchol::const_matrix_view& M) {
+    return {M.data, static_cast<std::size_t>(M.rows)};
 }
 
 void solve_metadata(int nlhs, mxArray* plhs[], std::span<const apxchol::solve_result> columns,
@@ -204,18 +204,18 @@ void solve_metadata(int nlhs, mxArray* plhs[], std::span<const apxchol::solve_re
     }
 }
 
-mxArray* sparse_to_mx(Eigen::SparseMatrix<double> A) {
-    A.makeCompressed();
-    mxArray* m = mxCreateSparse(A.rows(), A.cols(), std::max<Eigen::Index>(A.nonZeros(), 1), mxREAL);
-    std::copy_n(A.outerIndexPtr(), A.cols() + 1, mxGetJc(m));
-    std::copy_n(A.innerIndexPtr(), A.nonZeros(), mxGetIr(m));
-    std::copy_n(A.valuePtr(), A.nonZeros(), mxGetPr(m));
+mxArray* sparse_to_mx(const apxchol::detail::csc_matrix<double>& A) {
+    const std::size_t n = A.rows(), nnz = A.ptr()[n];
+    mxArray* m = mxCreateSparse(n, n, std::max<std::size_t>(nnz, 1), mxREAL);
+    std::copy_n(A.ptr(), n + 1, mxGetJc(m));
+    std::copy_n(A.idx(), nnz, mxGetIr(m));
+    std::copy_n(A.val(), nnz, mxGetPr(m));
     return m;
 }
 
-mxArray* vec_to_mx(const Eigen::VectorXd& v) {
+mxArray* vec_to_mx(const std::vector<double>& v) {
     mxArray* m = mxCreateDoubleMatrix(v.size(), 1, mxREAL);
-    Eigen::Map<Eigen::VectorXd>(mxGetPr(m), v.size()) = v;
+    std::copy(v.begin(), v.end(), mxGetPr(m));
     return m;
 }
 
@@ -235,13 +235,15 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         if (op == "factorize") {
             if (nrhs != 2 && nrhs != 3)
                 fail("apxchol:usage", "usage: h = apxchol_mex('factorize', A, options)");
-            auto solver = std::make_unique<apxchol::solver>(
-                mx_to_eigen(prhs[1]), setup_options(nrhs == 3 ? prhs[2] : nullptr));
+            const auto options = setup_options(nrhs == 3 ? prhs[2] : nullptr);
+            const auto A = mx_to_csc(prhs[1]);
+            auto solver = std::make_unique<apxchol::solver>(A->view(), options);
             store_solver(std::move(solver), nlhs, plhs);
         } else if (op == "as_operator") {
             if (nrhs != 2)
                 fail("apxchol:usage", "usage: A = apxchol_mex('as_operator', M)");
-            const auto M = mx_to_eigen(prhs[1]);
+            const auto imported = mx_to_csc(prhs[1]);
+            const apxchol::detail::csc_input M(imported->view());
             plhs[0] = apxchol::detail::is_graph_adjacency(M)
                 ? sparse_to_mx(apxchol::detail::adjacency_laplacian(M))
                 : mxDuplicateArray(prhs[1]);
@@ -267,23 +269,21 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             if (!(mxIsDouble(prhs[3]) && mxIsEmpty(prhs[3]))) tol = scalar_option(prhs[3], "rtol");
             if (!(mxIsDouble(prhs[4]) && mxIsEmpty(prhs[4])))
                 maxiter = integer_option<int>(prhs[4], "maxiter");
-            std::optional<apxchol::const_matrix_view> X0;
+            apxchol::const_matrix_view X0;
             if (nrhs == 6 && !(mxIsDouble(prhs[5]) && mxIsEmpty(prhs[5]))) {
-                const auto guess = mx_to_rhs(prhs[5], s.rows(), "x0");
-                if (guess.cols() != B.cols())
+                X0 = mx_to_rhs(prhs[5], s.rows(), "x0");
+                if (X0.cols != B.cols)
                     fail("apxchol:badInput", "x0 must have the same shape as b");
-                X0.emplace(guess);
             }
-            if (B.cols() == 1) {
-                Eigen::VectorXd x0;
-                if (X0) x0 = X0->col(0);
-                const auto result = s.solve(B.col(0), tol, maxiter, X0 ? &x0 : nullptr);
+            if (B.cols == 1) {
+                const auto result = s.solve(column(B), tol, maxiter,
+                                            X0.data ? column(X0) : std::span<const double>());
                 plhs[0] = vec_to_mx(result.x);
                 solve_metadata(nlhs, plhs, {&result, 1}, result.solve_seconds);
             } else {
-                plhs[0] = mxCreateDoubleMatrix(B.rows(), B.cols(), mxREAL);
-                Eigen::Map<Eigen::MatrixXd> X(mxGetPr(plhs[0]), B.rows(), B.cols());
-                const auto result = s.solve(B, X, tol, maxiter, X0 ? &*X0 : nullptr);
+                plhs[0] = mxCreateDoubleMatrix(B.rows, B.cols, mxREAL);
+                const apxchol::matrix_view X{mxGetPr(plhs[0]), B.rows, B.cols, B.rows};
+                const auto result = s.solve(B, X, tol, maxiter, X0);
                 solve_metadata(nlhs, plhs, result.columns, result.solve_seconds);
             }
         } else if (op == "apply") {
@@ -291,12 +291,11 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 fail("apxchol:usage", "usage: z = apxchol_mex('apply', h, r)");
             auto& s = get_solver(prhs[1]);
             const auto R = mx_to_rhs(prhs[2], s.rows(), "r");
-            if (R.cols() == 1) {
-                plhs[0] = vec_to_mx(s.apply(R.col(0)));
+            if (R.cols == 1) {
+                plhs[0] = vec_to_mx(s.apply(column(R)));
             } else {
-                plhs[0] = mxCreateDoubleMatrix(R.rows(), R.cols(), mxREAL);
-                Eigen::Map<Eigen::MatrixXd> Z(mxGetPr(plhs[0]), R.rows(), R.cols());
-                s.apply(R, Z);
+                plhs[0] = mxCreateDoubleMatrix(R.rows, R.cols, mxREAL);
+                s.apply(R, apxchol::matrix_view{mxGetPr(plhs[0]), R.rows, R.cols, R.rows});
             }
         } else if (op == "free") {
             if (nrhs != 2)

@@ -10,7 +10,7 @@ apxchol graph.mtx --convert-input --random-rhs --tol 1e-8
 apxchol --help
 ```
 
-The input file is read as the operator `A`. If it is a graph adjacency matrix,
+The CLI reads the input file as the operator `A`. If it is a graph adjacency matrix,
 `--convert-input` solves its Laplacian instead; see
 [converting input](usage.md#converting-input-to-an-operator). Without it, an
 adjacency matrix is rejected with an error that suggests the conversion.
@@ -26,8 +26,8 @@ Pass exactly one of:
 `k`); without it the solve starts from zero.
 
 `-o FILE` writes the solution as a dense `n` by `k` Matrix Market array.
-The CLI prints the selected backend, iterations and residual for each column;
-`-v` adds a timing breakdown and `-q` prints errors only. The exit status is 0 when
+The CLI prints the selected backend, iterations and residual for each column.
+`-v` adds a timing breakdown. `-q` prints errors only. The exit status is 0 when
 every column converges, 1 when a column misses the tolerance (the solution is
 still written), and 2 on an error: a rejected input or option value, an
 execution failure, or a solution that cannot be written. Options the parser rejects, such as an unknown

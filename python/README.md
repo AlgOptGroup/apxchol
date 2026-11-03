@@ -112,10 +112,10 @@ The [native reference](https://algoptgroup.github.io/apxchol/docs/reference/cpp.
 compiled tolerance and iteration defaults.
 
 Overlapping inputs are copied before writing `out`. Factorization, `solve`
-and `apply` release the GIL while they run native code; reading the input
+and `apply` release the GIL while they run native code. Reading the input
 matrix holds it. A call made while another thread uses the same solver raises
-`RuntimeError`. Give each thread `copy.copy(solver)`, which shares the factor
-and allocates only new workspace; on a GPU the copy shares the device factor
+`RuntimeError`. Give each thread `copy.copy(solver)`. The copy shares the factor
+and allocates only its own workspace. On a GPU it shares the device factor
 and solves on its own CUDA stream or Metal command queue.
 
 ## Save and reload

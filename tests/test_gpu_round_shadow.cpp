@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "scoped_omp_threads.h"
 #include "apxchol/solver/solve.h"
+#include "csc_test_util.h"
 #include "gpu_preconditioner_fixture.h"
 
 #include "apxchol/detail/checkpoint.h"
@@ -784,13 +785,12 @@ TEST(GpuRoundShadowReference, FreshPairedContentMatchesFullValidation) {
     }
     // Every graph builder branch still emits canonical lower weights twice.
     for (bool full : {false, true}) {
-        Eigen::SparseMatrix<double> A(4, 4);
-        std::vector<Eigen::Triplet<double>> entries = {
+        std::vector<apxchol::test::triplet> entries = {
             {0, 0, 3}, {1, 1, 3}, {2, 2, 2}, {3, 3, 1},
             {1, 0, -1}, {2, 1, -2}};
-        if (full) { entries.emplace_back(0, 1, -7); entries.emplace_back(1, 2, -9); }
-        A.setFromTriplets(entries.begin(), entries.end());
-        const auto graph = apxchol::detail::make_graph(A);
+        if (full) { entries.push_back({0, 1, -7}); entries.push_back({1, 2, -9}); }
+        const auto A = apxchol::test::from_triplets(4, 4, entries);
+        const auto graph = apxchol::detail::make_graph(apxchol::test::internal_csc(A));
         const std::vector<node_index> selected = {0};
         const auto fresh = apxchol::detail::make_gpu_round_shadow_input(graph, selected, 42);
         EXPECT_EQ(apxchol::detail::gpu_round_selection_content_from_paired_input(fresh),
@@ -3163,18 +3163,16 @@ TEST(GpuOwnedPrefix, StaleSecondSelectionPoisonsBeforeHostPublication) {
 
 #if defined(APXCHOL_USE_CUDA)
 namespace {
-Eigen::SparseMatrix<double> owned_solve_matrix(int n, double shift) {
-    Eigen::SparseMatrix<double> A(n, n);
-    std::vector<Eigen::Triplet<double>> entries;
+apxchol::test::sparse_matrix owned_solve_matrix(int n, double shift) {
+    std::vector<apxchol::test::triplet> entries;
     for (int i = 0; i < n; ++i) {
-        entries.emplace_back(i, i, 4.0 + shift);
+        entries.push_back({i, i, 4.0 + shift});
         for (int offset : {1, 8}) {
             int j = (i + offset) % n;
-            entries.emplace_back(i, j, -1.0); entries.emplace_back(j, i, -1.0);
+            entries.push_back({i, j, -1.0}); entries.push_back({j, i, -1.0});
         }
     }
-    A.setFromTriplets(entries.begin(), entries.end());
-    return A;
+    return apxchol::test::from_triplets(n, n, entries);
 }
 }
 #endif
@@ -3201,7 +3199,7 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
         setup.factor_opts = factor_options;
         apxchol::detail::checkpoint owned_cp;
         testing::internal::CaptureStderr();
-        const auto owner = apxchol::detail::solver_access::with_timings(A, setup, owned_cp);
+        const auto owner = apxchol::test::with_timings(A, setup, owned_cp);
         const std::string trace = testing::internal::GetCapturedStderr();
         const auto& preconditioner = gpu_session(owner);
         ASSERT_NE(trace.find("[gpu-owned-factorization] complete rounds="), std::string::npos) << trace;
@@ -3213,7 +3211,7 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
         EXPECT_EQ(owned_cp.total("setup.factor_metadata"), 0.0);
         const auto& factor = preconditioner.factor();
         ASSERT_GT(factor.rounds.size(), 2u);
-        std::size_t remaining = A.rows();
+        std::size_t remaining = A.rows;
         for (const auto& round : factor.rounds) {
             EXPECT_EQ(round.active, remaining);
             ASSERT_GT(round.is_size, 0u); ASSERT_LE(round.is_size, remaining);
@@ -3227,14 +3225,14 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
         EXPECT_EQ(factor.sddm, shift != 0.0);
         EXPECT_TRUE(csc_access::vals(factor.L).empty()); EXPECT_TRUE(csc_access::inner(factor.L).empty());
         ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
-        Eigen::VectorXd exact(A.rows());
-        for (int i = 0; i < exact.size(); ++i) exact[i] = std::sin(i + 0.25);
-        Eigen::VectorXd b = A * exact;
+        std::vector<double> exact(A.rows);
+        for (std::size_t i = 0; i < exact.size(); ++i) exact[i] = std::sin(double(i) + 0.25);
+        const std::vector<double> b = apxchol::test::multiply(A, exact);
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::gpu;
         options.factor_opts = factor_options;
-        const auto solved = apxchol::solve(A, b, 1e-8, 1000, nullptr, options);
-        EXPECT_LE((A * solved.x - b).norm() / b.norm(), 1e-8);
+        const auto solved = apxchol::solve(apxchol::test::csc(A), b, 1e-8, 1000, {}, options);
+        EXPECT_LE(apxchol::test::relative_residual(A, solved.x, b), 1e-8);
     }
 #endif
 }
@@ -3244,40 +3242,39 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     GTEST_SKIP() << "CUDA build required";
 #else
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
-    Eigen::SparseMatrix<double> tiny(2, 2);
-    const std::vector<Eigen::Triplet<double>> entries{{0,0,2},{1,1,2},{0,1,-1},{1,0,-1}};
-    tiny.setFromTriplets(entries.begin(), entries.end());
+    const std::vector<apxchol::test::triplet> entries{{0,0,2},{1,1,2},{0,1,-1},{1,0,-1}};
+    const auto tiny = apxchol::test::from_triplets(2, 2, entries);
     const apxchol::factor_options factor_options{
         .factor_storage = apxchol::factor_storage_type::fp32, .drop_tolerance = 0};
     apxchol::solve_options options;
     options.backend = apxchol::solve_backend::gpu;
     options.factor_opts = factor_options;
-    const apxchol::solver tiny_owner(tiny, options);
+    const apxchol::solver tiny_owner(apxchol::test::csc(tiny), options);
     const auto& small = gpu_session(tiny_owner);
     EXPECT_EQ(small.factor().perm.size(), 2u);
     EXPECT_TRUE(small.trsv().adopted_device_factor());
     EXPECT_TRUE(csc_access::vals(small.factor().L).empty());
     auto A = owned_solve_matrix(64, 1.0);
-    auto exported = apxchol::factorize(A, factor_options);
+    auto exported = apxchol::factorize(apxchol::test::csc(A), factor_options);
     EXPECT_EQ(csc_access::vals(exported.L).size(), exported.L.nonZeros());
     EXPECT_FALSE(apxchol::detail::factorization_access::device_factor(exported));
-    apxchol::solver owner(A, exported, options);
+    apxchol::solver owner(apxchol::test::csc(A), exported, options);
     EXPECT_FALSE(gpu_session(owner).trsv().adopted_device_factor());
     EXPECT_TRUE(csc_access::vals(gpu_session(owner).factor().L).empty());
     EXPECT_EQ(csc_access::vals(exported.L).size(), exported.L.nonZeros());
     auto host_options = options;
     host_options.backend = apxchol::solve_backend::cpu;
-    ASSERT_NO_THROW(apxchol::solver(A, exported, host_options));
+    ASSERT_NO_THROW(apxchol::solver(apxchol::test::csc(A), exported, host_options));
     ASSERT_TRUE(exported.sddm);
-    const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(A.rows(), 1.0, 2.0);
-    Eigen::VectorXd permuted(A.rows()), expected(A.rows());
-    for (Eigen::Index v = 0; v < A.rows(); ++v) permuted[exported.perm[v]] = rhs[v];
+    std::vector<double> rhs(A.rows), permuted(A.rows), expected(A.rows);
+    for (std::int64_t v = 0; v < A.rows; ++v) rhs[v] = 1.0 + double(v) / double(A.rows - 1);
+    for (std::int64_t v = 0; v < A.rows; ++v) permuted[exported.perm[v]] = rhs[v];
     // The direct CUDA reference uses the same FP32 arithmetic as the owner.
     apxchol::detail::cuda_sptrsv uploaded;
-    uploaded.setup(exported.L, static_cast<node_index>(A.rows()), factor_options);
+    uploaded.setup(exported.L, static_cast<node_index>(A.rows), factor_options);
     uploaded.solve_LLt(permuted.data(), expected.data());
-    const Eigen::VectorXd actual = owner.apply(rhs);
-    for (Eigen::Index v = 0; v < A.rows(); ++v) EXPECT_EQ(actual[v], expected[exported.perm[v]]) << v;
+    const std::vector<double> actual = owner.apply(rhs);
+    for (std::int64_t v = 0; v < A.rows; ++v) EXPECT_EQ(actual[v], expected[exported.perm[v]]) << v;
 #endif
 }
 
@@ -3510,16 +3507,16 @@ TEST(GpuCycleSampler, OwnedSolveReturnsOriginalSystemSolution) {
     for(double shift:{0.,1.}) {
         SCOPED_TRACE(std::to_string(static_cast<int>(sampler))+":"+std::to_string(shift));
         auto A=owned_solve_matrix(257,shift);
-        Eigen::VectorXd exact(A.rows());for(int i=0;i<exact.size();++i)exact[i]=std::sin(i+.25);
-        const Eigen::VectorXd b=A*exact;
+        std::vector<double> exact(A.rows);for(std::size_t i=0;i<exact.size();++i)exact[i]=std::sin(double(i)+.25);
+        const std::vector<double> b=apxchol::test::multiply(A,exact);
         apxchol::solve_options opts;
         opts.backend=apxchol::solve_backend::gpu;
         opts.factor_opts.verbose = true;
         opts.factor_opts.sampler=sampler;opts.factor_opts.partition.degree_quantile=.8;
         testing::internal::CaptureStderr();
-        const auto result=apxchol::solve(A, b, 1e-8, 1000, nullptr, opts);
+        const auto result=apxchol::solve(apxchol::test::csc(A), b, 1e-8, 1000, {}, opts);
         const auto trace=testing::internal::GetCapturedStderr();
-        EXPECT_LE((A*result.x-b).norm()/b.norm(),1e-8);
+        EXPECT_LE(apxchol::test::relative_residual(A,result.x,b),1e-8);
         EXPECT_NE(trace.find("[gpu-owned-factorization] complete rounds="),std::string::npos);
         EXPECT_NE(trace.find("[gpu-clique-sampler] sampler=trace_cycle"),std::string::npos);
         EXPECT_NE(trace.find("device_sampling=1"),std::string::npos);

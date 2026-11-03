@@ -111,6 +111,8 @@ def assemble(development, snapshots, output):
             selector = (f'\n<details class="version-selector">\n'
                         f'  <summary aria-label="Documentation version">{label}</summary>\n'
                         f'  <ul>{"".join(links)}</ul>\n</details>\n')
+            if len(versions) == 1:
+                selector = ""
             page.write_bytes((before + SELECTOR_START + selector + SELECTOR_END + after).encode("utf-8"))
 
 

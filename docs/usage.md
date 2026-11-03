@@ -40,6 +40,23 @@ Python accepts SciPy sparse matrices and arrays. It converts them to CSC
 entries. Supply the full symmetric matrix, not just one triangle. Format conversion
 does not invent missing symmetric entries.
 
+C++ borrows the matrix as a `csc_view` (32-bit indices) or `csc_view64`
+(64-bit indices) from `apxchol/views.h`: the dimension `n`, `col_ptr` with
+`n + 1` offsets starting at 0, and `row_idx` and `values` with `col_ptr[n]`
+entries each. Rows must be sorted and unique within each column. An invalid
+view throws `std::invalid_argument`. Because `A` is symmetric, CSR arrays can
+be passed unchanged. Setup uses index arrays of the build's width in place
+and converts other widths once. The solver copies what it
+needs, so the arrays only have to outlive the call that receives the view.
+[Input formats](input-formats.md) shows conversions from Eigen, CHOLMOD,
+SciPy, MATLAB/Octave and Matrix Market.
+
+```cpp
+std::vector<std::int32_t> col_ptr, row_idx;   // filled by the caller
+std::vector<double> values;
+const apxchol::csc_view A{n, col_ptr, row_idx, values};
+```
+
 ## Choosing CPU or GPU
 
 The `CPU` build contains the CPU solver. `CUDA` and `METAL` builds add their
@@ -53,8 +70,8 @@ backend for their platform; they work without a GPU.
 | `gpu` | Run setup and solves on the compiled GPU backend; fail if the device, input or options are unsupported |
 
 Automatic selection is not a guarantee of the fastest backend for every
-matrix. Once selected, the backend stays fixed. An execution error is
-reported rather than silently retrying on another backend.
+matrix. Once selected, the backend stays fixed. The solver reports an
+execution error and does not retry on another backend.
 
 Use Python's `backend` argument, C++ `solve_options.backend`, or CLI
 `--backend`. Python's `solver.backend` and native solve results report the
@@ -62,10 +79,8 @@ selected backend. The MATLAB/Octave binding currently uses CPU only.
 
 ### Native GPU input and options
 
-For direct C++ input, GPU setup needs compressed CSC storage: column offsets
-must cover only stored entries, row indices within each column must be sorted
-and unique, and every stored off-diagonal `(i, j)` needs its matching `(j, i)`.
-GPU setup also requires 32-bit vertex indices.
+For direct C++ input, GPU setup needs every stored off-diagonal `(i, j)` to
+have its matching `(j, i)`. GPU setup also requires 32-bit vertex indices.
 
 CPU setup supports custom partitioners and eliminators. CUDA setup supports
 `block_greedy` and GKS or trace-cycle sampling; the experimental exact-clique,
@@ -128,13 +143,23 @@ For C++:
 
 ```cpp
 #include "apxchol.h"
-apxchol::solver solver(A);
-auto result = solver.solve(b, 1e-8);
+apxchol::solver solver(A);                   // A: csc_view
+auto result = solver.solve(b, 1e-8);         // b: std::vector<double> or span
 // std::nullopt selects the default tolerance or iteration budget.
-auto warm = solver.solve(b2, std::nullopt, std::nullopt, &result.x);
-Eigen::MatrixXd X(B.rows(), B.cols());
-auto batch = solver.solve(B, X);
+auto warm = solver.solve(b2, std::nullopt, std::nullopt, result.x);
+// k right-hand sides, column-major: column j starts at B.data() + j * n.
+std::vector<double> X(n * k);
+auto batch = solver.solve(apxchol::const_matrix_view{B.data(), n, k, n},
+                          apxchol::matrix_view{X.data(), n, k, n});
 ```
+
+Vectors are `std::span<double>` arguments, so a `std::vector`, an array or a
+pointer and length all work. The returned `result.x` is a `std::vector<double>`.
+Matrix views are column-major with column stride `col_stride >= rows`. For
+solve and apply, each view spans the range from its first element through its
+last, including padding between columns. The output range must be disjoint
+from each input range. An empty `x0`
+(the default) or a `const_matrix_view` with a null `data` starts from zero.
 
 One-shot `apxchol::solve(A, b, tol, max_iter, x0, opts)` uses the same backend
 selection. For explicit CPU execution, set
@@ -220,48 +245,12 @@ Each application computes `z = M^{-1} r` with the prepared factor; the other
 solver controls the iteration and its stopping test.
 
 For Eigen's iterative solvers, a small adapter is enough. It is an example
-outside apxchol's stable API; copy it into your code:
+outside apxchol's stable API; copy it into your code. The solver borrows the
+compressed `Eigen::SparseMatrix<double>` while it is built:
 
-```cpp
-#include <apxchol.h>
-#include <Eigen/IterativeLinearSolvers>
-
-class apxchol_preconditioner
-    : public Eigen::SparseSolverBase<apxchol_preconditioner> {
-public:
-    using Scalar = double;
-    using StorageIndex = int;
-    enum { ColsAtCompileTime = Eigen::Dynamic, MaxColsAtCompileTime = Eigen::Dynamic };
-
-    void attach(apxchol::solver& s) { solver_ = &s; m_isInitialized = true; }
-
-    // The attached solver already holds the factor.
-    template<class Matrix> apxchol_preconditioner& analyzePattern(const Matrix&) { return *this; }
-    template<class Matrix> apxchol_preconditioner& factorize(const Matrix&) { return *this; }
-    template<class Matrix> apxchol_preconditioner& compute(const Matrix&) { return *this; }
-
-    Eigen::Index rows() const { return solver_->rows(); }
-    Eigen::Index cols() const { return solver_->rows(); }
-    Eigen::ComputationInfo info() const { return Eigen::Success; }
-
-    template<class Rhs, class Dest>
-    void _solve_impl(const Rhs& b, Dest& x) const { x = solver_->apply(b); }
-
-private:
-    apxchol::solver* solver_ = nullptr;
-};
-
-apxchol::solver s(A);
-Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower | Eigen::Upper,
-                         apxchol_preconditioner> cg;
-cg.preconditioner().attach(s);
-cg.setTolerance(1e-10);
-cg.compute(A);
-Eigen::VectorXd x = cg.solve(b);
+```{literalinclude} ../examples/input_formats/eigen_cg.cpp
+:language: cpp
 ```
-
-Eigen default-constructs the preconditioner, so the adapter holds a pointer
-set by `attach`; the solver must outlive `cg`.
 
 A GPU-backed SciPy operator exchanges host vectors with the device on each
 application. Native `solve` keeps iteration vectors on the GPU, so prefer it
@@ -308,10 +297,10 @@ and the operator, which are read-only after setup, and allocates only its
 own workspace. Copy a solver once per thread, with `solver copy = original;`
 in C++ or `copy.copy(solver)` in Python, and the copies solve in parallel
 with the same results as serial calls. Copies stay valid after the original
-is destroyed. On a GPU, copies share the factor and operator in device memory
-and each copy gets its own device workspace and stream (CUDA) or command queue
-(Metal), so copies on one GPU solve concurrently without storing the factor
-again; they share that GPU's compute and memory bandwidth.
+is destroyed. On a GPU, copies share the factor and operator in device memory.
+Each copy gets its own workspace and its own CUDA stream or Metal command queue.
+Copies on 1 GPU solve concurrently without storing the factor again. They share
+that GPU's compute and memory bandwidth.
 
 To solve many right-hand sides from one thread, pass them to `solve(B)` as the
 columns of one matrix; the batched solver shares work between columns.
