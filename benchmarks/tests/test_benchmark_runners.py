@@ -589,40 +589,162 @@ class FairSweepSelectionTest(unittest.TestCase):
         self.assertEqual(dispatched["iter0010"][0], "ipm")
 
 
-class CmgAvailabilityTest(unittest.TestCase):
-    def test_legacy_adapter_stops_before_export_or_solver_execution(self):
-        cmg = sweep_fair.cmg_matlab_runner
-        with mock.patch.object(cmg, "_dump") as export, \
-             mock.patch.object(cmg, "sh") as run, \
-             mock.patch.object(rc, "emit_cell") as emit:
-            ready, reason = cmg.available()
-            self.assertFalse(ready)
-            self.assertIn("local RHS", reason)
-            self.assertEqual(cmg.run_one("grid_500"), "UNAVAILABLE: " + reason)
-        export.assert_not_called()
-        run.assert_not_called()
-        emit.assert_not_called()
+def cmg_record(rep, status="complete", total=1.0, rel_res=5e-9, **extra):
+    record = {"repetition": rep, "retained": rep > 0, "status": status, "n": 4, "nnz": 10,
+              "setup_s": total / 2, "solve_s": total / 2, "total_s": total, "iters": 7,
+              "rel_res": rel_res, "pcg_flag": 0, "adaptation_s": 0.01, "components": 2,
+              "grounded_components": 1, "matlab_version": "26.1.0 (R2026a)"}
+    record.update(extra)
+    return record
 
-    def test_sweep_reports_unavailable_cmg_once_before_first_matrix(self):
-        state = {"probed": False, "ok": False, "why": ""}
-        def matrix(mid, *_args):
-            self.assertTrue(state["probed"])
-            sweep_fair.run_cmg(mid)
-            sweep_fair.run_cmg(mid)
+
+class CmgRunnerTest(unittest.TestCase):
+    cmg = sweep_fair.cmg_matlab_runner
+
+    def summarize(self, records, returncode=0, stderr=""):
+        return self.cmg.summarize(records, returncode, stderr, 3, "1e-8")
+
+    def test_unconfigured_matlab_is_unavailable(self):
+        with mock.patch.object(self.cmg, "MATLAB", ""):
+            ready, reason = self.cmg.available()
+        self.assertFalse(ready)
+        self.assertIn("APXCHOL_MATLAB_ROOT", reason)
+
+    def test_local_command_runs_shared_inputs_on_one_pinned_thread(self):
+        with mock.patch.object(self.cmg, "MATLAB", "/opt/matlab"), \
+             mock.patch.object(self.cmg, "CMG_SOLVER", "/src/cmg"), \
+             mock.patch.object(self.cmg, "IMAGE", ""), \
+             mock.patch.object(rc, "affinity_spec", return_value="3"):
+            command = self.cmg.command("/d/A.mtx", "/d/A.rhs.mtx", "/d/work", "/d/gauge",
+                                       3, "1e-8", 500, 900)
+        args = __import__("shlex").split(command)
+        self.assertEqual(args[:6], ["env", "CMG_ROOT=/src/cmg", "taskset", "-c", "3", "timeout"])
+        self.assertIn("900", args)
+        self.assertEqual(args[args.index("/opt/matlab/bin/matlab") + 1:][:2],
+                         ["-singleCompThread", "-batch"])
+        self.assertIn("bench_cmg_common('/d/A.mtx','/d/A.rhs.mtx','/d/work',3,1e-8,500,1)",
+                      args[-1])
+        self.assertIn("'-outdir',g", args[-1])
+
+    def test_container_command_mounts_host_paths_and_keeps_deadline_inside(self):
+        with mock.patch.object(self.cmg, "MATLAB", "/opt/matlab"), \
+             mock.patch.object(self.cmg, "CMG_SOLVER", "/src/cmg"), \
+             mock.patch.object(self.cmg, "IMAGE", "apxchol-matlab-cmg:r2026a"), \
+             mock.patch.object(rc, "affinity_spec", return_value="3"):
+            command = self.cmg.command("/d/A.mtx", "/d/A.rhs.mtx", "/d/work", "/d/gauge",
+                                       3, "1e-8", 500, 900)
+        args = __import__("shlex").split(command)
+        self.assertEqual(args[:3], ["docker", "run", "--rm"])
+        self.assertIn("--user", args)
+        self.assertEqual(args[args.index("--cpuset-cpus") + 1], "3")
+        for mount in ("/opt/matlab:/opt/matlab:ro", "/src/cmg:/src/cmg:ro", "/d:/d:rw",
+                      f"{self.cmg.BENCH}:{self.cmg.BENCH}:ro"):
+            self.assertIn(mount, args)
+        image = args.index("apxchol-matlab-cmg:r2026a")
+        self.assertEqual(args[image + 1], "timeout")
+
+    def test_single_quotes_in_paths_are_rejected(self):
+        with self.assertRaises(ValueError):
+            self.cmg.command("/d/it's/A.mtx", "/d/b.mtx", "/w", "/g", 3, "1e-8", 500, 9)
+
+    def test_complete_cell_keeps_median_retained_run_and_every_total(self):
+        records = [cmg_record(0, total=9.0), cmg_record(1, total=3.0),
+                   cmg_record(2, total=1.0, rel_res=9e-9), cmg_record(3, total=2.0)]
+        status, metrics, meta = self.summarize(records)
+        self.assertEqual(status, "complete")
+        self.assertIsNone(meta)
+        self.assertEqual(metrics["representative_repeat"], 3)
+        self.assertEqual(metrics["total_s"], 2.0)
+        self.assertEqual(metrics["max_repeat_rel_res"], 9e-9)
+        self.assertEqual(metrics["stop_contract"], "original-v1")
+        self.assertEqual(metrics["effective_threads"], 1)
+        self.assertEqual(metrics["grounded_components"], 1)
+        self.assertEqual(sweep_fair._repeat_totals(metrics), [2.0, 9.0, 3.0, 1.0, 2.0])
+
+    def test_warmup_over_the_cap_is_exceeded_cap(self):
+        records = [cmg_record(0, total=50.0)] + [cmg_record(i) for i in (1, 2, 3)]
+        status, metrics, *_ = sweep_fair.capped(self.summarize(records), 30.0)
+        self.assertEqual(status, "exceeded_cap")
+        self.assertNotIn("total_s", metrics)
+
+    def test_retained_residual_above_tolerance_is_not_converged(self):
+        records = [cmg_record(i) for i in range(3)] + [cmg_record(3, rel_res=2e-8)]
+        self.assertEqual(self.summarize(records)[0], "not_converged")
+
+    def test_matlab_not_converged_stops_the_cell(self):
+        records = [cmg_record(0, status="not_converged", rel_res=1e-3, pcg_flag=1)]
+        status, metrics, _ = self.summarize(records)
+        self.assertEqual(status, "not_converged")
+        self.assertEqual((metrics["rel_res"], metrics["retained_repeats"]), (1e-3, 0))
+
+    def test_empty_hierarchy_is_na_with_its_reason(self):
+        reason = "canonical cmg_precondition returned an empty hierarchy"
+        status, metrics, meta = self.summarize([{"repetition": 0, "status": "n/a",
+                                                 "n": 4, "nnz": 10, "reason": reason}])
+        self.assertEqual((status, metrics, meta), ("n/a", {"n": 4, "nnz": 10},
+                                                   {"na_reason": reason}))
+
+    def test_failures_keep_matlab_error(self):
+        status, _, meta = self.summarize([{"repetition": 0, "status": "failed",
+                                           "error": "Expected an exactly symmetric operator"}])
+        self.assertEqual(status, "failed")
+        self.assertIn("exactly symmetric", meta["na_reason"])
+        status, _, meta = self.summarize([], returncode=1, stderr="x\nLicense checkout failed")
+        self.assertEqual(status, "failed")
+        self.assertIn("License checkout failed", meta["na_reason"])
+
+    def test_missing_retained_record_or_bad_exit_is_failed(self):
+        records = [cmg_record(i) for i in range(3)]
+        self.assertEqual(self.summarize(records)[0], "failed")
+        records.append(cmg_record(3))
+        self.assertEqual(self.summarize(records, returncode=1)[0], "failed")
+
+    def test_deadline_exit_is_timeout(self):
+        for returncode in (124, 137):
+            status, *_ = self.summarize([cmg_record(0)], returncode=returncode)
+            self.assertEqual(status, "timeout")
+
+    def test_unavailable_cmg_is_reported_once_and_not_planned(self):
         argv = ["sweep_fair.py", "--only", "grid_500", "--no-julia", "--no-parac"]
         with mock.patch.object(sys, "argv", argv), \
-             mock.patch.object(sweep_fair, "_CMG_STATE", state), \
              mock.patch.object(sweep_fair, "RUN_CMG", True), \
              mock.patch.object(sweep_fair, "JULIA", []), \
              mock.patch.object(sweep_fair, "RUN_PARAC", False), \
-             mock.patch.object(sweep_fair, "do_matrix", side_effect=matrix), \
-             mock.patch.object(sweep_fair.cmg_matlab_runner, "run_one") as run, \
+             mock.patch.object(self.cmg, "available", return_value=(False, "no MATLAB")), \
+             mock.patch.object(sweep_fair, "do_matrix") as do_matrix, \
              mock.patch("builtins.print") as output:
             sweep_fair.main()
-        unavailable = [call for call in output.call_args_list
-                       if "UNAVAILABLE" in str(call.args[0])]
-        self.assertEqual(len(unavailable), 1)
-        run.assert_not_called()
+            self.assertFalse(sweep_fair.RUN_CMG)
+        lines = [str(call.args[0]) for call in output.call_args_list if call.args]
+        self.assertEqual(sum("no MATLAB" in line for line in lines), 1)
+        do_matrix.assert_called_once()
+
+    def test_cpu_sweep_hands_cmg_the_exported_operator_and_rhs(self):
+        def run(operator, rhs, **kwargs):
+            self.assertEqual((operator, rhs), ("/d/A.mtx", "/d/A.rhs.mtx"))
+            self.assertEqual(kwargs["repeats"], sweep_fair.REPS)
+            self.assertEqual(kwargs["timeout"], int((1 + sweep_fair.REPS) * 40.0
+                                                    + sweep_fair.CAP_STARTUP_S))
+            return "complete", {"total_s": 1.0}
+        with mock.patch.object(sweep_fair, "APX", [("apxchol_v1", "c")]), \
+             mock.patch.object(sweep_fair, "COMP", []), \
+             mock.patch.object(sweep_fair, "JULIA", []), \
+             mock.patch.object(sweep_fair, "RUN_PARAC", False), \
+             mock.patch.object(sweep_fair, "RUN_CMG", True), \
+             mock.patch.object(sweep_fair, "DEVICE", "cpu"), \
+             mock.patch.object(sweep_fair, "cell_done", return_value=False), \
+             mock.patch.object(sweep_fair, "run_cpp", return_value=("complete", {"total_s": 2.0})), \
+             mock.patch.object(sweep_fair, "dump_mtx", return_value="/d/A.mtx"), \
+             mock.patch.object(sweep_fair, "dump_rhs", return_value="/d/A.rhs.mtx"), \
+             mock.patch.object(self.cmg, "run", side_effect=run) as cmg_run, \
+             mock.patch.object(sweep_fair, "emit") as emit, \
+             mock.patch("builtins.print"):
+            sweep_fair.do_matrix("grid_500", "grids", "grid", 500, True, 250000, None)
+        cmg_run.assert_called_once()
+        cell = [call.args for call in emit.call_args_list if call.args[2] == "cmg"]
+        self.assertEqual(len(cell), 1)
+        self.assertEqual(cell[0][4], "complete")
+        self.assertEqual(cell[0][5]["cap_s"], 40.0)
 
 
 class JuliaPreflightTest(unittest.TestCase):

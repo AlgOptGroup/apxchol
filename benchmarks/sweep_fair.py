@@ -21,15 +21,15 @@ scores every solver's true residual against the original L, so multigrid reaches
 1e-8 without the eps*I perturbation that --reg-rel used to add. (reg-rel was
 masking real solver limitations -- e.g. AMGCL floors on the disconnected
 as-Skitter -- by solving a better-conditioned L+eps*I.) IPM normal-equation
-matrices are already strictly SDDM and likewise run unshifted. The retained CMG
-adapter is unavailable because it generates its own RHS and shifts Laplacians;
-it produces no comparison cells.
+matrices are already strictly SDDM and likewise run unshifted.
 
 The CPU sweep runs apxchol and the C++ competitors in-process, ParAC through
-parac_runner.py, and AC/AC2 through benchmarks/julia/bench_laplacians.jl.
---no-julia and --no-parac skip those adapters; --no-cmg skips CMG's availability
-check. --headline-only restricts the apxchol config list; AC/AC2 are dropped
-only by an explicit --no-julia.
+parac_runner.py, AC/AC2 through benchmarks/julia/bench_laplacians.jl, and
+canonical MATLAB CMG through cmg_matlab_runner.py on the exported operator and
+RHS. --no-julia, --no-parac and --no-cmg skip those adapters; CMG is also
+skipped, with its reason printed once, when MATLAB or CMG is not configured.
+--headline-only restricts the apxchol config list; AC/AC2 are dropped only by
+an explicit --no-julia.
 A solver that cannot take a given matrix emits an explicit `n/a` cell carrying
 the reason, never a silent gap.
 
@@ -217,10 +217,13 @@ def emit(family, mid, solver, config, status, metrics, extra_meta=None,
     meta = dict(OBSERVED.get(mid) or {})
     if extra_meta:
         meta.update(extra_meta)
-    affinity = ({} if solver in JULIA_SOLVERS
-                else rc.benchmark_openmp_provenance(THREADS))
-    prov = {**PROV, **affinity,
-            **(julia_toolchain() if solver in JULIA_SOLVERS else build_toolchain())}
+    if solver in JULIA_SOLVERS:
+        runtime = julia_toolchain()
+    elif solver == "cmg":
+        runtime = cmg_matlab_runner.provenance()
+    else:
+        runtime = {**rc.benchmark_openmp_provenance(THREADS), **build_toolchain()}
+    prov = {**PROV, **runtime}
     return rc.emit_cell(family, mid, solver, config, status, metrics, THREADS, DEVICE, prov,
                         matrix_meta=meta or None,
                         timeout_cap_s=timeout_cap_s if status in ("timeout", "exceeded_cap") else None)
@@ -404,26 +407,6 @@ def run_parac(mid):
                 mid, "failed", f"unhandled ParAC runner error: {type(e).__name__}: {e}")
             print(f"   {label:24} {stamped}")
 
-_CMG_STATE = {"probed": False, "ok": False, "why": ""}
-
-def cmg_preflight():
-    """Report an unavailable CMG adapter once, before starting the sweep."""
-    if not _CMG_STATE["probed"]:
-        _CMG_STATE["ok"], _CMG_STATE["why"] = cmg_matlab_runner.available()
-        _CMG_STATE["probed"] = True
-        if not _CMG_STATE["ok"]:
-            print(f"   {'cmg':24} UNAVAILABLE — no cmg cells this run: {_CMG_STATE['why']}",
-                  flush=True)
-    return _CMG_STATE["ok"]
-
-def run_cmg(mid):
-    if not cmg_preflight():
-        return
-    try:
-        print(f"   {'cmg':24} {cmg_matlab_runner.run_one(mid)}", flush=True)
-    except Exception as e:                       # never abort the sweep for one solver
-        print(f"   {'cmg':24} ERROR: {e}", flush=True)
-
 def dump_mtx(mid):
     """Write the EXACT operator the in-process solvers solve to a .mtx, cached.
 
@@ -439,6 +422,10 @@ def dump_mtx(mid):
     them. Returns None when the dump failed.
     """
     return rc.dump_matrix(mid, DUMP, BIN[DEVICE], THREADS, TIMEOUT)
+
+def dump_rhs(mid):
+    """Write the RHS the in-process solvers solve, cached next to dump_mtx."""
+    return rc.dump_matrix(mid, DUMP, BIN[DEVICE], THREADS, TIMEOUT, rhs=True)
 
 # --- CPU axis solver sets ---
 # Solver set: (solver, config)
@@ -458,8 +445,7 @@ COMP = ["rchol","rchol_par","hypre_boomeramg","amgcl"]
 JULIA = ["ac","ac2"]
 RUN_PARAC = True     # ParAC runs as part of every sweep (skip via --no-parac)
 PARAC_ONLY = False   # --parac-only: run ONLY ParAC (skip apxchol/competitors/AC)
-# The retained CMG adapter is unavailable. Report this once and write no cells;
-# --no-cmg skips the availability check.
+# Canonical MATLAB CMG on the shared A and b (CPU only; skip via --no-cmg).
 RUN_CMG = True
 # --no-cap: drop the 10x-GPU-apxchol competitor wall cap and RE-RUN cells currently
 # stored as 'timeout' (clamped), so AMGCL/BoomerAMG get an HONEST uncapped wall time on
@@ -629,11 +615,13 @@ def do_matrix(mid, family, source, spec, is2d, n, reg):
         else:
             step(family,mid,solver,"", lambda s=solver: capped(run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), cap), solver,
                  timeout_cap_s=cap)
-    # AC/AC2 read the DUMPED operator — the same seam every other external solver
-    # goes through — so their cells demonstrably solve the same system as the
-    # in-process ones instead of re-deriving one from the registry file.
-    if JULIA and not all(cell_done(family, mid, s, "") for s in JULIA):
-        dumped = dump_mtx(mid)
+    # AC/AC2 and CMG read the DUMPED operator — the same seam every other external
+    # solver goes through — so their cells demonstrably solve the same system as
+    # the in-process ones instead of re-deriving one from the registry file.
+    need_julia = JULIA and not all(cell_done(family, mid, s, "") for s in JULIA)
+    need_cmg = RUN_CMG and not cell_done(family, mid, "cmg", "")
+    dumped = dump_mtx(mid) if need_julia or need_cmg else None
+    if need_julia:
         if dumped:
             for s in JULIA:
                 step(family,mid,s,"",
@@ -645,8 +633,20 @@ def do_matrix(mid, family, source, spec, is2d, n, reg):
             print(f"   {'AC/AC2':24} SKIP (operator dump failed)")
     if RUN_PARAC:      # ParAC graph+physics (resume-safe; the runner skips done cells)
         run_parac(mid)
-    if RUN_CMG:        # CMG in the MATLAB container (resume-safe; emits its own cell)
-        run_cmg(mid)
+    if need_cmg:
+        # CMG also needs the RHS: it solves the exported A and b in one MATLAB
+        # process (1 warmup + REPS retained repetitions).
+        rhs = dump_rhs(mid) if dumped else None
+        if rhs:
+            step(family,mid,"cmg","",
+                 lambda: capped(cmg_matlab_runner.run(
+                     dumped, rhs, timeout=process_timeout(cap, 1 + REPS),
+                     repeats=REPS, tol=TOL, maxiter=MAXITER["cpu"]), cap),
+                 "cmg", timeout_cap_s=cap)
+        else:
+            print(f"   {'cmg':24} SKIP (operator or RHS dump failed)")
+    elif RUN_CMG:
+        print(f"   {'cmg':24} (skip, done)")
 
 def main():
     global DEVICE, APX, JULIA, COMP, THREADS, REPS, CELLS, WARMUP
@@ -679,8 +679,8 @@ def main():
     ap.add_argument("--no-parac", action="store_true",
                     help="skip ParAC (run in-process via parac_runner.py).")
     ap.add_argument("--no-cmg", action="store_true",
-                    help="skip the retained CMG adapter, currently unavailable for "
-                         "shared original-operator/RHS comparisons.")
+                    help="skip canonical MATLAB CMG (needs APXCHOL_MATLAB_ROOT and "
+                         "APXCHOL_CMG_SOLVER; see benchmarks/README.md).")
     ap.add_argument("--parac-only", action="store_true",
                     help="run ONLY ParAC (skip apxchol / competitors / AC); for filling the "
                          "ParAC giant-matrix cells without touching the rest.")
@@ -705,7 +705,6 @@ def main():
     parac_runner.REPS = REPS
     parac_runner.PROV_CPU["repeat"] = REPS
     parac_runner.PROV_GPU["repeat"] = REPS
-    cmg_matlab_runner.THREADS = THREADS
     PROV["repeat"] = REPS
     fams = {f.strip() for f in a.families.split(",") if f.strip()}
     only = {x.strip() for x in a.only.split(",") if x.strip()}
@@ -720,7 +719,11 @@ def main():
             ap.error("--parac-only has no Metal axis")
         RUN_PARAC = False   # ParAC has no Metal driver
     if RUN_CMG:
-        cmg_preflight()
+        cmg_ok, cmg_reason = cmg_matlab_runner.available()
+        if not cmg_ok:
+            print(f"    NOTE: CMG is unavailable, no CMG cells are planned: {cmg_reason}",
+                  flush=True)
+            RUN_CMG = False
     if DEVICE == "cpu" and JULIA:
         julia_ok, julia_reason = julia_preflight()
         if not julia_ok:
@@ -744,7 +747,7 @@ def main():
               "`python3 benchmarks/sweep_fair.py` without --no-julia/--headline-only "
               "(needs: julia --project=benchmarks/julia -e 'using Pkg; Pkg.instantiate()').",
               flush=True)
-    if not RUN_CMG and DEVICE == "cpu":
+    if a.no_cmg and DEVICE == "cpu":
         print("    NOTE: CMG is OFF; no CMG cells are planned.", flush=True)
     # Resume-safe: reusable terminal cells skip; stale terminal cells rerun while
     # their old JSON stays in place until the replacement runner has finished.

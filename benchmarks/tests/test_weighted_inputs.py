@@ -15,14 +15,13 @@ from benchmarks import weighted_inputs as wi
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import runner_common as rc
 import sweep_fair
-import cmg_matlab_runner
 import parac_runner
 from types import SimpleNamespace
 
 
 class WeightedInputsTest(unittest.TestCase):
     def setUp(self):
-        for module in (sweep_fair, cmg_matlab_runner, parac_runner):
+        for module in (sweep_fair, parac_runner):
             threads = mock.patch.object(module, "THREADS", 1)
             threads.start()
             self.addCleanup(threads.stop)
@@ -150,21 +149,21 @@ class WeightedInputsTest(unittest.TestCase):
 
         def dump(command, **kwargs):
             args = shlex.split(command)
-            path = Path(args[args.index("--dump-mtx") + 1])
+            flag = "--dump-rhs" if "--dump-rhs" in args else "--dump-mtx"
+            path = Path(args[args.index(flag) + 1])
             path.write_text("%%MatrixMarket matrix coordinate real symmetric\n1 1 1\n1 1 1\n")
             return SimpleNamespace(returncode=0, stdout="", stderr="APX dump setup time: 0.01")
 
-        for module, field in [(sweep_fair, "DUMP"), (cmg_matlab_runner, "DUMP_DIR"),
-                              (parac_runner, "DUMP_CPU")]:
-            directory = self.root / module.__name__
+        for module, field, export in [(sweep_fair, "DUMP", "dump_mtx"),
+                                      (sweep_fair, "DUMP", "dump_rhs"),
+                                      (parac_runner, "DUMP_CPU", "_dump")]:
+            directory = self.root / export
             with mock.patch.object(module, field, str(directory)), \
                  mock.patch.object(parac_runner if module is parac_runner else rc,
                                    "sh", side_effect=dump) as run:
                 def call():
                     if module is sweep_fair:
-                        return module.dump_mtx(mid)
-                    if module is cmg_matlab_runner:
-                        return module._dump(mid)
+                        return getattr(module, export)(mid)
                     return module._dump(mid, str(directory), "benchmark", 10)[0]
                 rc.MATRICES[mid]["input_manifest_sha256"] = "1" * 64
                 first = call()
