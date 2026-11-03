@@ -7,8 +7,10 @@
 #include "apxchol/solver/detail/factor_entry.h"
 #include "apxchol/solver/partitioner.h"
 #include "apxchol/sparse_csc.h"
-#include <Eigen/Sparse>
+#include "apxchol/detail/csc_input.h"
+#include "apxchol/views.h"
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <type_traits>
 #include <utility>
@@ -60,7 +62,7 @@ struct factorization {
 
     // Stored positive off-diagonal entries removed by M-matrix lumping (two
     // per pair). Only the preconditioner changes; the solve operator is untouched.
-    Eigen::Index lumped_offdiag = 0;
+    std::int64_t lumped_offdiag = 0;
 
     // Per-round elimination metadata. is_size drives the SpTRSV round-as-level path.
     struct round_stats {
@@ -104,7 +106,7 @@ namespace detail {
 /// Shared matrix-input path: validate, lump if needed, and build the graph with
 /// regularization. The caller's operator remains unchanged for PCG.
 template<typename Build>
-factorization factorize_operator(const Eigen::SparseMatrix<double>& L,
+factorization factorize_operator(csc_ref<double> L,
                                  const factor_options& options, Build&& build) {
     validate_factor_options(options);
     const operator_view op(L, options.lump_max_mass);
@@ -112,8 +114,10 @@ factorization factorize_operator(const Eigen::SparseMatrix<double>& L,
     auto graph_options = options;
     graph_options.regularization = 0;
     graph_options.lump_max_mass = kDefaultLumpMassCeiling;
+    // The scan's bit-identical-triangles proof holds for L, i.e. only when
+    // nothing was lumped.
     factorization F = build(make_graph_from_operator(op.matrix(),
-        &op.matrix() == &L && op.scan().triangles_bit_identical, options.regularization), graph_options);
+        op.lumped() == 0 && op.scan().triangles_bit_identical, options.regularization), graph_options);
     F.lumped_offdiag = op.lumped();
     return F;
 }
@@ -128,8 +132,10 @@ factorization factorize_operator(const Eigen::SparseMatrix<double>& L,
 /// Custom-eliminator overload: substitute your own star-vertex elimination
 /// rule (see elimination/elimination.h for the `eliminator` contract).
 /// Overloads without an eliminator build the built-in rule from `opts`.
-template<eliminator E>
-factorization factorize(const Eigen::SparseMatrix<double>& L, const E& elim,
+/// Every overload takes a csc_view or csc_view64 (views.h); invalid views
+/// throw std::invalid_argument.
+template<class Index, eliminator E>
+factorization factorize(basic_csc_view<Index> L, const E& elim,
                         const factor_options& opts = {});
 
 /// Partitioner-instance overloads: pass a configured (possibly stateful)
@@ -138,24 +144,25 @@ factorization factorize(const Eigen::SparseMatrix<double>& L, const E& elim,
 /// The instance is taken by value; state mutated during the run is not
 /// observable afterwards — reference it through a member pointer if you need
 /// to inspect it post-run.
-template<partitioner P>
-factorization factorize(const Eigen::SparseMatrix<double>& L, P part,
+template<class Index, partitioner P>
+factorization factorize(basic_csc_view<Index> L, P part,
                         const factor_options& opts = {});
 
-template<partitioner P, eliminator E>
-factorization factorize(const Eigen::SparseMatrix<double>& L, P part,
+template<class Index, partitioner P, eliminator E>
+factorization factorize(basic_csc_view<Index> L, P part,
                         const E& elim,
                         const factor_options& opts = {});
 
 /// Matrix-level factorization using the built-in AoS graph and named partitioner.
-factorization factorize(const Eigen::SparseMatrix<double>& L,
+template<class Index>
+factorization factorize(basic_csc_view<Index> L,
                         const factor_options& opts = {});
 
 namespace detail {
 
 // Internal consuming route used only by the solver routes. Public factorize()
 // always retains exportable host arrays; the device-resident route omits them.
-factorization factorize_for_solver(const Eigen::SparseMatrix<double>& L,
+factorization factorize_for_solver(csc_ref<double> L,
                                   const factor_options& opts,
                                   checkpoint* cp,
                                   setup_route route = setup_route::cpu);

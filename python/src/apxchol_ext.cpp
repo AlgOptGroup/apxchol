@@ -1,20 +1,22 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
-#include <pybind11/eigen.h>
 #include <pybind11/stl.h>
 #include <pybind11/stl/filesystem.h>
-#include <Eigen/Core>
-#include <Eigen/Sparse>
 #include <algorithm>
 #include <cstdint>
 #include <exception>
+#include <limits>
+#include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "apxchol.h"
 #include "apxchol/detail/csc_import.h"
+#include "apxchol/detail/csc_input.h"
 #include "apxchol/solver/detail/solver_route.h"
 #include "apxchol/operator_class.h"
 #include "apxchol/version.h"
@@ -23,33 +25,73 @@ namespace py = pybind11;
 
 namespace {
 
-template<class Import>
-auto with_csc_indices(const py::array& array, Import import) {
-    if (py::isinstance<py::array_t<std::int32_t>>(array))
-        return import(array.cast<py::array_t<std::int32_t, py::array::c_style>>());
-    return import(array.cast<py::array_t<std::int64_t,
-                                       py::array::c_style | py::array::forcecast>>());
-}
+template<class Index>
+using index_array = py::array_t<Index, py::array::c_style | py::array::forcecast>;
 
-// CSC arrays -> column-major Eigen::SparseMatrix<double>.
-Eigen::SparseMatrix<double> csc_to_eigen(py::array indptr, py::array indices,
-                                         py::array data) {
-    if (indptr.ndim() != 1 || indices.ndim() != 1 || data.ndim() != 1)
-        throw std::invalid_argument("CSC data, indices and indptr must be one-dimensional");
-    if (indptr.size() == 0)
-        throw std::invalid_argument("CSC indptr must contain at least its initial zero");
+// NumPy CSC arrays as a solver input. Contiguous float64 values and int32 or
+// int64 index arrays of one width are borrowed when the columns are sorted;
+// anything else is converted once (apxchol::detail::imported_csc).
+class csc_arrays {
+public:
+    csc_arrays(const py::array& indptr, const py::array& indices, const py::array& data) {
+        if (indptr.ndim() != 1 || indices.ndim() != 1 || data.ndim() != 1)
+            throw std::invalid_argument("CSC data, indices and indptr must be one-dimensional");
+        if (indptr.size() == 0)
+            throw std::invalid_argument("CSC indptr must contain at least its initial zero");
+        values_ = data.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>();
+        if (indices.size() != values_.size())
+            throw std::invalid_argument("CSC data and indices must have the same length");
+        if (py::isinstance<py::array_t<std::int32_t>>(indptr) &&
+            py::isinstance<py::array_t<std::int32_t>>(indices))
+            import<std::int32_t>(indptr, indices);
+        else
+            import<std::int64_t>(indptr, indices);
+    }
 
-    auto dd = data.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>();
-    if (indices.size() != dd.size())
-        throw std::invalid_argument("CSC data and indices must have the same length");
-    return with_csc_indices(indptr, [&](const auto& ip) {
+    template<class F>
+    decltype(auto) visit(F f) const {
+        return std::visit([&](const auto& imported) { return f(imported->view()); }, imported_);
+    }
+
+private:
+    template<class Index>
+    void import(const py::array& indptr, const py::array& indices) {
+        auto ip = indptr.cast<index_array<Index>>();
+        auto ii = indices.cast<index_array<Index>>();
         const auto n = ip.size() - 1;
-        if (ip.at(n) != dd.size())
+        if (ip.at(n) != values_.size())
             throw std::invalid_argument("CSC indptr must end at the length of data and indices");
-        return with_csc_indices(indices, [&](const auto& ii) {
-            return apxchol::detail::import_csc(n, ip.data(), ii.data(), dd.data());
-        });
-    });
+        // The arrays stay referenced, so the O(nnz) import runs without the GIL.
+        {
+            py::gil_scoped_release release;
+            imported_ = std::make_unique<apxchol::detail::imported_csc<Index>>(
+                n, ip.data(), ii.data(), values_.data());
+        }
+        indptr_ = std::move(ip);
+        indices_ = std::move(ii);
+    }
+
+    py::array_t<double> values_;
+    py::array indptr_, indices_;
+    std::variant<std::unique_ptr<apxchol::detail::imported_csc<std::int32_t>>,
+                 std::unique_ptr<apxchol::detail::imported_csc<std::int64_t>>> imported_;
+};
+
+// An owned CSC matrix as NumPy arrays, with int32 indices when they fit.
+py::tuple csc_to_numpy(const apxchol::detail::csc_matrix<double>& A) {
+    const auto n = static_cast<py::ssize_t>(A.rows());
+    const auto nnz = static_cast<py::ssize_t>(A.ptr()[A.rows()]);
+    const auto as = [&](auto index) {
+        using Index = decltype(index);
+        py::array_t<Index> indptr(n + 1), indices(nnz);
+        std::copy_n(A.ptr(), n + 1, indptr.mutable_data());
+        std::copy_n(A.idx(), nnz, indices.mutable_data());
+        return py::make_tuple(indptr, indices, py::array_t<double>(nnz, A.val()));
+    };
+    if (std::cmp_less_equal(nnz, std::numeric_limits<std::int32_t>::max()) &&
+        std::cmp_less_equal(n, std::numeric_limits<std::int32_t>::max()))
+        return as(std::int32_t{});
+    return as(std::int64_t{});
 }
 
 // ── options dict -> solve_options ────────────────────────────────────────────
@@ -128,7 +170,7 @@ class Solver {
 public:
     Solver(py::array indptr, py::array indices, py::array data,
            const py::dict& options)
-        : slv_(setup(csc_to_eigen(indptr, indices, data), parse_options(options))) {}
+        : slv_(setup(csc_arrays(indptr, indices, data), parse_options(options))) {}
 
     void save(const std::filesystem::path& path) const {
         py::gil_scoped_release release;
@@ -141,7 +183,7 @@ public:
         return Solver(apxchol::solver::load(path, parsed));
     }
 
-    Eigen::Index rows() const { return slv_.rows(); }
+    std::int64_t rows() const { return slv_.rows(); }
     double setup_seconds() const { return slv_.setup_seconds(); }
     const char* backend() const {
         return slv_.backend() == apxchol::solve_backend::cpu ? "cpu" : "gpu";
@@ -158,24 +200,28 @@ public:
     }
 
     using Array = py::array_t<double, py::array::forcecast>;
-    using Stride = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
+    // Column-major storage the native views accept; contiguous vectors qualify.
+    using Fortran = py::array_t<double, py::array::f_style | py::array::forcecast>;
 
     py::object apply(Array r) {
         r = checked_rhs(r);
+        const Fortran input = Fortran::ensure(r);
         if (r.ndim() == 1) {
-            const auto rhs = r.cast<Eigen::VectorXd>();
-            Eigen::VectorXd z;
+            // Write straight into the result: Krylov wrappers call this every iteration.
+            Fortran out(std::vector<py::ssize_t>{r.shape(0)});
+            const apxchol::const_matrix_view in{input.data(), input.shape(0), 1, input.shape(0)};
+            const apxchol::matrix_view z{out.mutable_data(), out.shape(0), 1, out.shape(0)};
             {
                 py::gil_scoped_release release;
-                z = slv_.apply(rhs);
+                slv_.apply(in, z);
             }
-            return py::cast(std::move(z));
+            return out;
         }
-        auto out = output_array(r, py::none());
+        Fortran out(std::vector<py::ssize_t>(r.shape(), r.shape() + r.ndim()));
         auto z = mutable_matrix(out);
         {
             py::gil_scoped_release release;
-            slv_.apply(matrix(r), z);
+            slv_.apply(matrix(input), z);
         }
         return out;
     }
@@ -200,18 +246,19 @@ public:
                 throw std::invalid_argument("x0 must have the same shape as b");
             guess = copy_alias(guess);
         }
+        const Fortran rhs = Fortran::ensure(b);
+        const Fortran initial = x0.is_none() ? Fortran() : Fortran::ensure(guess);
+        // A C-ordered matrix output is solved into column-major scratch and copied back.
+        Fortran solution = Fortran::ensure(output);
 
         py::dict out;
         out["x"] = output;
         if (b.ndim() == 1) {
-            Eigen::VectorXd x0v;
-            if (!x0.is_none()) x0v = guess.cast<Eigen::VectorXd>();
-            const auto rhs = b.cast<Eigen::VectorXd>();
-            Eigen::Map<Eigen::VectorXd> x(output.mutable_data(), rows());
             apxchol::solve_result res;
             {
                 py::gil_scoped_release release;
-                res = slv_.solve(rhs, x, tol, maxiter, x0.is_none() ? nullptr : &x0v);
+                res = slv_.solve(vector(rhs), mutable_vector(solution), tol, maxiter,
+                                 x0.is_none() ? std::span<const double>() : vector(initial));
             }
             out["iterations"] = static_cast<int>(res.iterations);
             out["residual"] = res.residual;
@@ -219,14 +266,10 @@ public:
             out["solve_seconds"] = res.solve_seconds;
         } else {
             apxchol::batch_solve_result res;
-            auto x = mutable_matrix(output);
-            if (x0.is_none()) {
+            {
                 py::gil_scoped_release release;
-                res = slv_.solve(matrix(b), x, tol, maxiter);
-            } else {
-                apxchol::const_matrix_view x0m = matrix(guess);
-                py::gil_scoped_release release;
-                res = slv_.solve(matrix(b), x, tol, maxiter, &x0m);
+                res = slv_.solve(matrix(rhs), mutable_matrix(solution), tol, maxiter,
+                                 x0.is_none() ? apxchol::const_matrix_view{} : matrix(initial));
             }
             const auto count = b.shape(1);
             py::array_t<int> iterations(count);
@@ -243,6 +286,7 @@ public:
             out["converged"] = converged;
             out["solve_seconds"] = res.solve_seconds;
         }
+        if (!solution.is(output)) output[py::ellipsis()] = solution;
         return out;
     }
 
@@ -298,10 +342,11 @@ public:
 private:
     explicit Solver(apxchol::solver owner) : slv_(std::move(owner)) {}
 
-    static apxchol::solver setup(const Eigen::SparseMatrix<double>& A,
-                                 const apxchol::solve_options& options) {
-        py::gil_scoped_release release;
-        return apxchol::solver(A, options);
+    static apxchol::solver setup(const csc_arrays& A, const apxchol::solve_options& options) {
+        return A.visit([&](const auto& view) {
+            py::gil_scoped_release release;
+            return apxchol::solver(view, options);
+        });
     }
 
     static bool same_shape(const py::array& a, const py::array& b) {
@@ -311,19 +356,12 @@ private:
     Array checked_rhs(Array a) const {
         if ((a.ndim() != 1 && a.ndim() != 2) || a.shape(0) != rows())
             throw std::invalid_argument("RHS must have shape (n,) or (n, nrhs)");
-        for (py::ssize_t d = 0; d < a.ndim(); ++d) {
-            if (a.strides(d) % py::ssize_t(sizeof(double)) != 0)
-                throw std::invalid_argument("RHS strides must be multiples of float64 item size");
-            // Eigen::Ref interprets a zero stride as contiguous, not broadcast.
-            if (a.size() && a.shape(d) > 1 && a.strides(d) == 0)
-                return a.attr("copy")().cast<Array>();
-        }
         return a;
     }
 
     static Array output_array(const Array& rhs, const py::object& out) {
         if (out.is_none())
-            return Array(std::vector<py::ssize_t>(rhs.shape(), rhs.shape() + rhs.ndim()));
+            return Fortran(std::vector<py::ssize_t>(rhs.shape(), rhs.shape() + rhs.ndim()));
         if (!py::isinstance<py::array_t<double>>(out))
             throw std::invalid_argument("out must be a float64 NumPy array");
         auto a = out.cast<Array>();
@@ -334,18 +372,17 @@ private:
         return a;
     }
 
-    static Eigen::Map<const Eigen::MatrixXd, Eigen::Unaligned, Stride>
-    matrix(const Array& a) {
-        return Eigen::Map<const Eigen::MatrixXd, Eigen::Unaligned, Stride>(
-            a.data(), a.shape(0), a.shape(1),
-            Stride(a.strides(1) / py::ssize_t(sizeof(double)), a.strides(0) / py::ssize_t(sizeof(double))));
+    static std::span<const double> vector(const Fortran& a) {
+        return {a.data(), static_cast<std::size_t>(a.size())};
     }
-
-    static Eigen::Map<Eigen::MatrixXd, Eigen::Unaligned, Stride>
-    mutable_matrix(Array& a) {
-        return Eigen::Map<Eigen::MatrixXd, Eigen::Unaligned, Stride>(
-            a.mutable_data(), a.shape(0), a.shape(1),
-            Stride(a.strides(1) / py::ssize_t(sizeof(double)), a.strides(0) / py::ssize_t(sizeof(double))));
+    static std::span<double> mutable_vector(Fortran& a) {
+        return {a.mutable_data(), static_cast<std::size_t>(a.size())};
+    }
+    static apxchol::const_matrix_view matrix(const Fortran& a) {
+        return {a.data(), a.shape(0), a.shape(1), a.shape(0)};
+    }
+    static apxchol::matrix_view mutable_matrix(Fortran& a) {
+        return {a.mutable_data(), a.shape(0), a.shape(1), a.shape(0)};
     }
 
     // Permutation and flags of the route; does not export the factor.
@@ -389,16 +426,13 @@ PYBIND11_MODULE(_apxchol, m) {
     // arrays of its graph Laplacian; throws for anything else.
     m.def("as_operator",
           [](py::array indptr, py::array indices, py::array data) -> py::object {
-              const auto M = csc_to_eigen(std::move(indptr), std::move(indices), std::move(data));
-              if (!apxchol::detail::is_graph_adjacency(M))
-                  return py::none();
-              Eigen::SparseMatrix<double> L = apxchol::detail::adjacency_laplacian(M);
-              L.makeCompressed();
-              using Index = Eigen::SparseMatrix<double>::StorageIndex;
-              return py::make_tuple(
-                  py::array_t<Index>(L.outerSize() + 1, L.outerIndexPtr()),
-                  py::array_t<Index>(L.nonZeros(), L.innerIndexPtr()),
-                  py::array_t<double>(L.nonZeros(), L.valuePtr()));
+              const csc_arrays arrays(indptr, indices, data);
+              return arrays.visit([](const auto& view) -> py::object {
+                  const apxchol::detail::csc_input M(view);
+                  if (!apxchol::detail::is_graph_adjacency(M))
+                      return py::none();
+                  return csc_to_numpy(apxchol::detail::adjacency_laplacian(M));
+              });
           },
           py::arg("indptr"), py::arg("indices"), py::arg("data"));
     py::class_<Solver>(m, "Solver")

@@ -41,6 +41,29 @@ The C++ benchmark accepts `--factor-storage auto|float16|float32`, `--cpu-schedu
 
 ## Measurement contract
 
+### Configuration selection
+
+Before scoring, choose one configuration rule per solver and backend, including
+apxchol. Use a documented upstream recommendation when it applies to the input
+class and hardware. Otherwise use the shipped default. Record the version,
+options, recommendation source and any adapter choices needed to solve the
+original system. Charge required preparation to setup.
+
+Disclose when the suite informed a solver's defaults. If a tested alternative
+materially changes the comparison, show it alongside the primary result under
+its own configuration name, whichever solver benefits. Label choices made after
+timing an individual matrix as instance-specific.
+
+For a tuning study, specify the objective (such as total time for one or 32
+right-hand sides), search space and comparable tuning budget for each solver
+before running the search. Select settings on development inputs. To evaluate
+performance on unseen workloads, freeze those settings and use held-out matrix
+families. Report failures and unsupported inputs in the coverage totals.
+
+For examples and rationale, see [Gould and Scott on sparse preconditioners](https://centaur.reading.ac.uk/70342/1/ls_study_toms.pdf),
+[Beiranvand, Hare and Lucet on parameter tuning (§4.4)](https://arxiv.org/pdf/1709.08242#page=12),
+and the [ParamILS training and test sets](https://www.cs.ubc.ca/labs/algorithms/Projects/ParamILS/results.html).
+
 ### Hosted checks
 
 The `PR performance` workflow installs the exact PR base and head in separate

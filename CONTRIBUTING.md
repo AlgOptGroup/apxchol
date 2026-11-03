@@ -11,7 +11,7 @@ also runs the examples. Run one test while iterating with
 
 CI builds `tests/cmake_consumer` to check the
 [CMake consumer](docs/cpp.md#use-from-cmake) requirements with warnings as errors. The root-embedding
-consumer reuses the same alignment and original-residual checks:
+consumer reuses the same original-residual check:
 
 ```sh
 cmake -S tests/cmake_subdirectory -B build-subdirectory
@@ -83,6 +83,11 @@ build to refresh the site.
 A pull request with a user-visible change adds a line to the `Unreleased`
 section of `CHANGELOG.md`. Mark breaking changes. Benchmark-internal and
 CI-only changes usually need no entry.
+
+## Writing for people
+
+Follow the writing rules in [AGENTS.md](AGENTS.md#writing-for-people) for everything people read, including
+PR descriptions, review comments and commit messages.
 
 ## Code conventions
 

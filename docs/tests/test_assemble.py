@@ -100,6 +100,11 @@ class AssembleTest(unittest.TestCase):
                     for relative in ("index.html", "docs/usage.html"):
                         page = directory / relative
                         selector = Selector(page.read_text())
+                        if count == 0:
+                            self.assertEqual(selector.summary, "")
+                            self.assertEqual(selector.links, [])
+                            self.assertNotIn("<details", page.read_text())
+                            continue
                         self.assertEqual(selector.summary.strip(), current)
                         self.assertEqual([label.strip() for _, label in selector.links], labels)
                         self.assertEqual([label.strip() for attrs, label in selector.links

@@ -443,9 +443,7 @@ private:
         // For SDDM (m == n) we alias L's CSC storage directly — no copy.
         // For Laplacian (m == n-1) we build L11 = L.topLeftCorner(m, m) in
         // parallel: keep entries from columns 0..m-1 with row < m, drop
-        // any row==n-1 entries that fall in the kept columns. Eigen's
-        // built-in topLeftCorner + makeCompressed is serial and costs
-        // ~60 ms on IPM iter40 — manual parallel version drops it under 10 ms.
+        // any row==n-1 entries that fall in the kept columns, in parallel.
         std::vector<edge_index>     L11_outer_local;
         std::unique_ptr<node_index[]>     L11_inner_local;
         std::unique_ptr<factor_value_t[]> L11_vals_local;

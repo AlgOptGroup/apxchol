@@ -13,7 +13,7 @@ fi
 cmake -S . -B build-cli -G 'Unix Makefiles' -DCMAKE_BUILD_TYPE=Release \
   -DAPXCHOL_DEVICE="$device" -DAPXCHOL_NATIVE_ARCH=OFF -DBUILD_SHARED_LIBS=OFF \
   -DAPXCHOL_BUILD_TESTS=OFF -DAPXCHOL_BUILD_EXAMPLES=OFF \
-  -DCMAKE_DISABLE_FIND_PACKAGE_Eigen3=ON -DCMAKE_DISABLE_FIND_PACKAGE_spdlog=ON \
+  -DCMAKE_DISABLE_FIND_PACKAGE_spdlog=ON \
   -DCMAKE_INSTALL_RPATH="$rpath" "${extra[@]}"
 cmake --build build-cli --target apxchol --parallel 2
 version=$(sed -n 's/^set(APXCHOL_VERSION \([0-9.]*\))$/\1/p' cmake/apxchol_version.cmake)
@@ -32,11 +32,7 @@ for dep in fast_float dragonbox ryu; do
   cp build-cli/_deps/fast_matrix_market-src/dependencies/"$dep"/LICENSE* "$prefix/share/licenses/$dep/"
 done
 cp build-cli/_deps/spdlog-src/include/spdlog/fmt/bundled/fmt.license.rst "$prefix/share/licenses/"
-mkdir -p "$prefix/share/licenses/eigen" "$prefix/share/licenses/OpenMP"
-cp build-cli/_deps/eigen-src/COPYING.* "$prefix/share/licenses/eigen/"
-eigen_version=$(sed -n 's/.*set(Eigen3_VERSION \([0-9.]*\)).*/\1/p' cmake/apxchol_eigen.cmake)
-sed -e "s/@Eigen3_VERSION@/$eigen_version/g" -e 's/wheel/archive/g;s/Wheels/Archives/g' \
-  python/Eigen-NOTICE.txt.in > "$prefix/share/licenses/eigen/NOTICE"
+mkdir -p "$prefix/share/licenses/OpenMP"
 strip "${strip_flags[@]}" "$prefix/bin/apxchol"
 if [[ $device == CPU ]]; then
   cp -L /usr/lib64/libomp.so "$prefix/lib/"
