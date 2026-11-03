@@ -276,8 +276,8 @@ FetchContent_MakeAvailable(hypre)
 # ── NVIDIA AMGX (optional GPU competitor) ────────────
 # v2.5.0 does not compile with CUDA 13.x: CCCL 3 removed the legacy
 # thrust::tuple API its headers use. 91a8413 ("Fix CUDA 13 tuple compatibility")
-# is the first upstream commit that builds; since v2.5.0 it changes only that
-# header shim, an export macro and the CMake C++17 setting. Patch 0001 adds
+# supplies the tuple compatibility shim. Other changes since v2.5.0 include
+# C++17 support, an export macro and an example convergence-status fix. Patch 0001 adds
 # AMGX_solver_set_max_iters so original-v1 retries stay within the remaining
 # iteration budget without rebuilding the hierarchy.
 # AMGX is built as its own CMake project because its top level forces global

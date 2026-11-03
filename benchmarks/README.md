@@ -269,8 +269,8 @@ to Solve.
 AMGX is pinned to upstream commit `91a8413` (tarball SHA-256 in
 [CMakeLists.txt](CMakeLists.txt)). Release v2.5.0 does not compile with CUDA
 13.x: CCCL 3 removed the legacy `thrust::tuple` API that its headers use.
-`91a8413` is the first commit that maps it to `cuda::std::tuple`; since v2.5.0
-it changes only that header shim, an export macro and the CMake C++17 setting. [Patch 0001](patches/amgx/) adds
+`91a8413` maps it to `cuda::std::tuple`. Other changes since v2.5.0 include
+C++17 support, an export macro and an example convergence-status fix. [Patch 0001](patches/amgx/) adds
 `AMGX_solver_set_max_iters`, so a retry uses only the remaining iteration
 budget without rebuilding the hierarchy.
 
@@ -279,16 +279,19 @@ The solver configuration is
 into the binary and recorded with its SHA-256 in `BUILD_META`. It is AMGX's
 shipped `PCG_CLASSICAL_V_JACOBI.json`: PCG preconditioned by one classical AMG
 V-cycle (two aggressive levels, D2 interpolation, block-Jacobi smoothing), in
-double precision (`dDDI`). Classical AMG matches the BoomerAMG GPU series; the
-shipped aggregation config uses size-2 aggregates without a coarse solver.
+double precision (`dDDI`). This benchmark selects that shipped sample for all
+matrices. The upstream README describes these as sample configurations.
+Classical AMG matches the BoomerAMG GPU series.
+`PCG_AGGREGATION_JACOBI.json` uses size-2 aggregates without a coarse solver.
 Changes from the shipped file: printing and timing collection are off, and
 `convergence` is `ABSOLUTE`. The adapter sets `max_iters` to the remaining
 budget and `tolerance` to `request x ||b||` before each pass, so AMGX stops on
 its unpreconditioned recurrence residual relative to the RHS norm, whatever the
 warm start. The original-v1 check then grades the original operator.
 
-AMGX solves the whole operator. A singular Laplacian is grounded like AMGCL,
-with one Dirichlet pin per connected component, including isolated vertices.
+AMGX defaults to the whole operator and supports explicit component splitting.
+Grounding follows AMGCL's pinned route, with one pin per singular Laplacian
+component. Nonsingular components retain their equations.
 Setup covers grounding, CSR conversion, AMGX object creation, the matrix
 upload and the hierarchy. Solve covers the RHS upload, PCG passes, checks and
 each copy of the solution back to the host.
