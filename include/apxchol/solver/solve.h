@@ -108,8 +108,9 @@ public:
                        std::optional<double> tol = std::nullopt,
                        std::optional<int> max_iter = std::nullopt,
                        std::span<const double> x0 = {});
-    /// Independent RHS columns, with bounded panel workspace. Output must not
-    /// overlap the RHS or warm start. tol/max_iter apply to each column.
+    /// Independent RHS columns, with bounded panel workspace. The output range
+    /// must be disjoint from the RHS and warm-start ranges, including any
+    /// padding between columns. tol/max_iter apply to each column.
     /// X0.data == nullptr starts every column from zero.
     batch_solve_result solve(const_matrix_view B, matrix_view X,
                              std::optional<double> tol = std::nullopt,
@@ -117,6 +118,7 @@ public:
                              const_matrix_view X0 = {});
     /// Apply the preconditioner to finite vector or matrix input.
     std::vector<double> apply(std::span<const double> r);
+    /// Input and output ranges must be disjoint, including padding between columns.
     void apply(const_matrix_view R, matrix_view Z);
 
     /// The installed preconditioner, the factor the solves actually use
