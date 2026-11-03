@@ -455,4 +455,3 @@ inline solver with_timings(const sparse_matrix& A, const solve_options& opts, de
 }
 
 } // namespace apxchol::test
-
