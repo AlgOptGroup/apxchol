@@ -1449,33 +1449,40 @@ factorization factorize_with_named_partitioner(const Eliminator& elim, graph G,
 
 } // namespace detail
 
-template<eliminator E>
-factorization factorize(const Eigen::SparseMatrix<double>& L, const E& elim,
+template<class Index, eliminator E>
+factorization factorize(basic_csc_view<Index> L, const E& elim,
                         const factor_options& opts) {
-    const detail::eigen_csc input(L);
-    return detail::factorize_operator(detail::factorize_input(input, opts), opts, [&](detail::graph&& G, const auto& graph_options) {
+    const detail::csc_input input(L);
+    return detail::factorize_operator(input, opts, [&](detail::graph&& G, const auto& graph_options) {
         return detail::factorize_with_named_partitioner(elim, std::move(G),
                                                         graph_options, nullptr);
     });
 }
 
-template<partitioner P>
-factorization factorize(const Eigen::SparseMatrix<double>& L, P part,
+template<class Index, partitioner P>
+factorization factorize(basic_csc_view<Index> L, P part,
                         const factor_options& opts) {
-    const detail::eigen_csc input(L);
-    return detail::factorize_operator(detail::factorize_input(input, opts), opts, [&](detail::graph&& G, const auto& graph_options) {
+    const detail::csc_input input(L);
+    return detail::factorize_operator(input, opts, [&](detail::graph&& G, const auto& graph_options) {
         return detail::factorize_impl(detail::make_tree_elim(graph_options), part,
                                       std::move(G), graph_options, nullptr);
     });
 }
 
-template<partitioner P, eliminator E>
-factorization factorize(const Eigen::SparseMatrix<double>& L, P part, const E& elim,
+template<class Index, partitioner P, eliminator E>
+factorization factorize(basic_csc_view<Index> L, P part, const E& elim,
                         const factor_options& opts) {
-    const detail::eigen_csc input(L);
-    return detail::factorize_operator(detail::factorize_input(input, opts), opts, [&](detail::graph&& G, const auto& graph_options) {
+    const detail::csc_input input(L);
+    return detail::factorize_operator(input, opts, [&](detail::graph&& G, const auto& graph_options) {
         return detail::factorize_impl(elim, part, std::move(G), graph_options, nullptr);
     });
+}
+
+// Public factorization returns an exportable CPU factor.
+template<class Index>
+factorization factorize(basic_csc_view<Index> L, const factor_options& opts) {
+    const detail::csc_input input(L);
+    return detail::factorize_for_solver(input, opts, nullptr);
 }
 
 } // namespace apxchol

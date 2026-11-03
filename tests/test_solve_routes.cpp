@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <algorithm>
+#include "csc_test_util.h"
 #include "scoped_env.h"
 #include "apxchol/detail/checkpoint.h"
 #include "apxchol/solver/solve.h"
@@ -14,6 +15,7 @@
 #include <vector>
 
 using csc_access = apxchol::detail::sparse_csc_access;
+namespace test = apxchol::test;
 
 namespace {
 
@@ -35,14 +37,15 @@ Eigen::SparseMatrix<double> operator_matrix(int n = 65) {
     }
     Eigen::SparseMatrix<double> result(n, n);
     result.setFromTriplets(entries.begin(), entries.end());
+    result.makeCompressed();
     return result;
 }
 
 void expect_solution(const Eigen::SparseMatrix<double>& matrix,
                      const Eigen::VectorXd& rhs, const apxchol::solve_result& result) {
-    ASSERT_EQ(result.x.size(), matrix.rows());
-    EXPECT_TRUE(result.x.allFinite());
-    EXPECT_LT((matrix * result.x - rhs).norm() / rhs.norm(), 1e-8);
+    ASSERT_EQ(result.x.size(), static_cast<std::size_t>(matrix.rows()));
+    EXPECT_TRUE(test::vec(result.x).allFinite());
+    EXPECT_LT((matrix * test::vec(result.x) - rhs).norm() / rhs.norm(), 1e-8);
 }
 
 std::vector<apxchol::solve_options> host_only_options() {
@@ -76,17 +79,17 @@ TEST(SolveRoutes, ExplicitCpuDoesNotPrewarm) {
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     apxchol::solve_options options;
     options.backend = apxchol::solve_backend::cpu;
-    const auto result = apxchol::solve(matrix, rhs, 1e-10, std::nullopt, nullptr, options);
+    const auto result = apxchol::solve(test::csc(matrix), test::cspan(rhs), 1e-10, std::nullopt, {}, options);
     EXPECT_EQ(result.backend, apxchol::solve_backend::cpu);
     expect_solution(matrix, rhs, result);
     // A reusable solver on the CPU route stays on CPU as well, including
     // preconditioner applications for an external Krylov solver.
-    apxchol::solver reusable(matrix, options);
-    const auto reused = reusable.solve(rhs, 1e-10);
+    apxchol::solver reusable(test::csc(matrix), options);
+    const auto reused = reusable.solve(test::cspan(rhs), 1e-10);
     EXPECT_EQ(reused.backend, apxchol::solve_backend::cpu);
     expect_solution(matrix, rhs, reused);
-    EXPECT_TRUE(reusable.apply(rhs).allFinite());
-    const auto factor = apxchol::factorize(matrix);
+    EXPECT_TRUE(test::vec(reusable.apply(test::cspan(rhs))).allFinite());
+    const auto factor = apxchol::factorize(test::csc(matrix));
     EXPECT_EQ(csc_access::vals(factor.L).size(), factor.L.nonZeros());
     EXPECT_EQ(csc_access::inner(factor.L).size(), factor.L.nonZeros());
     EXPECT_EQ(factor.perm.size(), static_cast<std::size_t>(matrix.rows()));
@@ -103,14 +106,14 @@ TEST(SolveRoutes, OneShotUsesTheInitialGuess) {
     const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), 1.0, 2.0);
     apxchol::solve_options options;
     options.backend = apxchol::solve_backend::cpu;
-    const auto cold = apxchol::solve(matrix, rhs, 1e-10, std::nullopt, nullptr, options);
+    const auto cold = apxchol::solve(test::csc(matrix), test::cspan(rhs), 1e-10, std::nullopt, {}, options);
     ASSERT_TRUE(cold.converged);
     ASSERT_GT(cold.iterations, 0);
-    const auto warm = apxchol::solve(matrix, rhs, 1e-10, std::nullopt, &cold.x, options);
+    const auto warm = apxchol::solve(test::csc(matrix), test::cspan(rhs), 1e-10, std::nullopt, test::cspan(test::vec(cold.x)), options);
     EXPECT_TRUE(warm.converged);
     EXPECT_LT(warm.iterations, cold.iterations);
     const Eigen::VectorXd short_guess = Eigen::VectorXd::Zero(matrix.rows() - 1);
-    EXPECT_THROW(apxchol::solve(matrix, rhs, 1e-10, std::nullopt, &short_guess, options),
+    EXPECT_THROW(apxchol::solve(test::csc(matrix), test::cspan(rhs), 1e-10, std::nullopt, test::cspan(short_guess), options),
                  std::invalid_argument);
 }
 
@@ -123,7 +126,7 @@ TEST(SolveRoutes, AutomaticSelectionRespectsConfigurationAndAvailability) {
         SCOPED_TRACE(i);
         EXPECT_EQ(apxchol::detail::select_solve_backend(cases[i]),
                   apxchol::solve_backend::cpu);
-        const auto result = apxchol::solve(matrix, rhs, std::nullopt, std::nullopt, nullptr, cases[i]);
+        const auto result = apxchol::solve(test::csc(matrix), test::cspan(rhs), std::nullopt, std::nullopt, {}, cases[i]);
         EXPECT_EQ(result.backend, apxchol::solve_backend::cpu);
         expect_solution(matrix, rhs, result);
     }
@@ -136,18 +139,18 @@ TEST(SolveRoutes, ScalarAutomaticUsesCpuWithoutPrewarming) {
     const auto matrix = operator_matrix(1);
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(1);
     apxchol::solve_options options;
-    EXPECT_EQ(apxchol::detail::select_solve_backend(options, &matrix),
+    EXPECT_EQ(test::select_solve_backend(options, matrix),
               apxchol::solve_backend::cpu);
-    apxchol::solver owner(matrix, options);
+    apxchol::solver owner(test::csc(matrix), options);
     EXPECT_EQ(owner.backend(), apxchol::solve_backend::cpu);
     EXPECT_EQ(owner.factor_storage(), apxchol::factor_storage_type::fp32);
-    expect_solution(matrix, rhs, owner.solve(rhs));
+    expect_solution(matrix, rhs, owner.solve(test::cspan(rhs)));
     if (apxchol::detail::omp_sptrsv::fp16_supported()) {
         options.factor_opts.factor_storage = apxchol::factor_storage_type::fp16;
-        apxchol::solver half(matrix, options);
+        apxchol::solver half(test::csc(matrix), options);
         EXPECT_EQ(half.backend(), apxchol::solve_backend::cpu);
         EXPECT_EQ(half.factor_storage(), apxchol::factor_storage_type::fp16);
-        expect_solution(matrix, rhs, half.solve(rhs));
+        expect_solution(matrix, rhs, half.solve(test::cspan(rhs)));
     }
 #if defined(APXCHOL_USE_CUDA)
     EXPECT_EQ(apxchol::detail::cuda_context::state().started, started);
@@ -158,10 +161,10 @@ TEST(SolveRoutes, ScalarAutomaticUsesCpuWithoutPrewarming) {
 TEST(SolveRoutes, AutomaticCpuGuardBoundary) {
     const apxchol::solve_options options;
     const auto at_boundary = operator_matrix(cpu_guard_rows);
-    EXPECT_EQ(apxchol::detail::select_solve_backend(options, &at_boundary),
+    EXPECT_EQ(test::select_solve_backend(options, at_boundary),
               apxchol::solve_backend::cpu);
     const auto above_boundary = operator_matrix(cpu_guard_rows + 1);
-    EXPECT_EQ(apxchol::detail::select_solve_backend(options, &above_boundary),
+    EXPECT_EQ(test::select_solve_backend(options, above_boundary),
               apxchol::detail::select_solve_backend(options));
 }
 #endif
@@ -176,7 +179,7 @@ TEST(SolveRoutes, MetalGpuSupportsFp32AndFp16Storage) {
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::gpu;
         options.factor_opts.factor_storage = storage;
-        const auto result = apxchol::solve(matrix, rhs, 1e-10, std::nullopt, nullptr, options);
+        const auto result = apxchol::solve(test::csc(matrix), test::cspan(rhs), 1e-10, std::nullopt, {}, options);
         EXPECT_EQ(result.backend, apxchol::solve_backend::gpu);
         expect_solution(matrix, rhs, result);
     }
@@ -193,7 +196,7 @@ TEST(SolveRoutes, ExplicitGpuRejectsUnsupportedConfigurationsBeforeSetup) {
     for (auto& options : cases) {
         options.backend = apxchol::solve_backend::gpu;
         EXPECT_THROW(apxchol::detail::select_solve_backend(options), std::invalid_argument);
-        EXPECT_THROW(apxchol::solve(matrix, rhs, std::nullopt, std::nullopt, nullptr, options), std::invalid_argument);
+        EXPECT_THROW(apxchol::solve(test::csc(matrix), test::cspan(rhs), std::nullopt, std::nullopt, {}, options), std::invalid_argument);
     }
 #if defined(APXCHOL_USE_CUDA)
     EXPECT_EQ(apxchol::detail::cuda_context::state().started, started);
@@ -206,7 +209,7 @@ TEST(SolveRoutes, CommonOwnerRejectsEmptyInput) {
                               apxchol::solve_backend::cpu, apxchol::solve_backend::gpu}) {
         apxchol::solve_options options;
         options.backend = backend;
-        EXPECT_THROW(apxchol::solver(empty, options), std::invalid_argument);
+        EXPECT_THROW(apxchol::solver(test::csc(empty), options), std::invalid_argument);
     }
 }
 
@@ -214,13 +217,13 @@ TEST(SolveRoutes, CpuFactorReuseAndExportRemainAvailable) {
     const auto matrix = operator_matrix();
     apxchol::solve_options options;
     options.backend = apxchol::solve_backend::cpu;
-    apxchol::solver solver(matrix, options);
+    apxchol::solver solver(test::csc(matrix), options);
     ASSERT_FALSE(csc_access::vals(solver.factor().L).empty());
     auto factor = solver.factor();
-    apxchol::solver adopted(matrix, std::move(factor), options);
+    apxchol::solver adopted(test::csc(matrix), std::move(factor), options);
     for (double offset : {0.5, 2.0}) {
         const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(matrix.rows(), offset, offset + 1);
-        const auto result = adopted.solve(rhs);
+        const auto result = adopted.solve(test::cspan(rhs));
         EXPECT_EQ(result.backend, apxchol::solve_backend::cpu);
         expect_solution(matrix, rhs, result);
     }
@@ -238,21 +241,21 @@ TEST(SolveRoutes, FactorStorageAppliesToNewFactorsAndAdoptionKeepsIt) {
         EXPECT_EQ(apxchol::detail::cuda_sptrsv::fp16_resolved(options.factor_opts.factor_storage), fp16);
 #endif
         if (fp16 && !apxchol::detail::omp_sptrsv::fp16_supported()) {
-            EXPECT_THROW(apxchol::solver(matrix, options), std::runtime_error);
+            EXPECT_THROW(apxchol::solver(test::csc(matrix), options), std::runtime_error);
             continue;
         }
-        apxchol::solver original(matrix, options);
+        apxchol::solver original(test::csc(matrix), options);
         auto factor = original.factor();
         // The installed factor keeps its storage whatever the options say.
         options.factor_opts.factor_storage = fp16
             ? apxchol::factor_storage_type::fp32 : apxchol::factor_storage_type::fp16;
-        apxchol::solver adopted(matrix, std::move(factor), options);
+        apxchol::solver adopted(test::csc(matrix), std::move(factor), options);
         const auto storage = fp16 ? apxchol::factor_storage_type::fp16
                                   : apxchol::factor_storage_type::fp32;
         EXPECT_EQ(original.factor_storage(), storage);
         EXPECT_EQ(adopted.factor_storage(), storage);
-        expect_solution(matrix, rhs, original.solve(rhs, 1e-10));
-        expect_solution(matrix, rhs, adopted.solve(rhs, 1e-10));
+        expect_solution(matrix, rhs, original.solve(test::cspan(rhs), 1e-10));
+        expect_solution(matrix, rhs, adopted.solve(test::cspan(rhs), 1e-10));
     }
 }
 
@@ -262,7 +265,7 @@ TEST(SolveRoutes, RequiredGpuPreconditionerValidatesHostFactorsBeforeCuda) {
 #else
     const bool started = apxchol::detail::cuda_context::state().started;
     const auto matrix = operator_matrix();
-    const auto valid = apxchol::factorize(matrix);
+    const auto valid = apxchol::factorize(test::csc(matrix));
     ASSERT_FALSE(apxchol::detail::factorization_access::device_factor(valid));
     auto options = apxchol::solve_options{};
     options.backend = apxchol::solve_backend::gpu;
@@ -276,16 +279,16 @@ TEST(SolveRoutes, RequiredGpuPreconditionerValidatesHostFactorsBeforeCuda) {
             case 4: csc_access::vals(malformed.L).front() = std::numeric_limits<float>::quiet_NaN(); break;
             case 5: csc_access::release_values(malformed.L); break;
         }
-        EXPECT_THROW(apxchol::solver(matrix, malformed, options), std::invalid_argument) << defect;
+        EXPECT_THROW(apxchol::solver(test::csc(matrix), malformed, options), std::invalid_argument) << defect;
     }
-    EXPECT_THROW(apxchol::solver(operator_matrix(32), valid, options), std::invalid_argument);
+    EXPECT_THROW(apxchol::solver(test::csc(operator_matrix(32)), valid, options), std::invalid_argument);
     apxchol::factorization grounded;
     csc_access::n(grounded.L) = 1;
     csc_access::outer(grounded.L) = {0, 0};
     grounded.perm = {0};
     grounded.sddm = false;
     try {
-        apxchol::solver rejected(Eigen::SparseMatrix<double>(1, 1), grounded, options);
+        apxchol::solver rejected(test::csc(Eigen::SparseMatrix<double>(1, 1)), grounded, options);
         FAIL() << "a scalar Laplacian CUDA factor must be rejected";
     } catch (const std::invalid_argument& error) {
         EXPECT_NE(std::string(error.what()).find("scalar Laplacian"), std::string::npos);
@@ -310,7 +313,7 @@ TEST(SolveRoutes, AutomaticAndExplicitGpuUseOwnedSetup) {
             options.backend = backend;
             options.factor_opts.sampler = sampler;
             apxchol::detail::checkpoint timings;
-            const auto result = apxchol::detail::solver_access::with_timings(matrix, options, timings).solve(rhs, 1e-10);
+            const auto result = test::with_timings(matrix, options, timings).solve(test::cspan(rhs), 1e-10);
             EXPECT_EQ(result.backend, apxchol::solve_backend::gpu);
             EXPECT_GT(timings.total("setup.gpu_owned_factorization"), 0.0);
             EXPECT_GT(timings.total("pcg.gpu_pcg_loop"), 0.0);
@@ -325,30 +328,20 @@ TEST(SolveRoutes, UnsupportedStoredLayoutSelectsCpuBeforeSetup) {
     GTEST_SKIP() << "32-bit-node CUDA route required";
 #else
     {
-        // Uncompressed Eigen storage is compressed at the library boundary,
-        // so it selects the same route as its compressed copy.
-        auto uncompressed = operator_matrix(std::max(65, cpu_guard_rows + 1));
-        const auto compressed = uncompressed;
-        uncompressed.uncompress();
-        const apxchol::solve_options options;
-        EXPECT_EQ(apxchol::detail::select_solve_backend(options, &uncompressed),
-                  apxchol::detail::select_solve_backend(options, &compressed));
-    }
-    {
         auto matrix = operator_matrix(std::max(65, cpu_guard_rows + 1));
         // Numerically symmetric, but the device builder needs stored mates.
         matrix.coeffRef(0, 2) = 0.0;
         matrix.makeCompressed();
         const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(matrix.rows());
         apxchol::solve_options options;
-        ASSERT_EQ(apxchol::detail::select_solve_backend(options, &matrix), apxchol::solve_backend::cpu);
+        ASSERT_EQ(test::select_solve_backend(options, matrix), apxchol::solve_backend::cpu);
         apxchol::detail::checkpoint timings;
-        const auto result = apxchol::detail::solver_access::with_timings(matrix, options, timings).solve(rhs);
+        const auto result = test::with_timings(matrix, options, timings).solve(test::cspan(rhs));
         EXPECT_EQ(result.backend, apxchol::solve_backend::cpu);
         EXPECT_GT(timings.total("setup.backend_selection"), 0.0);
         expect_solution(matrix, rhs, result);
         options.backend = apxchol::solve_backend::gpu;
-        EXPECT_THROW(apxchol::solve(matrix, rhs, std::nullopt, std::nullopt, nullptr, options), std::invalid_argument);
+        EXPECT_THROW(apxchol::solve(test::csc(matrix), test::cspan(rhs), std::nullopt, std::nullopt, {}, options), std::invalid_argument);
     }
 #endif
 }
@@ -360,18 +353,18 @@ TEST(SolveRoutes, OperatorOutsideMetalRangeSelectsCpuBeforeSetup) {
     matrix *= 0x1p104;
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(matrix.rows());
     apxchol::solve_options options;
-    EXPECT_EQ(apxchol::detail::select_solve_backend(options, &matrix), apxchol::solve_backend::cpu);
+    EXPECT_EQ(test::select_solve_backend(options, matrix), apxchol::solve_backend::cpu);
     apxchol::detail::checkpoint timings;
-    const auto result = apxchol::detail::solver_access::with_timings(matrix, options, timings).solve(rhs);
+    const auto result = test::with_timings(matrix, options, timings).solve(test::cspan(rhs));
     EXPECT_EQ(result.backend, apxchol::solve_backend::cpu);
     EXPECT_GT(timings.total("setup.backend_selection"), 0.0);
     expect_solution(matrix, rhs, result);
     options.backend = apxchol::solve_backend::gpu;
-    EXPECT_THROW(apxchol::solve(matrix, rhs, std::nullopt, std::nullopt, nullptr, options), std::exception);
+    EXPECT_THROW(apxchol::solve(test::csc(matrix), test::cspan(rhs), std::nullopt, std::nullopt, {}, options), std::exception);
 
     options.backend = apxchol::solve_backend::automatic;
     matrix.coeffRef(0, 0) = std::numeric_limits<double>::infinity();
-    EXPECT_THROW(apxchol::solve(matrix, rhs, std::nullopt, std::nullopt, nullptr, options), std::invalid_argument);
+    EXPECT_THROW(apxchol::solve(test::csc(matrix), test::cspan(rhs), std::nullopt, std::nullopt, {}, options), std::invalid_argument);
 }
 #endif
 
@@ -386,14 +379,14 @@ TEST(SolveRoutes, HiddenDeviceUsesCpuAutomaticallyAndRejectsExplicitGpu) {
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(matrix.rows());
     apxchol::solve_options options;
     EXPECT_EQ(apxchol::detail::select_solve_backend(options), apxchol::solve_backend::cpu);
-    const auto automatic = apxchol::solve(matrix, rhs, std::nullopt, std::nullopt, nullptr, options);
+    const auto automatic = apxchol::solve(test::csc(matrix), test::cspan(rhs), std::nullopt, std::nullopt, {}, options);
     EXPECT_EQ(automatic.backend, apxchol::solve_backend::cpu);
     expect_solution(matrix, rhs, automatic);
     options.backend = apxchol::solve_backend::gpu;
-    EXPECT_THROW(apxchol::solve(matrix, rhs, std::nullopt, std::nullopt, nullptr, options), std::exception);
+    EXPECT_THROW(apxchol::solve(test::csc(matrix), test::cspan(rhs), std::nullopt, std::nullopt, {}, options), std::exception);
     apxchol::solve_options cpu;
     cpu.backend = apxchol::solve_backend::cpu;
-    expect_solution(matrix, rhs, apxchol::solve(matrix, rhs, std::nullopt, std::nullopt, nullptr, cpu));
+    expect_solution(matrix, rhs, apxchol::solve(test::csc(matrix), test::cspan(rhs), std::nullopt, std::nullopt, {}, cpu));
 #endif
 }
 
@@ -408,11 +401,11 @@ TEST(SolveRoutes, IncompatibleBuildRejectsExplicitGpuAndAutoSelectsCpu) {
 #endif
     const auto matrix = operator_matrix();
     const Eigen::VectorXd rhs = Eigen::VectorXd::Ones(matrix.rows());
-    const auto result = apxchol::solve(matrix, rhs, std::nullopt, std::nullopt, nullptr, options);
+    const auto result = apxchol::solve(test::csc(matrix), test::cspan(rhs), std::nullopt, std::nullopt, {}, options);
     EXPECT_EQ(result.backend, apxchol::solve_backend::cpu);
     expect_solution(matrix, rhs, result);
     options.backend = apxchol::solve_backend::gpu;
-    EXPECT_THROW(apxchol::solve(matrix, rhs, std::nullopt, std::nullopt, nullptr, options), std::invalid_argument);
+    EXPECT_THROW(apxchol::solve(test::csc(matrix), test::cspan(rhs), std::nullopt, std::nullopt, {}, options), std::invalid_argument);
 #if defined(APXCHOL_USE_CUDA)
     EXPECT_EQ(apxchol::detail::cuda_context::state().started, started);
 #endif
@@ -430,11 +423,11 @@ TEST(SolveRoutes, GpuSingletonSddmAndUnsupportedEmptyFactorAreExplicit) {
     Eigen::SparseMatrix<double> matrix(1, 1);
     matrix.insert(0, 0) = 2.0;
     matrix.makeCompressed();
-    const apxchol::solver owner(matrix, options);
+    const apxchol::solver owner(test::csc(matrix), options);
     ASSERT_TRUE(std::get<apxchol::detail::cuda_route>(
         apxchol::detail::solver_access::route(owner)).trsv().adopted_device_factor());
     const Eigen::VectorXd rhs = Eigen::VectorXd::Constant(1, 2.0);
-    const auto result = apxchol::solve(matrix, rhs, 1e-10, std::nullopt, nullptr, options);
+    const auto result = apxchol::solve(test::csc(matrix), test::cspan(rhs), 1e-10, std::nullopt, {}, options);
     EXPECT_EQ(result.backend, apxchol::solve_backend::gpu);
     expect_solution(matrix, rhs, result);
 
@@ -445,17 +438,17 @@ TEST(SolveRoutes, GpuSingletonSddmAndUnsupportedEmptyFactorAreExplicit) {
     const Eigen::VectorXd zero = Eigen::VectorXd::Zero(1);
     apxchol::solve_options cpu;
     cpu.backend = apxchol::solve_backend::cpu;
-    const auto trivial = apxchol::solve(singleton_laplacian, zero, std::nullopt, std::nullopt, nullptr, cpu);
+    const auto trivial = apxchol::solve(test::csc(singleton_laplacian), test::cspan(zero), std::nullopt, std::nullopt, {}, cpu);
     EXPECT_EQ(trivial.backend, apxchol::solve_backend::cpu);
     EXPECT_EQ(trivial.iterations, 0);
     EXPECT_EQ(trivial.residual, 0.0);
-    EXPECT_TRUE(trivial.x.isZero(0.0));
-    EXPECT_THROW(apxchol::solve(singleton_laplacian, zero, std::nullopt, std::nullopt, nullptr, options), std::invalid_argument);
+    EXPECT_TRUE(test::vec(trivial.x).isZero(0.0));
+    EXPECT_THROW(apxchol::solve(test::csc(singleton_laplacian), test::cspan(zero), std::nullopt, std::nullopt, {}, options), std::invalid_argument);
     options.backend = apxchol::solve_backend::automatic;
-    const auto automatic = apxchol::solve(singleton_laplacian, zero, std::nullopt, std::nullopt, nullptr, options);
+    const auto automatic = apxchol::solve(test::csc(singleton_laplacian), test::cspan(zero), std::nullopt, std::nullopt, {}, options);
     EXPECT_EQ(automatic.backend, apxchol::solve_backend::cpu);
     EXPECT_EQ(automatic.residual, 0.0);
-    EXPECT_TRUE(automatic.x.isZero(0.0));
+    EXPECT_TRUE(test::vec(automatic.x).isZero(0.0));
 #endif
 }
 

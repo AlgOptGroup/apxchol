@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "csc_test_util.h"
 #include "scoped_omp_threads.h"
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/solve.h"
@@ -239,9 +240,9 @@ TEST(GpuFactorFinalize, ConsumingSolveAcceptsDefaultFp16AndCompensatedDrop) {
         Eigen::VectorXd b = A * exact;
         apxchol::solve_options opts;
         opts.backend = apxchol::solve_backend::gpu;
-        const auto solved = apxchol::solve(A, b, 1e-8, 1000, nullptr, opts);
+        const auto solved = apxchol::solve(apxchol::test::csc(A), apxchol::test::cspan(b), 1e-8, 1000, {}, opts);
         EXPECT_EQ(solved.backend, apxchol::solve_backend::gpu);
-        EXPECT_LE((A * solved.x - b).norm() / b.norm(), 1e-8);
+        EXPECT_LE((A * apxchol::test::vec(solved.x) - b).norm() / b.norm(), 1e-8);
     }
 }
 
@@ -309,7 +310,7 @@ TEST(GpuFactorFinalize, DeviceSolvesAndSessionsInstallOwnedCapsules) {
         solve_options.factor_opts.factor_storage = storage;
         solve_options.factor_opts.drop_tolerance = 0;
         for (double shift : {0.0, 1.0}) {
-            const apxchol::solver owner(solve_matrix(64, shift), solve_options);
+            const apxchol::solver owner(apxchol::test::csc(solve_matrix(64, shift)), solve_options);
             const auto& preconditioner = std::get<apxchol::detail::cuda_route>(
                 apxchol::detail::solver_access::route(owner));
             ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
@@ -348,7 +349,7 @@ TEST(GpuFactorFinalize, SharedCapsulesAndExplicitHostImportsPreserveOwnership) {
     public_options.backend = apxchol::solve_backend::gpu;
     public_options.factor_opts = options;
     try {
-        apxchol::solver rejected(solve_matrix(4, 1.0), std::move(public_factor), public_options);
+        apxchol::solver rejected(apxchol::test::csc(solve_matrix(4, 1.0)), std::move(public_factor), public_options);
         FAIL() << "public factor adoption must not consume a device capsule";
     } catch (const std::invalid_argument& error) {
         EXPECT_NE(std::string(error.what()).find("host factor without a device capsule"),
@@ -359,7 +360,7 @@ TEST(GpuFactorFinalize, SharedCapsulesAndExplicitHostImportsPreserveOwnership) {
         auto reference = fixture.reference;
         reference.sddm = sddm;
         apxchol::detail::factorization_access::device_factor(reference) = fixture.state.finalize_device_factor(reference.perm, m, options.factor_storage, options.drop_tolerance);
-        EXPECT_THROW(apxchol::solver(solve_matrix(4, sddm ? 1.0 : 0.0), reference, public_options),
+        EXPECT_THROW(apxchol::solver(apxchol::test::csc(solve_matrix(4, sddm ? 1.0 : 0.0)), reference, public_options),
                      std::invalid_argument);
         ASSERT_FALSE(apxchol::detail::factorization_access::device_factor(reference)->empty());
         ASSERT_EQ(apxchol::detail::factorization_access::device_factor(reference).use_count(), 1);
@@ -393,7 +394,7 @@ TEST(GpuFactorFinalize, SharedCapsulesAndExplicitHostImportsPreserveOwnership) {
         }
         EXPECT_FALSE(apxchol::detail::factorization_access::device_factor(reference)->empty());
         const auto A = solve_matrix(64, sddm ? 1.0 : 0.0);
-        const auto exported = apxchol::factorize(A);
+        const auto exported = apxchol::factorize(apxchol::test::csc(A));
         EXPECT_EQ(csc_access::vals(exported.L).size(), exported.L.nonZeros());
         EXPECT_EQ(csc_access::inner(exported.L).size(), exported.L.nonZeros());
         EXPECT_FALSE(apxchol::detail::factorization_access::device_factor(exported));

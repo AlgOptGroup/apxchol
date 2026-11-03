@@ -7,9 +7,10 @@
 #include "apxchol/solver/detail/factor_entry.h"
 #include "apxchol/solver/partitioner.h"
 #include "apxchol/sparse_csc.h"
-#include "apxchol/detail/eigen_boundary.h"
-#include <Eigen/Sparse>
+#include "apxchol/detail/csc_input.h"
+#include "apxchol/views.h"
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <type_traits>
 #include <utility>
@@ -61,7 +62,7 @@ struct factorization {
 
     // Stored positive off-diagonal entries removed by M-matrix lumping (two
     // per pair). Only the preconditioner changes; the solve operator is untouched.
-    Eigen::Index lumped_offdiag = 0;
+    std::int64_t lumped_offdiag = 0;
 
     // Per-round elimination metadata. is_size drives the SpTRSV round-as-level path.
     struct round_stats {
@@ -121,16 +122,6 @@ factorization factorize_operator(csc_ref<double> L,
     return F;
 }
 
-/// The public factorize() overloads' input: Eigen's matrix as a square csc_ref.
-inline const eigen_csc& factorize_input(const eigen_csc& input, const factor_options& options) {
-    if (!input.square()) {
-        validate_factor_options(options);
-        validate_lump_max_mass(options.lump_max_mass);
-        throw_operator_not_square(input.rows(), input.cols());
-    }
-    return input;
-}
-
 } // namespace detail
 
 /// Extension overloads validate the operator, apply permitted lumping and
@@ -141,8 +132,10 @@ inline const eigen_csc& factorize_input(const eigen_csc& input, const factor_opt
 /// Custom-eliminator overload: substitute your own star-vertex elimination
 /// rule (see elimination/elimination.h for the `eliminator` contract).
 /// Overloads without an eliminator build the built-in rule from `opts`.
-template<eliminator E>
-factorization factorize(const Eigen::SparseMatrix<double>& L, const E& elim,
+/// Every overload takes a csc_view or csc_view64 (views.h); invalid views
+/// throw std::invalid_argument.
+template<class Index, eliminator E>
+factorization factorize(basic_csc_view<Index> L, const E& elim,
                         const factor_options& opts = {});
 
 /// Partitioner-instance overloads: pass a configured (possibly stateful)
@@ -151,17 +144,18 @@ factorization factorize(const Eigen::SparseMatrix<double>& L, const E& elim,
 /// The instance is taken by value; state mutated during the run is not
 /// observable afterwards — reference it through a member pointer if you need
 /// to inspect it post-run.
-template<partitioner P>
-factorization factorize(const Eigen::SparseMatrix<double>& L, P part,
+template<class Index, partitioner P>
+factorization factorize(basic_csc_view<Index> L, P part,
                         const factor_options& opts = {});
 
-template<partitioner P, eliminator E>
-factorization factorize(const Eigen::SparseMatrix<double>& L, P part,
+template<class Index, partitioner P, eliminator E>
+factorization factorize(basic_csc_view<Index> L, P part,
                         const E& elim,
                         const factor_options& opts = {});
 
 /// Matrix-level factorization using the built-in AoS graph and named partitioner.
-factorization factorize(const Eigen::SparseMatrix<double>& L,
+template<class Index>
+factorization factorize(basic_csc_view<Index> L,
                         const factor_options& opts = {});
 
 namespace detail {

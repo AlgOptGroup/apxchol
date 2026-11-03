@@ -21,7 +21,7 @@
 #include "apxchol/solver/pcg_cuda_kernels.h"
 #include "apxchol/solver/pcg_cuda.h"
 #include "apxchol/solver/detail/solver_route.h"
-#include "apxchol/detail/eigen_boundary.h"
+#include "csc_test_util.h"
 #include <optional>
 #include <cuda_runtime.h>
 namespace {
@@ -29,7 +29,7 @@ namespace {
 // cuda_pcg takes the library's own CSC and dense views; convert Eigen fixtures.
 [[maybe_unused]] void setup(apxchol::detail::cuda_pcg& pcg, const Eigen::SparseMatrix<double>& A,
            const std::vector<apxchol::node_index>& perm, bool verbose = false) {
-    const apxchol::detail::eigen_csc input(A);
+    const apxchol::test::eigen_csc input(A);
     if (!input.square()) throw std::invalid_argument("GPU PCG requires a square operator");
     pcg.setup(input.ref(), perm, verbose);
 }
@@ -39,8 +39,8 @@ void solve_panel(apxchol::detail::cuda_pcg& pcg, const Precond& precond, const I
                  Output& x, double tol, int max_iter, std::array<int, C>& iterations,
                  std::array<double, C>& residuals, bool laplacian, const Input* x0 = nullptr) {
     std::optional<apxchol::detail::const_matrix_ref> initial;
-    if (x0) initial.emplace(apxchol::detail::dense_of(*x0));
-    pcg.solve_panel<C>(precond, apxchol::detail::dense_of(b), apxchol::detail::dense_of(x), tol,
+    if (x0) initial.emplace(apxchol::test::dense_of(*x0));
+    pcg.solve_panel<C>(precond, apxchol::test::dense_of(b), apxchol::test::dense_of(x), tol,
                        max_iter, iterations, residuals, laplacian, initial ? &*initial : nullptr);
 }
 
@@ -447,7 +447,7 @@ TEST(GpuOperatorCsr, ConsumingSolveKeepsDefaultStorageAndOriginalResidual) {
         Eigen::SparseMatrix<double> A(n,n);A.setFromTriplets(entries.begin(),entries.end());
         Eigen::VectorXd exact(n);for(int u=0;u<n;++u)exact[u]=std::sin(u+0.375);
         const Eigen::VectorXd b=A*exact;
-        const apxchol::solver owner(A, {.backend = apxchol::solve_backend::gpu});
+        const apxchol::solver owner(apxchol::test::csc(A), {.backend = apxchol::solve_backend::gpu});
         const auto& preconditioner = session(owner);
         ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
         EXPECT_TRUE(preconditioner.trsv().fp16());
@@ -758,7 +758,7 @@ TEST(GpuOperatorCsr, DeviceSetupRejectsUnsupportedStorage) {
     }
     Eigen::SparseMatrix<double> A(n, n);
     A.setFromTriplets(entries.begin(), entries.end());
-    const apxchol::solver owner(A, {.backend = apxchol::solve_backend::gpu});
+    const apxchol::solver owner(apxchol::test::csc(A), {.backend = apxchol::solve_backend::gpu});
     const auto& preconditioner = session(owner);
     ASSERT_TRUE(preconditioner.trsv().adopted_device_factor());
     apxchol::detail::cuda_pcg solver;
@@ -819,13 +819,13 @@ TEST(GpuSolveHonesty, ZeroIterationPublicSolveReportsRelativeResidual) {
     for (double scale : {1e-12, 1.0, 1e6}) {
         SCOPED_TRACE(scale);
         const Eigen::VectorXd b = Eigen::VectorXd::Constant(n, scale);
-        const auto result = apxchol::solve(A, b, 1e-8, 0,
-                                                 nullptr, {.backend = apxchol::solve_backend::gpu});
-        ASSERT_EQ(result.x.size(), n);
-        EXPECT_TRUE(result.x.isZero(0.0));
+        const auto result = apxchol::solve(apxchol::test::csc(A), apxchol::test::cspan(b), 1e-8, 0,
+                                                 {}, {.backend = apxchol::solve_backend::gpu});
+        ASSERT_EQ(result.x.size(), static_cast<std::size_t>(n));
+        EXPECT_TRUE(apxchol::test::vec(result.x).isZero(0.0));
         EXPECT_EQ(result.iterations, 0);
         EXPECT_NEAR(result.residual, 1.0, 2e-15);
-        EXPECT_DOUBLE_EQ((A * result.x - b).norm() / b.norm(), result.residual);
+        EXPECT_DOUBLE_EQ((A * apxchol::test::vec(result.x) - b).norm() / b.norm(), result.residual);
     }
 #endif
 }
@@ -847,21 +847,22 @@ TEST(GpuSolveHonesty, ZeroIterationSessionReportsRelativeResidualOnReuse) {
     }
     Eigen::SparseMatrix<double> A(n, n);
     A.setFromTriplets(entries.begin(), entries.end());
-    apxchol::solver solver(A, {.backend = apxchol::solve_backend::gpu});
+    apxchol::solver solver(apxchol::test::csc(A), {.backend = apxchol::solve_backend::gpu});
     ASSERT_TRUE(session(solver).trsv().adopted_device_factor());
-    EXPECT_THROW(solver.solve(Eigen::VectorXd::Zero(n - 1), 1e-8, 0),
+    const Eigen::VectorXd short_rhs = Eigen::VectorXd::Zero(n - 1);
+    EXPECT_THROW(solver.solve(apxchol::test::cspan(short_rhs), 1e-8, 0),
                  std::invalid_argument);
     for (double scale : {1e-12, 0.0, 1e6}) {
         SCOPED_TRACE(scale);
         const Eigen::VectorXd b = Eigen::VectorXd::Constant(n, scale);
-        const auto result = solver.solve(b, 1e-8, 0);
+        const auto result = solver.solve(apxchol::test::cspan(b), 1e-8, 0);
         EXPECT_EQ(result.backend, apxchol::solve_backend::gpu);
-        ASSERT_EQ(result.x.size(), n);
-        EXPECT_TRUE(result.x.isZero(0.0));
+        ASSERT_EQ(result.x.size(), static_cast<std::size_t>(n));
+        EXPECT_TRUE(apxchol::test::vec(result.x).isZero(0.0));
         EXPECT_EQ(result.iterations, 0);
         EXPECT_NEAR(result.residual, scale == 0.0 ? 0.0 : 1.0, 2e-15);
         const double denominator = b.norm() > 0.0 ? b.norm() : 1.0;
-        EXPECT_DOUBLE_EQ((A * result.x - b).norm() / denominator, result.residual);
+        EXPECT_DOUBLE_EQ((A * apxchol::test::vec(result.x) - b).norm() / denominator, result.residual);
     }
 #endif
 }
@@ -891,12 +892,12 @@ TEST(GpuOperatorCsr, ReusableOwnersFollowTheirSetupDeviceAcrossThreads) {
     options.backend = apxchol::solve_backend::gpu;
     options.num_threads = 1;
     options.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
-    const auto host_factor = apxchol::factorize(A);
+    const auto host_factor = apxchol::factorize(apxchol::test::csc(A));
     for (const bool adopt : {false, true}) {
         SCOPED_TRACE(adopt);
-        auto owner = adopt ? std::make_unique<apxchol::solver>(A, host_factor, options)
-                           : std::make_unique<apxchol::solver>(A, options);
-        const Eigen::VectorXd applied = owner->apply(rhs);
+        auto owner = adopt ? std::make_unique<apxchol::solver>(apxchol::test::csc(A), host_factor, options)
+                           : std::make_unique<apxchol::solver>(apxchol::test::csc(A), options);
+        const Eigen::VectorXd applied = apxchol::test::vec(owner->apply(apxchol::test::cspan(rhs)));
         std::exception_ptr failure;
         std::thread worker([&, owner = std::move(owner)]() mutable {
             try {
@@ -906,19 +907,19 @@ TEST(GpuOperatorCsr, ReusableOwnersFollowTheirSetupDeviceAcrossThreads) {
                     apxchol::detail::check_cuda(cudaGetDevice(&current), "cudaGetDevice");
                     EXPECT_EQ(current, 0);
                 };
-                const auto scalar = owner->solve(rhs, 1e-8, 200);
+                const auto scalar = owner->solve(apxchol::test::cspan(rhs), 1e-8, 200);
                 EXPECT_TRUE(scalar.converged);
-                EXPECT_LT(independent_residual(A, rhs, scalar.x), 1e-8);
+                EXPECT_LT(independent_residual(A, rhs, apxchol::test::vec(scalar.x)), 1e-8);
                 expect_caller_device();
                 Eigen::MatrixXd B(n, 4), X(n, 4);
                 for (int c = 0; c < 4; ++c) B.col(c) = (c + 1.0) * rhs;
-                const auto batch = owner->solve(B, X, 1e-8, 200);
+                const auto batch = owner->solve(apxchol::test::cmat(B), apxchol::test::mmat(X), 1e-8, 200);
                 for (int c = 0; c < 4; ++c) {
                     EXPECT_TRUE(batch.columns[c].converged);
                     EXPECT_LT(independent_residual(A, B.col(c), X.col(c)), 1e-8);
                 }
                 expect_caller_device();
-                EXPECT_EQ((owner->apply(rhs) - applied).norm(), 0);
+                EXPECT_EQ((apxchol::test::vec(owner->apply(apxchol::test::cspan(rhs))) - applied).norm(), 0);
                 expect_caller_device();
                 owner.reset();
                 expect_caller_device();
