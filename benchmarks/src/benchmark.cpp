@@ -20,7 +20,7 @@
 //                      construction). What the assembled operator IS; declared by
 //                      the caller and then asserted against the structural scan.
 //                        laplacian -> singular: grounded, scored mean-centred
-//                        sddm      -> full-rank: no pin, no mean-centring
+//                        sddm      -> retain the operator; ground only singular Laplacian blocks
 //   --solver <list>    comma-separated: apxchol,cg,ldlt,rchol,cholmod,all
 //   --tol <double>     PCG tolerance                        (default: 1e-8)
 //   --maxiter <int>    PCG max iterations                   (default: 500)
@@ -481,11 +481,8 @@ enum class matrix_kind {
 //
 // Set once in main() from the DECLARATION, then read by every solver runner.
 static bool g_laplacian_mode = true;
-// Populated only for a disconnected operator, because split dispatch also needs
-// it for SDDM inputs. Centering consults it only in Laplacian mode. Connected
-// operators retain the historical single-mean path without keeping an O(n)
-// component list alive. A run_split subproblem has a smaller vector, so it also
-// takes that connected path; the full Laplacian takes one mean per component.
+// For a mixed operator, mark vertices in components with a constant null mode.
+static std::vector<char> g_singular_vertices;
 static std::vector<std::vector<int>> g_laplacian_components;
 static Eigen::Index g_laplacian_dimension = 0;
 static std::size_t g_component_count = 0;
@@ -497,11 +494,12 @@ static double g_component_discovery_seconds = 0.0;
 // Laplacian by construction.
 static Eigen::VectorXd& center_if_laplacian(Eigen::VectorXd& v) {
     if (!g_laplacian_mode) return v;
-    if (g_laplacian_components.empty() || v.size() != g_laplacian_dimension) {
+    if (g_component_count <= 1 || v.size() != g_laplacian_dimension) {
         v.array() -= v.mean();
         return v;
     }
     for (const auto& component : g_laplacian_components) {
+        if (!g_singular_vertices.empty() && !g_singular_vertices[component.front()]) continue;
         double sum = 0.0;
         for (int vertex : component) sum += v[vertex];
         const double mean = sum / static_cast<double>(component.size());
@@ -1787,19 +1785,16 @@ enum class ground_mode    { pin, coarse, native };
 // solver key: "apxchol" | "amgcl" | "boomeramg".
 struct desing_plan { bool supported; decompose_mode decompose; ground_mode ground; };
 static desing_plan resolve_desing(const std::string& solver, const std::string& dec_req,
-                                  const std::string& gnd_req, bool disconnected) {
+                                  const std::string& gnd_req, bool disconnected,
+                                  bool laplacian) {
     // ground: auto = the config-clean default (pin for the AMG solvers -> default
     // config; native for apxchol).
     ground_mode gnd = (gnd_req=="pin")    ? ground_mode::pin
                     : (gnd_req=="coarse") ? ground_mode::coarse
                     : (gnd_req=="native") ? ground_mode::native
                     : (solver=="apxchol") ? ground_mode::native : ground_mode::pin;  // auto
-    // decompose: auto = whole, EXCEPT split when disconnected AND either the ground is
-    // `coarse` (whole+coarse is invalid -- single near-null vector can't span a k-dim
-    // null space) or the solver is BoomerAMG (measured: split avoids dragging the dust
-    // components through one AMG hierarchy, ~3-5% faster). apxchol and AMGCL+pin handle
-    // the whole disconnected operator faster than paying per-component build overhead.
-    bool auto_split = disconnected && (gnd==ground_mode::coarse || solver=="boomeramg");
+    // The singular coarse adapter operates on one connected block at a time.
+    const bool auto_split = laplacian && disconnected && gnd == ground_mode::coarse;
     decompose_mode dec = (dec_req=="whole") ? decompose_mode::whole
                        : (dec_req=="split") ? decompose_mode::split
                        : (auto_split ? decompose_mode::split : decompose_mode::whole);
@@ -1810,7 +1805,8 @@ static desing_plan resolve_desing(const std::string& solver, const std::string& 
     // The invalid cell: whole + coarse on a DISCONNECTED graph -- the unpinned singular
     // operator has a k-dim constant null space the single near-null vector can't span
     // (AMGCL CG breaks down / NaN). split makes every piece connected (k=1), so it's ok.
-    if (gnd==ground_mode::coarse && dec==decompose_mode::whole && disconnected) ok = false;
+    if (laplacian && gnd==ground_mode::coarse && dec==decompose_mode::whole && disconnected)
+        ok = false;
     return {ok, dec, gnd};
 }
 
@@ -1858,6 +1854,8 @@ static Eigen::SparseMatrix<double> dirichlet_pin(const Eigen::SparseMatrix<doubl
             if (w != -1) { seen[w] = 1; cur[w] = outer[w]; stk.push_back(w); }
             else { stk.pop_back(); if (leaf == -1) leaf = u; }  // first finished = DFS leaf
         }
+        if (L.rows() == g_laplacian_dimension && !g_singular_vertices.empty()
+            && !g_singular_vertices[s]) continue;
         is_pin[leaf] = 1; pinned.push_back(leaf);
     }
     // Build P's CSC directly in column order. L is column-major and already sorted, so
@@ -1898,6 +1896,56 @@ static std::vector<std::vector<int>> connected_components(const Eigen::SparseMat
     std::vector<int> cid(n,-1); std::vector<std::vector<int>> comps;
     for (int v=0;v<n;++v){int r=find(v); if(cid[r]<0){cid[r]=(int)comps.size();comps.emplace_back();} comps[cid[r]].push_back(v);}
     return comps;
+}
+
+// A component of an assembled operator can itself be a graph Laplacian.
+// Require nonpositive off-diagonals and an exactly zero stored column sum.
+// An error-free expansion prevents a small diagonal shift from being rounded
+// away when the weights span several orders of magnitude.
+static bool constant_null_component(const Eigen::SparseMatrix<double>& L,
+                                    const std::vector<int>& nodes) {
+    std::vector<double> partials;
+    for (int col : nodes) {
+        partials.clear();
+        for (Eigen::SparseMatrix<double>::InnerIterator it(L, col); it; ++it) {
+            double x = it.value();
+            if (it.row() != col && x > 0) return false;
+            size_t used = 0;
+            for (double y : partials) {
+                if (std::abs(x) < std::abs(y)) std::swap(x, y);
+                const double hi = x + y;
+                const double lo = y - (hi - x);
+                if (lo != 0) partials[used++] = lo;
+                x = hi;
+            }
+            partials.resize(used);
+            if (x != 0) partials.push_back(x);
+        }
+        if (!partials.empty()) return false;
+    }
+    return true;
+}
+
+static bool prepare_components(const Eigen::SparseMatrix<double>& L, bool declared_laplacian) {
+    g_laplacian_mode = declared_laplacian;
+    const auto component_begin = std::chrono::steady_clock::now();
+    auto components = connected_components(L);
+    g_component_count = components.size();
+    g_laplacian_dimension = L.rows();
+    g_singular_vertices.clear();
+    if (!g_laplacian_mode && components.size() > 1) {
+        for (const auto& nodes : components) {
+            if (!constant_null_component(L, nodes)) continue;
+            if (g_singular_vertices.empty()) g_singular_vertices.resize(L.rows(), false);
+            for (int vertex : nodes) g_singular_vertices[vertex] = true;
+        }
+    }
+    const bool mixed = !g_singular_vertices.empty();
+    g_laplacian_components = std::move(components);
+    g_component_discovery_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - component_begin).count();
+    g_laplacian_mode = g_laplacian_mode || mixed;
+    return mixed;
 }
 
 // Connected-component SPLIT (the `decompose = split` axis): decompose L into its
@@ -1965,6 +2013,12 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
         subL.makeCompressed();
         Eigen::VectorXd subb(sn); for (int i=0;i<sn;++i) subb[i]=b[nodes[i]];
         split_prep += prep.elapsed();
+        // A connected subproblem uses its own grounding and centering mode.
+        struct RestoreMode {
+            bool previous = g_laplacian_mode;
+            ~RestoreMode() { g_laplacian_mode = previous; }
+        } restore_mode;
+        if (!g_singular_vertices.empty()) g_laplacian_mode = g_singular_vertices[nodes.front()];
         BenchResult rc = per_solver(subL, subb, name, tol, maxiter);
         setup += rc.setup_time; solve += rc.solve_time; it=std::max(it,rc.iterations);
         r.solve_passes = std::max(r.solve_passes, rc.solve_passes);
@@ -2809,9 +2863,8 @@ int main(int argc, char** argv) try {
                "                     nullspace): it is grounded, and its solution and residual\n"
                "                     are scored mean-centred, being defined only modulo\n"
                "                     constants.\n"
-               "  --class sddm       the operator is FULL-RANK: it has a unique solution, is\n"
-               "                     handed to every solver untouched, and is scored untouched\n"
-               "                     — no pin, no mean-centring.\n"
+               "  --class sddm       use the published operator. In disconnected inputs,\n"
+               "                     ground only blocks with a constant Laplacian null mode.\n"
                "There is deliberately no default and no detection. The ratio test this\n"
                "replaced (max|rowsum| / max|diag| < 1e-10) called three of the four IPM\n"
                "matrices singular because their uniform +1e-6 diagonal shift moves the\n"
@@ -2925,9 +2978,9 @@ int main(int argc, char** argv) try {
                 << "--class " << args.cls << " CONTRADICTS the structure of "
                 << args.mtx_path << ".\n"
                    "  declared: " << (declared_laplacian ? "laplacian (singular)"
-                                                         : "sddm (full-rank)") << "\n"
+                                                         : "sddm") << "\n"
                    "  scanned:  " << (scan_laplacian ? "laplacian (singular)"
-                                                     : "sddm (full-rank)") << "\n"
+                                                     : "sddm") << "\n"
                    "  apxchol::detail::scan_operator over " << op_scan.rows << " rows: "
                 << op_scan.excess_rows << " with a positive diagonal excess, "
                 << op_scan.deficient_rows << " with a negative row sum";
@@ -2970,7 +3023,7 @@ int main(int argc, char** argv) try {
     // regularized Laplacian is full-rank from here on no matter what was declared
     // about the file. That is a property of the shift we applied, not a guess
     // about the input.
-    g_laplacian_mode = declared_laplacian && !(args.reg_rel > 0.0);
+    const bool mixed = prepare_components(L, declared_laplacian && !(args.reg_rel > 0.0));
     {
         const char* kname = (kind == matrix_kind::op) ? "operator" : "graph";
         std::cerr << "[matrix] " << graph_name << ": kind=" << kname
@@ -2982,9 +3035,10 @@ int main(int argc, char** argv) try {
             : (kind == matrix_kind::op) ? "declared --class, checked against the scan"
                                         : "by construction (L = D - A)";
         std::cerr << "[matrix] operator is "
-                  << (g_laplacian_mode ? "a SINGULAR LAPLACIAN: grounded, solution and "
+                  << (mixed ? "mixed: only Laplacian components are grounded and centred"
+                            : g_laplacian_mode ? "a SINGULAR LAPLACIAN: grounded, solution and "
                                          "residual mean-centred per connected component"
-                                       : "FULL-RANK SDDM: solved and scored untouched, "
+                                       : "assembled operator: solved and scored untouched, "
                                          "no pin, no mean-centring")
                   << " (" << provenance << ")\n";
         if (kind == matrix_kind::op) {
@@ -3016,10 +3070,10 @@ int main(int argc, char** argv) try {
         // One machine-readable line for the runners to lift into the cell's
         // matrix_meta, so every stored result carries its own interpretation.
         std::cerr << "MATRIX_META kind=" << kname
-                  << " class=" << (g_laplacian_mode ? "laplacian" : "sddm")
+                  << " class=" << (mixed ? "mixed" : g_laplacian_mode ? "laplacian" : "sddm")
                   << " class_declared=" << (kind == matrix_kind::op ? 1 : 0)
                   << " n=" << n << " nnz=" << nnz
-                  << " laplacian=" << (g_laplacian_mode ? 1 : 0)
+                  << " laplacian=" << (g_laplacian_mode && !mixed ? 1 : 0)
                   << " grounding=" << (g_laplacian_mode ? "pin_or_native" : "none");
         if (kind == matrix_kind::op)
             std::cerr << " pos_offdiag=" << op_scan.offdiag_pos
@@ -3035,16 +3089,14 @@ int main(int argc, char** argv) try {
     // only one null vector.  Matrix parsing/assembly is shared benchmark input
     // work and deliberately outside this timer; no derived matrix is serialized.
     if (args.component_info) {
-        if (!g_laplacian_mode) {
+        if (!g_laplacian_mode || mixed) {
             std::cerr << "--component-info requires a singular Laplacian input\n";
             return 1;
         }
-        const auto component_begin = std::chrono::high_resolution_clock::now();
-        const auto comps = connected_components(L);
+        const auto& comps = g_laplacian_components;
         size_t largest = 0;
         for (const auto& comp : comps) largest = std::max(largest, comp.size());
-        const double discovery_s = std::chrono::duration<double>(
-            std::chrono::high_resolution_clock::now() - component_begin).count();
+        const double discovery_s = g_component_discovery_seconds;
         std::cerr << "[component-info] " << comps.size() << " components: largest "
                   << largest << " / " << L.rows() << " nodes\n"
                   << "APX component discovery time: " << std::setprecision(17)
@@ -3070,7 +3122,7 @@ int main(int argc, char** argv) try {
             // mode on each connected Laplacian. Report the component count and size
             // so the runner knows when to stop.
             const auto component_begin = std::chrono::high_resolution_clock::now();
-            auto comps = connected_components(L);
+            const auto& comps = g_laplacian_components;
             std::vector<size_t> order(comps.size());
             std::iota(order.begin(), order.end(), static_cast<size_t>(0));
             std::sort(order.begin(), order.end(),
@@ -3121,7 +3173,7 @@ int main(int argc, char** argv) try {
         std::cerr << "dumped " << entries << " lower-triangle entries to " << args.dump_mtx << "\n";
         if (args.giant_dump) {
             std::cerr << "APX component discovery time: " << std::setprecision(17)
-                      << component_discovery_s << "\n"
+                      << component_discovery_s + g_component_discovery_seconds << "\n"
                       << "APX component serialization time: "
                       << std::max(0.0, dump_s - component_discovery_s) << "\n";
         }
@@ -3129,22 +3181,8 @@ int main(int argc, char** argv) try {
         return 0;
     }
 
-    // The null space of a disconnected Laplacian has one constant vector per
-    // component. Keep the partition once: RHS projection and true-residual
-    // grading use it, and split-mode solvers no longer rediscover it per row.
-    g_laplacian_components.clear();
-    g_laplacian_dimension = 0;
-    g_component_count = 0;
-    const auto component_begin = std::chrono::steady_clock::now();
-    auto components = connected_components(L);
-    g_component_discovery_seconds = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - component_begin).count();
-    g_component_count = components.size();
-    if (components.size() > 1) {
-        g_laplacian_dimension = L.rows();
-        g_laplacian_components = std::move(components);
-    }
-
+    // Connected solves need only a single mean; release the vertex list.
+    if (g_component_count <= 1) g_laplacian_components.clear();
     Eigen::VectorXd b = make_rhs(L, args.seed);
     if (!args.dump_rhs.empty()) {
         std::ofstream output(args.dump_rhs);
@@ -3166,8 +3204,8 @@ int main(int argc, char** argv) try {
 
     const int R = args.repeat;
 
-    // Whether L is disconnected -- computed once (benchmark-only classification, not
-    // timed); drives decompose=auto + the whole+coarse validity gate.
+    // Whether L is disconnected -- computed once and
+    // timed in the selected route); drives auto and the whole+coarse validity gate.
     const bool disconnected = g_component_count > 1;
 
     // De-singularization dispatch (2 axes; see resolve_desing). `single(L,b,nm,tol,mi,
@@ -3183,7 +3221,8 @@ int main(int argc, char** argv) try {
     };
     [[maybe_unused]] auto run_desing = [&](const std::string& key, const std::string& base,
                           auto single) -> BenchResult {
-        auto plan = resolve_desing(key, args.decompose, args.ground, disconnected);
+        auto plan = resolve_desing(key, args.decompose, args.ground, disconnected,
+                                   g_laplacian_mode);
         if (!plan.supported) return make_na(base);
         if (plan.decompose == decompose_mode::split)
             return run_split([&, g = plan.ground](const Eigen::SparseMatrix<double>& sL,
@@ -3193,7 +3232,11 @@ int main(int argc, char** argv) try {
                    }, L, b, graph_name, args.tol, args.maxiter,
                    g_laplacian_components, g_component_count,
                    g_component_discovery_seconds);
-        return single(L, b, graph_name, args.tol, args.maxiter, plan.ground);
+        auto result = single(L, b, graph_name, args.tol, args.maxiter, plan.ground);
+        result.setup_time += g_component_discovery_seconds;
+        result.total_time += g_component_discovery_seconds;
+        result.us_per_nnz = result.total_time / std::max(1, result.nnz) * 1e6;
+        return result;
     };
 
     // All solvers use L; release adjacency staging before running them.
@@ -3265,7 +3308,7 @@ int main(int argc, char** argv) try {
 #endif
 
     // AMG solvers use run_desing (--decompose/--ground). Auto pins Laplacians;
-    // AMGCL solves the whole operator, while BoomerAMG splits disconnected inputs.
+    // Both pinned routes use the whole operator by default.
 #ifdef HAVE_AMGCL
     if (args.solvers.count("amgcl"))
         print(median_run([&]() { return run_desing("amgcl", "AMG+CG [AMGCL]",
@@ -3282,10 +3325,6 @@ int main(int argc, char** argv) try {
 #endif
 
 #ifdef HAVE_HYPRE
-    // BoomerAMG routes through run_desing. auto = split (A/B: ~3-5% faster than
-    // whole-matrix multi-pin, both reach tol once the PCG stop is relative). The
-    // connected-grounding under split is `pin` (one Dirichlet pin per component);
-    // native/nullspace are n/a (Hypre has no scalar singular-nullspace API).
     if (args.solvers.count("hypre_boomeramg")) {
         auto result = median_run([&]() { return run_desing("boomeramg", "BoomerAMG+PCG [Hypre]",
             [](const Eigen::SparseMatrix<double>& L_, const Eigen::VectorXd& b_,
