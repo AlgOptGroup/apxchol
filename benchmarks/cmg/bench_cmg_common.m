@@ -1,8 +1,8 @@
 function bench_cmg_common(operator_path, rhs_path, output_dir, retained_repeats, tol, maxiter, threads)
 % Canonical CMG on explicit unchanged A,b: one full warmup and retained rebuilds.
 % Component certification/slicing and hierarchy creation are timed as setup.
-% Reconstruction and destruction are timed as solve; true residuals and I/O are
-% outside those intervals. No shift, RHS regeneration, or residual projection.
+% Reconstruction, original-residual checks and bounded retries are timed as solve.
+% Final independent grading, destruction and I/O are outside those intervals. No shift, RHS regeneration, or residual projection.
     if retained_repeats < 1 || fix(retained_repeats) ~= retained_repeats
         error('cmg_common:repeats', 'At least one retained repeat is required');
     end
@@ -39,23 +39,20 @@ function bench_cmg_common(operator_path, rhs_path, output_dir, retained_repeats,
                 rec.status = 'n/a'; rec.reason = 'canonical cmg_precondition returned an empty hierarchy';
                 rec.solve_s = 0; rec.total_s = rec.setup_s;
             else
-                started = tic;
-                [sx, pcg_flag, reported_relres, iterations] = pcg(S,sb,tol,maxiter,pfun);
-                if grounded > 0
-                    x = zeros(n,1); x(keep) = sx;
-                else
-                    x = sx;
-                end
-                clear pfun S sb sx keep;
-                rec.solve_s = toc(started); rec.total_s = rec.setup_s + rec.solve_s;
-                rec.pcg_flag = pcg_flag; rec.reported_relres = reported_relres; rec.iters = iterations;
+                [x, stop] = checked_cmg_solve(A,b,S,sb,keep,pfun,tol,maxiter);
+                rec.solve_s = stop.solve_s;
+                rec.total_s = rec.setup_s + rec.solve_s;
+                rec.pcg_flag = stop.pcg_flag; rec.reported_relres = stop.reported_relres;
+                rec.iters = stop.iters; rec.solve_passes = stop.solve_passes;
+                rec.stop_check_s = stop.stop_check_s;
+                clear pfun S sb keep;
                 if bnorm > 0
                     rec.rel_res = norm(A*x-b)/bnorm;
                 else
                     rec.rel_res = norm(A*x-b);
                 end
                 rec.status = 'not_converged';
-                if pcg_flag == 0 && isfinite(rec.rel_res) && rec.rel_res <= tol
+                if isfinite(rec.rel_res) && rec.rel_res <= tol
                     rec.status = 'complete';
                 end
                 fp = fopen(fullfile(output_dir,sprintf('rep%d.solution.f64',repetition)), 'w', 'ieee-le');

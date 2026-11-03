@@ -286,9 +286,14 @@ iterations) under `-singleCompThread`, pinned to one CPU. A disconnected
 Laplacian gets one grounded coordinate per Laplacian component
 ([cmg/component_gauge.h](cmg/component_gauge.h)); coefficients and RHS values
 are kept unchanged, with no shift or RHS projection. Setup covers the component
-gauge and hierarchy; solve covers PCG and reconstruction. Every repetition is
+gauge and hierarchy. Solve covers PCG, reconstruction and original-residual
+checks. A failed check can tighten the native tolerance and warm-start another
+PCG call on the same hierarchy, within one total iteration budget and at most
+eight calls. Numerical breakdown stops retries. Every repetition is independently
 graded by `||Ax-b||/||b||` on the original A and b, and the cell follows the
-same status and per-solve cap rules as the other competitors. An empty hierarchy,
+same status and per-solve cap rules as the other competitors. The
+`shared-timed-original-v1` provenance marker distinguishes these cells from
+older CMG timings that excluded the stopping check. An empty hierarchy,
 which CMG returns for operators it does not support such as positive
 off-diagonals, is recorded as `n/a`.
 

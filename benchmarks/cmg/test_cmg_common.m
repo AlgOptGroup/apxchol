@@ -27,6 +27,7 @@ function test_cmg_common()
     [keep,components,grounded]=common_component_gauge_mex(A,zeros(n,1));
     assert(components==2 && grounded==1 && keep(1)==1 && numel(keep)==n-1);
     fprintf('MATLAB component gauge: 7/7 contract cases passed\n');
+    test_checked_cmg_solve();
 end
 
 function check(A,b,components,grounded,expected)

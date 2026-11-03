@@ -46,7 +46,7 @@ def available():
 def provenance():
     """Cell provenance: the MEX toolchain, the runtime and the CPU used."""
     return {**rc.binary_toolchain(os.path.join(CMG_SOLVER, _MEX) if CMG_SOLVER else ""),
-            "cmg_note": NOTE, "cmg_runtime": f"container {IMAGE}" if IMAGE else "local MATLAB",
+            "cmg_note": NOTE, "cmg_contract": rc.CMG_CONTRACT, "cmg_runtime": f"container {IMAGE}" if IMAGE else "local MATLAB",
             "cmg_cpuset": rc.affinity_spec(1) or "unpinned"}
 
 
@@ -103,7 +103,8 @@ def read_records(work, repeats):
 
 
 _METRICS = ("setup_s", "solve_s", "total_s", "iters", "rel_res", "n", "nnz",
-            "adaptation_s", "components", "grounded_components", "matlab_version")
+            "adaptation_s", "components", "grounded_components", "matlab_version",
+            "solve_passes", "stop_check_s")
 
 
 def summarize(records, returncode, stderr, repeats, tol):

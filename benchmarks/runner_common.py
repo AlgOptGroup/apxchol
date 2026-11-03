@@ -134,6 +134,9 @@ def git_sha():
     return head or declared
 
 
+CMG_CONTRACT = "shared-timed-original-v1"
+
+
 def cell_meets_contract(cell):
     """Whether a stored cell satisfies the current measurement contract:
     recorded source provenance, original-v1 stopping, a matching complete-route
@@ -147,6 +150,9 @@ def cell_meets_contract(cell):
     if (not isinstance(provenance, dict)
             or not isinstance(provenance.get("git_sha"), str)
             or not provenance["git_sha"].strip()):
+        return False
+    if (cell["cell"].get("solver") == "cmg"
+            and provenance.get("cmg_contract") != CMG_CONTRACT):
         return False
     if status in ("timeout", "exceeded_cap"):
         return timeout_cap({"timeout_cap_s": cell.get("timeout_cap_s")}) is not None

@@ -345,6 +345,8 @@ class CellReuseTest(unittest.TestCase):
 
     def test_cmg_cells_follow_the_competitor_contract(self):
         cell = self.cell(cell={"solver": "cmg", "device": "cpu", "matrix_id": "grid"})
+        self.assertFalse(rc.cell_is_current(cell, self.SHA))
+        cell["provenance"]["cmg_contract"] = rc.CMG_CONTRACT
         self.assertTrue(rc.cell_is_current(cell, self.SHA))
         cell["metrics"].pop("stop_contract")
         self.assertFalse(rc.cell_meets_contract(cell))
