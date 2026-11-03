@@ -24,10 +24,10 @@
 ///     the eligible vertex list. ctx.degrees[v] is exact after pruning or a
 ///     cache update, and may be conservative during audited prune skipping.
 ///     The scan rules (block_greedy, priority_greedy) use this.
-///   * false — no O(active + edges) pre-pass runs: `candidates` is the raw
-///     active list (ascending original-index order) and ctx.degrees is
-///     empty. baumann_kyng works this way — it estimates degrees from its
-///     hash sample and applies the cap to that estimate.
+///   * false — no degree pre-pass runs: `candidates` is the raw active list
+///     (ascending original-index order) and ctx.degrees is empty.
+///     baumann_kyng works this way — it estimates degrees from its hash
+///     sample and applies the cap to that estimate.
 ///
 /// Degrees are indexed by vertex ID so rules can compare neighboring vertices.
 /// Incidence-list sizes may include eliminated neighbors. The orchestrator
@@ -125,22 +125,22 @@ public:
     /// True while v has not been eliminated.
     bool is_active(node_index v) const { return g_->is_active(v); }
     /// Calls f(u) for each live neighbor u of v, repeating u once per
-    /// parallel edge, and returns that count. The call drops v's stored
-    /// incidences of eliminated vertices, so concurrent calls need distinct v,
-    /// and f must not query v itself.
+    /// parallel edge, and returns that count. Every query is a pure read, so
+    /// any threads may query any vertices concurrently.
     template<typename F>
     node_index for_each_neighbor(node_index v, F&& f) const {
-        return g_->prune_and_visit(v, std::forward<F>(f));
+        return g_->visit_live(v, std::forward<F>(f));
     }
-    /// Live degree of v: the count for_each_neighbor returns, with the same
-    /// concurrency rule.
-    node_index degree(node_index v) const { return g_->prune_and_degree(v); }
+    /// Live degree of v: the count for_each_neighbor returns.
+    node_index degree(node_index v) const {
+        return g_->visit_live(v, [](node_index) {});
+    }
 
 private:
     friend struct detail::partition_graph_access;
     explicit partition_graph(detail::graph& g) : g_(&g) {}
-    // Visiting drops incidences of eliminated vertices from v's list, which
-    // leaves the represented graph unchanged.
+    // Built-in partitioners reach the mutable graph through
+    // partition_graph_access::graph_of; the view itself never writes.
     detail::graph* g_;
 };
 
