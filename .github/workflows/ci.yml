@@ -103,8 +103,9 @@ jobs:
         run: |
           cmake -S benchmarks -B build-benchmark -G Ninja -DCMAKE_BUILD_TYPE=Release \
                 -DAPXCHOL_DEVICE=METAL -DAPXCHOL_NATIVE_ARCH=OFF -DBUILD_GPU_RCHOL=OFF \
-                -DOpenMP_ROOT="$(brew --prefix libomp)" -DCMAKE_DISABLE_FIND_PACKAGE_Boost=ON
-          cmake --build build-benchmark --target benchmark original_stop_tests split_components_tests v1_config_tests discard_streambuf_tests
+                -DOpenMP_ROOT="$(brew --prefix libomp)" -DCMAKE_DISABLE_FIND_PACKAGE_Boost=ON \
+                -DBENCH_ACCELERATE=ON
+          cmake --build build-benchmark --target benchmark original_stop_tests split_components_tests v1_config_tests discard_streambuf_tests accelerate_tests
       - name: Run native benchmark contracts and a tiny Metal cell
         run: ctest --test-dir build-benchmark --no-tests=error --output-on-failure --timeout 120
       - *ccache-stats
