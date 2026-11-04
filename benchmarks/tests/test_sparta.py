@@ -229,8 +229,6 @@ class SpartaTest(unittest.TestCase):
             with self.assertRaises(worker.Unavailable):
                 worker.ground(A.tocsc(), 'laplacian')
         with self.assertRaises(worker.Unavailable):
-            worker.ground(sparse.csc_matrix([[2., 1.], [1., 2.]]), 'sddm')
-        with self.assertRaises(worker.Unavailable):
             worker.ground(sparse.csc_matrix([[2., -1.], [0., 2.]]), 'sddm')
 
     def test_nondominant_spd_operator_is_not_reclassified(self):
@@ -240,6 +238,34 @@ class SpartaTest(unittest.TestCase):
         np.testing.assert_array_equal(G.toarray(), A.toarray())
         b = np.array([1., 2.])
         self.assertLessEqual(worker.checked_solve(Factor(G), A, b, pins, 1e-8, 500)['rel_res'], 1e-8)
+
+    def test_positive_offdiagonal_spd_operator_is_preserved(self):
+        A = sparse.csc_matrix([[2., 1.], [1., 2.]])
+        self.assertGreater(np.linalg.eigvalsh(A.toarray()).min(), 0)
+        G, pins, _ = worker.ground(A, 'sddm')
+        self.assertEqual(pins.tolist(), [])
+        np.testing.assert_array_equal(G.toarray(), A.toarray())
+        b = np.array([1., -2.])
+        self.assertLessEqual(worker.checked_solve(Factor(G), A, b, pins, 1e-8, 500)['rel_res'], 1e-8)
+
+    def test_connected_and_mixed_signed_constant_null_components(self):
+        signed = np.array([[4., 1., -5.], [1., 4., -5.], [-5., -5., 10.]])
+        np.testing.assert_array_equal(signed.sum(axis=1), np.zeros(3))
+        for A, expected in [(sparse.csc_matrix(signed), [0]),
+                            (sparse.block_diag([self.A, signed, [[3.]]], format='csc'), [0, 2])]:
+            original = A.toarray().copy()
+            for matrix_class in ['sddm'] + (['laplacian'] if A.shape[0] == 3 else []):
+                G, pins, _ = worker.ground(A, matrix_class)
+                self.assertEqual(pins.tolist(), expected)
+                b = A @ np.arange(A.shape[0], dtype=float)
+                result = worker.checked_solve(Factor(G), A, b, pins, 1e-8, 500)
+                self.assertLessEqual(result['rel_res'], 1e-8)
+                np.testing.assert_array_equal(A.toarray(), original)
+
+    def test_nonfinite_operator_is_rejected(self):
+        for bad in [float('nan'), float('inf')]:
+            with self.assertRaises(ValueError):
+                worker.ground(sparse.csc_matrix([[bad]]), 'sddm')
 
 
 if __name__ == '__main__':
