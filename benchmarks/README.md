@@ -17,8 +17,8 @@ same C/C++/CUDA compilers, `CMAKE_CUDA_ARCHITECTURES` and `CMAKE_CUDA_FLAGS`.
 
 On macOS, build `benchmarks/build-metal` with `-DAPXCHOL_DEVICE=METAL
 -DOpenMP_ROOT=$(brew --prefix libomp)` (Apple Clang; Hypre needs `OpenMP_ROOT` to
-find Homebrew's `libomp`) and sweep with `--device metal`. That axis runs only
-apxchol, since no competitor has a Metal backend. Its cells are stored under
+find Homebrew's `libomp`) and sweep with `--device metal`. That axis runs
+apxchol and optional SPARTA when configured below. Its cells are stored under
 `device=metal` with `execution_route=metal`, so they never mix with CUDA
 (`gpu`) cells. The same binary also runs the CPU competitors that build there
 (RCHOL with the portable PCG, pRCHOL, Hypre BoomerAMG; AMGCL when Boost headers
@@ -27,6 +27,40 @@ CPU pinning, so runs are unpinned and record `benchmark_cpuset=unpinned`.
 Peak RSS comes from BSD `time -l`, and no memory cap is applied.
 Add `-DBENCH_ACCELERATE=ON` to build Apple Accelerate's sparse Cholesky, which the
 macOS CPU sweep runs as `accelerate`.
+
+SPARTA is an optional Metal subprocess competitor. Use a separate native arm64
+Python environment with Rust available for its source build; the sweep does not
+install dependencies. SPARTA is AGPL-3.0-or-later and remains outside the core
+build. Install the pinned revision and select that environment explicitly:
+
+```sh
+python3 -m venv /path/to/sparta-env
+/path/to/sparta-env/bin/pip install 'git+https://github.com/FennisRobert/SPARTA.git@7d82cdca257e1136c49e0cf84fe0cfc01c38ec4b'
+APXCHOL_SPARTA_PYTHON=/path/to/sparta-env/bin/python python3 benchmarks/sweep_fair.py --device metal
+```
+
+The worker checks the installed VCS revision and explicit Metal route, records
+the native binary digest, and uses the shared exported operator and RHS.
+It pins only singular components and leaves nonsingular components unshifted.
+Setup includes component handling, conversion, analysis and numeric factors.
+A tiny untimed Metal solve initializes the device before measured repetitions;
+its cost is recorded as `sparta_init_s`. Input parsing is outside timing.
+
+Solve includes upstream FP64 refinement, original-system residual verification,
+and any correction solves needed to meet the same target on the original A/b.
+Correction solves reuse the factors through SPARTA's public `solve` API.
+The default upstream refinement has a 50-correction ceiling at the pinned revision.
+The adapter allows at most 8 calls and reserves up to 51 factor applications before
+each call. It can stop with unused budget when less than a full call remains.
+`factor_applications` counts direct solves and refinement corrections, not Krylov
+iterations; the harness work budget bounds that count. Every repetition
+must pass original-system verification. Logical-cell timeouts preserve partial
+receipts and do not establish a lower bound on one RHS.
+
+Repeated-RHS qualification uses a separate driver. The headline sweep retains
+its existing independent setup-plus-one-RHS repetitions; it does not infer
+1/8/32-RHS costs from that data.
+
 Optional solvers require their runtimes. Julia dependencies:
 
 ```sh
