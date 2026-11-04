@@ -41,7 +41,11 @@ APXCHOL_SPARTA_PYTHON=/path/to/sparta-env/bin/python python3 benchmarks/sweep_fa
 
 The worker checks the installed VCS revision and explicit Metal route, records
 the native binary digest, and uses the shared exported operator and RHS.
-It pins only singular components and leaves nonsingular components unshifted.
+It receives the same declared matrix class used by the exporter. Declared
+Laplacians use the benchmark's row-sum validation and pin every component,
+including floating-point assembly roundoff. Assembled SDDM inputs retain their
+equations, except for exact constant-null components of a mixed operator.
+Nonpositive off-diagonals and symmetry are checked; no diagonal shift is added.
 Setup includes component handling, conversion, analysis and numeric factors.
 A tiny untimed Metal solve initializes the device before measured repetitions;
 its cost is recorded as `sparta_init_s`. Input parsing is outside timing.

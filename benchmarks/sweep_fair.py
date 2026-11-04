@@ -587,7 +587,7 @@ def do_matrix(mid, family, source, spec, is2d, n, reg):
                     return "failed", {}, {"na_reason": "shared operator/RHS export failed"}
                 result = sparta_runner.run(
                     operator, rhs, timeout=process_timeout(cap, WARMUP + REPS),
-                    repeats=REPS, warmup=WARMUP, threads=THREADS, tol=TOL, maxiter=MAXITER[DEVICE])
+                    repeats=REPS, warmup=WARMUP, threads=THREADS, tol=TOL, maxiter=MAXITER[DEVICE], matrix_class=rc.class_of(mid))
                 return result if result[0] == "timeout" else capped(result, cap)
             step(family, mid, "sparta", "", sparta_cell, "SPARTA Metal", timeout_cap_s=cap)
         return
