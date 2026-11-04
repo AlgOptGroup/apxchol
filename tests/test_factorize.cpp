@@ -1,3 +1,6 @@
+#include <barrier>
+#include <thread>
+#include <stdexcept>
 #include <gtest/gtest.h>
 #include "csc_test_util.h"
 #include "grid_laplacian.h"
@@ -1712,7 +1715,7 @@ TEST(BaumannKyngWorkHint, MatchesSelectedLiveDegreeSum) {
 
 TEST(PartitionGraphView, QueriesSkipEliminatedNeighborsWithoutPruning) {
     const auto L = grid_laplacian(5, 5);
-    auto G = apxchol::detail::make_graph(L);
+    auto G = apxchol::detail::make_graph(apxchol::test::internal_csc(L).ref());
     G.set_inactive_unchecked(6);  // a neighbor of 7 on the 5x5 grid
     G.bulk_decrement_active(1);
     const auto view = partition_view(G);
@@ -2173,3 +2176,42 @@ TEST(GpuBoundedSelection, ConsumingSolveChecksOriginalOperatorResidual) {
 }
 
 #endif
+
+TEST(PartitionGraphView, LazyRoundQueriesAreReentrantAndReleaseBeforeCallbacks) {
+    const auto L = grid_laplacian(5, 5);
+    auto G = apxchol::detail::make_graph(apxchol::test::internal_csc(L).ref());
+    std::vector<std::atomic<std::uint32_t>> epochs(G.n());
+    G.set_inactive_unchecked(6);
+    G.bulk_decrement_active(1);
+    auto view = apxchol::detail::partition_graph_access::trimming_view(G, epochs.data(), 2);
+    EXPECT_THROW(view.for_each_neighbor(7, [](auto) { throw std::runtime_error("visitor"); }),
+                 std::runtime_error);
+    EXPECT_EQ(epochs[7].load(), 2u);
+    EXPECT_EQ(view.degree(7), 3);
+    apxchol::node_index calls = 0;
+    EXPECT_EQ(view.for_each_neighbor(7, [&](auto) { ++calls; return false; }), 3);
+    EXPECT_EQ(calls, 3); // bool results keep their existing ignored semantics.
+    std::barrier start(4);
+    std::array<std::thread, 4> threads;
+    std::atomic<bool> correct{true};
+    for (int t = 0; t < 4; ++t) threads[t] = std::thread([&, t] {
+        start.arrive_and_wait();
+        for (int r = 0; r < 100; ++r) {
+            const apxchol::node_index v = 7 + (t % 2);
+            const auto degree = view.degree(v);
+            apxchol::node_index count = 0;
+            view.for_each_neighbor(v, [&](auto u) {
+                if (view.degree(v) != degree || view.degree(u) < 1) correct = false;
+                ++count;
+            });
+            if (count != degree) correct = false;
+        }
+    });
+    for (auto& thread : threads) thread.join();
+    EXPECT_TRUE(correct.load());
+    G.set_inactive_unchecked(8);
+    G.bulk_decrement_active(1);
+    auto next = apxchol::detail::partition_graph_access::trimming_view(G, epochs.data(), 4);
+    EXPECT_EQ(next.degree(7), 2);
+    EXPECT_EQ(epochs[7].load(), 4u);
+}

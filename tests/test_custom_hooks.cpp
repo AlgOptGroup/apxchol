@@ -221,7 +221,7 @@ TEST(CustomPartitioner, ConcurrentViewQueriesMatchSerialOnes) {
             }
             ++rounds;
         });
-    const auto F = apxchol::factorize(L, std::move(part));
+    const auto F = apxchol::factorize(csc(L), std::move(part));
     EXPECT_GT(rounds, 1u);
     EXPECT_FALSE(F.rounds.empty());
 }
