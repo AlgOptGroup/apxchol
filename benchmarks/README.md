@@ -43,9 +43,13 @@ The worker checks the installed VCS revision and explicit Metal route, records
 the native binary digest, and uses the shared exported operator and RHS.
 It receives the same declared matrix class used by the exporter. Declared
 Laplacians use the benchmark's row-sum validation and pin every component,
-including floating-point assembly roundoff. Assembled SDDM inputs retain their
-equations, except for exact constant-null components of a mixed operator.
-Nonpositive off-diagonals and symmetry are checked; no diagonal shift is added.
+including floating-point assembly roundoff. Inputs declared `sddm` retain their
+equations, except for exact constant-null components, connected or disconnected.
+Symmetry is checked for every input. Assembled operators retain positive
+off-diagonal entries; SPARTA's symmetric LDLT route supports them directly.
+Exact zero sums establish a constant null vector even with signed edges; the
+adapter makes no claim about positive definiteness or nullity beyond that.
+No diagonal shift or M-matrix lumping is applied by this adapter.
 Setup includes component handling, conversion, analysis and numeric factors.
 A tiny untimed Metal solve initializes the device before measured repetitions;
 its cost is recorded as `sparta_init_s`. Input parsing is outside timing.
