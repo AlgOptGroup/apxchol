@@ -1,12 +1,12 @@
 #include <gtest/gtest.h>
-#include "apxchol/checkpoint.h"
+#include "apxchol/detail/checkpoint.h"
 #include <memory>
 #include <utility>
 
 TEST(Checkpoint, CopiesAndMovesOwnTheirScopes) {
     for (const bool nested : {false, true}) {
         SCOPED_TRACE(nested);
-        auto original = std::make_unique<apxchol::checkpoint>();
+        auto original = std::make_unique<apxchol::detail::checkpoint>();
         if (nested) {
             original->descend("outer");
             original->descend("inner");
@@ -17,12 +17,12 @@ TEST(Checkpoint, CopiesAndMovesOwnTheirScopes) {
         copied("copy");
         EXPECT_EQ(original->report(), before);
 
-        apxchol::checkpoint assigned;
+        apxchol::detail::checkpoint assigned;
         assigned.descend("discarded");
         assigned = *original;
         auto moved = std::move(*original);
         original.reset();
-        apxchol::checkpoint move_assigned;
+        apxchol::detail::checkpoint move_assigned;
         move_assigned.descend("discarded");
         move_assigned = std::move(assigned);
 

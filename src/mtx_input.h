@@ -9,96 +9,60 @@
 ///     off-diagonals) — the operator is L = D - A, which must be assembled
 ///     first.
 ///
-/// The solver validates assembled operators. The CLI detects adjacency input
-/// and assembles L = D - A before passing it to the operator contract.
-///
-/// This module is the CLI's HUMAN-FACING interpretation layer, and nothing
-/// else compiles it. It may guess, because it prints the guess and takes
-/// `--input-kind` to override it. The in-memory bindings (python/, octave/)
-/// deliberately do NOT share it: a library caller does not reliably see what
-/// we print, so the library asserts the operator class instead of guessing at
-/// it -- see include/apxchol/operator_class.h, which every surface (this one
-/// included, one layer down) goes through.
-///
-/// Everything here depends on Eigen only, so the unit tests can link it.
+/// The CLI reads the file as the operator. `--convert-input` applies the rule
+/// it shares with the bindings' `as_operator` (`detail::is_graph_adjacency` in
+/// include/apxchol/operator_class.h): a finite symmetric matrix with at least
+/// one off-diagonal entry, all of them positive, becomes its graph Laplacian,
+/// any other finite symmetric matrix is used as given, and the rest is an error.
 
-#include <Eigen/Core>
-#include <Eigen/Sparse>
+#include "apxchol/detail/csc_matrix.h"
+#include <cstdint>
+#include <span>
 #include <string>
 
 namespace apxchol {
-
-/// How the CLI should interpret the matrix it just read.
-enum class input_kind {
-    automatic,  ///< decide from the matrix itself (the default)
-    laplacian,  ///< already an assembled Laplacian / SDDM operator
-    adjacency,  ///< a graph adjacency / pattern matrix; assemble L = D - A
-};
 
 /// Structural facts about an input matrix, gathered in a single pass.
 /// Column sums stand in for row sums: the operator contract requires a
 /// symmetric matrix, and `one_sided` below catches the case where it isn't.
 struct input_scan {
-    Eigen::Index n            = 0;  ///< rows (== cols; the caller checks)
-    Eigen::Index offdiag_nnz  = 0;  ///< stored off-diagonal entries
-    Eigen::Index offdiag_pos  = 0;  ///< ... with a strictly positive value
-    Eigen::Index offdiag_neg  = 0;  ///< ... with a strictly negative value
-    Eigen::Index upper_nnz    = 0;  ///< ... in the strict upper triangle
-    Eigen::Index lower_nnz    = 0;  ///< ... in the strict lower triangle
-    Eigen::Index diag_pos     = 0;  ///< columns with a strictly positive diagonal
+    std::int64_t n            = 0;  ///< rows (== cols)
+    std::int64_t offdiag_nnz  = 0;  ///< stored off-diagonal entries
+    std::int64_t offdiag_pos  = 0;  ///< ... with a strictly positive value
+    std::int64_t offdiag_neg  = 0;  ///< ... with a strictly negative value
+    std::int64_t upper_nnz    = 0;  ///< ... in the strict upper triangle
+    std::int64_t lower_nnz    = 0;  ///< ... in the strict lower triangle
+    std::int64_t diag_pos     = 0;  ///< columns with a strictly positive diagonal
     /// Columns whose sum is below -1e-10 * max(|diagonal|, 1) — i.e. rows that
     /// break diagonal dominance. Diagnostic only: plenty of legitimate SPD
     /// test matrices (G3_circuit, apache2) are not diagonally dominant and
     /// converge fine, so this never gates a run.
-    Eigen::Index deficient_rows = 0;
+    std::int64_t deficient_rows = 0;
     double       worst_deficit  = 0.0;  ///< most negative column sum seen
-    Eigen::Index worst_row      = -1;   ///< where it was seen (-1 = none)
+    std::int64_t worst_row      = -1;   ///< where it was seen (-1 = none)
     /// Columns whose sum is above +1e-10 * max(|diagonal|, 1) — the SDDM
     /// diagonal excess.
-    Eigen::Index excess_rows = 0;
+    std::int64_t excess_rows = 0;
 };
 
-/// One pass over `M`, gathering everything `resolve_input_kind` needs.
-input_scan scan_input(const Eigen::SparseMatrix<double>& M);
-
-/// Resolve `requested` (possibly `automatic`) against the scan.
-///
-/// `pattern_field` says whether the MatrixMarket header declared the
-/// `pattern` field; it only sharpens the explanation, the decision itself
-/// stands without it.
-///
-/// On success returns `laplacian` or `adjacency` and writes a human-readable
-/// justification into `reason`. Throws `std::runtime_error` — naming what was
-/// detected — when the matrix is structurally unusable, or when `automatic`
-/// genuinely cannot tell the two kinds apart.
-input_kind resolve_input_kind(input_kind requested, const input_scan& s,
-                              bool pattern_field, std::string& reason);
-
-/// Reinterpret `M` as a weighted adjacency matrix and replace it with the
-/// graph Laplacian L = D - A, where A_ij = |M_ij| for i != j and D is the
-/// weighted-degree diagonal. Diagonal entries of `M` (graph self-loops, which
-/// contribute nothing to a Laplacian) are dropped.
-///
-/// Taking |value| matches the benchmark suite's `load_mtx_as_adjacency`, so
-/// `--input-kind adjacency` reproduces the benchmark's reading of any file.
-void adjacency_to_laplacian(Eigen::SparseMatrix<double>& M);
+/// One pass over `M`, gathering what the CLI reports about it.
+input_scan scan_input(detail::csc_ref<double> M);
 
 /// Project `b` onto the range of a graph Laplacian by subtracting its mean
 /// independently on every connected component of `L`. Returns the component
-/// count. A connected matrix leaves `b` byte-for-byte unchanged, preserving
-/// the historical --random-rhs stream on the common case.
+/// count. A connected matrix leaves `b` byte-for-byte unchanged.
 ///
 /// The caller must already know that `L` is a pure Laplacian. Applying this to
 /// an SDDM/SPD operator would change a perfectly valid right-hand side.
-Eigen::Index project_laplacian_rhs_components(
-    const Eigen::SparseMatrix<double>& L, Eigen::VectorXd& b);
+std::int64_t project_laplacian_rhs_components(
+    detail::csc_ref<double> L, std::span<double> b);
 
 /// The single line the CLI logs to say how it read the file.
-std::string describe_input(input_kind kind, const input_scan& s,
-                           const std::string& reason);
+/// `graph` says whether the file was read as an adjacency matrix.
+std::string describe_input(bool graph, const input_scan& s, const std::string& reason);
 
 /// Extra diagnosis appended to the CLI's failure message. Empty when the scan
 /// found nothing that would explain a breakdown.
-std::string diagnose_failure(input_kind kind, const input_scan& s);
+std::string diagnose_failure(bool graph, const input_scan& s);
 
 } // namespace apxchol

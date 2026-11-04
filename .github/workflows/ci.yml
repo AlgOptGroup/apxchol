@@ -15,11 +15,16 @@ on:
       - 'benchmarks/**/*.py'
       - 'benchmarks/requirements.txt'
       - 'benchmarks/CMakeLists.txt'
+      - 'benchmarks/eigen.cmake'
       - 'benchmarks/src/**'
       - 'benchmarks/tests/**'
       - 'benchmarks/patches/**'
       - 'python/**'
       - 'octave/**'
+      - '.github/scripts/build-cli.sh'
+      - '.github/scripts/build-sdk.sh'
+      - '.github/workflows/cli.yml'
+      - '.github/workflows/sdk.yml'
       - '.github/workflows/ci.yml'
       - '.github/workflows/wheels.yml'
       - '.github/workflows/publish.yml'
@@ -70,13 +75,41 @@ jobs:
                 -DBENCH_HYPRE_USE_CUDA=OFF -DBUILD_GPU_RCHOL=OFF \
                 -DAPXCHOL_RCHOL_PORTABLE_PCG=ON -DAPXCHOL_BENCH_FETCH_METIS=OFF \
                 -DCMAKE_DISABLE_FIND_PACKAGE_Boost=ON
-          cmake --build build-benchmark --target benchmark original_stop_tests split_components_tests -j2
+          cmake --build build-benchmark --target benchmark original_stop_tests split_components_tests v1_config_tests discard_streambuf_tests -j2
       - name: Run native benchmark contracts
         run: ctest --test-dir build-benchmark --no-tests=error --output-on-failure --timeout 60
       - &ccache-stats
         name: Show compiler cache statistics
         if: always()
         run: ccache --show-log-stats
+
+  benchmark-macos:
+    name: benchmark (macOS, Apple Clang, Metal, native contracts)
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      OMP_NUM_THREADS: '2'
+      OMP_DYNAMIC: 'FALSE'
+      CMAKE_BUILD_PARALLEL_LEVEL: '3'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: brew install libomp ninja ccache
+      - uses: ./.github/actions/ccache
+        with:
+          key: benchmark-mac-metal
+      # OpenMP_ROOT lets Hypre's own FindOpenMP see Homebrew's keg-only libomp.
+      # AMGCL is skipped (no Boost); CUDA competitors and ParAC do not build here.
+      - name: Configure + build native benchmark
+        run: |
+          cmake -S benchmarks -B build-benchmark -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DAPXCHOL_DEVICE=METAL -DAPXCHOL_NATIVE_ARCH=OFF -DBUILD_GPU_RCHOL=OFF \
+                -DOpenMP_ROOT="$(brew --prefix libomp)" -DCMAKE_DISABLE_FIND_PACKAGE_Boost=ON \
+                -DBENCH_ACCELERATE=ON
+          cmake --build build-benchmark --target benchmark original_stop_tests split_components_tests v1_config_tests discard_streambuf_tests accelerate_tests
+      - name: Run native benchmark contracts and a tiny Metal cell
+        run: ctest --test-dir build-benchmark --no-tests=error --output-on-failure --timeout 120
+      - *ccache-stats
 
   linux:
     name: Linux (${{ matrix.name }}, build + ctest)
@@ -90,12 +123,12 @@ jobs:
             cxx: g++-14
             packages: g++-14
             native_arch: 'ON'
-          - name: GCC 14, portable, 64-bit nodes, FP64 pool
+          - name: GCC 14, portable, 64-bit nodes
             cc: gcc-14
             cxx: g++-14
             packages: g++-14
             native_arch: 'OFF'
-            cmake_args: -DAPXCHOL_INDEX_WIDTH=64 -DAPXCHOL_POOL_FP32=OFF
+            cmake_args: -DAPXCHOL_INDEX_WIDTH=64
           - name: Clang 18, portable
             cc: clang-18
             cxx: clang++-18
@@ -123,7 +156,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ${{ matrix.packages }} libeigen3-dev ninja-build ccache
+          sudo apt-get install -y ${{ matrix.packages }} ninja-build ccache
       - uses: ./.github/actions/ccache
         with:
           key: native-${{ matrix.cc }}-${{ matrix.native_arch }}
@@ -136,21 +169,41 @@ jobs:
       - &ctest
         name: Run unit tests and examples
         run: ctest --test-dir build --no-tests=error --output-on-failure
-      - name: Test relocated SDK with fetched Eigen
+      - name: Test library-only root embedding
         if: matrix.cxx == 'clang++-18'
         run: |
-          eigen_config="$(sed -n 's/^Eigen3_DIR:[^=]*=//p' build/CMakeCache.txt)"
-          test -d "$eigen_config"
+          cmake -S tests/cmake_subdirectory -B build-subdirectory -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+          cmake --build build-subdirectory --parallel 2
+          ctest --test-dir build-subdirectory --no-tests=error --output-on-failure
+          cmake -S tests/cmake_subdirectory -B build-subdirectory-tests -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
+                -DAPXCHOL_BUILD_TESTS=ON -DAPXCHOL_BUILD_CLI=OFF
+          cmake --build build-subdirectory-tests --parallel 2
+          ctest --test-dir build-subdirectory-tests --no-tests=error --output-on-failure
+          cmake -S tests/cmake_subdirectory -B build-subdirectory-march -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
+                -DCMAKE_CXX_FLAGS=-march=x86-64-v3 | tee subdirectory-march.log
+          grep -q "using the -march/-mcpu flag from CMAKE_CXX_FLAGS" subdirectory-march.log
+          cmake --build build-subdirectory-march --parallel 2
+          ctest --test-dir build-subdirectory-march --no-tests=error --output-on-failure
+          # A portable core with a consumer built for a wider instruction set.
+          cmake -S tests/cmake_subdirectory -B build-subdirectory-avx2 -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
+                -DAPXCHOL_TEST_CONSUMER_FLAGS=-mavx2
+          cmake --build build-subdirectory-avx2 --parallel 2
+          ctest --test-dir build-subdirectory-avx2 --no-tests=error --output-on-failure
+      - name: Test relocated SDK
+        if: matrix.cxx == 'clang++-18'
+        run: |
           cmake -S cmake/core -B build-sdk -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                -DAPXCHOL_NATIVE_ARCH=OFF -DCMAKE_DISABLE_FIND_PACKAGE_Eigen3=ON \
-                -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+                -DAPXCHOL_NATIVE_ARCH=OFF -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
           cmake --build build-sdk
           cmake --install build-sdk --prefix "$RUNNER_TEMP/apxchol-sdk"
           mv "$RUNNER_TEMP/apxchol-sdk" "$RUNNER_TEMP/apxchol-sdk-relocated"
           mv build-sdk build-sdk-relocated
           cmake -S tests/cmake_install -B build-sdk-consumer -G Ninja \
                 -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/apxchol-sdk-relocated" \
-                -DCMAKE_IGNORE_PATH="$eigen_config" \
                 -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF \
                 -DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF
           cmake --build build-sdk-consumer
@@ -172,7 +225,7 @@ jobs:
       - name: Install dependencies
         run: |
           apt-get update -qq
-          apt-get install -y --no-install-recommends cmake ninja-build libeigen3-dev ccache
+          apt-get install -y --no-install-recommends cmake ninja-build ccache
       - uses: ./.github/actions/ccache
         with:
           key: native-gcc15
@@ -204,11 +257,16 @@ jobs:
             https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i "$RUNNER_TEMP/cuda-keyring.deb"
           sudo apt-get update -qq
-          sudo apt-get install -y g++-14 libeigen3-dev ninja-build cuda-nvcc-13-4 cuda-cudart-dev-13-4 ccache
+          sudo apt-get install -y g++-14 ninja-build cuda-nvcc-13-4 cuda-cudart-dev-13-4 ccache
       - uses: ./.github/actions/ccache
         with:
           key: cuda13.4-gcc14-sm80
       - *configure-build
+      - name: Build root-embedding consumer
+        run: |
+          cmake -S tests/cmake_subdirectory -B build-subdirectory -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON ${CMAKE_ARGS}
+          cmake --build build-subdirectory --parallel 2
       - *ccache-stats
 
   macos:
@@ -235,10 +293,51 @@ jobs:
           key: mac-${{ matrix.device }}-${{ matrix.native_arch }}
       - *configure-build
       - *ctest
+      - name: Test Metal root-embedding consumer
+        if: matrix.device == 'METAL'
+        run: |
+          cmake -S tests/cmake_subdirectory -B build-subdirectory -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON ${CMAKE_ARGS}
+          cmake --build build-subdirectory --parallel 2
+          ctest --test-dir build-subdirectory --no-tests=error --output-on-failure
       - *ccache-stats
 
   python:
     uses: ./.github/workflows/wheels.yml
+
+  cli:
+    uses: ./.github/workflows/cli.yml
+
+  sdk:
+    uses: ./.github/workflows/sdk.yml
+
+  input-formats:
+    name: input-format examples (Eigen, CHOLMOD, Matrix Market)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CC: gcc-14
+      CXX: g++-14
+      CMAKE_BUILD_PARALLEL_LEVEL: '3'
+    steps:
+      - uses: actions/checkout@v4
+      # Eigen and SuiteSparse are installed for these examples only; the
+      # library itself does not use them.
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y g++-14 libeigen3-dev libsuitesparse-dev ninja-build ccache
+      - uses: ./.github/actions/ccache
+        with:
+          key: input-formats-gcc14
+      - name: Build the examples of docs/input-formats.md
+        run: |
+          cmake -S examples/input_formats -B build-input-formats -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DAPXCHOL_NATIVE_ARCH=OFF -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+          cmake --build build-input-formats
+      - name: Run the examples
+        run: ctest --test-dir build-input-formats --no-tests=error --output-on-failure
+      - *ccache-stats
 
   octave:
     name: octave (mkoctfile + tests)
@@ -253,7 +352,7 @@ jobs:
           # Skip optional Java, plotting and documentation packages. Keep the
           # pthread BLAS/LAPACK runtime selected by the full Octave install.
           sudo apt-get install -y --no-install-recommends \
-            g++-14 octave octave-dev libeigen3-dev libopenblas0-pthread
+            g++-14 octave octave-dev libopenblas0-pthread
       - name: Build MEX + run tests
         env:
           CC: gcc-14
@@ -262,6 +361,8 @@ jobs:
           cd octave
           ./build.sh
           octave --no-gui --eval "addpath(pwd); run('tests/test_apxchol.m')"
+      - name: Run the input-formats example
+        run: octave --no-gui --eval "addpath(fullfile(pwd, 'octave')); run('examples/input_formats/octave_input.m')"
 
   matlab:
     name: MATLAB (R2026b, GCC 13, MEX + tests)
@@ -273,8 +374,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install build dependencies
         run: |
+          # Use the runner's official HTTPS mirrors for MATLAB's dependency downloads.
+          sudo sed -i.bak '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
           sudo apt-get update -qq
-          sudo apt-get install -y g++-13 libeigen3-dev
+          sudo apt-get install -y g++-13
       - uses: matlab-actions/setup-matlab@v3
         with:
           release: R2026b

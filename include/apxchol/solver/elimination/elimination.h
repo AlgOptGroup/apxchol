@@ -60,9 +60,9 @@
 /// entries[j] = (neighbor_j, w_j / sqrt(deg)) — and is handled by the
 /// caller.  The eliminator only controls which clique edges are generated.
 ///
-/// `tree_elimination` is the built-in rule: a random spanning tree of the
-/// clique (d-1 edges), with an optional exact-clique mode below a degree
-/// threshold.
+/// The built-in rule, which factor_options configures, is
+/// detail::tree_elimination: a random spanning tree of the clique (d-1 edges),
+/// with an optional exact-clique mode below a degree threshold.
 
 #include "apxchol/types.h"
 #include "apxchol/solver/factor_options.h"
@@ -121,8 +121,8 @@ struct random_stream {
 };
 
 /// Concept for a star-vertex elimination rule (see the header comment for the
-/// full contract).  Models: tree_elimination (built-in), user-defined rules,
-/// as_eliminator(lambda).
+/// full contract).  Models: detail::tree_elimination (built-in), user-defined
+/// rules, as_eliminator(lambda).
 template<typename T>
 concept eliminator = requires(const T& t,
         std::span<weighted_neighbor> neighbors,
@@ -170,8 +170,6 @@ inline void sample_cycle_clique(std::span<weighted_neighbor>, double,
                                 std::uint64_t, edge_emitter,
                                 std::size_t exact_core_max_h = 0,
                                 std::size_t double_cycle_min_h = 0);
-
-} // namespace detail
 
 /// Tree elimination: spanning tree of the clique (CliqueTreeSample).
 /// The built-in (and default) eliminator; configured from factor_options
@@ -291,6 +289,8 @@ struct tree_elimination {
 };
 
 static_assert(eliminator<tree_elimination>);
+
+} // namespace detail
 
 } // namespace apxchol
 

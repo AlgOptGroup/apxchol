@@ -14,10 +14,14 @@ conjugate gradients (PCG) to compute the solution.
 
 ## Quick start
 
-This page follows the development branch. Use a
-[source installation](docs/building.md#python-source-installation) for a matching build.
-For the latest published package and its API, see
-[PyPI](https://pypi.org/project/apxchol/).
+Until the next release, `pip` installs 0.2.2, which solves one right-hand
+side per call and has no `as_operator`. To run this example, install the
+development version [from source](python/README.md#build-from-source).
+
+<!-- quickstart -->
+```bash
+python -m pip install "apxchol[scipy]"
+```
 
 ```python
 import apxchol
@@ -36,22 +40,17 @@ B = np.column_stack((np.ones(n), np.arange(n)))
 batch = solver.solve(B)
 assert batch.converged.all()           # solutions are in batch.x
 ```
+<!-- /quickstart -->
 
-**No GPU is required.** Wheels built by this project include the CPU solver plus
-CUDA on Linux or Metal on macOS.
-GPU execution needs a compatible device and driver, but using the wheels
-requires neither the CUDA Toolkit nor Homebrew.
-
-| Wheel builds | Minimum platform | Included backends |
-|---|---|---|
-| CPython 3.11–3.15, Linux | x86-64-v2 CPU, glibc 2.28 | CPU + CUDA |
-| CPython 3.11–3.15, macOS | macOS 15, Apple silicon | CPU + Metal |
+Wheels run on CPU without a GPU and include CUDA (Linux) or Metal (macOS).
+See [installation](docs/install.md) for the latest release, CLI archives and
+source builds.
 
 `solver.backend` reports which backend was selected. Use `backend="cpu"`
 or `backend="gpu"` in `factorize` to choose explicitly.
 
 Pass the matrix `A` from `A x = b`. For a graph adjacency matrix, first form
-its Laplacian with `apxchol.laplacian(Adj)`. See the
+its Laplacian with `apxchol.as_operator(Adj)`. See the
 [solver guide](docs/usage.md) for supported matrices and convergence checks.
 
 ## Interfaces
@@ -59,13 +58,16 @@ its Laplacian with `apxchol.laplacian(Adj)`. See the
 Start with the built-in solver for factor reuse and batched solves.
 The [Python](python/README.md), [C++](docs/reference/cpp.md) and
 [MATLAB/Octave](octave/README.md) guides cover each interface.
-Eigen and SciPy adapters let you use the preconditioner with another iterative
-solver; see [integration and factor reuse](docs/usage.md#using-another-iterative-solver).
+`solver.apply` (C++) and `aslinearoperator()` (Python) let you use the
+preconditioner with another iterative solver. See [integration and factor reuse](docs/usage.md#using-another-iterative-solver).
 
 ## Build and run
 
-A source build needs CMake, GCC or Clang with C++23 and OpenMP, and Eigen.
-See [building and installation](docs/building.md) for dependencies, GPU builds
+Standalone [CLI archives](docs/install.md#cli-archives) for Linux CPU and
+Apple-silicon CPU/Metal need no Python.
+
+A source build needs CMake 3.20+ and GCC or Clang with C++23 and OpenMP.
+See [building from source](docs/building.md) for dependencies, GPU builds
 and CMake integration.
 
 ```bash
@@ -75,14 +77,22 @@ ctest --test-dir build --output-on-failure
 ./build/apxchol matrix.mtx --rhs rhs.mtx -o solution.mtx
 ```
 
-The CLI also accepts adjacency matrices. `--random-rhs` generates a test RHS;
-[`--help`](docs/building.md#command-line-use) lists the available controls.
+The CLI reads the matrix as `A`. `--convert-input` forms the Laplacian of an
+adjacency matrix. An `--rhs` file with several columns is solved as one batch.
+`--random-rhs` generates a test RHS.
+The [command-line guide](docs/cli.md) lists the available controls.
+
+## Performance
+
+Cross-solver results will appear in 1.0. See [performance](docs/performance.md)
+for the methodology and the measured [batching case study](docs/batching.md).
 
 ## Learn more
 
+- [Installation](docs/install.md) and [building from source](docs/building.md)
 - [Choosing a backend, reusing factors and checking results](docs/usage.md)
-- [Build options](docs/building.md#build-options), [precision](docs/precision.md) and [API compatibility](docs/api.md)
-- [Custom algorithms](docs/extending.md), [examples](examples/) and [contributing](CONTRIBUTING.md)
+- [Precision](docs/precision.md) and [API compatibility](docs/api.md)
+- [Examples](docs/examples.md), [custom algorithms](docs/extending.md) and [contributing](CONTRIBUTING.md)
 - [Benchmarking and reproducibility](benchmarks/README.md)
 
 Based on Kyng–Sachdeva ([2016](https://arxiv.org/abs/1605.02353)),
@@ -90,4 +100,8 @@ Gao–Kyng–Spielman ([2023](https://arxiv.org/abs/2303.00709)) and
 Baumann–Kyng ([2024](https://dl.acm.org/doi/10.1145/3626183.3659987)).
 
 Developed at ETH Zürich. Contact: <apxchol@inf.ethz.ch>.
-[License](LICENSE) · [Citation](CITATION.cff).
+[License](LICENSE) · [Citing apxchol](docs/citing.md) · [Changelog](CHANGELOG.md).
+
+## Acknowledgements
+
+Samuel Talkington contributed the Apple Metal backend and macOS support.

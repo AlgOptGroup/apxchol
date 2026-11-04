@@ -15,10 +15,13 @@
 namespace apxchol::detail::gpu_pcg {
 
 // Both backends enqueue the same device-predicated recurrence. submit owns
-// the stream/command-buffer lifetime and reads the completed state once per batch.
+// the stream/command-buffer lifetime and reads the completed state once per
+// batch of Backend::batch_iterations. Iterations after convergence are
+// predicated off on the device, so the batch trades host waits against
+// skipped iterations; each backend sets it from its own costs.
 template<class Backend>
-void solve(Backend& gpu, unsigned max_iter, unsigned batch_size) {
-    batch_size = std::max(batch_size, 1u);
+void solve(Backend& gpu, unsigned max_iter) {
+    constexpr unsigned batch_size = Backend::batch_iterations;
     unsigned first = 0;
     do {
         const unsigned last = first + std::min(batch_size, max_iter - first);

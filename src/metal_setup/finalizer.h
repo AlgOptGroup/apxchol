@@ -1,5 +1,6 @@
 #pragma once
 #include "apxchol/solver/detail/gpu_dataflow_plan.h"
+#include "apxchol/solver/sptrsv/factor_drop.h"
 #include "engine.h"
 #include "../metal_setup.h"
 #include <array>
@@ -256,6 +257,7 @@ kernel void operator_emit(device const unsigned* ptr [[buffer(0)]],device const 
 struct Finalized {
     triangle forward, backward;
     id<MTLBuffer> metadata = nil, permutation = nil;
+    factor_drop_stats drop;
 };
 
 class Finalizer {
@@ -487,6 +489,23 @@ class Finalizer {
         finish(cb, status);
         const unsigned nnz = static_cast<unsigned *>(out.backward.ptr.contents)[m];
         require(nnz <= capacity, "Metal finalized factor exceeds allocated capacity");
+        out.drop.rel = drop;
+        out.drop.nnz_factor = out.drop.nnz_stored = nnz;
+        if (shape.drop_hi > 0) {
+            // Without a threshold every entry is kept, so only then are the
+            // per-row counts summed.
+            const auto *row = static_cast<const rf::Row *>(rows.contents);
+            std::uint64_t factored = 0, threshold = 0;
+            #pragma omp parallel for schedule(static) reduction(+ : factored, threshold)
+            for (unsigned r = 0; r < m; ++r) {
+                factored += row[r].factored;
+                threshold += row[r].dropped_threshold;
+            }
+            out.drop.nnz_factor = factored;
+            out.drop.dropped = factored - nnz;
+            out.drop.dropped_threshold = threshold;
+            out.drop.dropped_flush = out.drop.dropped - threshold;
+        }
         out.backward.idx = allocate(nnz * sizeof(unsigned));
         out.forward.idx = allocate(nnz * sizeof(unsigned));
         const auto bytes = half ? sizeof(_Float16) : sizeof(float);

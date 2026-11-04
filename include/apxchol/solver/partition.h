@@ -9,15 +9,10 @@
 #include "apxchol/types.h"
 #include <vector>
 
-namespace apxchol {
+namespace apxchol::detail {
 
 struct partition_result {
     std::vector<node_index> data;        // flat list of selected vertices
-
-    // Each selected vertex is its own region, so region count == vertex count.
-    size_t num_regions() const { return data.size(); }
-
-    void clear() { data.clear(); }
 };
 
-} // namespace apxchol
+} // namespace apxchol::detail

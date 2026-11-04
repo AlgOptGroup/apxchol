@@ -1,0 +1,13 @@
+%%MatrixMarket matrix coordinate real symmetric
+% The weighted path of path5_adjacency.mtx with a self-loop on every vertex.
+% Self-loops cancel in L = D - A, so --convert-input gives the same Laplacian.
+5 5 9
+1 1 1
+2 1 1
+2 2 3
+3 2 2
+3 3 0.5
+4 3 1
+4 4 1
+5 4 0.5
+5 5 2

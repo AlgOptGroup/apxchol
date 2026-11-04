@@ -5,9 +5,10 @@ template<class Wide> struct Scale {
     Wide value, target;
     unsigned passes, advance;
 };
-template<class Bits>
-APXCHOL_GPU_FUNCTION unsigned bucket(Bits bits) {
-    return unsigned((~bits >> (sizeof(Bits) * 8 - 12)) & Bits(4095));
+// Heaviest-first weight bucket from the FP32 encoding of a nonnegative weight:
+// the inverted exponent and top three mantissa bits, eight buckets per octave.
+APXCHOL_GPU_FUNCTION unsigned bucket(unsigned float_bits) {
+    return ~float_bits >> 20;
 }
 APXCHOL_GPU_FUNCTION bits_type priority(unsigned bucket, unsigned ordinal) {
     return (bits_type(bucket) << 32) | ordinal;

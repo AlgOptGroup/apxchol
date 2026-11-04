@@ -1,4 +1,4 @@
-// Metal PCG kernels, compiled at run time by metal_solver.mm.
+// Metal PCG kernels, compiled at run time by metal_route.mm.
 // Embedding the source avoids an offline Metal compiler or generation step.
 R"apxchol_msl(
 #include <metal_stdlib>
@@ -10,7 +10,8 @@ static_assert(sizeof(Params) == 40, "Params mirrors the host layout");
 static_assert(__builtin_offsetof(Params, preconditioner_scale) == 32, "Params mirrors the host layout");
 
 using SolveState = solve_state<df, float>;
-static_assert(sizeof(SolveState) == 40, "SolveState mirrors detail::metal::solve_state");
+static_assert(sizeof(SolveState) == 44, "SolveState mirrors detail::metal::solve_state");
+static_assert(__builtin_offsetof(SolveState, tolerance_stop) == 40, "SolveState mirrors the host layout");
 
 constant bool kForward [[function_constant(0)]];
 constant bool kOperatorDf [[function_constant(1)]];
@@ -50,6 +51,9 @@ inline void pcg_step_columns(constant Params& P, workspace<df, float> vectors,
                             device const float* hi, device const float* lo,
                             device const uint* row_map,
                             uint lane, uint group, uint tid) {
+    // Iterations after every column stopped run only to fill the batch;
+    // finalize ignores their partials.
+    if (!any_active<Columns>(vectors.state)) return;
     const operation op = operation(kOperation);
     const pcg_work<uint> work = op == operation::direction
         ? pcg_work<uint>{tid, P.n, P.n, 0, P.n}
@@ -95,6 +99,7 @@ struct recurrence_math {
 template<unsigned Columns>
 inline void finalize_columns(constant Params& P, device const df* partial,
                              device SolveState* state, uint l) {
+    if (!any_active<Columns>(state)) return;
     const pcg_work<uint> work{0, P.groups, kTreeLanes, l, P.groups};
     const auto partials = sum_partials_columns<Columns>(pcg_math<>{}, partial, work);
     for (unsigned q = 0; q < Columns; ++q) {
@@ -114,7 +119,7 @@ kernel void finalize(constant Params& P [[buffer(0)]],
     else finalize_columns<1>(P, partial, state, l);
 }
 
-// ---- self-test of the error-free transforms (metal_solver::available) ----
+// ---- self-test of the error-free transforms (backend_available) ----
 inline float4 pack_probe(df a, df b) { return float4(a.hi, a.lo, b.hi, b.lo); }
 kernel void df_probe(device const float4* in [[buffer(0)]],
                      device float4* out [[buffer(1)]],

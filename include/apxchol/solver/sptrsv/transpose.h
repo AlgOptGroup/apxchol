@@ -2,7 +2,7 @@
 // THE CSC -> CSR TRANSPOSE of the factor -- the ONE host implementation shared
 // by both SpTRSV backends: omp_sptrsv::setup builds its CSR of L11 (the
 // forward solve's operand) from the factor's CSC through it, and the GPU
-// backend's host prep (cuda_host::transpose_csr) builds CSR of L from CSR of
+// backend's host prep (gpu_factor_prep::transpose_csr) builds CSR of L from CSR of
 // L^T -- the very same arrays, int32 -- for the dataflow backend through it.
 // Header-only, CUDA-free, OpenMP-parallel, templated on offset, index and
 // stored-value types. CPU and GPU host preparation both transpose values
@@ -67,7 +67,7 @@
 #include <omp.h>
 #endif
 
-namespace apxchol {
+namespace apxchol::detail {
 
 /// Rows above which the parallel transpose is used (below it the serial
 /// scatter wins: thread dispatch overhead exceeds the work).
@@ -225,4 +225,4 @@ inline void transpose_csc_to_csr(Idx m, const Off* in_ptr, const Idx* in_idx, co
         }
 }
 
-} // namespace apxchol
+} // namespace apxchol::detail

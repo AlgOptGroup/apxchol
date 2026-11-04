@@ -24,9 +24,8 @@
 #include <omp.h>
 #endif
 
-namespace apxchol {
+namespace apxchol::detail {
 
-namespace detail {
 #ifdef __linux__
     // Lazy reservations benefit from the measured 2 MiB THP granularity,
     // but a 512 MiB PMD page can populate almost an entire unused segment.
@@ -51,7 +50,6 @@ namespace detail {
         return bytes > 0 && bytes <= 2 * 1024 * 1024;
     }
 #endif
-}
 
 // ── vec_pool storage ──
 //
@@ -401,7 +399,7 @@ template<typename Value> struct basic_vec_pool_incidence {
                 ++i;
             } while (i < before && p[i].to == target);
             if (is_live(target))
-                p[out++] = {target, static_cast<pool_value_t>(weight)};
+                p[out++] = {target, static_cast<float>(weight)};
         }
         count_[v] = out;
         return {before, out};
@@ -622,5 +620,4 @@ private:
 using directed_vec_pool_incidence =
     basic_vec_pool_incidence<directed_pool_edge>;
 
-
-} // namespace apxchol
+} // namespace apxchol::detail

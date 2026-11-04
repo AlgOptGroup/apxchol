@@ -712,19 +712,15 @@ def _run_once_cpu(amd, physics, deadline=None):
     env.pop("PARAC_REL_TOL", None)  # retire inherited calibration settings
     env["PARAC_MAX_ITER"] = str(MAX_ITER)
     # 4 args -> is_graph=1 (graph/Laplacian); a 5th arg -> is_graph=0 (physics/
-    # SDDM: handles the diagonal excess). /usr/bin/time -f 'APXRSS %M' -> peak
+    # SDDM: handles the diagonal excess). rc.peak_rss_prefix() -> peak
     # host RSS on stderr, the ParAC analog of the C++ solvers' max_rss_mb (the
     # driver is one self-contained binary, so whole-driver peak is what we chart).
     arg5 = "1" if physics else ""
-    cp = sh(f"/usr/bin/time -f 'APXRSS %M' {rc.taskset_prefix(THREADS)} "
+    cp = sh(f"{rc.peak_rss_prefix()} {rc.taskset_prefix(THREADS)} "
             f"{rc.PARAC_CPU_DRIVER} {amd} {THREADS} \"\" {arg5}".strip(),
             timeout=_cpu_cell_remaining(deadline), env=env, mem_cap_gb=MEM_CAP_GB)
     o = cp.stdout
-    rss_mb = None
-    for ln in (cp.stderr or "").splitlines():
-        if ln.startswith("APXRSS "):
-            try: rss_mb = round(int(ln.split()[1]) / 1024.0, 1)
-            except ValueError: pass
+    rss_mb = rc.parse_peak_rss_mb(cp.stderr)
     # Patch 0002 adds two complete, non-overlapping setup intervals around work
     # performed by ParAC itself.  `adapter` starts after MatrixMarket parsing and
     # includes triplet normalization/CSC construction plus the etree schedule;

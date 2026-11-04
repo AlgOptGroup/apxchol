@@ -7,7 +7,6 @@
 /// independent set, so low-priority vertices are eliminated first.
 /// See include/apxchol/solver/partitioner.h for the full contract.
 #include "apxchol.h"
-#include "apxchol/solver/partitioner_helpers.h"
 #include "example_grid.h"
 #include <algorithm>
 #include <cstdio>
@@ -15,12 +14,10 @@
 #include <vector>
 
 struct priority_partitioner {
-    static constexpr std::string_view name = "priority";
-
     /// User-supplied priority per vertex (lower = eliminated earlier).
     std::vector<double> priority;
 
-    void find_partition(apxchol::graph& G,
+    void find_partition(const apxchol::partition_graph& G,
                         std::span<const apxchol::node_index> active,
                         const apxchol::partition_context& /*ctx*/,
                         apxchol::selection& out) {
@@ -31,10 +28,9 @@ struct priority_partitioner {
                   [&](auto a, auto b) { return priority[a] < priority[b]; });
         for (auto v : order_) {
             bool independent = true;
-            for (auto idx : G.adj(v)) {
-                auto u = idx.to;
-                if (G.is_active(u) && out.contains(u)) { independent = false; break; }
-            }
+            G.for_each_neighbor(v, [&](auto u) {
+                if (out.contains(u)) independent = false;
+            });
             if (independent) out.add(v);
         }
     }
@@ -46,8 +42,11 @@ static_assert(apxchol::partitioner<priority_partitioner>);
 
 int main() {
     const int k = 60;
-    auto L = grid_laplacian(k);
-    Eigen::VectorXd b = apxchol::generate_test_rhs(L.rows());
+    const auto grid = grid_laplacian(k);
+    const apxchol::csc_view L = grid.view();
+    std::vector<double> b(static_cast<std::size_t>(L.n), 0.0);   // unit source and sink
+    b.front() = 1.0;
+    b.back() = -1.0;
 
     // Eliminate the grid interior first, boundary last (an arbitrary
     // demonstration order — plug in ND/AMD/domain knowledge here).
@@ -63,7 +62,7 @@ int main() {
     std::printf("custom-order factor: nnz %zu, %zu rounds\n",
                 size_t(F.L.nonZeros()), F.rounds.size());
 
-    apxchol::cpu_solver slv(L, std::move(F));
+    apxchol::solver slv(L, std::move(F));
     auto res = slv.solve(b);
     std::printf("custom-order solve : %ld iterations, residual %.2e\n",
                 long(res.iterations), res.residual);

@@ -3,6 +3,7 @@
 ## Scope and evidence
 
 - Deliver the requested scope. Prefer removing redundancy to adding modes, options or knobs. Keep this file current when builds, APIs, defaults or architecture change.
+- A user-visible change adds a line to `CHANGELOG.md` under `Unreleased` in the same PR, marked breaking where it is; benchmark-internal and CI-only changes usually need none.
 - State a result as fact only with evidence from the current session; label historical results and hypotheses. Audits report the complete denominator, checked/total and exclusions.
 - Factor identity requires structure and value digests; equal fill, iterations, residuals or seeds are not identity.
 - Check the worktree, branch and dirty state before editing; give concurrent agents explicit file ownership. Keep private notes, runbooks and campaign records out of tracked source.
@@ -23,29 +24,38 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 - Algorithm defaults and their rationale: `include/apxchol/solver/factor_options.h`. Build options: root `CMakeLists.txt` and `cmake/apxchol_core.cmake`, which the root, Python and benchmark projects share.
 - `APXCHOL_INDEX_WIDTH=32|64_EDGES|64` selects vertex/offset widths of 32/32, 32/64 or 64/64 bits; the default is `32`.
 - `cmake/apxchol_version.cmake` is the version source for native builds and Python packages. Release tags must be `v` followed by that version.
-- `cmake/core` builds just the native library and defaults to portable code (`APXCHOL_NATIVE_ARCH=OFF`); root and local Python builds default to native tuning. Source consumers include `cmake/apxchol_core.cmake` and call `apxchol_add_core()` at their top level; installed consumers use `find_package(apxchol CONFIG)`. Both link `apxchol::core`; installed consumers must use the same OpenMP runtime family.
-- Native SDK installs include Eigen headers when apxchol fetched them; builds using an existing Eigen package retain that dependency. Python wheels do not install the SDK.
+- `cmake/core` builds just the native library and defaults to portable code (`APXCHOL_NATIVE_ARCH=OFF`); standalone root, local Python and benchmark builds default to native tuning; `cmake/apxchol_core.cmake` declares `APXCHOL_NATIVE_ARCH` once. The arch flag is PRIVATE and nothing about it reaches consumers; a user `-march`/`-mcpu` replaces the flag. Root `add_subdirectory` embedding defaults to portable core only; CLI/tests/examples are opt-in there, while standalone root defaults remain enabled. Source consumers include `cmake/apxchol_core.cmake` and call `apxchol_add_core()` at their top level; installed consumers use `find_package(apxchol CONFIG)`. Both link `apxchol::core`; installed consumers must use the same OpenMP runtime family.
+- `.github/scripts/build-sdk.sh` packages the shared native install with portable tuning; `tests/check_sdk_archive.py` extracts it and builds the `tests/cmake_install` save/load consumer. Python wheels do not install the SDK.
+- Eigen is used only by `benchmarks/` (competitors and input generators; `benchmarks/eigen.cmake`). The library, bindings, CLI, tests and packages neither use nor ship it.
+- `solver` (`src/solve.cpp`) validates options and solve/apply arguments, selects the route, sets the thread budget, guards concurrent calls and splits RHS columns into panels. It dispatches to `detail::cpu_route`, `detail::cuda_route` or `detail::metal_route`, which share the interface in `solver/detail/solver_route.h`. Route methods trust their arguments, while route setup keeps backend-specific input checks; each route owns its factor, triangular solves and PCG. Tests and the benchmark read route state through `detail::solver_access::route`.
+- Portable save/load: `solver::save`/`solver::load` (`src/solver_archive.cpp`) and `docs/serialization.md`; the versioned binary format stores the original CSC operator and the installed factor (after dropping, in its FP32 or scaled FP16 storage), which `load()` reinstalls exactly. Typed arrays carry explicit widths, byte order and CRC-32C checksums; loading validates and prepares the backend without memory mapping.
+- MATLAB/Octave builds use `octave/CMakeLists.txt` and the shared `apxchol::core` target. Archive methods reuse native save/load.
 - Public API scope and compatibility: `docs/api.md`. Precision and storage: `docs/precision.md`. Extension seams: `docs/extending.md`.
-- Operator validation and M-matrix lumping: `operator_class`. Adjacency detection belongs to the CLI (`src/mtx_input.h`); bindings accept assembled operators only.
+- Internal storage: `detail/csc_matrix.h` (borrowed `csc_ref`, owned `csc_matrix` on node_index/edge_index, transpose, unpermute, triplet assembly), `detail/dense.h` (strided `dense_ref` views and vector reductions) and `detail/buffer.h` (64-byte aligned, uninitialized). The public API takes borrowed views (`views.h`: `csc_view`/`csc_view64`, `matrix_view`/`const_matrix_view`, spans), checked and converted once in `detail/csc_input.h`; same-width index arrays are borrowed. Tests hold matrices as `test::sparse_matrix` (int32 CSC) and `std::vector`, with small reference helpers (dense Cholesky, products) in `tests/csc_test_util.h`. The CLI reads Matrix Market through fast_matrix_market's triplet and array handlers and assembles with `csc_from_triplets`; bindings import foreign CSC arrays with `detail/csc_import.h`.
+- Operator validation and M-matrix lumping: `operator_class`. Every surface reads input as the operator. One rule in `operator_class` (`detail::is_graph_adjacency`) backs `--convert-input`, `apxchol.as_operator` and `apxchol_as_operator`; the CLI's logging lives in `src/mtx_input.h`.
 - Measurement contracts: `benchmarks/README.md`.
+- `docs/input-formats.md` includes the programs in `examples/input_formats`. Its C++ programs form a separate CMake project, so their Eigen and CHOLMOD dependencies never reach the library; `ci.yml` builds and runs them, the Octave job runs the `.m` file and `docs.yml` the SciPy one.
+- CLI archives: `.github/workflows/cli.yml` uses the `cli` install component, bundles OpenMP/notices, and runs `tests/check_cli_archive.py` after relocation.
 - Documentation: `python docs/build.py` reuses the guides, public C++ comments, Python docstrings and CLI help. Build instructions are in `CONTRIBUTING.md`; generated HTML goes to `build/docs`.
 
 ## Route invariants
 
-- Solver controls are typed per-instance options, not environment variables. Validate them before setup; `drop_tolerance` is in `[0, 1]`. Bindings share compiled defaults. Libraries are quiet by default, and `collect_timings` controls optional checkpoints. Standard OpenMP/CUDA runtime and build controls remain external; reference-only tuning stays internal to tests.
+- Solver controls are typed per-instance options, not environment variables. Validate them before setup; `drop_tolerance` is in `[0, 1]`. Tolerance and iteration budget are per-call solve arguments in every interface (omitted: `default_tol`, `default_max_iter`), never options. Bindings share compiled defaults. Libraries are quiet by default. Reusable solvers expose `setup_seconds` and solve results expose `solve_seconds`; the per-stage `detail::checkpoint` tree is recorded only when attached through `detail::solver_access::make(A, opts, &timings)` (CLI `-v`, tests, benchmark). Standard OpenMP/CUDA runtime and build controls remain external; research controls live in `factor_options::experimental` (outside the 1.x promise and absent from the CLI and bindings); reference-only tuning stays internal to tests.
+- Errors have two classes: `std::invalid_argument` for invalid input or options and unsupported requests, `std::runtime_error` (or a standard subclass) for execution failures, including an unavailable device. Python maps them to `ValueError`/`RuntimeError`, MATLAB/Octave to `apxchol:badInput`/`apxchol:error`. `std::logic_error` marks internal bugs only. Messages from `solver`'s own checks start with `apxchol:`.
 - `solve_backend` (`automatic`, `cpu`, `gpu`) fixes one complete setup/solve route before setup. Explicit GPU requests fail for unsupported options, input or devices. Once selected, errors never retry on another route. Report the selected route in results and CLI output.
-- `cpu_solver`, public `factorize()` and Eigen preconditioning stay on CPU in GPU builds and must not initialize CUDA. Disabled or pristine GPU lifetimes must not initialize CUDA either.
+- `solver`'s CPU route, including `apply` inside an external Krylov solver, and public `factorize()` stay on CPU in GPU builds and must not initialize CUDA (`SolveRoutes.ExplicitCpuDoesNotPrewarm`). Disabled or pristine GPU lifetimes must not initialize CUDA either.
 - `backend_available()` checks build/device availability, not compatibility with every solver option. CPU and automatic queries never initialize a GPU.
 - CUDA and Metal construct new factors on device or upload an explicitly supplied host factor. Operator preparation and PCG remain on device. They require compressed, sorted, unique, fully paired CSC input; automatic selection uses CPU otherwise. They report a recomputed FP64 residual against the original operator, with verification inside Solve timing.
 
 ## Determinism and numerical invariants
 
+- Run-to-run reproducibility at a fixed thread count is not a hard requirement. A change may give it up for measured speed or memory without losing precision; the PR says so and updates `docs/precision.md`, `docs/serialization.md` where reloads are affected, and `CHANGELOG.md`.
 - Public solver preconditioner application rejects non-finite inputs and centers Laplacian input/output on every call; only internal PCG uses periodic centering. All backends derive `converged` from the original-system exit residual and effective tolerance, with verification included in Solve timing.
-- Solves stop on tolerance, the iteration budget or numerical breakdown. Residual growth or a temporary plateau is not a stopping condition.
+- Solves stop on verified tolerance, the iteration budget or numerical breakdown. A failed original-residual check after apparent convergence can continue within the remaining budget; breakdown does not restart. Residual growth or a temporary plateau is not a stopping condition.
 - Canonical neighbors sort by weight, then vertex. Preserve ordered duplicate sums, exact cumulative weights, `upper_bound` sampling and per-elimination random streams.
 - OpenMP work uses the actual team size, never the requested one; every logical range must execute under reduced or nested teams. Caller-operator loops split work with `detail::work_balanced_range`; reductions stay thread-ordered.
 - Partitioner conflict resolution is deterministic for a given graph, context and team size. Symmetric-input pairing shortcuts must preserve results bit for bit. Prune skipping must retain its full-walk audit for hidden eligible vertices; it need not reproduce the same factor as full pruning.
-- Residual importance normalization uses fixed ordered 16,384-item partials, invariant to thread count. Same-graph selection and same-factor solves are deterministic; independently rebuilt parallel factors need not be identical (see `docs/precision.md`).
+- Residual importance normalization uses fixed ordered 16,384-item partials, invariant to thread count. `detail::vec` reductions (norms, sums, means) use fixed 8,192-element blocks summed in block order, also invariant to thread count. Same-graph selection and same-factor solves are deterministic; independently rebuilt parallel factors need not be identical (see `docs/precision.md`).
 - GPU selection guarantees independence and progress, not the CPU's selected set; GPU floating folds may differ from CPU while preserving the sampling law.
 
 ## Memory invariants
@@ -60,9 +70,79 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 | Graph, partitioners, elimination, sampling | `FactorizeTest.*`, `FactorizeDeterminism.*`, `AllStrategies/*`, `VecPoolAos.*`, `DirectedCscGraph.*`, `PruneSkip.*`, `IncrementalDegreeGate.*`, `TreeSampler.*`, `CycleSampler.*`, `Custom*` |
 | Residual sparsification | `ResidualBlocked*`, `ResidualSparsify*` |
 | CPU triangular solves, storage | `SpTRSV*`, `CriticalSchedule.*`, `BigAlloc.*`, `FP16.*`, `LowPrec*`, `FactorStorage.*` |
+| Root embedding | `tests/cmake_subdirectory`, with default options and with tests ON / CLI OFF; GPU parents enable CUDA or OBJCXX before adding the root |
 | Operators, input, routes, owners | `Operator*`, `MMatrixLumping.*`, `PermutedOperator.*`, `MtxInput*`, `AdjacencyInputRegression.*`, `SolveRoutes.*`, `Solve*`, `Solver.*`, `Checkpoint.*` |
 | CUDA | `Gpu*`, `CudaDeviceScope.*`, `gpu_factor_finalize_leak_check` (with compute-sanitizer) |
 | Metal | `Metal*`, `GpuDataflowPlan.*`; also under `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1` |
 | Benchmark harness | `benchmarks/tests` (unittest) and the benchmark project's CTest contracts |
 
 Integration correctness is not performance acceptance: compare original-system quality, setup, solve, one-RHS total, reuse and memory against a frozen baseline, following `benchmarks/README.md`.
+
+## Writing for people
+
+These rules apply to everything a person reads in this repository:
+
+- `README.md`, `python/README.md` and the guides in `docs/`.
+- The CLI's `--help`.
+- The messages of exceptions that reach a user.
+- `CHANGELOG.md`.
+- PR descriptions, review comments and commit messages.
+
+They don't apply to code comments or debug logs. The numbers follow the shared list R1 to R28. A missing number is a
+rule that doesn't apply here.
+
+- R1. One idea per sentence. No semicolons, no em dash between clauses, and at most 1 colon per sentence. Split the
+  sentence or use a list.
+- R2. Short sentences: 20 words or fewer on average, none over 30.
+- R3. Outcome first. The first 2 words carry the outcome or the action.
+- R4. An error says what happened, why, and what to do next, in that order. The next step names who or what: a flag,
+  a file, a page, a contact. Codes and IDs go after the sentence. No "sorry", "oops" or a bare "something went
+  wrong".
+- R5. The reader's words. Defined technical terms such as preconditioner, PCG or CSR are fine. Define an internal
+  name (a route code, a struct name) the first time, or leave it out.
+- R6. Active voice with a named actor: you, the solver, the CLI. Passive voice is fine when no actor matters, as in
+  "Nothing was changed."
+- R7. Digits and units for every number and time: "1 hour", "5 GB". Write "may" only for permission. No "soon" or "a
+  while" when the code knows the answer.
+- R8. One term per thing and one verb per action. The term list in `scripts/text-rules.json` is closed: a new term
+  goes into it in the same commit. A default in the guides matches `--help` and `factor_options.h`.
+- R9. No "we" unless the text says who "we" is.
+- R10. Every number, limit, default or guarantee matches the code or config that sets it. The commit that adds a
+  value to the text names where the code sets it. A change to the value changes the text in the same commit.
+- R12. A `--help` option fits on 1 line. An option with a default ends with it.
+- R17. Paragraphs: at most 5 sentences in a guide and 3 sentences in an exception message. Three or more parallel
+  items become a list.
+- R18. Headings are statements that name the topic, with the key word first.
+- R19. Details last. IDs, codes, raw output and internals go after what most readers need, in a Details part.
+- R23. A link names its destination, never "here" or "click here".
+
+What a PR, a review and a commit look like:
+
+- **Commit message.** The subject says what changed, in plain words, in 72 characters or fewer. The body says why,
+  then the numbers (before and after, with the machine and command), then the risk.
+- **PR description.** At most about 15 lines. The first line is the outcome for a user. Then 2 to 4 bullets: what
+  changed and why. Then the numbers with the command, matrix and machine, the risk, and how it was checked. Name the
+  `CHANGELOG.md` line. Say what is not done. Don't list open review points.
+- **Review comment.** One finding per comment. Start with the severity (Must, Should or Nit) and the outcome: what
+  breaks, for whom. Then the evidence (`file:line`, input, output) and a concrete fix. End the review with a line
+  `Text rules: pass` or the rule numbers with `file:line`.
+
+`python3 scripts/check_text_rules.py` compares the files in `scripts/text-rules.json` with
+`scripts/text-rules-baseline.json`. It fails only when a file gains one of these hits:
+
+- R1: a semicolon in prose.
+- R4: "sorry", "oops", "something went wrong", "an error occurred" or "unknown error".
+- R5: a word from the jargon list, in prose.
+- R7: "may", "might", "soon", "shortly", "a while", "eventually", or a number in words before a unit.
+- R8: a banned term from the term list.
+- R9: "we", "our" or "us" where the scope bans them.
+
+It reports R2 (sentences over 30 words) and R6 (passive voice) with `--report` and never fails on them. Every other
+rule, and em dashes and colons for R1, is for the reviewer. Text outside these files, such as commit messages and PR
+descriptions, is not linted.
+
+A file with fewer hits than its baseline passes with a note. Lower its baseline with `--update-baseline`, which
+refuses increases. A deliberate exception takes a comment on that line or the line before: `text-rules-allow: <rule>
+<term> <reason>`, such as `text-rules-allow: R8 kmer the flag name`. The term must occur in the text.
+
+Reviewers use this list.

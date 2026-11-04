@@ -37,6 +37,27 @@ inline auto canonical_lower_value(const int* ptr, const int* idx, Values values,
     return values[lo];
 }
 
+// The same on the library's own CSC index widths (host only).
+template<class Values>
+inline auto canonical_lower_value(const edge_index* ptr, const node_index* idx, Values values,
+                                  std::int64_t col, std::int64_t row, std::int64_t p,
+                                  bool& paired) {
+    if (row >= col) return values[p];
+    std::int64_t lo = static_cast<std::int64_t>(ptr[row]);
+    std::int64_t hi = static_cast<std::int64_t>(ptr[row + 1]);
+    const std::int64_t end = hi;
+    while (lo < hi) {
+        const std::int64_t mid = lo + (hi - lo) / 2;
+        if (static_cast<std::int64_t>(idx[mid]) < col) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo == end || static_cast<std::int64_t>(idx[lo]) != col) {
+        paired = false;
+        return values[p];
+    }
+    return values[lo];
+}
+
 /// Contiguous range [lo, hi) of the n rows/columns of a compressed matrix that
 /// thread `tid` of `nt` owns when the WORK, not the index count, is split
 /// evenly. The work of index i is its stored entries plus one,

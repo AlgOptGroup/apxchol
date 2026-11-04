@@ -115,6 +115,12 @@ TEST(MetalFinalize, InPlaceCompactionGroundingAndDropPreserveOtherRows) {
             EXPECT_EQ(f.rows[row].scale, scales[row]);
             EXPECT_EQ(f.rows[row].diagonal, f.columns[row].diagonal);
         }
+        // Each of the first two columns loses one off-diagonal to the threshold.
+        const std::array factored{4u, 3u, 2u, 1u}, below{1u, 1u, 0u, 0u};
+        for (unsigned row = 0; row < 4; ++row) {
+            EXPECT_EQ(f.rows[row].factored, factored[row]);
+            EXPECT_EQ(f.rows[row].dropped_threshold, below[row]);
+        }
     }
 }
 

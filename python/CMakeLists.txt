@@ -7,9 +7,9 @@ set(PYBIND11_FINDPYTHON ON)
 find_package(pybind11 CONFIG REQUIRED)
 
 pybind11_add_module(_apxchol src/apxchol_ext.cpp)
-apxchol_configure_core(_apxchol)
+_apxchol_configure_core(_apxchol)
 
-if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND APXCHOL_ARCH_FLAG STREQUAL "-march=x86-64-v2")
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND _APXCHOL_ARCH_FLAG STREQUAL "-march=x86-64-v2")
     # Keep import runnable on older CPUs so it can report the core's requirement.
     set_source_files_properties(src/apxchol_ext.cpp PROPERTIES
         COMPILE_OPTIONS "-march=x86-64"
@@ -19,6 +19,8 @@ endif()
 install(TARGETS _apxchol LIBRARY DESTINATION apxchol)
 
 if (SKBUILD)
+    install(FILES "${APX_ROOT}/LICENSE" DESTINATION "${SKBUILD_METADATA_DIR}/licenses")
+
     execute_process(COMMAND "${Python_EXECUTABLE}" -c [=[
 from importlib.metadata import distribution
 import sys
@@ -33,12 +35,4 @@ print(license)
         COMMAND_ERROR_IS_FATAL ANY)
     install(FILES "${pybind11_license}"
         DESTINATION "${SKBUILD_METADATA_DIR}/licenses/pybind11" RENAME LICENSE)
-
-    configure_file(Eigen-NOTICE.txt.in Eigen-NOTICE.txt @ONLY)
-    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/Eigen-NOTICE.txt"
-        DESTINATION "${SKBUILD_METADATA_DIR}/licenses/eigen" RENAME NOTICE)
-    if (TARGET apxchol_eigen)
-        file(GLOB eigen_licenses "${eigen_SOURCE_DIR}/COPYING.*")
-        install(FILES ${eigen_licenses} DESTINATION "${SKBUILD_METADATA_DIR}/licenses/eigen")
-    endif()
 endif()

@@ -2,28 +2,27 @@ name: documentation
 
 on:
   workflow_dispatch:
+  release:
+    types: [published]
   push:
     branches: [main]
-    paths: &docs_paths
+  pull_request:
+    paths:
       - 'docs/**'
       - 'README.md'
+      - 'CHANGELOG.md'
+      - 'CITATION.cff'
       - 'CONTRIBUTING.md'
-      - 'python/README.md'
-      - 'python/apxchol/**'
-      - 'python/src/**'
-      - 'python/CMakeLists.txt'
-      - 'python/pyproject.toml'
+      - 'examples/**'
+      - 'python/**'
       - 'octave/README.md'
-      - 'benchmarks/README.md'
+      - 'benchmarks/**'
       - 'include/**'
-      - 'src/config.cpp'
-      - 'src/main.cpp'
+      - 'src/**'
       - 'CMakeLists.txt'
       - 'cmake/**'
       - '.github/workflows/docs.yml'
       - '.github/actions/ccache/**'
-  pull_request:
-    paths: *docs_paths
 
 permissions:
   contents: read
@@ -32,8 +31,15 @@ concurrency:
   group: docs-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  OMP_NUM_THREADS: '2'
+  OPENBLAS_NUM_THREADS: '1'
+  MKL_NUM_THREADS: '1'
+  VECLIB_MAXIMUM_THREADS: '1'
+
 jobs:
   build:
+    if: github.event_name != 'release' || !github.event.release.prerelease
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -43,37 +49,72 @@ jobs:
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
     steps:
       - uses: actions/checkout@v4
+      - name: Check release tag
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: cmake -DRELEASE_TAG="$RELEASE_TAG" -P cmake/check_release_version.cmake
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Check documentation assembly
+        run: python -m unittest discover -s docs/tests -v
       - name: Install native dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y g++-14 libeigen3-dev ninja-build doxygen ccache
+          sudo apt-get install -y g++-14 ninja-build doxygen ccache
       - uses: ./.github/actions/ccache
         with:
           key: docs-gcc14
       - name: Install Python dependencies
-        run: python -m pip install -r docs/requirements.txt -e ./python
+        run: python -m pip install -r docs/requirements.txt scipy -e ./python
+      - name: Run the SciPy input-formats example
+        run: python examples/input_formats/scipy_input.py
       - name: Build CLI
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release ${CMAKE_ARGS} \
                 -DAPXCHOL_BUILD_TESTS=OFF -DAPXCHOL_BUILD_EXAMPLES=OFF
           cmake --build build --target apxchol
       - name: Build documentation
-        run: python docs/build.py
+        env:
+          APXCHOL_DOCS_RELEASE: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
+        run: |
+          python docs/build.py
+          git rev-parse HEAD > build/docs/source-revision.txt
       - uses: actions/upload-artifact@v4
         with:
           name: documentation
           path: build/docs
           if-no-files-found: error
-      - uses: actions/upload-pages-artifact@v4
-        if: github.ref == 'refs/heads/main'
-        with:
-          path: build/docs
       - name: Show compiler cache statistics
         if: always()
         run: ccache --show-log-stats
+
+  snapshot:
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: documentation
+          path: build/docs
+      - name: Preserve release documentation and refresh Pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          exists=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq 'any(.assets[]; .name == "documentation.tar.gz")')
+          if [ "$exists" = false ]; then
+            tar -czf documentation.tar.gz -C build/docs .
+            gh release upload "$RELEASE_TAG" documentation.tar.gz --repo "$GITHUB_REPOSITORY"
+          fi
+          gh workflow run docs.yml --ref main --repo "$GITHUB_REPOSITORY"
 
   deploy:
     if: github.ref == 'refs/heads/main'
@@ -81,11 +122,26 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
+      contents: read
       pages: write
       id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: documentation
+          path: build/docs
+      - name: Assemble stable and development documentation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases" > build/releases.json
+          python docs/assemble.py build/docs build/site build/releases.json "$GITHUB_REPOSITORY"
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: build/site
       - uses: actions/deploy-pages@v4
         id: deployment

@@ -1,12 +1,12 @@
 # apxchol for Python
 
 Solve sparse Laplacian and SDDM systems with reusable approximate-Cholesky
-factors. NumPy and SciPy are required.
+factors. NumPy is required. Install the SciPy extra for sparse-matrix helpers.
 
 ## Install and solve
 
 ```bash
-python -m pip install apxchol
+python -m pip install "apxchol[scipy]"
 ```
 
 For an unreleased checkout, use the [source installation](#build-from-source)
@@ -20,7 +20,8 @@ GPU backend; no CUDA Toolkit or Homebrew installation is needed.
 | Linux | x86-64-v2 or newer | NVIDIA CUDA |
 | macOS 15+ | Apple silicon (arm64) | Apple Metal |
 
-Wheels support CPython 3.11–3.15.
+Wheels support CPython 3.11–3.15 and PyPy 7.3.23 (Python 3.11, `pp73`).
+On PyPy, install `apxchol` and use the [NumPy-only interface](#numpy-only-input).
 
 ```python
 import apxchol
@@ -38,20 +39,39 @@ assert result.converged
 x = result.x
 ```
 
-For one solve, use `apxchol.solve(A, b)`. Results include `x`, `iters`,
+For one solve, use `apxchol.solve(A, b)`. Results include `x`, `iterations`,
 `residual` and `converged`. Convergence is always checked against the original
 `A` and `b`; inspect `converged` for success.
+
+See the shared [binding capabilities](https://algoptgroup.github.io/apxchol/docs/usage.html#binding-capabilities)
+for comparison with MATLAB/Octave.
 
 ## Matrix inputs
 
 Pass the matrix `A` in `A @ x = b`. For a graph's adjacency matrix, first use
-`A = apxchol.laplacian(Adj)` to form its Laplacian. See [supported matrices
-and RHS requirements](https://algoptgroup.github.io/apxchol/docs/usage.html).
+`A = apxchol.as_operator(Adj)`: it returns a valid operator unchanged and
+otherwise forms the graph Laplacian. See [supported matrices, input
+conversion and RHS requirements](https://algoptgroup.github.io/apxchol/docs/usage.html).
 
 Any SciPy sparse format is converted to sorted, duplicate-free CSC without
 changing the input. Supply the full symmetric matrix, including both
 entries of each off-diagonal pair. Complex inputs are rejected, even with
 zero imaginary parts.
+
+### NumPy-only input
+
+`python -m pip install apxchol` installs the solver without SciPy. Supply the
+three zero-based CSC arrays directly; all usual solver options still apply:
+
+```python
+solver = apxchol.Solver.from_csc(data, indices, indptr, backend="auto")
+result = solver.solve(b)
+```
+
+The matrix is square with `len(indptr) - 1` rows. Integer indices may be 32- or
+64-bit; the native importer sorts columns and sums duplicate entries. SciPy
+is needed for `factorize(A)`, `as_operator`, `aslinearoperator`, and sparse factor
+exports. NumPy-only solves and preconditioner application do not import it.
 
 ## Reuse, batches and initial guesses
 
@@ -69,6 +89,12 @@ Vector inputs have shape `(n,)`; batches have shape `(n, nrhs)`. `result.x`
 and `apply` outputs preserve that shape and use float64. Batch convergence
 fields contain one value per column.
 
+`solver.setup_seconds` is the wall-clock time the factor took to build, and
+`result.solve_seconds` that of one `solve` call, for all columns of a batch.
+Over `k` separate one-RHS calls each costs `setup_seconds / k + solve_seconds`
+on average, and one batched call of `k` columns costs
+`(setup_seconds + solve_seconds) / k` per RHS; see [judging whether reuse pays off](https://algoptgroup.github.io/apxchol/docs/usage.html#judging-whether-reuse-pays-off).
+
 A *warm start* supplies an initial solution estimate:
 
 ```python
@@ -85,8 +111,36 @@ result = solver.solve(b2, x0=first.x)
 The [native reference](https://algoptgroup.github.io/apxchol/docs/reference/cpp.html#solve-defaults) shows the
 compiled tolerance and iteration defaults.
 
-Overlapping inputs are copied before writing `out`. Use separate solver
-instances for concurrent calls; each solver shares mutable workspace.
+Overlapping inputs are copied before writing `out`. Factorization, `solve`
+and `apply` release the GIL while they run native code. Reading the input
+matrix holds it. A call made while another thread uses the same solver raises
+`RuntimeError`. Give each thread `copy.copy(solver)`. The copy shares the factor
+and allocates only its own workspace. On a GPU it shares the device factor
+and solves on its own CUDA stream or Metal command queue.
+
+## Save and reload
+
+Save a reusable solver's operator and factor, then choose the solve backend
+when loading. These methods also work without SciPy:
+
+```python
+solver.save("system.apxchol")
+restored = apxchol.Solver.load("system.apxchol", backend="cpu")
+result = restored.solve(b)
+```
+
+Saving replaces an existing file, writing to `<path>.tmp` first and renaming it
+into place. The archive
+stores the original operator and the installed factor, the preconditioner the
+solves actually use, in its storage dtype; RHSs, initial guesses and device
+workspace are not saved. Loading reinstalls that factor exactly without
+repeating factorization, so solves match the saved solver bit for bit on the
+same backend and thread count.
+
+`backend="auto"` adopts on CPU; `backend="gpu"` uploads to a compatible GPU.
+The file fixes the storage dtype and dropping, so `factor_storage` and
+`drop_tolerance` have no effect when loading. Pass `lump_max_mass` again if the
+saved operator requires positive-entry lumping.
 
 ## Setup options
 
@@ -98,15 +152,14 @@ Pass these keywords to `factorize` or the one-shot `solve`:
 | `num_threads` | CPU thread ceiling; `0` inherits the caller's OpenMP setting |
 | `seed` | Sampling seed; `None` uses the native default |
 | `partitioner` | `"block_greedy"`, `"priority_greedy"` or `"baumann_kyng"`; `None` uses the native default |
-| `keep_factor` | Retain exportable arrays; defaults to `True` for `factorize`, `False` for one-shot `solve` |
-| `factor_storage_dtype` | `np.float16`, `np.float32`, or `None` for the backend default; dtype names also work |
+| `factor_storage` | `"auto"` (default) for the backend default, `"float16"` or `"float32"`; NumPy dtypes also work |
 
 Read the chosen route from `solver.backend` and storage type from
-`solver.factor_storage_dtype`. See [backend and thread selection](https://algoptgroup.github.io/apxchol/docs/usage.html)
+`solver.factor_storage`, a NumPy dtype. See [backend and thread selection](https://algoptgroup.github.io/apxchol/docs/usage.html)
 for automatic selection and explicit-request behavior.
 
 Storage defaults to FP32 on CPU/Metal and FP16 on CUDA. This affects
-triangular-solve storage, not export or outer solve precision. Unsupported
+triangular-solve storage and the exported factor, not outer solve precision. Unsupported
 FP16 requests fail; FP64 storage is unavailable. See [precision](https://algoptgroup.github.io/apxchol/docs/precision.html).
 
 ### Advanced options
@@ -116,18 +169,18 @@ support fewer construction choices.
 
 | Keyword | Meaning |
 |---|---|
-| `degree_quantile` | Degree cutoff quantile; `0` selects the multiplier-based cutoff |
+| `sampler` | Clique sampler: `"gks"` (default) or `"trace_cycle"` (CPU and CUDA only) |
+| `degree_quantile` | Degree cutoff quantile in `[0, 1)`; `0` selects the multiplier-based cutoff (Metal requires `(0, 1)`); `None` uses the backend default |
 | `degree_multiplier` | Positive degree multiplier, used only when `degree_quantile=0` |
-| `degree_tiebreak` | Prefer lower-degree vertices in selection conflicts |
-| `exact_clique_max_degree` | Maximum degree for exact clique elimination; `0` disables it |
-| `residual_peel` | Residual pivot order: `"natural"`, `"min_degree"` or `"bk_serial"` |
-| `cpu_schedule` | CPU triangular-solve scheduling: `"auto"` or `"levels"` |
 | `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
-| `regularization` | Nonnegative diagonal fraction added during factor construction; `0` disables it |
+| `regularization` | Minimum diagonal excess of the preconditioner, as a fraction of each diagonal after lumping; excess below 1e-12 of the diagonal counts as zero first; `A` is not modified; `0` disables it |
 | `lump_max_mass` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
 | `verbose` | Print setup diagnostics; off by default |
 
-Unknown keywords raise `ValueError`. The [Python reference](https://algoptgroup.github.io/apxchol/docs/reference/python.html)
+Unknown keywords raise `ValueError`, like other invalid input or options;
+execution failures raise `RuntimeError` (see
+[results and errors](https://algoptgroup.github.io/apxchol/docs/usage.html#results-and-errors)).
+The [Python reference](https://algoptgroup.github.io/apxchol/docs/reference/python.html)
 and [native option reference](https://algoptgroup.github.io/apxchol/docs/reference/cpp.html) describe the controls.
 
 ## Use with a SciPy solver
@@ -154,16 +207,16 @@ FP32, regardless of backend or internal storage:
 ```python
 P = solver.P                          # P[original vertex] = elimination position
 G = solver.chol()                     # lower CSC factor, including its diagonal
-L, D = solver.L, solver.D             # unit lower CSC factor and diagonal
 p = P.argsort()
-# A[p][:, p] ≈ G @ G.T ≈ L @ diags(D) @ L.T
+# A[p][:, p] ≈ G @ G.T
 ```
 
-`chol()`, `L` and `D` return independent copies. For a Laplacian, they represent
-the nonsingular subspace; see the [factor reference](https://algoptgroup.github.io/apxchol/docs/reference/python.html).
-
-Use `keep_factor=False` to save the extra host factor copy when export is
-unnecessary. Repeated solves, `P`, `factor_nnz` and `fill_ratio` remain available.
+`chol()`, `P` and `factor_nnz` describe the preconditioner actually used: the
+factor after dropping and storage rounding. `chol()` returns a float64 copy, `P`
+an `int64` permutation and `factor_nnz` an integer. For a Laplacian, they
+represent the nonsingular subspace and the last row and column
+are empty; see the [factor reference](https://algoptgroup.github.io/apxchol/docs/reference/python.html).
+A GPU-backed solver downloads the factor on the first export and caches it.
 
 Matrix import is limited to signed 32-bit dimensions and stored-entry counts.
 The native library's wide-index build options do not enlarge this binding.
@@ -173,7 +226,7 @@ The native library's wide-index build options do not enlarge this binding.
 From a repository checkout, install a development build and run its tests:
 
 ```bash
-python -m pip install -e './python[test]'
+python -m pip install -e './python[test,scipy]'
 python -m pytest python/tests -v
 ```
 

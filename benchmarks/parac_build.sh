@@ -51,10 +51,14 @@ grep -Fq 'APX stop contract: original-v1' "$PARAC_CHECKOUT/experiment/custom_cg.
     echo "missing ParAC patch 0007 (original-system stopping)" >&2; exit 1;
 }
 
+grep -Fq 'APXCHOL_PARAC_PORTABLE_CPP' "$PARAC_CHECKOUT/experiment/custom_cg.hpp" || {
+    echo "missing ParAC patch 0008 (backend selection, explicit RHS/solution I/O)" >&2; exit 1;
+}
+
 cd "$PARAC_CHECKOUT/experiment"
 g++ -std=c++20 -O3 \
     -include climits -include cstdint \
-    -I"$FMMINC" -I"$MKLROOT/include" \
+    -I"$FMMINC" -I"$MKLROOT/include" -I../cpu_implementation -DAPXCHOL_PARAC_MKL_RCI \
     -o driver driver_local.cpp \
     -fopenmp \
     -L"$MKLROOT/lib" -lmkl_intel_lp64 -lmkl_intel_thread -lmkl_core \

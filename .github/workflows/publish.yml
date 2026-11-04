@@ -1,7 +1,8 @@
-# Wheels-only PyPI publishing (no sdist — python/CMakeLists.txt references
+# Python wheel, standalone CLI and native SDK publishing (no sdist — python/CMakeLists.txt references
 # ../src, so the package only builds from a full checkout).
-# Trigger: publishing a GitHub release (or manual dispatch to dry-run the build
-# job). Uses PyPI Trusted Publishing (OIDC), configured on pypi.org under
+# Trigger: publishing a GitHub release (or manual dispatch to dry-run the artifact
+# jobs). A prerelease builds everything and attaches the CLI and SDK archives,
+# but does not upload to PyPI. Uses PyPI Trusted Publishing (OIDC), configured on pypi.org under
 # "Publishing" with: owner=AlgOptGroup, repo=apxchol,
 # workflow=publish.yml, environment=pypi. No API tokens needed.
 name: publish-pypi
@@ -29,11 +30,24 @@ jobs:
     needs: version
     uses: ./.github/workflows/wheels.yml
 
+  pypy:
+    needs: version
+    uses: ./.github/workflows/pypy.yml
+
+  cli:
+    needs: version
+    uses: ./.github/workflows/cli.yml
+
+  sdk:
+    needs: version
+    uses: ./.github/workflows/sdk.yml
+
   publish:
     name: upload to PyPI (wheels only)
-    needs: wheels
-    # workflow_dispatch only dry-runs the wheel jobs; uploads happen on a release.
-    if: github.event_name == 'release'
+    needs: [wheels, pypy, cli, sdk]
+    # workflow_dispatch only builds artifacts; PyPI uploads happen on a final
+    # release. A PyPI version can be uploaded only once.
+    if: github.event_name == 'release' && !github.event.release.prerelease
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -41,7 +55,33 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: wheels-*
+          pattern: '{wheels-linux-x86_64-cuda,wheels-macos-arm64-metal,pypy-linux-x86_64-cuda,pypy-macos-arm64-metal}'
           merge-multiple: true
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-native:
+    needs: [wheels, pypy, cli, sdk]
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '{sdk-linux-x86_64-cpu,sdk-linux-x86_64-cuda,sdk-macos-arm64-metal}'
+          merge-multiple: true
+          path: dist
+      - name: Attach CLI and SDK archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          (cd dist && sha256sum -c -- *.sha256)
+          gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/*.sha256 --repo "$GITHUB_REPOSITORY"

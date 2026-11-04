@@ -13,13 +13,25 @@
 #include <unistd.h>
 #endif
 
-#include <Eigen/Core>
-#include <Eigen/Sparse>
 
 #include "apxchol/csc_work.h"
 #include "apxchol/graph/conversions.h"
 #include "apxchol/graph/graph.h"
+#include "csc_test_util.h"
 #include "reference_graph.h"
+
+namespace {
+using Sparse = apxchol::test::sparse_matrix;
+using Triplet = apxchol::test::triplet;
+// The library's Laplacian of a graph, and a graph of an operator.
+template<class Graph>
+Sparse laplacian_of(const Graph& g) {
+    return apxchol::test::from_csc(apxchol::detail::laplacian(g).ref());
+}
+apxchol::detail::graph make_graph_of(const Sparse& L) {
+    return apxchol::detail::make_graph(apxchol::test::internal_csc(L));
+}
+} // namespace
 
 #include <omp.h>
 
@@ -28,7 +40,7 @@
 
 class GraphTest : public ::testing::Test {
 protected:
-    using Graph = apxchol::graph;
+    using Graph = apxchol::detail::graph;
 
     static Graph make_path(int n) {
         Graph G(n);
@@ -54,7 +66,7 @@ protected:
 
 TEST(ActiveState, ParallelClearsSharingWordsDoNotLoseUpdates) {
     constexpr apxchol::node_index n = 4096;
-    apxchol::graph G(n);
+    apxchol::detail::graph G(n);
 
 #pragma omp parallel for schedule(static, 1)
     for (apxchol::node_index v = 0; v < n; ++v)
@@ -67,7 +79,7 @@ TEST(ActiveState, ParallelClearsSharingWordsDoNotLoseUpdates) {
 }
 
 TEST(ActiveState, RepeatedDeactivateDoesNotDoubleCount) {
-    apxchol::graph G(65);
+    apxchol::detail::graph G(65);
     G.deactivate(64);
     G.deactivate(64);
     EXPECT_EQ(G.num_active(), 64u);
@@ -93,7 +105,7 @@ struct assignment_counted_slot {
 } // namespace
 
 TEST(VecPoolIncidence, FilterSkipsWritesBeforeTheFirstRemovedEntry) {
-    using Incidence = apxchol::basic_vec_pool_incidence<assignment_counted_slot>;
+    using Incidence = apxchol::detail::basic_vec_pool_incidence<assignment_counted_slot>;
     Incidence adj;
     adj.init(1);
     for (int value : {1, 2, 3, 4})
@@ -113,7 +125,7 @@ TEST(VecPoolIncidence, FilterSkipsWritesBeforeTheFirstRemovedEntry) {
 }
 
 TEST(SegmentedPool, ClaimsNeverCrossSegmentsAndClearReusesTheMap) {
-    apxchol::segmented_pool<std::uint32_t, 8, 64> pool;
+    apxchol::detail::segmented_pool<std::uint32_t, 8, 64> pool;
     pool.prepare();
     const size_t first = pool.claim(6);
     const size_t second = pool.claim(4);
@@ -130,7 +142,7 @@ TEST(SegmentedPool, ClaimsNeverCrossSegmentsAndClearReusesTheMap) {
 }
 
 TEST(SegmentedPool, ParallelClaimsAreDisjoint) {
-    apxchol::segmented_pool<std::uint32_t, 64, 4096> pool;
+    apxchol::detail::segmented_pool<std::uint32_t, 64, 4096> pool;
     pool.prepare();
     constexpr size_t claims = 128;
     constexpr size_t slots_per_claim = 7;
@@ -150,7 +162,7 @@ TEST(SegmentedPool, ParallelClaimsAreDisjoint) {
 }
 
 TEST_F(GraphTest, BasicConstruction) {
-    using Graph = apxchol::graph;
+    using Graph = apxchol::detail::graph;
     Graph G(5);
     G.add_edge(0, 1, 2.0);
     G.add_edge(1, 2, 3.0);
@@ -159,7 +171,7 @@ TEST_F(GraphTest, BasicConstruction) {
 }
 
 TEST_F(GraphTest, DeactivateAndPrune) {
-    using Graph = apxchol::graph;
+    using Graph = apxchol::detail::graph;
     Graph G(4);
     G.add_edge(0, 1, 1.0);
     G.add_edge(0, 2, 2.0);
@@ -188,7 +200,7 @@ TEST_F(GraphTest, ForNeighbors) {
 }
 
 TEST_F(GraphTest, WeightedDegree) {
-    using Graph = apxchol::graph;
+    using Graph = apxchol::detail::graph;
     Graph G(3);
     G.add_edge(0, 1, 2.0);
     G.add_edge(0, 2, 5.0);
@@ -208,8 +220,8 @@ namespace {
 
 
 
-apxchol::graph make_sparsify_graph() {
-    apxchol::graph G(8);
+apxchol::detail::graph make_sparsify_graph() {
+    apxchol::detail::graph G(8);
     // Two connected components, both with many off-tree alternatives. Distinct
     // weights make the coarse maximum-weight forest deterministic.
     for (const auto& [u, v, w] : std::vector<std::tuple<int, int, double>>{
@@ -221,7 +233,7 @@ apxchol::graph make_sparsify_graph() {
     return G;
 }
 
-auto canonical_edges(const apxchol::graph& G) {
+auto canonical_edges(const apxchol::detail::graph& G) {
     std::vector<std::tuple<apxchol::node_index,
                            apxchol::node_index, double>> result;
     for (apxchol::node_index u = 0; u < G.n(); ++u)
@@ -232,7 +244,7 @@ auto canonical_edges(const apxchol::graph& G) {
     return result;
 }
 
-bool reachable_within(const apxchol::graph& G,
+bool reachable_within(const apxchol::detail::graph& G,
                       apxchol::node_index first,
                       apxchol::node_index last) {
     std::vector<unsigned char> seen(G.n(), 0);
@@ -252,7 +264,7 @@ bool reachable_within(const apxchol::graph& G,
     return true;
 }
 
-auto adjacency_records(const apxchol::graph& G) {
+auto adjacency_records(const apxchol::detail::graph& G) {
     std::vector<std::tuple<apxchol::node_index,
                            apxchol::node_index, double>> result;
     for (apxchol::node_index u = 0; u < G.n(); ++u)
@@ -271,7 +283,7 @@ TEST(ResidualSparsifyTest,
     std::vector<apxchol::node_index> active(n);
     std::iota(active.begin(), active.end(), apxchol::node_index{0});
     auto make_dense = [=] {
-        apxchol::graph G(n);
+        apxchol::detail::graph G(n);
         for (apxchol::node_index u = 0; u < n; ++u)
             for (apxchol::node_index v = u + 1; v < n; ++v)
                 G.add_edge(u, v, 1000.0 - 17.0 * u - v);
@@ -335,7 +347,7 @@ TEST(ResidualSparsifyTest, OffTreeWeightsAreUnbiased) {
     double weight_sum = 0.0;
     int retained = 0;
     for (int seed = 0; seed < trials; ++seed) {
-        apxchol::graph G(3);
+        apxchol::detail::graph G(3);
         G.add_edge(0, 1, 10.0);
         G.add_edge(1, 2, 9.0);
         // Coalesces to one off-tree edge of weight 1 and multiplicity 2.
@@ -364,15 +376,15 @@ TEST(ResidualSparsifyTest, OffTreeWeightsAreUnbiased) {
 
 // ── Laplacian tests (storage-independent) ────────────
 
-static apxchol::graph make_path_vec(int n) {
-    apxchol::graph G(n);
+static apxchol::detail::graph make_path_vec(int n) {
+    apxchol::detail::graph G(n);
     for (int i = 0; i + 1 < n; ++i)
         G.add_edge(i, i + 1, 1.0);
     return G;
 }
 
-static apxchol::graph make_grid_vec(int rows, int cols) {
-    apxchol::graph G(rows * cols);
+static apxchol::detail::graph make_grid_vec(int rows, int cols) {
+    apxchol::detail::graph G(rows * cols);
     auto id = [cols](int r, int c) { return r * cols + c; };
     for (int r = 0; r < rows; ++r)
         for (int c = 0; c < cols; ++c) {
@@ -384,35 +396,34 @@ static apxchol::graph make_grid_vec(int rows, int cols) {
 
 TEST(Laplacian, RowSumsZero) {
     auto G = make_grid_vec(10, 10);
-    auto L = apxchol::laplacian(G);
-    Eigen::VectorXd ones = Eigen::VectorXd::Ones(L.rows());
-    Eigen::VectorXd res = L * ones;
-    EXPECT_LT(res.norm(), 1e-12);
+    auto L = laplacian_of(G);
+    const std::vector<double> ones(L.rows, 1.0);
+    EXPECT_LT(apxchol::test::norm(apxchol::test::multiply(L, ones)), 1e-12);
 }
 
 TEST(Laplacian, Symmetric) {
     auto G = make_grid_vec(8, 8);
-    auto L = apxchol::laplacian(G);
-    Eigen::SparseMatrix<double> diff = L - Eigen::SparseMatrix<double>(L.transpose());
-    EXPECT_LT(diff.norm(), 1e-12);
+    auto L = laplacian_of(G);
+    const Sparse diff = apxchol::test::combine(1.0, L, -1.0, apxchol::test::transpose(L));
+    EXPECT_LT(apxchol::test::norm(diff.values), 1e-12);
 }
 
 TEST(Laplacian, PositiveDiagonal) {
     auto G = make_grid_vec(5, 5);
-    auto L = apxchol::laplacian(G);
-    for (int k = 0; k < L.outerSize(); ++k)
-        for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it) {
-            if (it.row() == it.col()) {
-                EXPECT_GE(it.value(), 0.0);
+    auto L = laplacian_of(G);
+    for (int k = 0; k < L.cols; ++k)
+        for (auto p = L.col_ptr[k]; p < L.col_ptr[k + 1]; ++p) {
+            if (L.row_idx[p] == k) {
+                EXPECT_GE(L.values[p], 0.0);
             }
         }
 }
 
 TEST(Laplacian, PathGraph) {
     auto G = make_path_vec(3);  // 0-1-2, weights 1.0
-    auto L = apxchol::laplacian(G);
+    auto L = laplacian_of(G);
     // L should be [[1,-1,0],[-1,2,-1],[0,-1,1]]
-    EXPECT_EQ(L.rows(), 3);
+    EXPECT_EQ(L.rows, 3);
     EXPECT_NEAR(L.coeff(0, 0), 1.0, 1e-15);
     EXPECT_NEAR(L.coeff(1, 1), 2.0, 1e-15);
     EXPECT_NEAR(L.coeff(0, 1), -1.0, 1e-15);
@@ -420,9 +431,9 @@ TEST(Laplacian, PathGraph) {
 }
 
 namespace {
-void expect_directed_csc_matches_general(const Eigen::SparseMatrix<double>& L) {
+void expect_directed_csc_matches_general(const Sparse& L) {
     const auto reference = reference_graph(L);
-    const auto candidate = apxchol::make_graph(L);
+    const auto candidate = make_graph_of(L);
     ASSERT_EQ(reference.n(), candidate.n());
     ASSERT_EQ(reference.m(), candidate.m());
     for (apxchol::node_index v = 0; v < reference.n(); ++v) {
@@ -443,19 +454,17 @@ void expect_directed_csc_matches_general(const Eigen::SparseMatrix<double>& L) {
                   std::bit_cast<std::uint64_t>(candidate.excess(v)));
     }
 }
-Eigen::SparseMatrix<double> csc_edge_fixture() {
+Sparse csc_edge_fixture() {
     // Straddle a float midpoint with an upper/lower difference below the
     // accepted symmetry tolerance: blindly copying the upper value is wrong.
     const double midpoint = 1.0 + std::ldexp(1.0, -24);
-    std::vector<Eigen::Triplet<double>> entries{
+    std::vector<Triplet> entries{
         {0,0,5}, {1,1,5}, {2,2,5}, {3,3,5}, {4,4,2},
         {1,0,-(midpoint+1e-12)}, {0,1,-(midpoint-1e-12)},
         {2,0,-0.0}, {0,2,-0.0},
         {3,1,-0.125}, {1,3,-0.125},
         {3,2,-1e-20}, {2,3,-1e-20}};
-    Eigen::SparseMatrix<double> L(5,5);
-    L.setFromTriplets(entries.begin(), entries.end());
-    return L;
+    return apxchol::test::from_triplets(5, 5, entries);
 }
 }
 
@@ -472,9 +481,11 @@ TEST(DirectedCscGraph, FullColumnsKeepCanonicalWeightsZerosAndIsolatedVertices) 
 TEST(PooledGraph, NestedTeamConsumesEveryLogicalColumnRange) {
     const int prior_levels = omp_get_max_active_levels();
     omp_set_max_active_levels(1);
-    auto L = apxchol::laplacian(make_grid_vec(20, 20));
-    for (int v = 0; v < L.rows(); ++v) L.coeffRef(v,v) += 0.125;
-    const auto reference = apxchol::make_graph(L);
+    auto L = laplacian_of(make_grid_vec(20, 20));
+    for (int v = 0; v < L.cols; ++v)
+        for (auto p = L.col_ptr[v]; p < L.col_ptr[v + 1]; ++p)
+            if (L.row_idx[p] == v) L.values[p] += 0.125;
+    const auto reference = make_graph_of(L);
     int observed_outer = 0, observed_inner = 0;
     #pragma omp parallel num_threads(2)
     {
@@ -488,7 +499,7 @@ TEST(PooledGraph, NestedTeamConsumesEveryLogicalColumnRange) {
                 observed_inner = omp_get_num_threads();
             }
             const auto check = [&]() {
-                const auto candidate = apxchol::make_graph(L);
+                const auto candidate = make_graph_of(L);
                 ASSERT_EQ(candidate.n(), reference.n());
                 ASSERT_EQ(candidate.m(), reference.m());
                 for (apxchol::node_index v = 0; v < reference.n(); ++v) {
@@ -501,10 +512,7 @@ TEST(PooledGraph, NestedTeamConsumesEveryLogicalColumnRange) {
                     ASSERT_EQ(candidate.excess(v),reference.excess(v)) << v;
                 }
             };
-            // Vector storage always takes the general path; uncompressed directed
-            // storage forces that path instead of the full-column shortcut.
-            check();
-            L.uncompress();
+            // Vector storage always takes the general path.
             check();
         }
     }
@@ -529,22 +537,20 @@ TEST(DirectedCscGraph, BitIdenticalProofBuildsTheSameGraph) {
         lower[{std::max(a, b), std::min(a, b)}] = weight(rng);
     }
     std::vector<double> degree(n, 0.0);
-    std::vector<Eigen::Triplet<double>> entries;
+    std::vector<Triplet> entries;
     for (const auto& [rc, w] : lower) {
-        entries.emplace_back(rc.first, rc.second, -w);
-        entries.emplace_back(rc.second, rc.first, -w);
+        entries.push_back({rc.first, rc.second, -w});
+        entries.push_back({rc.second, rc.first, -w});
         degree[rc.first] += w; degree[rc.second] += w;
     }
     for (int v = 0; v < n; ++v)
-        entries.emplace_back(v, v, degree[v] + (v % 5 == 0 ? 0.5 : 0.0));
-    Eigen::SparseMatrix<double> L(n, n);
-    L.setFromTriplets(entries.begin(), entries.end());
-    L.makeCompressed();
+        entries.push_back({v, v, degree[v] + (v % 5 == 0 ? 0.5 : 0.0)});
+    const Sparse L = apxchol::test::from_triplets(n, n, entries);
 
-    using G = apxchol::graph;
+    using G = apxchol::detail::graph;
     auto same_graph = [&] {
-        const G searched = apxchol::make_graph(L);
-        const G proven = apxchol::detail::make_graph_from_operator(L, true);
+        const G searched = make_graph_of(L);
+        const G proven = apxchol::detail::make_graph_from_operator(apxchol::test::internal_csc(L), true);
         ASSERT_EQ(searched.n(), proven.n());
         ASSERT_EQ(searched.m(), proven.m());
         for (apxchol::node_index v = 0; v < searched.n(); ++v) {
@@ -616,38 +622,31 @@ TEST(CscWork, UniformRowsReproduceTheEqualCountSplit) {
 
 TEST(DirectedCscGraph, OneTriangleAndBalancedUnpairedPatternUseGeneralPath) {
     auto full = csc_edge_fixture();
-    Eigen::SparseMatrix<double> lower = full.triangularView<Eigen::Lower>();
-    expect_directed_csc_matches_general(lower);
-    std::vector<Eigen::Triplet<double>> entries{
+    std::vector<Triplet> lower_entries;
+    for (const auto& e : apxchol::test::triplets(full))
+        if (e.row >= e.col) lower_entries.push_back(e);
+    expect_directed_csc_matches_general(apxchol::test::from_triplets(full.rows, full.cols, lower_entries));
+    const std::vector<Triplet> entries{
         {0,0,3}, {1,1,3}, {2,2,3}, {3,3,3},
         {1,0,-1}, {3,2,-2}, {0,2,-1}, {2,3,-2}};
-    Eigen::SparseMatrix<double> asymmetric(4,4);
-    asymmetric.setFromTriplets(entries.begin(), entries.end());
+    const Sparse asymmetric = apxchol::test::from_triplets(4, 4, entries);
     expect_directed_csc_matches_general(asymmetric);
 }
 
-TEST(DirectedCscGraph, UncompressedAndDuplicateCoordinatesUseGeneralPath) {
-    auto L = csc_edge_fixture();
-    L.reserve(Eigen::VectorXi::Constant(5, 7));
-    ASSERT_FALSE(L.isCompressed());
-    expect_directed_csc_matches_general(L);
-    const int outer[]{0,3,6};
-    const int inner[]{0,1,1,0,0,1};
-    const double values[]{4,-2,-1,-1,-2,4};
-    const Eigen::Map<const Eigen::SparseMatrix<double>> mapped(
-        2,2,6,outer,inner,values);
-    Eigen::SparseMatrix<double> duplicate = mapped;
-    ASSERT_EQ(duplicate.nonZeros(), 6);
+TEST(DirectedCscGraph, DuplicateCoordinatesUseGeneralPath) {
+    Sparse duplicate(2, 2);
+    duplicate.col_ptr = {0, 3, 6};
+    duplicate.row_idx = {0, 1, 1, 0, 0, 1};
+    duplicate.values = {4, -2, -1, -1, -2, 4};
+    ASSERT_EQ(duplicate.nnz(), 6);
     expect_directed_csc_matches_general(duplicate);
 }
 
 TEST(DirectedCscGraph, EmptyAndDiagonalOnlyInputs) {
-    Eigen::SparseMatrix<double> empty(0,0);
+    const Sparse empty(0,0);
     expect_directed_csc_matches_general(empty);
-    Eigen::SparseMatrix<double> diagonal(3,3);
-    diagonal.insert(0,0)=1;
-    diagonal.insert(2,2)=2;
-    diagonal.makeCompressed();
+    const std::vector<Triplet> entries{{0,0,1}, {2,2,2}};
+    const Sparse diagonal = apxchol::test::from_triplets(3, 3, entries);
     expect_directed_csc_matches_general(diagonal);
 }
 
@@ -659,7 +658,7 @@ TEST(SegmentedPool, SmallTouchDoesNotPopulateGiantSegmentPages) {
     constexpr std::size_t bytes = slots * sizeof(std::uint64_t);
     const long page = ::sysconf(_SC_PAGESIZE);
     ASSERT_GT(page, 0);
-    apxchol::segmented_pool<std::uint64_t, slots> pool;
+    apxchol::detail::segmented_pool<std::uint64_t, slots> pool;
     const std::size_t used = 3 * static_cast<std::size_t>(page);
     ASSERT_EQ(pool.claim(used / sizeof(std::uint64_t)), 0u);
     // Touch a complete PMD-aligned region when possible: an unaligned prefix

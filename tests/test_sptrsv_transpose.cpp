@@ -1,6 +1,6 @@
 // Byte-identity tests for the shared CSC→CSR transpose (transpose.h) through
 // BOTH its callers: omp_sptrsv::setup (the CPU SpTRSV's CSR of L11) and
-// cuda_host::transpose_csr (the GPU backend's host prep: CSR of L from CSR of
+// gpu_factor_prep::transpose_csr (the GPU backend's host prep: CSR of L from CSR of
 // L^T, int32 arrays, plain value copy).
 //
 // The blocked counting-sort transpose (engaged for
@@ -18,14 +18,16 @@
 #include <omp.h>
 
 #include "apxchol/sparse_csc.h"
-#include "apxchol/solver/sptrsv/cuda_host.h"
+#include "apxchol/solver/sptrsv/gpu_factor_prep.h"
 #include "apxchol/solver/sptrsv/omp.h"
+
+using csc_access = apxchol::detail::sparse_csc_access;
 
 using apxchol::edge_index;
 using apxchol::node_index;
 using apxchol::sparse_csc;
 using apxchol::factor_value_t;
-using apxchol::sptrsv_value_t;
+using apxchol::detail::sptrsv_value_t;
 
 namespace {
 
@@ -41,9 +43,9 @@ struct ref_csr {
 ref_csr reference_transpose(const sparse_csc& L) {
     const node_index m   = L.rows();
     const edge_index nnz = L.nonZeros();
-    const auto* outer = L.outerIndexPtr();
-    const auto* inner = L.innerIndexPtr();
-    const auto* vals  = L.valuePtr();
+    const auto* outer = L.col_ptrs().data();
+    const auto* inner = L.row_indices().data();
+    const auto* vals  = L.values().data();
 
     ref_csr R;
     R.row_ptr.assign(static_cast<size_t>(m) + 1, 0);
@@ -59,11 +61,11 @@ ref_csr reference_transpose(const sparse_csc& L) {
         // factor_value_t -> sptrsv_value_t through the documented storage
         // contract (RNE narrowing of the value divided by the per-column scale
         // under FP16_SCALED; a plain cast otherwise).
-        const float s_j = apxchol::omp_sptrsv::column_scale(vals, outer[j], outer[j + 1]);
+        const float s_j = apxchol::detail::omp_sptrsv::column_scale(vals, outer[j], outer[j + 1]);
         for (edge_index p = outer[j]; p < outer[j + 1]; ++p) {
             const edge_index out = pos[inner[p]]++;
             R.col_idx[out] = j;
-            R.vals[out]    = apxchol::omp_sptrsv::narrow_value(vals[p], s_j);
+            R.vals[out]    = apxchol::detail::omp_sptrsv::narrow_value(vals[p], s_j);
         }
     }
     return R;
@@ -79,8 +81,8 @@ sparse_csc make_random_lower(node_index m, double avg_offdiag, unsigned seed) {
     std::poisson_distribution<int> pcount(avg_offdiag);
 
     sparse_csc L;
-    L.n_ = m;
-    L.outer_.assign(static_cast<size_t>(m) + 1, 0);
+    csc_access::n(L) = m;
+    csc_access::outer(L).assign(static_cast<size_t>(m) + 1, 0);
 
     std::vector<std::vector<node_index>> col_rows(m);
     for (node_index j = 0; j < m; ++j) {
@@ -96,21 +98,21 @@ sparse_csc make_random_lower(node_index m, double avg_offdiag, unsigned seed) {
         rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
     }
     for (node_index j = 0; j < m; ++j)
-        L.outer_[j + 1] = L.outer_[j] + static_cast<edge_index>(col_rows[j].size());
-    L.inner_.resize(static_cast<size_t>(L.outer_[m]));
-    L.vals_.resize(static_cast<size_t>(L.outer_[m]));
+        csc_access::outer(L)[j + 1] = csc_access::outer(L)[j] + static_cast<edge_index>(col_rows[j].size());
+    csc_access::inner(L).resize(static_cast<size_t>(csc_access::outer(L)[m]));
+    csc_access::vals(L).resize(static_cast<size_t>(csc_access::outer(L)[m]));
     for (node_index j = 0; j < m; ++j) {
-        edge_index out = L.outer_[j];
+        edge_index out = csc_access::outer(L)[j];
         for (node_index r : col_rows[j]) {
-            L.inner_[out] = r;
-            L.vals_[out]  = static_cast<factor_value_t>(uval(rng));
+            csc_access::inner(L)[out] = r;
+            csc_access::vals(L)[out]  = static_cast<factor_value_t>(uval(rng));
             ++out;
         }
     }
     return L;
 }
 
-void expect_byte_identical(const apxchol::omp_sptrsv& trsv, const ref_csr& R,
+void expect_byte_identical(const apxchol::detail::omp_sptrsv& trsv, const ref_csr& R,
                            int threads) {
     SCOPED_TRACE("threads=" + std::to_string(threads));
     ASSERT_EQ(trsv.csr_row_ptr().size(), R.row_ptr.size());
@@ -140,7 +142,7 @@ TEST(SpTRSVTranspose, ByteIdenticalToSerialReferenceAcrossThreadCounts) {
     // covers the full machine when the binary is run standalone.
     for (int threads : {1, 2, 3, 4, max_threads}) {
         omp_set_num_threads(threads);
-        apxchol::omp_sptrsv trsv;
+        apxchol::detail::omp_sptrsv trsv;
         trsv.setup(L, m);
         expect_byte_identical(trsv, R, threads);
     }
@@ -154,7 +156,7 @@ TEST(SpTRSVTranspose, RowsAreAscendingWithDiagonalLast) {
     const node_index m = 60000;   // > 50000: parallel path
     sparse_csc L = make_random_lower(m, 3.0, /*seed=*/777);
 
-    apxchol::omp_sptrsv trsv;
+    apxchol::detail::omp_sptrsv trsv;
     trsv.setup(L, m);
 
     const auto& row_ptr = trsv.csr_row_ptr();
@@ -168,7 +170,7 @@ TEST(SpTRSVTranspose, RowsAreAscendingWithDiagonalLast) {
     }
 }
 
-// ── The GPU backend's host transpose (cuda_host::transpose_csr) ─────────
+// ── The GPU backend's host transpose (gpu_factor_prep::transpose_csr) ─────────
 // The same shared implementation on int32 arrays with a plain value copy:
 // byte-identical to an independent serial reference on the parallel path
 // (m > 50000) at every thread count, and on the serial path.
@@ -181,7 +183,7 @@ struct ref_csr_int {
 };
 
 template <class V>
-ref_csr_int<V> reference_transpose_int(const apxchol::cuda_host::csr_int<V>& A) {
+ref_csr_int<V> reference_transpose_int(const apxchol::detail::gpu_factor_prep::csr_int<V>& A) {
     ref_csr_int<V> R;
     R.ptr.assign(static_cast<size_t>(A.m) + 1, 0);
     for (std::int64_t p = 0; p < A.nnz; ++p) R.ptr[A.idx[p] + 1]++;
@@ -198,10 +200,10 @@ ref_csr_int<V> reference_transpose_int(const apxchol::cuda_host::csr_int<V>& A) 
 }
 
 template <class V>
-void expect_gpu_transpose_identical(const apxchol::cuda_host::csr_int<V>& LT, const ref_csr_int<V>& R,
+void expect_gpu_transpose_identical(const apxchol::detail::gpu_factor_prep::csr_int<V>& LT, const ref_csr_int<V>& R,
                                     int threads) {
     SCOPED_TRACE("threads=" + std::to_string(threads));
-    const auto Lc = apxchol::cuda_host::transpose_csr(LT);
+    const auto Lc = apxchol::detail::gpu_factor_prep::transpose_csr(LT);
     ASSERT_EQ(Lc.m, LT.m);
     ASSERT_EQ(Lc.nnz, LT.nnz);
     ASSERT_EQ(Lc.ptr.size(), R.ptr.size());
@@ -218,8 +220,8 @@ TEST(SpTRSVTranspose, GpuHostTransposeIsByteIdenticalToSerialReferenceAcrossThre
     sparse_csc L = make_random_lower(m, 4.0, /*seed=*/12345);
     // The GPU backend's int32 CSC of L11 (== CSR of L^T), fp32 values, and its
     // fp16 bit-pattern twin (the fp16 storage transposes uint16_t values).
-    const auto LT = apxchol::cuda_host::build_L11_csc_int<factor_value_t>(L, m);
-    apxchol::cuda_host::csr_int<std::uint16_t> LT16;
+    const auto LT = apxchol::detail::gpu_factor_prep::build_L11_csc_int<factor_value_t>(L, m);
+    apxchol::detail::gpu_factor_prep::csr_int<std::uint16_t> LT16;
     LT16.m = LT.m; LT16.nnz = LT.nnz; LT16.ptr = LT.ptr;
     LT16.idx  = std::make_unique<int[]>(static_cast<size_t>(LT.nnz));
     LT16.vals = std::make_unique<std::uint16_t[]>(static_cast<size_t>(LT.nnz));
@@ -240,7 +242,7 @@ TEST(SpTRSVTranspose, GpuHostTransposeIsByteIdenticalToSerialReferenceAcrossThre
     omp_set_num_threads(max_threads);
     // And it IS the CPU backend's CSR of L11 (same shared code, same input):
     // row pointers, column indices, values (fp32 storage: a plain cast).
-    apxchol::omp_sptrsv trsv;
+    apxchol::detail::omp_sptrsv trsv;
     trsv.setup(L, m);
     ASSERT_EQ(trsv.csr_row_ptr().size(), R.ptr.size());
     for (node_index i = 0; i <= m; ++i)
@@ -257,7 +259,7 @@ TEST(SpTRSVTranspose, GpuHostTransposeIsByteIdenticalToSerialReferenceAcrossThre
 TEST(SpTRSVTranspose, GpuHostTransposeSerialPathMatchesReference) {
     const node_index m = 20000;   // <= 50000: serial path
     sparse_csc L = make_random_lower(m, 5.0, /*seed=*/4242);
-    const auto LT = apxchol::cuda_host::build_L11_csc_int<factor_value_t>(L, m);
+    const auto LT = apxchol::detail::gpu_factor_prep::build_L11_csc_int<factor_value_t>(L, m);
     const auto R  = reference_transpose_int(LT);
     expect_gpu_transpose_identical(LT, R, 0);
 }
@@ -269,7 +271,7 @@ TEST(SpTRSVTranspose, SerialFallbackMatchesReference) {
     sparse_csc L = make_random_lower(m, 5.0, /*seed=*/4242);
     const ref_csr R = reference_transpose(L);
 
-    apxchol::omp_sptrsv trsv;
+    apxchol::detail::omp_sptrsv trsv;
     trsv.setup(L, m);
     expect_byte_identical(trsv, R, 0);
 }

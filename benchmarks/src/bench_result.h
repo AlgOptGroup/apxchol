@@ -19,11 +19,12 @@ struct BenchResult {
     double solve_rss_mb = 0;   // host VmRSS held during the solve phase (factor+operator+
                                // vectors, after the setup pool is freed). Peak RSS comes
                                // from /usr/bin/time externally; peak - this = setup transient.
-    // GPU device memory (MB), -1 = unmeasured (CPU solvers, or no CUDA). The device analog
-    // of solve_rss_mb: VRAM in use at the end of the solve phase (operator + factor + SpSV
-    // buffers + PCG vectors still resident), read via cudaMemGetInfo (total-free). Whole-run
-    // PEAK VRAM is sampled externally by the sweep (nvidia-smi --query-compute-apps), the
-    // device analog of /usr/bin/time -%M; peak - solve = the setup/analysis transient.
+    // GPU device memory (MiB) this process holds above its post-context baseline, read
+    // via NVML for this PID (gpu_memory.h); -1 = unmeasured (CPU solvers, no CUDA, or NVML
+    // cannot attribute it). setup: after setup returns; solve: at solve end with operator,
+    // factor/hierarchy and PCG vectors still resident. Whole-run PEAK is sampled by the
+    // runner's untimed nvidia-smi pass for the same PID.
+    double setup_vram_mb = -1;
     double solve_vram_mb = -1;
     int retained_repeats = 1;
     int representative_repeat = 1;

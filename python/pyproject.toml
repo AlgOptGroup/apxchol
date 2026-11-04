@@ -1,15 +1,14 @@
 [build-system]
-requires = ["scikit-build-core>=0.10", "pybind11>=3.1"]
+requires = ["scikit-build-core>=0.12", "pybind11>=3.1"]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "apxchol"
-dynamic = ["version"]
+dynamic = ["version", "license"]
 description = "Approximate-Cholesky preconditioner for graph-Laplacian / SDDM linear systems"
 readme = "README.md"
-license = {file = "LICENSE"}
 requires-python = ">=3.11"
-dependencies = ["numpy>=1.21", "scipy>=1.7"]
+dependencies = ["numpy>=1.21"]
 authors = [
     {name = "Oleksandr Kulkov"},
     {name = "Yves Baumann"},
@@ -36,14 +35,29 @@ Repository = "https://github.com/AlgOptGroup/apxchol"
 Issues = "https://github.com/AlgOptGroup/apxchol/issues"
 
 [project.optional-dependencies]
+scipy = ["scipy>=1.7"]
 test = ["pytest>=7"]
 
 [tool.scikit-build]
-minimum-version = "0.10"
+minimum-version = "0.12"
 cmake.version = ">=3.20"
 wheel.packages = ["apxchol"]
 build-dir = "build/{wheel_tag}"
 wheel.license-files = ["LICENSE*"]
+
+# Wheels also contain pybind11 (BSD-3-Clause) and the LLVM
+# OpenMP runtime (Apache-2.0 WITH LLVM-exception). CUDA
+# builds add the CUDA runtime under the NVIDIA CUDA EULA, plus CCCL; the Linux
+# wheel job copies both license texts from the installed toolkit. Each license
+# text is under the wheel's .dist-info/licenses.
+[tool.scikit-build.metadata.license]
+provider = "scikit_build_core.metadata.template"
+result = "BSD-3-Clause AND Apache-2.0 WITH LLVM-exception"
+
+[[tool.scikit-build.overrides]]
+if.env.CMAKE_ARGS = ".*-DAPXCHOL_DEVICE=CUDA.*"
+metadata.license.provider = "scikit_build_core.metadata.template"
+metadata.license.result = "BSD-3-Clause AND Apache-2.0 WITH LLVM-exception AND LicenseRef-NVIDIA-CUDA-EULA"
 
 [tool.scikit-build.metadata.version]
 provider = "scikit_build_core.metadata.regex"
@@ -55,7 +69,7 @@ build = "cp311-* cp312-* cp313-* cp314-* cp315-*"
 skip = "*-musllinux_*"
 # Fetch the upstream license for the OpenMP runtime bundled by wheel repair.
 before-build = 'curl -fsSL --retry 3 https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-21.1.8/openmp/LICENSE.TXT -o "{package}/LICENSE.libomp.txt"'
-test-extras = ["test"]
+test-extras = ["test", "scipy"]
 test-command = "python -m pytest {package}/tests -q"
 config-settings = { "cmake.define.APXCHOL_NATIVE_ARCH" = "OFF", "cmake.define.CMAKE_COMPILE_WARNING_AS_ERROR" = "ON", "cmake.version" = ">=4.4" }
 

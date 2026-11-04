@@ -1,5 +1,8 @@
 # Extending the solver
 
+These extension interfaces are experimental in 1.x: they may change in minor
+releases, and each change is noted in the [changelog](../CHANGELOG.md).
+
 Factorization alternates between selecting an independent set of vertices and
 replacing each selected star by sampled Schur-complement edges. These are the
 public **partitioner** and **eliminator** template seams. The resulting factor
@@ -50,8 +53,7 @@ random streams, factors can differ across thread counts because parallel
 accumulation and the selected order can differ.
 
 `as_eliminator(lambda)` adapts a matching callable. An instance is passed by
-const reference, allowing immutable configuration. The built-in
-`tree_elimination` also supports `exact_clique_max_degree`.
+const reference, allowing immutable configuration.
 [custom_eliminator.cpp](../examples/custom_eliminator.cpp) demonstrates exact
 clique elimination, including end-to-end solution checks.
 
@@ -62,10 +64,9 @@ The concatenation of selected rounds defines the elimination order. Implement
 
 ```cpp
 struct my_partitioner {
-    static constexpr std::string_view name = "mine";
     static constexpr bool degree_prepass = true;
 
-    void find_partition(apxchol::graph& G,
+    void find_partition(const apxchol::partition_graph& G,
                         std::span<const apxchol::node_index> candidates,
                         const apxchol::partition_context& ctx,
                         apxchol::selection& out);
@@ -82,7 +83,8 @@ See the header for optional `sample_bounded` and
 `residual_handoff_threshold` traits.
 
 `ctx.options` contains selection settings, `ctx.seed` supplies randomness,
-`ctx.omp_threshold` gates parallel work, and `ctx.cp` is optional profiling.
+`ctx.omp_threshold` gates parallel work, and `ctx.degree_tiebreak` asks the rule
+to prefer lower-degree vertices in conflicts.
 The rule is called once per round and may parallelize internally. This is the
 opposite of the eliminator, whose individual calls are already parallelized.
 
@@ -94,20 +96,18 @@ compute conflict decisions, synchronize, and then apply changes. Both the
 selected set and insertion order must be deterministic for the same graph,
 context, and team size; dynamic arrival order must not choose the result.
 
-The graph is mutable only to permit pruning already-dead incidences.
-`G.adj(v)` yields incidence records whose `.to` member is the neighbor,
-`G.neighbors(v)` yields `{to, w}` pairs with FP64 weights, and `G.is_active(u)`
-tells whether a neighbor is still live. Incidences to eliminated vertices stay
-in `G.adj(v)` until pruned; `G.prune_and_degree(v)` and
-`G.prune_and_visit(v, f)` remove them, calling `f(u)` for each live neighbor.
-Do not otherwise mutate the represented graph. `G.m()` counts ever-added
-edges, not current live edges.
+`G` is a read-only view of the residual graph. `G.n()` is the vertex count,
+including eliminated vertices, and `G.is_active(v)` tells whether `v` is still
+live. `G.for_each_neighbor(v, f)` calls `f(u)` for each live neighbor `u`,
+once per parallel edge, and returns that count; `G.degree(v)` returns the
+count alone. Both drop `v`'s stored incidences of eliminated vertices, so
+concurrent calls must use distinct `v`, and `f` must not query `v` itself.
+Querying another vertex inside `f` is fine when no other thread visits it.
 
-Partitioner instances are passed by value. Callable adapters are
-`as_partitioner` and `as_prepass_partitioner`. Direct template use requires no
-registry change; by-name CLI/binding dispatch requires adding the type to
-`partitioner_list`. [custom_order.cpp](../examples/custom_order.cpp) shows
-complete integration.
+Pass a partitioner instance to `factorize`, alone or with an eliminator; it is
+taken by value and replaces `factor_options::partitioner`. Callable adapters
+are `as_partitioner` and `as_prepass_partitioner`.
+[custom_order.cpp](../examples/custom_order.cpp) shows complete integration.
 
 ## Reusing a custom factor
 
@@ -122,21 +122,24 @@ An explicit GPU request uploads the factor for CUDA or Metal solves, without
 factorizing again. Automatic adoption stays on CPU. The original matrix `A`
 is still needed for PCG and residual checks.
 
-The factor may come from CPU construction or from a GPU solver created with
-`keep_factor_values=true`: pass its `solver.factor()` to the constructor above.
-The destination rebuilds its own triangular-solve storage. There is no built-in
-save/load format; this handoff is in memory.
+The factor may come from CPU construction or from any solver's
+`solver.factor()`, which returns its installed factor; pass it to the
+constructor above. The destination rebuilds its own triangular-solve layout.
+For a handoff between processes, use [saved solvers](serialization.md).
 
-`apxchol::apx_cholesky::set_factor` also accepts a factor for use with an
-Eigen iterative solver. That adapter always applies it on CPU.
+To precondition another iterative solver with the factor, construct
+`solver(A, std::move(F), opts)` and call its `apply`; see
+[using another iterative solver](usage.md#using-another-iterative-solver).
 
 A `factorization` holds CSC factor columns
 (diagonal first), permutation with `perm[original] = elimination_position`,
-operator kind, and round metadata. Preserve these conventions. Enable
-`set_keep_factor(true)` before installation if the preconditioner must retain
-exportable factor arrays; consuming solver paths may release them.
+operator kind, round metadata and its storage form. Preserve these
+conventions. The factor `L` is a read-only view; build factors with
+`factorize` or load them from an archive. A custom factor uses
+`storage = automatic`, so the solver applies its dropping and storage options.
 
-Graph storage is the directed AoS pool. Custom partitioners and eliminators
-operate on the same graph. The PCG recurrence, factor-column formula, and triangular-solve
-kernels are not additional template seams. Preserve the current defaults and
-[precision contract](precision.md); retired options are not supported APIs.
+Custom partitioners and eliminators see the residual graph only through
+`partition_graph` and the neighbor span. The PCG recurrence, factor-column
+formula, and triangular-solve kernels are not additional template seams.
+Preserve the current defaults and [precision contract](precision.md); retired
+options are not supported APIs.

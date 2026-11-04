@@ -32,7 +32,7 @@ function test_apxchol()
   end
 
   function assert_same_solve(actual, expected, label)
-    assert(actual.iters == expected.iters && actual.converged == expected.converged, ...
+    assert(actual.iterations == expected.iterations && actual.converged == expected.converged, ...
            '%s: solve status differs', label);
     assert(norm(actual.x - expected.x) <= 1e-14 && ...
            abs(actual.residual - expected.residual) <= 1e-14, ...
@@ -46,7 +46,7 @@ function test_apxchol()
   assert(res.converged, 'laplacian: not converged');
   assert(res.residual <= 1e-8, 'laplacian: residual %g > tol', res.residual);
   assert(norm(L * res.x - b) / norm(b) <= 1e-6, 'laplacian: true residual too big');
-  ok = ok + 1; fprintf('ok %d  laplacian solve converges (it=%d)\n', ok, res.iters);
+  ok = ok + 1; fprintf('ok %d  laplacian solve converges (it=%d)\n', ok, res.iterations);
 
   % ── 2. SDDM solve converges ──
   n = 400;
@@ -55,7 +55,7 @@ function test_apxchol()
   bs = randn(n, 1);
   res = apxchol_solve(Ls, bs);
   assert(res.converged && res.residual <= 1e-8, 'sddm: not converged to tol');
-  ok = ok + 1; fprintf('ok %d  sddm solve converges (it=%d)\n', ok, res.iters);
+  ok = ok + 1; fprintf('ok %d  sddm solve converges (it=%d)\n', ok, res.iterations);
 
   % ── 3. factor reused across many b ──
   L = grid2d_laplacian(40);
@@ -66,6 +66,23 @@ function test_apxchol()
     assert(rk.converged && rk.residual <= 1e-8, 'reuse: solve %d failed', k);
   end
   ok = ok + 1; fprintf('ok %d  factor reused across 4 rhs\n', ok);
+
+  % ── 3b. setup and solve seconds ──
+  setup = s.setup_seconds;
+  assert(isscalar(setup) && isfinite(setup) && setup > 0, 'setup_seconds: %g', setup);
+  bt = randn(size(L, 1), 1);  bt = bt - mean(bt);
+  for rhs = {bt, [bt, -bt]}
+    rt = s.solve(rhs{1});
+    assert(isscalar(rt.solve_seconds) && isfinite(rt.solve_seconds) && rt.solve_seconds > 0, ...
+           'solve_seconds: %g', rt.solve_seconds);
+  end
+  assert(s.setup_seconds == setup, 'setup_seconds changed across solves');
+  r1 = apxchol_solve(L, bt);
+  assert(isfinite(r1.solve_seconds) && r1.solve_seconds > 0, 'one-shot solve_seconds');
+  caught = false;
+  try, s.setup_seconds = 1; catch, caught = true; end
+  assert(caught, 'setup_seconds must be read-only');
+  ok = ok + 1; fprintf('ok %d  setup_seconds and solve_seconds reported\n', ok);
 
   % ── 4. apply() = one preconditioner application ──
   z = s.apply(randn(size(L, 1), 1));
@@ -104,14 +121,12 @@ function test_apxchol()
   assert(strcmp(id, 'apxchol:badInput'), 'wrong identifier: %s', id);
   assert(~isempty(strfind(msg, 'Condition FAILED: positive diagonal')), ...
          'message: does not name the failed condition');
-  assert(~isempty(strfind(msg, sprintf('Not one of the %d non-empty rows', n7*n7))), ...
+  assert(~isempty(strfind(msg, sprintf('%d of %d non-empty rows', n7*n7, n7*n7))), ...
          'message: no row count');
-  assert(~isempty(strfind(msg, sprintf('%d off-diagonal entries are positive', nnz(A7)))), ...
-         'message: no off-diagonal count');
   assert(~isempty(strfind(msg, 'apxchol solves symmetric SDDM / Laplacian operators')), ...
          'message: does not say what is wanted');
   assert(~isempty(strfind(msg, 'ADJACENCY matrix')), 'message: no detection');
-  assert(~isempty(strfind(msg, 'apxchol_laplacian(A)')), 'message: no fix');
+  assert(~isempty(strfind(msg, 'apxchol_as_operator(M)')), 'message: no fix');
   ok = ok + 1; fprintf('ok %d  adjacency input rejected with a diagnosis\n', ok);
 
   % ── 8. positive off-diagonals on a positive diagonal are LUMPED, not refused ──
@@ -134,36 +149,47 @@ function test_apxchol()
   assert(~isempty(strfind(msg, 'first at row 1')), 'message: no witness row');
   ok = ok + 1; fprintf('ok %d  positive off-diagonals lumped, bad diagonal refused\n', ok);
 
-  % ── 9. apxchol_laplacian assembles L = D - A ──
-  L9 = apxchol_laplacian(A7);
-  assert(norm(L9 - L7, 1) == 0, 'laplacian: does not match D - A');
+  % ── 9. apxchol_as_operator: the rule shared with the CLI's --convert-input ──
+  % valid operators come back unchanged
+  S9 = L7 + 0.1 * speye(n7*n7);
+  assert(isequal(apxchol_as_operator(L7), L7), 'as_operator: Laplacian changed');
+  assert(isequal(apxchol_as_operator(S9), S9), 'as_operator: SDDM changed');
+  % an adjacency matrix becomes L = D - A ...
+  L9 = apxchol_as_operator(A7);
+  assert(norm(L9 - L7, 1) == 0, 'as_operator: does not match D - A');
   b9 = randn(n7*n7, 1);  b9 = b9 - mean(b9);
   r9 = apxchol_solve(L9, b9);
-  assert(r9.converged && r9.residual <= 1e-8, 'laplacian: converted solve failed');
-
-  % self-loops contribute nothing; isolated vertices give all-zero rows
+  assert(r9.converged && r9.residual <= 1e-8, 'as_operator: converted solve failed');
+  % ... with self-loops cancelling, also for a logical (pattern) matrix
   As = A7;  As(1, 1) = 5.0;
-  assert(norm(apxchol_laplacian(As) - L7, 1) == 0, 'laplacian: self-loop leaked');
+  Ds = spdiags(full(sum(As, 2)), 0, n7*n7, n7*n7) - As;
+  assert(norm(apxchol_as_operator(As) - Ds, 1) == 0, 'as_operator: not D - A with a self-loop');
+  assert(norm(apxchol_as_operator(As) - L7, 1) == 0, 'as_operator: self-loop leaked');
+  P9 = A7 ~= 0;  P9(1, 1) = true;
+  assert(norm(apxchol_as_operator(P9) - L7, 1) == 0, 'as_operator: pattern not converted');
+  % isolated vertices give all-zero rows
   Ai = sparse(5, 5);  Ai(2, 3) = 1;  Ai(3, 2) = 1;
-  Li = apxchol_laplacian(Ai);
-  assert(isequal(full(diag(Li))', [0 1 1 0 0]), 'laplacian: isolated vertices wrong');
-  assert(max(abs(sum(Li, 2))) == 0, 'laplacian: rows do not sum to zero');
-
-  % |A_ij|, so a negatively-stored edge is read as an undirected edge
-  An = sparse([1 2], [2 1], [-2 -2], 2, 2);
-  assert(isequal(full(apxchol_laplacian(An)), [2 -2; -2 2]), 'laplacian: sign handling');
-
+  Li = apxchol_as_operator(Ai);
+  assert(isequal(full(diag(Li))', [0 1 1 0 0]), 'as_operator: isolated vertices wrong');
+  assert(max(abs(sum(Li, 2))) == 0, 'as_operator: rows do not sum to zero');
+  % mixed signs are left to the solver; an asymmetric matrix raises, saying why
+  Am = sparse([1 2 2 3], [2 1 3 2], [1 1 -1 -1], 3, 3);
+  assert(isequal(apxchol_as_operator(Am), Am), 'as_operator: mixed signs must pass unchanged');
+  err = false;  msg = '';
+  try, apxchol_as_operator(sparse([1 2], [2 3], [1 1], 3, 3)); catch e, err = true; msg = e.message; end
+  assert(err, 'as_operator: an asymmetric matrix must error');
+  assert(~isempty(strfind(msg, 'transpose partner')), 'as_operator: no reason');
   % a weighted symmetric adjacency matrix, and the input is left alone
   Mw = sprand(40, 40, 0.1);  Aw = Mw + Mw';
   Aw = Aw - spdiags(diag(Aw), 0, 40, 40);
   before = Aw;
-  Lw = apxchol_laplacian(Aw);
-  assert(isequal(Aw, before), 'laplacian: mutated its input');
-  assert(max(abs(sum(Lw, 2))) < 1e-12, 'laplacian: weighted rows do not sum to zero');
+  Lw = apxchol_as_operator(Aw);
+  assert(isequal(Aw, before), 'as_operator: mutated its input');
+  assert(max(abs(sum(Lw, 2))) < 1e-12, 'as_operator: weighted rows do not sum to zero');
   err = false;
-  try, apxchol_laplacian(sparse(ones(3, 4))); catch, err = true; end
-  assert(err, 'laplacian: non-square must error');
-  ok = ok + 1; fprintf('ok %d  apxchol_laplacian assembles L = D - A\n', ok);
+  try, apxchol_as_operator(sparse(ones(3, 4))); catch, err = true; end
+  assert(err, 'as_operator: non-square must error');
+  ok = ok + 1; fprintf('ok %d  apxchol_as_operator keeps operators and converts graphs\n', ok);
 
   % ── 10. malformed options reject before scalar/integer conversion ──
   Aopts = sparse([2 -1; -1 2]); bopts = [1; -1]; zopts = zeros(2, 1);
@@ -215,18 +241,13 @@ function test_apxchol()
     rejected = rejected + 1;
   end
   % Only numeric [] selects defaults; other empty types are invalid.
-  raw_handle = apxchol_mex('factorize', Aopts);
-  raw_cleanup = onCleanup(@() apxchol_mex('free', raw_handle));
-  raw_empty = {{}, ''};
-  for k = 1:numel(raw_empty)
-    value = raw_empty{k};
-    expect_bad_option(@() apxchol_mex('solve', raw_handle, bopts, value, 20), ...
-                      'tol', 'raw empty');
-    expect_bad_option(@() apxchol_mex('solve', raw_handle, bopts, 1e-8, value), ...
-                      'maxiter', 'raw empty');
+  typed_empty = {{}, ''};
+  for k = 1:numel(typed_empty)
+    value = typed_empty{k};
+    expect_bad_option(@() sopts.solve(bopts, value, 20), 'tol', 'typed empty');
+    expect_bad_option(@() sopts.solve(bopts, 1e-8, value), 'maxiter', 'typed empty');
     rejected = rejected + 2;
   end
-  clear raw_cleanup;
   assert(rejected == 48, 'malformed option case denominator changed');
   reused = sopts.solve(bopts);
   assert(reused.converged && norm(Aopts * reused.x - bopts) / norm(bopts) < 1e-8, ...
@@ -256,7 +277,7 @@ function test_apxchol()
   };
   for k = 1:size(valid_options, 1)
     r = sopts.solve(zopts, valid_options{k, 1}, valid_options{k, 2});
-    assert(r.iters == 0 && r.residual == 0 && all(r.x == 0) && r.converged);
+    assert(r.iterations == 0 && r.residual == 0 && all(r.x == 0) && r.converged);
   end
   ok = ok + 1; fprintf('ok %d  accepted scalar options (%d cases)\n', ok, size(valid_options, 1));
 
@@ -274,27 +295,30 @@ function test_apxchol()
     assert_same_solve(invoke(), core_default, 'omitted/empty C++ defaults');
   end
   r = sopts.solve(bopts, 1, 0);
-  assert(r.iters == 0 && r.residual == 1 && ~r.converged && all(r.x == 0));
+  assert(r.iterations == 0 && r.residual == 1 && ~r.converged && all(r.x == 0));
   r = sopts.solve(bopts, 2, 0);
-  assert(r.iters == 0 && r.residual == 1 && r.converged && all(r.x == 0));
+  assert(r.iterations == 0 && r.residual == 1 && r.converged && all(r.x == 0));
   one_shot = apxchol_solve(Aopts, zopts);
-  assert(one_shot.converged && one_shot.iters == 0 && one_shot.residual == 0);
+  assert(one_shot.converged && one_shot.iterations == 0 && one_shot.residual == 0);
   assert_same_solve(apxchol_solve(Aopts, zopts, [], []), one_shot, 'one-shot defaults');
   ok = ok + 1; fprintf('ok %d  shared defaults and convergence\n', ok);
 
   % ── 13. explicit setup controls and input shape ──
-  options = struct('num_threads', 1, 'seed', 7, 'factor_storage', 'float32', ...
-                   'cpu_schedule', 'levels', 'drop_tolerance', 0, ...
+  options = struct('num_threads', 1, 'seed', 7, 'partitioner', 'priority_greedy', ...
+                   'sampler', 'trace_cycle', 'factor_storage', 'float32', ...
+                   'degree_quantile', 0, 'degree_multiplier', 3, 'drop_tolerance', 0, ...
                    'regularization', 0, 'lump_max_mass', 0.25, 'verbose', false);
   for drop = [0 1]
     options.drop_tolerance = drop;
     controlled = apxchol_solver(Aopts, options);
     r = controlled.solve(bopts);
     assert(r.converged && norm(Aopts * r.x - bopts) / norm(bopts) < 1e-8);
-    assert_same_solve(apxchol_solve(Aopts, bopts, [], [], options), r, 'one-shot setup options');
+    assert_same_solve(apxchol_solve(Aopts, bopts, [], [], [], options), r, 'one-shot setup options');
   end
   bad_options = {struct('num_threads', 1.5), struct('num_threads', -1), ...
-                 struct('seed', 1.5), struct('cpu_schedule', 'unknown'), ...
+                 struct('seed', 1.5), struct('partitioner', 'unknown'), ...
+                 struct('sampler', 'unknown'), struct('degree_quantile', 1), ...
+                 struct('degree_multiplier', 0), struct('cpu_schedule', 'levels'), ...
                  struct('factor_storage', 'float64'), struct('drop_tolerance', -1), ...
                  struct('drop_tolerance', 1 + eps(1)), struct('drop_tolerance', 2), ...
                  struct('drop_tolerance', NaN), struct('drop_tolerance', Inf), ...
@@ -312,5 +336,87 @@ function test_apxchol()
   assert(rejected_shape, 'matrix RHS was silently flattened');
   ok = ok + 1; fprintf('ok %d  explicit setup controls\n', ok);
 
-  fprintf('ALL %d TESTS PASSED\n', ok);
+  % ── 14. native matrix solves, apply and warm starts ──
+  rng(17);
+  operators = {grid2d_laplacian(7) + 0.5 * speye(49), ...
+               blkdiag(grid2d_laplacian(4), grid2d_laplacian(3))};
+  for a = 1:numel(operators)
+    A = operators{a}; n = size(A, 1);
+    batch_solver = apxchol_solver(A, struct('num_threads', 1));
+    for width = [0 1 4 5 16]
+      exact = randn(n, width);
+      if width > 1, exact(:, 2) = 0; end
+      B = A * exact; before = B;
+      result = batch_solver.solve(B, 1e-9, 500);
+      assert(isequal(size(result.x), [n width]));
+      assert(isequal(size(result.iterations), [1 width]));
+      assert(isequal(size(result.residual), [1 width]));
+      assert(isequal(size(result.converged), [1 width]) && islogical(result.converged));
+      assert(all(result.converged));
+      errors = sqrt(sum((A * result.x - B).^2, 1));
+      assert(all(errors <= 1e-9 * sqrt(sum(B.^2, 1)) + 1e-12));
+      Z = batch_solver.apply(B);
+      assert(isequal(size(Z), [n width]));
+      for j = 1:width
+        scalar_z = batch_solver.apply(B(:, j));
+        assert(norm(Z(:, j) - scalar_z) <= 1e-11 * max(1, norm(scalar_z)));
+      end
+      warm = batch_solver.solve(B, 1e-9, 0, exact);
+      assert(all(warm.converged) && all(warm.iterations == 0));
+      limited = batch_solver.solve(B, 1e-14, 0);
+      assert(all(limited.iterations == 0));
+      assert(all(limited.converged == all(B == 0, 1)));
+      assert(isequal(B, before), 'matrix input was changed');
+    end
+  end
+  ok = ok + 1; fprintf('ok %d  native matrix solves/apply/warm starts (10 shapes)\n', ok);
+
+  % ── 15. scalar systems, row vectors and one-shot warm starts ──
+  scalar_solver = apxchol_solver(sparse(2));
+  for width = [0 1 4]
+    B = 1:width;
+    result = scalar_solver.solve(B);
+    assert(isequal(size(result.x), [1 width]) && all(result.converged));
+    assert(norm(result.x - B / 2) < 1e-14);
+    assert(isequal(size(scalar_solver.apply(B)), [1 width]));
+  end
+  row = sopts.solve(bopts');
+  assert_same_solve(row, sopts.solve(bopts), 'legacy row vector');
+  assert(isequal(size(sopts.apply(bopts')), [2 1]));
+  exact = [1 2 3 4; -2 -3 -4 -5]; B = Aopts * exact;
+  warm = apxchol_solve(Aopts, B, 1e-9, 0, exact);
+  assert(all(warm.converged) && all(warm.iterations == 0));
+  assert(norm(warm.x - exact) < 1e-14);
+  row_warm = sopts.solve(B(:, 1)', 1e-9, 0, exact(:, 1)');
+  assert(row_warm.converged && row_warm.iterations == 0);
+  ok = ok + 1; fprintf('ok %d  scalar/row shapes and one-shot warm starts\n', ok);
+
+  % ── 16. matrix and initial-guess errors leave the owner usable ──
+  bad_rhs = {ones(3, 2), ones(2, 2, 2), single(ones(2, 2)), ...
+             complex(ones(2, 2), 1), [NaN 1; 1 1], [Inf 1; 1 1]};
+  rejected = 0;
+  for k = 1:numel(bad_rhs)
+    value = bad_rhs{k};
+    calls = {@() sopts.solve(value), @() sopts.apply(value), ...
+             @() sopts.solve(ones(2, 2), [], [], value)};
+    for j = 1:numel(calls)
+      caught = false;
+      try, invoke = calls{j}; unused = invoke(); catch, caught = true; end
+      assert(caught, 'invalid RHS or initial guess was accepted');
+      rejected = rejected + 1;
+    end
+  end
+  for guess = {ones(2, 1), ones(2, 3)}
+    caught = false;
+    try, sopts.solve(ones(2, 2), [], [], guess{1}); catch, caught = true; end
+    assert(caught, 'wrong initial-guess width was accepted');
+    rejected = rejected + 1;
+  end
+  assert(rejected == 20);
+  reused = sopts.solve(bopts);
+  assert(reused.converged && norm(Aopts * reused.x - bopts) / norm(bopts) < 1e-8);
+  ok = ok + 1; fprintf('ok %d  matrix/initial-guess validation (20 errors)\n', ok);
+
+  test_archive();
+  fprintf('ALL %d TESTS PASSED (plus archive tests)\n', ok);
 end

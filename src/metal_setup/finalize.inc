@@ -9,8 +9,11 @@ enum Stage : unsigned {
     stage_emit_transpose = 5,
 };
 
-struct Metadata { float scale, diagonal; };
-struct Row { unsigned count; float scale, diagonal; };
+struct Metadata { float scale, diagonal, scaled_diagonal; };
+// count and factored are the column's entries after and before the drop, the
+// diagonal included; dropped_threshold counts the off-diagonals the threshold
+// removed (the rest were dropped because the storage flushes them to zero).
+struct Row { unsigned count; float scale, diagonal; unsigned factored, dropped_threshold; };
 struct Shape { unsigned n, m; float drop_hi, drop_lo; int drop_exponent; };
 
 template<class Memory>
@@ -43,16 +46,20 @@ APXCHOL_GPU_FUNCTION void prepare(Memory s, Math math, unsigned row) {
     const auto threshold = math.multiply(math.drop(s.shape),
         math.from_float(math.fraction(scale, scale_exponent)));
     const int shift = -(s.shape.drop_exponent + scale_exponent);
-    unsigned written = 0;
+    unsigned written = 0, below_threshold = 0;
     for (unsigned p = 0; p < count; ++p) {
         const float v = entries[p].value;
+        const bool below = s.shape.drop_hi > 0 &&
+            math.less(math.from_float(math.scale_float(math.absolute(v), shift)), threshold);
         const bool keep = !(s.shape.drop_hi > 0) ||
-            (!math.less(math.from_float(math.scale_float(math.absolute(v), shift)), threshold) &&
-             (s.fp16 ? !math.flushes(v / scale) : v != 0));
+            (!below && (s.fp16 ? !math.flushes(v / scale) : v != 0));
         if (keep) {
             kept = math.add(kept, math.from_float(-v));
             entries[written++] = entries[p];
-        } else dropped = math.add(dropped, math.from_float(v));
+        } else {
+            dropped = math.add(dropped, math.from_float(v));
+            below_threshold += below ? 1u : 0u;
+        }
     }
     if (math.to_float(dropped) != 0 && math.to_float(kept) > 0) {
         const auto per_abs = math.divide(dropped, kept);
@@ -62,7 +69,7 @@ APXCHOL_GPU_FUNCTION void prepare(Memory s, Math math, unsigned row) {
                 math.multiply(per_abs, math.from_float(-v))));
         }
     }
-    s.rows[row] = {written + 1, scale, col.diagonal};
+    s.rows[row] = {written + 1, scale, col.diagonal, count + 1, below_threshold};
     s.ptr[row] = written + 1;
 }
 
@@ -89,7 +96,7 @@ APXCHOL_GPU_FUNCTION void emit(Memory s, Math math, unsigned row) {
     if (s.fp16) {
         const float scaled = math.to_float(math.add(math.from_float(diagonal / info.scale), residual));
         diagonal = scaled * info.scale;
-        s.metadata[row] = {info.scale, diagonal};
+        s.metadata[row] = {info.scale, diagonal, scaled};
     }
     const float magnitude = math.absolute(diagonal);
     if (!math.finite_float(diagonal) || magnitude < 0x1p-100f || magnitude > 0x1p100f) s.fail(2);

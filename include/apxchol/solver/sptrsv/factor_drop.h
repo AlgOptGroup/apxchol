@@ -13,7 +13,7 @@
 #include <memory>
 #include <vector>
 
-namespace apxchol {
+namespace apxchol::detail {
 
 // Per-column scale contract: s_j of the factor column [first, last) whose
 // FIRST entry is the diagonal: max |off-diagonal|, or 1.0f if the column has
@@ -156,4 +156,4 @@ inline bool compact_factor_columns(Idx m, const Off* outer, const Idx* inner, co
     return true;
 }
 
-} // namespace apxchol
+} // namespace apxchol::detail

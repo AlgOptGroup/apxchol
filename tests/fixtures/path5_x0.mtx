@@ -1,0 +1,8 @@
+%%MatrixMarket matrix array real general
+% Initial guess for path5_sddm with path5_rhs1: its solution.
+5 1
+0.9090909090909091
+0.36363636363636365
+0
+-0.36363636363636365
+-0.9090909090909091

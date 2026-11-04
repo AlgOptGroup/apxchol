@@ -1,21 +1,15 @@
 #include "config.h"
-#include "apxchol/solver/partitioner_list.h"
+#include "apxchol/solver/factor_options.h"
 #include "apxchol/version.h"
 #include <CLI/CLI.hpp>
 #include <spdlog/spdlog.h>
 #include <cstdio>
 #include <cstdlib>
+#include <array>
 #include <map>
-#include <tuple>
-#include <vector>
+#include <string>
 
 namespace apxchol {
-
-static const std::map<std::string, input_kind> input_kind_map = {
-    {"auto",      input_kind::automatic},
-    {"laplacian", input_kind::laplacian},
-    {"adjacency", input_kind::adjacency},
-};
 
 static const std::map<std::string, solve_backend> solve_backend_map = {
     {"auto", solve_backend::automatic},
@@ -23,10 +17,12 @@ static const std::map<std::string, solve_backend> solve_backend_map = {
     {"gpu", solve_backend::gpu},
 };
 
-static std::vector<std::string> partitioner_names() {
-    return []<typename... Ps>(std::tuple<Ps...>*) {
-        return std::vector<std::string>{std::string(Ps::name)...};
-    }(static_cast<partitioner_list*>(nullptr));
+// CLI11 map for a shared option-name table; numeric spellings are rejected.
+template<class E, std::size_t N>
+static std::map<std::string, E> name_map(const std::array<detail::option_name<E>, N>& table) {
+    std::map<std::string, E> names;
+    for (const auto& entry : table) names.emplace(entry.name, entry.value);
+    return names;
 }
 
 static void setup_logging(bool quiet, bool verbose) {
@@ -46,26 +42,34 @@ run_config parse_args(int argc, char* argv[]) {
     run_config cfg;
     bool quiet   = false;
     bool verbose = false;
-    std::string rhs_str, output_str;
+    std::string rhs_str, x0_str, output_str;
 
     CLI::App app{"Solve a Laplacian or SDDM system Ax = b via approximate Cholesky + PCG. "
-                 "The input .mtx may be an assembled Laplacian/SDDM operator or a graph "
-                 "adjacency/pattern matrix; which one is auto-detected and reported (see "
-                 "--input-kind), and Laplacian vs SDDM is auto-detected within the solver"};
+                 "The input .mtx is the operator A; for a graph adjacency/pattern matrix, "
+                 "pass --convert-input to solve its Laplacian L = D - A. "
+                 "Laplacian vs SDDM is detected within the solver"};
 
     // ── version ──
     app.add_flag_callback("-V,--version", []() {
+#if defined(APXCHOL_USE_CUDA)
+        const char* device = "cuda";
+#elif defined(APXCHOL_USE_METAL)
+        const char* device = "metal";
+#else
+        const char* device = "cpu";
+#endif
         std::printf("apxchol %s (commit %s)\n"
                     "  index widths: %d-bit vertex / %d-bit edge (unsigned)\n"
-                    "  SpTRSV backend: %s\n",
+                    "  device: %s\n",
                     APXCHOL_VERSION, APXCHOL_GIT_SHA,
-                    APXCHOL_NODE_INDEX_BITS, APXCHOL_EDGE_INDEX_BITS,
-                    APXCHOL_SPTRSV_BACKEND);
+                    APXCHOL_NODE_INDEX_BITS, APXCHOL_EDGE_INDEX_BITS, device);
         std::exit(0);
     }, "Print version and build info");
 
+    app.option_defaults()->group("Input/output");
+
     // ── positional ──
-    app.add_option("input", cfg.input_path, "Input graph in MatrixMarket format")
+    app.add_option("input", cfg.input_path, "Matrix A in Matrix Market format. Use --convert-input for a graph adjacency matrix.")
         ->required()
         ->check(CLI::ExistingFile);
 
@@ -74,42 +78,37 @@ run_config parse_args(int argc, char* argv[]) {
     // the excludes keep the "not both" error message specific.
     auto* rhs_group = app.add_option_group("Right-hand side (exactly one required)");
     auto* rhs_opt = rhs_group->add_option("--rhs", rhs_str,
-                   "RHS vector in MatrixMarket format")
+                   "RHS in dense Matrix Market format: an n-vector, or an n x k matrix "
+                   "whose k columns are solved as one batch")
         ->check(CLI::ExistingFile);
     auto* rand_flag = rhs_group->add_flag("--random-rhs", cfg.random_rhs,
-                 "Generate a random RHS, compatible with Laplacian components (uses --seed)");
+                 "Generate a random RHS, compatible with Laplacian components; the same "
+                 "on every platform for a given --seed");
     rhs_opt->excludes(rand_flag);
     rand_flag->excludes(rhs_opt);
     rhs_group->require_option(1);
+    app.add_option("--x0", x0_str,
+                   "Initial guess in dense Matrix Market format, shaped like the RHS "
+                   "(default: zero)")
+        ->check(CLI::ExistingFile);
 
     // ── how to read the input matrix ──
-    app.add_option("--input-kind", cfg.input,
-                   "How to read the input file: 'laplacian' = an already-assembled "
-                   "Laplacian/SDDM operator, solved as given; 'adjacency' = a graph "
-                   "adjacency/pattern matrix, from which L = D - A is assembled "
-                   "(edge weight |value|, self-loops dropped); 'auto' = decide from "
-                   "the off-diagonal signs and the diagonal, and refuse if ambiguous")
-        ->default_str("auto")
-        ->transform(CLI::IsMember(input_kind_map) & CLI::Transformer(input_kind_map));
+    app.add_flag("--convert-input", cfg.convert_input,
+                 "Convert the input matrix to an operator if needed (a graph adjacency "
+                 "matrix becomes its Laplacian L = D - A)");
 
     // ── output ──
     app.add_option("-o,--output", output_str,
-                   "Write solution vector to MatrixMarket file");
+                   "Write the solution to a dense Matrix Market file (n x k for an n x k RHS)");
 
+    app.option_defaults()->group("Setup (advanced)");
+    const auto samplers = name_map(detail::clique_sampler_names);
     app.add_option("--sampler", cfg.solve_opts.factor_opts.sampler,
                    "Clique sampler: gks or trace_cycle")
-        ->transform(CLI::CheckedTransformer(std::map<std::string, clique_sampler>{
-            {"gks", clique_sampler::gks}, {"trace_cycle", clique_sampler::trace_cycle}}));
+        ->default_str("gks")
+        ->transform(CLI::IsMember(samplers) & CLI::Transformer(samplers));
 
-    app.add_option("--exact-core-max-h", cfg.solve_opts.factor_opts.exact_core_max_h,
-                   "trace_cycle only: emit the exact clique on heavy cores of at most this "
-                   "many vertices (0 = off; default: 4 on host, 0 for GPU-owned setup)")
-        ->default_str("by route");
-    app.add_option("--double-cycle-min-h", cfg.solve_opts.factor_opts.double_cycle_min_h,
-                   "trace_cycle only: emit two independent cycles on heavy cores of at least "
-                   "this many vertices (0 = off; 20-32 targets hub-like stars)")
-        ->capture_default_str();
-
+    app.option_defaults()->group("Solve");
     app.add_option("--backend", cfg.solve_opts.backend,
                    "Complete setup/solve route: auto, cpu or gpu (no runtime fallback)")
         ->default_str("auto")
@@ -119,18 +118,13 @@ run_config parse_args(int argc, char* argv[]) {
     app.add_option("--threads", cfg.solve_opts.num_threads,
                    "CPU thread ceiling (0 = OpenMP default; small work may use fewer)")
         ->check(CLI::NonNegativeNumber)->capture_default_str();
+    app.option_defaults()->group("Setup (advanced)");
+    const auto storages = name_map(detail::factor_storage_names);
     app.add_option("--factor-storage", cfg.solve_opts.factor_opts.factor_storage,
                    "Factor storage: auto, float16 or float32")
-        ->transform(CLI::CheckedTransformer(std::map<std::string, factor_storage_type>{
-            {"auto", factor_storage_type::automatic},
-            {"float16", factor_storage_type::fp16},
-            {"float32", factor_storage_type::fp32}}));
-    app.add_option("--cpu-schedule", cfg.solve_opts.factor_opts.cpu_schedule,
-                   "CPU triangular-solve schedule: auto or levels")
-        ->transform(CLI::CheckedTransformer(std::map<std::string, cpu_sptrsv_schedule>{
-            {"auto", cpu_sptrsv_schedule::automatic},
-            {"levels", cpu_sptrsv_schedule::levels}}));
-    app.add_option("--factor-drop", cfg.solve_opts.factor_opts.drop_tolerance,
+        ->default_str("auto")
+        ->transform(CLI::IsMember(storages) & CLI::Transformer(storages));
+    app.add_option("--drop-tolerance", cfg.solve_opts.factor_opts.drop_tolerance,
                    "Relative factor-entry dropping threshold in [0, 1] (0 disables dropping)")
         ->capture_default_str();
     app.add_option("--regularization", cfg.solve_opts.factor_opts.regularization,
@@ -139,39 +133,39 @@ run_config parse_args(int argc, char* argv[]) {
     app.add_option("--lump-max-mass", cfg.solve_opts.factor_opts.lump_max_mass,
                    "Maximum positive off-diagonal mass fraction allowed for lumping")
         ->capture_default_str();
-    app.add_flag_callback("--no-timings", [&] { cfg.solve_opts.collect_timings = false; },
-                          "Disable solver timing collection");
-    app.add_option("--tol", cfg.solve_opts.tol, "Relative residual tolerance")
+    app.option_defaults()->group("Solve");
+    app.add_option("--tol", cfg.tol, "Relative residual tolerance")
         ->capture_default_str();
-    app.add_option("--maxiter", cfg.solve_opts.max_iter, "Maximum PCG iterations")
+    app.add_option("--max-iter", cfg.max_iter, "Maximum PCG iterations")
         ->capture_default_str();
     app.add_option("--seed", cfg.solve_opts.factor_opts.seed,
                    "Random seed for factorization and test RHS")
         ->capture_default_str();
+    app.option_defaults()->group("Setup (advanced)");
     app.add_option("--degree-quantile", cfg.solve_opts.factor_opts.partition.degree_quantile,
-                   "IS degree cap as a quantile of current degrees in (0,1); "
-                   "0 = use --degree-multiplier; -1 = pick by route "
-                   "(0.2 CPU/Metal, 0.5 CUDA; Metal requires (0,1))")
-        ->capture_default_str();
+                   "IS degree cap as a quantile of current degrees in [0, 1); "
+                   "0 = use --degree-multiplier; omitted = route default "
+                   "(0.2 CPU/Metal, 0.5 CUDA; Metal requires (0, 1))")
+        ->default_str("by route");
     app.add_option("--degree-multiplier", cfg.solve_opts.factor_opts.partition.degree_multiplier,
                    "IS degree threshold = multiplier × avg_degree "
                    "(fallback, used only when --degree-quantile is 0)")
         ->capture_default_str();
-    app.add_option("--omp-threshold", cfg.solve_opts.factor_opts.omp_threshold,
-                   "Min active vertices before engaging OpenMP")
-        ->capture_default_str();
-    const std::vector<std::string> partitioners = partitioner_names();
-    std::string partitioner_help = "Independent set strategy (";
-    for (std::size_t i = 0; i < partitioners.size(); ++i)
-        partitioner_help += (i ? ", " : "") + partitioners[i];
-    partitioner_help += ")";
-    app.add_option("--is", cfg.solve_opts.factor_opts.is_select, partitioner_help)
-        ->capture_default_str()
-        ->check(CLI::IsMember(partitioners));
+    const auto partitioners = name_map(detail::partitioner_names);
+    std::string partitioner_help = "Independent set strategy: ";
+    for (std::size_t i = 0; i < detail::partitioner_names.size(); ++i) {
+        if (i) partitioner_help += i + 1 == detail::partitioner_names.size() ? " or " : ", ";
+        partitioner_help += detail::partitioner_names[i].name;
+    }
+    app.add_option("--partitioner", cfg.solve_opts.factor_opts.partitioner, partitioner_help)
+        ->default_str("block_greedy")
+        ->transform(CLI::IsMember(partitioners) & CLI::Transformer(partitioners));
+
+    app.option_defaults()->group("Output detail");
 
     // ── verbosity (mutually exclusive) ──
     auto* q_flag = app.add_flag("-q,--quiet", quiet, "Suppress non-error output");
-    auto* v_flag = app.add_flag("-v,--verbose", verbose, "Verbose output");
+    auto* v_flag = app.add_flag("-v,--verbose", verbose, "Verbose output, including the timing tree");
     q_flag->excludes(v_flag);
     v_flag->excludes(q_flag);
 
@@ -182,8 +176,10 @@ run_config parse_args(int argc, char* argv[]) {
     }
 
     if (!rhs_str.empty())    cfg.rhs_path     = rhs_str;
+    if (!x0_str.empty())     cfg.x0_path      = x0_str;
     if (!output_str.empty()) cfg.output_path  = output_str;
     cfg.solve_opts.factor_opts.verbose = verbose;
+    detail::validate_solve_parameters(cfg.tol, cfg.max_iter);
     detail::validate_solve_options(cfg.solve_opts);
     setup_logging(quiet, verbose);
     return cfg;

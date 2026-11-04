@@ -37,13 +37,7 @@
 #define MADV_POPULATE_WRITE 23
 #endif
 
-namespace apxchol::util {
-
-inline constexpr std::size_t MEGABYTE = 1u << 20;
-
-inline std::size_t round_up(std::size_t n) {
-    return (n + 4095) & ~std::size_t(4095);
-}
+namespace apxchol::detail {
 
 // ValueInitialize=false is for output buffers whose caller overwrites every
 // element before the first read. It starts the lifetime of trivial elements
@@ -116,7 +110,13 @@ public:
     }
 
     bool operator==(const big_alloc&) const noexcept { return true; }
-    bool operator!=(const big_alloc&) const noexcept { return false; }
+
+private:
+    static constexpr std::size_t MEGABYTE = 1u << 20;
+
+    static std::size_t round_up(std::size_t n) {
+        return (n + 4095) & ~std::size_t(4095);
+    }
 };
 
-}  // namespace apxchol::util
+}  // namespace apxchol::detail

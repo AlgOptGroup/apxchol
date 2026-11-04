@@ -2,7 +2,7 @@
 // Each pivot owns its plan and shuffle, including actual rejection consumption.
 // Large trace parents use an indexed one-draw CDF; other rows retain their streams.
 // Materialize standard-library constants outside device functions for NVCC.
-constexpr double kCyclePoolMax = std::numeric_limits<pool_value_t>::max();
+constexpr double kCyclePoolMax = std::numeric_limits<float>::max();
 constexpr double kCycleInfinity = std::numeric_limits<double>::infinity();
 constexpr std::uint32_t kCycleCooperativeDegree = 128;
 __device__ std::uint32_t cycle_uniform_index(unsigned long long& state,
@@ -15,12 +15,12 @@ __device__ std::uint32_t cycle_uniform_index(unsigned long long& state,
 __device__ bool cycle_pool_edge(double value) {
     // Match pool insertion: positive subnormals survive; zero/overflow do not.
     return value > 0 && value <= kCyclePoolMax &&
-           static_cast<pool_value_t>(value) > 0;
+           static_cast<float>(value) > 0;
 }
 // 0: eligible, 1: input-only numerical fallback, 2: invalid/overflow.
 __device__ int cycle_pool_range(double value) {
     if (!(value >= 0) || !(value <= kCyclePoolMax)) return 2;
-    return static_cast<pool_value_t>(value) > 0 ? 0 : 1;
+    return static_cast<float>(value) > 0 ? 0 : 1;
 }
 __device__ double cycle_edge_weight(const work_record* a, double D,
         std::uint32_t h, std::uint32_t i, std::uint32_t j) {

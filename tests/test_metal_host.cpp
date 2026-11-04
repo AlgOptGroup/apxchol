@@ -1,11 +1,12 @@
 #include <gtest/gtest.h>
-#include <Eigen/Core>
+#include "csc_test_util.h"
 
 #include "apxchol/solver/detail/metal_host.h"
 #include "../src/metal_setup_options.h"
 #include "../src/metal_setup/layout.h"
-#include "apxchol/solver/sptrsv/cuda_host.h"
+#include "apxchol/solver/sptrsv/gpu_factor_prep.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -17,12 +18,12 @@ namespace mh = apxchol::detail::metal_host;
 TEST(MetalHost, DegreeQuantileOptions) {
     apxchol::factor_options options;
     const bool defaults = apxchol::detail::metal_setup_options_supported(options);
-    for (double quantile : {apxchol::degree_quantile_by_route, 0.1, 0.2, 0.3, 0.5, 0.8,
+    EXPECT_EQ(apxchol::detail::metal_degree_quantile(std::nullopt), 0.2);
+    for (double quantile : {0.1, 0.2, 0.3, 0.5, 0.8,
                             double(float(0.2)), std::nextafter(0.0, 1.0), std::nextafter(1.0, 0.0)}) {
         SCOPED_TRACE(quantile);
         options.partition.degree_quantile = quantile;
-        EXPECT_EQ(apxchol::detail::metal_degree_quantile(quantile),
-                  quantile == apxchol::degree_quantile_by_route ? 0.2 : quantile);
+        EXPECT_EQ(apxchol::detail::metal_degree_quantile(quantile), quantile);
         EXPECT_EQ(apxchol::detail::metal_setup_options_supported(options), defaults);
     }
     for (double quantile : {-2.0, -0.1, 0.0, 1.0, 2.0,
@@ -33,7 +34,7 @@ TEST(MetalHost, DegreeQuantileOptions) {
         options.partition.degree_quantile = quantile;
         EXPECT_FALSE(apxchol::detail::metal_setup_options_supported(options));
     }
-    EXPECT_EQ(apxchol::degree_quantile_device_default, 0.5);
+    EXPECT_EQ(apxchol::detail::degree_quantile_device_default, 0.5);
 }
 
 TEST(MetalHost, DegreeQuantileThresholdBounds) {
@@ -115,56 +116,61 @@ TEST(MetalHost, ScalingRemainsFiniteAtFloatingPointLimits) {
     }
 }
 
+// Test vectors as the library's strided views.
+apxchol::detail::const_matrix_ref view(const std::vector<double>& v) {
+    return {v.data(), static_cast<std::int64_t>(v.size())};
+}
+
 TEST(MetalHost, NormAcrossMagnitudes) {
     for (const double scale : {0.0, std::numeric_limits<double>::denorm_min(),
                                0x1p-530, 1e-200, 1.0, 1e200,
                                std::numeric_limits<double>::max() / 8}) {
         SCOPED_TRACE(scale);
-        const Eigen::Vector2d v(3 * scale, 4 * scale);
+        const std::vector<double> v{3 * scale, 4 * scale};
         const double expected = std::hypot(v[0], v[1]);
-        if (expected == 0.0) EXPECT_EQ(mh::norm(v), 0.0);
-        else EXPECT_NEAR(mh::norm(v) / expected, 1.0, 4 * std::numeric_limits<double>::epsilon());
+        if (expected == 0.0) EXPECT_EQ(mh::norm(view(v)), 0.0);
+        else EXPECT_NEAR(mh::norm(view(v)) / expected, 1.0, 4 * std::numeric_limits<double>::epsilon());
     }
-    for (const Eigen::Vector2d& v : {Eigen::Vector2d(1.0, 1e-200),
-                                     Eigen::Vector2d(1e200, 1e-200)}) {
+    for (const std::vector<double>& v : {std::vector<double>{1.0, 1e-200},
+                                         std::vector<double>{1e200, 1e-200}}) {
         const double expected = std::hypot(v[0], v[1]);
-        EXPECT_NEAR(mh::norm(v) / expected, 1.0, 4 * std::numeric_limits<double>::epsilon());
+        EXPECT_NEAR(mh::norm(view(v)) / expected, 1.0, 4 * std::numeric_limits<double>::epsilon());
     }
-    const Eigen::Vector2f narrow(1e-22f, 3e-22f);
+    const float narrow[2] = {1e-22f, 3e-22f};
     const double expected = std::hypot(double(narrow[0]), double(narrow[1]));
-    EXPECT_NEAR(mh::norm(narrow) / expected, 1.0, 4 * std::numeric_limits<float>::epsilon());
-    EXPECT_EQ(mh::norm(Eigen::VectorXd{}), 0.0);
-    EXPECT_TRUE(std::isinf(mh::norm(Eigen::Vector2d(std::numeric_limits<double>::infinity(), 1.0))));
-    EXPECT_TRUE(std::isnan(mh::norm(Eigen::Vector2d(std::numeric_limits<double>::quiet_NaN(), 1.0))));
+    EXPECT_NEAR(mh::norm(view({double(narrow[0]), double(narrow[1])})) / expected, 1.0, 4 * std::numeric_limits<float>::epsilon());
+    EXPECT_EQ(mh::norm(view({})), 0.0);
+    EXPECT_TRUE(std::isinf(mh::norm(view({std::numeric_limits<double>::infinity(), 1.0}))));
+    EXPECT_TRUE(std::isnan(mh::norm(view({std::numeric_limits<double>::quiet_NaN(), 1.0}))));
 }
 
 TEST(MetalHost, RelativeNormSurvivesOverflowingVectorNorm) {
     for (double magnitude : {1.0, 1e-200, 1e200, 1e308}) {
-        const Eigen::VectorXd rhs = Eigen::VectorXd::Constant(16, magnitude);
-        Eigen::VectorXd residual = Eigen::VectorXd::Zero(16);
+        const std::vector<double> rhs(16, magnitude);
+        std::vector<double> residual(16, 0.0);
         residual[0] = magnitude;
-        const mh::norm_reference reference(rhs);
-        EXPECT_DOUBLE_EQ(reference.relative(residual), 0.25);
+        const mh::norm_reference reference(view(rhs));
+        EXPECT_DOUBLE_EQ(reference.relative(view(residual)), 0.25);
         const double scale = mh::pow2_scale(magnitude);
-        EXPECT_DOUBLE_EQ(reference.scaled(scale), mh::norm(rhs * scale));
+        EXPECT_DOUBLE_EQ(reference.scaled(scale), mh::norm(view(std::vector<double>(16, magnitude * scale))));
         EXPECT_TRUE(std::isfinite(reference.scaled(scale)));
     }
 }
 
 TEST(MetalHost, RelativeNormDoesNotUnderflowBeforeReduction) {
-    Eigen::VectorXd rhs = Eigen::VectorXd::Constant(101, 2e-16);
-    rhs.head(4).setConstant(1e308);
-    Eigen::VectorXd residual = rhs;
-    residual.head(4).setZero();
-    const mh::norm_reference reference(rhs);
+    std::vector<double> rhs(101, 2e-16);
+    std::fill_n(rhs.begin(), 4, 1e308);
+    std::vector<double> residual = rhs;
+    std::fill_n(residual.begin(), 4, 0.0);
+    const mh::norm_reference reference(view(rhs));
     // sqrt(97) * 2e-16 / 2e308 rounds to two binary64 subnormal units.
-    EXPECT_EQ(reference.relative(residual), 2 * std::numeric_limits<double>::denorm_min());
+    EXPECT_EQ(reference.relative(view(residual)), 2 * std::numeric_limits<double>::denorm_min());
 }
 
 TEST(MetalHost, RelativeNormHandlesOverflowingResidualNorm) {
-    const Eigen::Vector4d rhs = Eigen::Vector4d::Constant(5e307);
-    const Eigen::Vector4d residual = Eigen::Vector4d::Constant(1e308);
-    EXPECT_DOUBLE_EQ(mh::norm_reference(rhs).relative(residual), 2.0);
+    const std::vector<double> rhs(4, 5e307);
+    const std::vector<double> residual(4, 1e308);
+    EXPECT_DOUBLE_EQ(mh::norm_reference(view(rhs)).relative(view(residual)), 2.0);
 }
 
 TEST(MetalHost, FactorStorageReconstructsFiniteValues) {
@@ -192,12 +198,12 @@ TEST(MetalHost, FactorStorageRangeAndRounding) {
         EXPECT_LE(std::abs(metadata.diagonal - diagonal), diagonal * 2 * std::numeric_limits<float>::epsilon());
     }
     for (float bad : {0.0f, -1.0f, std::numeric_limits<float>::infinity()})
-        EXPECT_THROW(mh::pack_factor_metadata(bad, 1), std::domain_error);
-    EXPECT_THROW(mh::pack_factor_metadata(1, 0), std::domain_error);
+        EXPECT_THROW(mh::pack_factor_metadata(bad, 1), std::invalid_argument);
+    EXPECT_THROW(mh::pack_factor_metadata(1, 0), std::invalid_argument);
 }
 
 TEST(MetalHost, Float16ScaleFallbackKeepsSmallOffDiagonalFactorsFinite) {
-    namespace ch = apxchol::cuda_host;
+    namespace ch = apxchol::detail::gpu_factor_prep;
     for (const auto& [diagonal, offdiag] : std::vector<std::pair<float, float>>{
              {1, -1e-40f}, {1e20f, -1e-30f}, {1, -0.25f}}) {
         ch::csr_int<float> factor;

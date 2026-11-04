@@ -34,8 +34,8 @@ inline double join(df v) { return static_cast<double>(v.hi) + static_cast<double
 inline factor_metadata pack_factor_metadata(float scale, float scaled_diagonal) {
     const float diagonal = static_cast<float>(double(scaled_diagonal) * scale);
     if (!(scale > 0) || !std::isfinite(scale) || diagonal == 0 || !std::isfinite(diagonal))
-        throw std::domain_error("Metal FP16 factor has an invalid scale or diagonal");
-    return {scale, diagonal};
+        throw std::invalid_argument("Metal FP16 factor has an invalid scale or diagonal");
+    return {scale, diagonal, scaled_diagonal};
 }
 
 /// fp64 value as a double-float, saturated to the largest finite fp32 (used

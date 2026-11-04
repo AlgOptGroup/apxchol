@@ -53,7 +53,7 @@ inline packed_plan pack(const Pointer *ptr, row_order order, std::span<const uns
     const auto total = prefix.back();
     if (order.n >= special_bit || total.words > std::numeric_limits<unsigned>::max() ||
         total.segments >= special_bit || total.slots + order.n >= special_bit)
-        throw std::length_error("GPU dataflow plan exceeds 32-bit capacity");
+        throw std::invalid_argument("GPU dataflow plan exceeds 32-bit capacity");
     packed_plan out;
     out.words.resize(total.words);
     out.segments.resize(total.segments);

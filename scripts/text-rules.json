@@ -1,0 +1,51 @@
+{
+ "rules_doc": "AGENTS.md, \"Writing for people\"",
+ "scopes": [
+  {
+   "name": "docs",
+   "include": [
+    "README.md",
+    "docs/*.md",
+    "docs/**/*.md",
+    "python/README.md",
+    "CONTRIBUTING.md"
+   ]
+  },
+  {
+   "name": "errors",
+   "include": [
+    "src/*.cpp",
+    "src/*.h",
+    "src/*.mm",
+    "src/*.cu",
+    "include/**/*.h",
+    "include/**/*.hpp",
+    "python/src/*.cpp",
+    "python/apxchol/*.py"
+   ]
+  }
+ ],
+ "cpp_all_strings": [
+  "src/config.cpp",
+  "src/main.cpp"
+ ],
+ "python_calls": [
+  "ValueError",
+  "TypeError",
+  "RuntimeError"
+ ],
+ "python_keywords": [
+  "help",
+  "description"
+ ],
+ "terms": [
+  {
+   "use": "right-hand side",
+   "not": [
+    "right hand side",
+    "right hand sides"
+   ]
+  }
+ ],
+ "jargon": []
+}

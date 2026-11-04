@@ -5,6 +5,7 @@
 // invoke it without itself being compiled by nvcc.
 
 #include "bench_result.h"
+#include "gpu_memory.h"
 #include "original_stop.h"
 
 #include <cuda_runtime.h>
@@ -98,6 +99,7 @@ extern "C" void run_amgcl_cuda_impl(
     Solver solve(A, prm, bprm);
     cudaDeviceSynchronize();
     r->setup_time = host_prep_seconds + (now_s() - t0);
+    r->setup_vram_mb = gpu_memory_above_baseline_mib();   // outside both timers
 
     // Device vectors are per-RHS work, so charge their allocation/upload to
     // solve.  They were previously outside both setup_time and solve_time,
@@ -122,12 +124,9 @@ extern "C" void run_amgcl_cuda_impl(
     r->solve_passes = stop.passes;
     r->stop_check_seconds = stop.check_seconds;
 
-    // Device VRAM held at solve end (AMG hierarchy + CSR operator + PCG vectors
-    // still resident), total-free via cudaMemGetInfo — the device analog of
-    // solve_rss_mb, sampled before `solve`/device vectors go out of scope.
-    { size_t mf = 0, mt = 0;
-      if (cudaMemGetInfo(&mf, &mt) == cudaSuccess && mt >= mf)
-          r->solve_vram_mb = (mt - mf) / (1024.0 * 1024.0); }
+    // Device memory held at solve end (AMG hierarchy + CSR operator + PCG vectors
+    // still resident), sampled before `solve`/device vectors go out of scope.
+    r->solve_vram_mb = gpu_memory_above_baseline_mib();
 
     r->fillin = 0;
     r->us_per_nnz = r->total_time / r->nnz * 1e6;

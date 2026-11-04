@@ -1,9 +1,8 @@
-# Building and installation
+# Building from source
 
 ## Dependencies
 
-CPU builds require CMake 3.20+, GCC or Clang with C++23 and OpenMP, and Eigen.
-CMake uses an installed Eigen package when available and fetches it otherwise.
+CPU builds require CMake 3.20+, GCC or Clang with C++23 and OpenMP.
 Windows builds with MSVC or `clang-cl` are not supported.
 On x86-64, the minimum target is x86-64-v2.
 
@@ -26,70 +25,15 @@ ctest --test-dir build --output-on-failure
 
 The default build is CPU-only. Add `-DAPXCHOL_DEVICE=CUDA` or
 `-DAPXCHOL_DEVICE=METAL` at configuration to include that GPU backend as well.
-The same executable still supports CPU solves.
+The same executable still supports CPU solves. To run it, see the
+[command-line guide](cli.md); to link the library from your own project, see
+[C++ and CMake](cpp.md#use-from-cmake).
 
 ## Python source installation
 
 The [Python guide](../python/README.md#build-from-source) gives the editable
 installation command and tests. Run it from a repository checkout with the
 native build dependencies above.
-
-## Command-line use
-
-```bash
-./build/apxchol matrix.mtx --rhs rhs.mtx -o solution.mtx
-./build/apxchol matrix.mtx --random-rhs --tol 1e-8
-./build/apxchol --help
-```
-
-Supply `--rhs` for your actual problem or `--random-rhs` for an experiment.
-The CLI detects adjacency matrices and forms their graph Laplacian;
-`--input-kind` overrides detection. The website's command-line reference is
-generated from `--help`, so it lists every option for that revision.
-
-## Use from CMake
-
-For a source checkout, call the helper in your consuming project's top-level
-`CMakeLists.txt`, after its `project(...)` declaration:
-
-```cmake
-include(path/to/apxchol/cmake/apxchol_core.cmake)
-apxchol_add_core()
-target_link_libraries(my_program PRIVATE apxchol::core)
-```
-
-This builds just the library and enables any GPU language in the consuming
-project's scope. Set `APXCHOL_DEVICE` when configuring the consuming project.
-For distribution, set `APXCHOL_NATIVE_ARCH=OFF`; CUDA consumers must also
-choose `CMAKE_CUDA_ARCHITECTURES` instead of its `native` default.
-
-Adding the repository root with `add_subdirectory` also
-includes the CLI and, by default, tests and examples.
-
-For a separately installed SDK, use:
-
-```cmake
-find_package(apxchol CONFIG REQUIRED)
-target_link_libraries(my_program PRIVATE apxchol::core)
-```
-
-Build and install that SDK with:
-
-```bash
-cmake -S cmake/core -B build-sdk -DCMAKE_INSTALL_PREFIX=/path/to/prefix
-cmake --build build-sdk -j6
-cmake --install build-sdk
-```
-
-Configure the consuming project with `-DCMAKE_PREFIX_PATH=/path/to/prefix`.
-If apxchol fetched Eigen, the install includes its headers. Otherwise, the
-consumer must also provide Eigen. A CUDA SDK consumer needs the CUDA Toolkit.
-Use compatible compiler, standard-library and OpenMP runtime settings.
-
-`ExternalProject_Add` builds in a separate project. Use it to build/install
-`cmake/core`, then configure the consuming project against that install with
-`find_package`. It does not create an immediately linkable `apxchol::core`
-target in the parent configuration.
 
 ## Build options
 
@@ -100,11 +44,11 @@ backend selection and factor storage are runtime settings; see the
 | Option | Default | Meaning |
 |---|---|---|
 | `APXCHOL_DEVICE` | `CPU` | `CPU` only, or CPU plus `CUDA` / `METAL` |
-| `APXCHOL_NATIVE_ARCH` | ON for root/helper/local Python; OFF for SDK/wheels | Tune for the build machine; turn OFF for distribution |
-| `APXCHOL_POOL_FP32` | ON | Store mutable graph weights in FP32; OFF uses FP64 |
+| `APXCHOL_NATIVE_ARCH` | ON for standalone root, local Python and benchmarks; OFF for embedding, the SDK and wheels | Tune for the build machine; turn OFF for distribution. Ignored when `CMAKE_CXX_FLAGS` sets `-march`/`-mcpu` |
 | `APXCHOL_INDEX_WIDTH` | `32` | `32`, `64_EDGES` or `64`; see layouts below |
-| `APXCHOL_BUILD_TESTS` | ON in root build | Build the test suite |
-| `APXCHOL_BUILD_EXAMPLES` | ON in root build | Build the examples |
+| `APXCHOL_BUILD_CLI` | ON standalone; OFF when embedded | Build the CLI and its input/logging dependencies |
+| `APXCHOL_BUILD_TESTS` | ON standalone; OFF when embedded | Build the test suite |
+| `APXCHOL_BUILD_EXAMPLES` | ON standalone; OFF when embedded | Build the examples |
 
 The index setting selects one of three layouts:
 
@@ -124,5 +68,6 @@ Standard CMake controls also apply: `CMAKE_BUILD_TYPE`, `BUILD_SHARED_LIBS`,
 
 Portable x86 builds use x86-64-v2 and dispatch supported FP16/SIMD kernels at
 runtime. Native tuning can require a newer CPU than this baseline.
-`apxchol::core` propagates architecture and C++23 requirements to consumers;
-these matter because Eigen objects cross the library boundary.
+The architecture flag stays private to the library: `apxchol::core`
+propagates C++23 but no instruction-set or alignment settings, so a consumer
+can target a narrower or wider instruction set than the core.

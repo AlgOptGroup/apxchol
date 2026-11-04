@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Regression tests for the retained benchmark runners and scaling plots."""
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -84,6 +85,30 @@ class CompleteRouteRunnerTest(unittest.TestCase):
     def test_gpu_plan_contains_no_host_selector_ablations(self):
         self.assertEqual(sweep_fair.APX_GPU, [("apxchol_v1", sweep_fair.APX_DEFAULT_CONFIG)])
 
+    def test_metal_axis_requests_the_device_route_and_needs_a_metal_receipt(self):
+        output = "v1,m,2,4,1e-3,2e-3,3e-3,2,1e-9,1,750,original-v1,1,0.001,metal\n"
+        for actual in ("metal", "gpu"):
+            repeats = "\n".join(f"BENCH_REPEAT phase=retained index={i} execution_route={actual}"
+                                 for i in range(1, 4))
+            stderr = repeats + "\n[bench] metal_init (once, before any timed solver): 120.0 ms\n"
+            with mock.patch.object(sweep_fair, "DEVICE", "metal"), \
+                 mock.patch.object(sweep_fair, "REPS", 3), \
+                 mock.patch.object(sweep_fair, "WARMUP", 0), \
+                 mock.patch.object(rc, "benchmark_openmp_env", return_value={}), \
+                 mock.patch.object(rc, "taskset_prefix", return_value=""), \
+                 mock.patch.object(sweep_fair, "sh", return_value=subprocess.CompletedProcess(
+                     "benchmark", 0, output, stderr)) as run:
+                status, metrics = sweep_fair.run_cpp("", "apxchol_v1", rc.APXCHOL_DEFAULT_CONFIG, False)
+            self.assertIn("--v1-backend gpu", run.call_args.args[0])
+            self.assertIn(rc.BIN["metal"], run.call_args.args[0])
+            self.assertEqual(status, "complete" if actual == "metal" else "failed")
+            self.assertEqual(metrics["metal_init_s"], 0.12)
+
+    def test_metal_plan_is_apxchol_only(self):
+        with mock.patch.object(sweep_fair, "PARAC_ONLY", False):
+            self.assertEqual(sweep_fair.planned_cell_count([("m", {})] * 3, "metal"), 3)
+        self.assertEqual(sweep_fair.APX_METAL, [("apxchol_v1", sweep_fair.APX_DEFAULT_CONFIG)])
+
 
 class GpuTimingIsolationTest(unittest.TestCase):
     def test_cpp_timing_does_not_start_memory_poller(self):
@@ -94,24 +119,105 @@ class GpuTimingIsolationTest(unittest.TestCase):
         with mock.patch.object(sweep_fair, "DEVICE", "gpu"), \
              mock.patch.object(rc, "benchmark_openmp_env", return_value={}), \
              mock.patch.object(rc, "taskset_prefix", return_value="taskset -c 0"), \
-             mock.patch.object(rc, "VramSampler", side_effect=AssertionError("timing polluted")), \
              mock.patch.object(sweep_fair, "sh", return_value=subprocess.CompletedProcess(
-                 "benchmark", 0, output, "")):
+                 "benchmark", 0, output,
+                 "[bench] gpu_memory pid=9 bus_id=00000000:01:00.0 baseline_mib=238.0 "
+                 "other_processes=0 other_mib=0.0\n")):
             status, metrics = sweep_fair.run_cpp("", "amgcl_cuda", "", False)
         self.assertEqual(status, "complete")
         self.assertIs(metrics["gpu_memory_polling"], False)
         self.assertNotIn("max_vram_mb", metrics)
+        self.assertEqual(metrics["vram_baseline_mb"], 238.0)
+        self.assertIs(metrics["gpu_shared"], False)
+
+    def test_cpp_timeout_keeps_gpu_memory_receipt(self):
+        with mock.patch.object(sweep_fair, "DEVICE", "gpu"), \
+             mock.patch.object(rc, "benchmark_openmp_env", return_value={}), \
+             mock.patch.object(rc, "taskset_prefix", return_value="taskset -c 0"), \
+             mock.patch.object(sweep_fair, "sh", side_effect=subprocess.TimeoutExpired(
+                 "benchmark", 5, output="",
+                 stderr="[bench] gpu_memory pid=9 bus_id=00000000:01:00.0 baseline_mib=238.0 "
+                        "other_processes=1 other_mib=512.0\n")):
+            status, metrics = sweep_fair.run_cpp("", "amgcl_cuda", "", False)
+        self.assertEqual(status, "timeout")
+        self.assertEqual(metrics["vram_baseline_mb"], 238.0)
+        self.assertIs(metrics["gpu_shared"], True)
 
     def test_parac_shared_calibration_and_timing_path_has_no_memory_poller(self):
         import parac_runner
-        with mock.patch.object(rc, "VramSampler", side_effect=AssertionError("timing polluted")), \
-             mock.patch.object(parac_runner, "sh", return_value=subprocess.CompletedProcess(
-                 "gpu_rchol", 0, "APX GPU solve phase time: 0.02\nAPX stop contract: original-v1\nAPX stop checks: 1\nAPX stop check seconds: 0.001\n", "")):
+        with mock.patch.object(parac_runner, "sh", return_value=subprocess.CompletedProcess(
+                "gpu_rchol", 0, "APX GPU solve phase time: 0.02\nAPX stop contract: original-v1\nAPX stop checks: 1\nAPX stop check seconds: 0.001\n", "")):
             metrics = parac_runner._run_once_gpu("gpu_rchol", "matrix.mtx", 1e-8)
         self.assertEqual(metrics["solve_total"], "0.02")
         self.assertIs(metrics["gpu_memory_polling"], False)
         self.assertNotIn("vram_mb", metrics)
         self.assertNotIn("max_vram_mb", metrics)
+
+
+class AmgxSeriesTest(unittest.TestCase):
+    ROW = ("AMG+PCG [AMGX;cuda],m,4,10,2.5e-02,1.0e-02,3.5e-02,7,4.0e-09,0,1000,"
+           "512.0,96.0,80.0,3,2,6.0e-09,original-v1,2,0.002,\n")
+    STDERR = (
+        'BUILD_META compiler=clang compiler_version=23.1.4 openmp_runtime=llvm-libomp '
+        'node_index_bits=32 edge_index_bits=32 hypre_cuda=off rchol_pcg=upstream-mkl '
+        'cuda_host_compiler="/usr/bin/g++-15" '
+        'amgx=91a8413ef267b1c32aff4014c02820e1c5897ac2+set_max_iters '
+        'amgx_config=PCG_CLASSICAL_V_JACOBI.json amgx_config_sha256=abc123 '
+        'arch_flags="-march=native"\n'
+        "[bench] cuda_init (once, before any timed solver): 90.0 ms\n"
+        "[bench] gpu_memory pid=9 bus_id=00000000:01:00.0 baseline_mib=238.0 "
+        "other_processes=0 other_mib=0.0\n"
+        "AMGX version 2.5.0\nBuilt on Nov  1 2026, 20:20:45\n"
+        "[bench] amgx_init (charged once per AMGX row): 0.150000 s\n"
+        "BENCH_REPEAT phase=retained index=1 total_s=3.4e-02\n")
+
+    def test_amgx_is_a_gpu_competitor_series(self):
+        self.assertIn("amgx", sweep_fair.COMP_GPU)
+        self.assertNotIn("amgx", sweep_fair.COMP)
+        self.assertIn(("AMGX", "amgx", ""), thread_scaling.CPP_GPU)
+        self.assertIn("AMGX", thread_scaling.COLORS)
+        with mock.patch.object(sweep_fair, "PARAC_ONLY", False), \
+             mock.patch.object(sweep_fair, "RUN_PARAC", False):
+            # apxchol, BoomerAMG default and cut, AMGCL and AMGX.
+            self.assertEqual(sweep_fair.planned_cell_count([("m", {})] * 2, "gpu"), 10)
+
+    def _run(self, output, stderr):
+        build = {}
+        with mock.patch.object(sweep_fair, "DEVICE", "gpu"), \
+             mock.patch.object(sweep_fair, "BUILD", build), \
+             mock.patch.object(rc, "benchmark_openmp_env", return_value={}), \
+             mock.patch.object(rc, "taskset_prefix", return_value="taskset -c 0"), \
+             mock.patch.object(sweep_fair, "sh", return_value=subprocess.CompletedProcess(
+                 "benchmark", 0, output, stderr)) as run:
+            status, metrics = sweep_fair.run_cpp("", "amgx", "", False, family="grids")
+        return status, metrics, build, run.call_args.args[0]
+
+    def test_amgx_row_parses_with_contract_memory_and_receipts(self):
+        status, metrics, build, cmd = self._run(self.ROW, self.STDERR)
+        self.assertIn("--solver amgx ", cmd)
+        self.assertIn(f"--maxiter {sweep_fair.MAXITER['gpu']} ", cmd)
+        self.assertEqual(status, "complete")
+        self.assertEqual(metrics["stop_contract"], "original-v1")
+        self.assertEqual((metrics["iters"], metrics["solve_passes"]), (7, 2))
+        self.assertEqual((metrics["setup_vram_mb"], metrics["solve_vram_mb"]), (80.0, 96.0))
+        self.assertEqual(metrics["max_repeat_rel_res"], 6.0e-09)
+        self.assertEqual(metrics["cuda_init_s"], 0.09)
+        self.assertEqual(metrics["vram_baseline_mb"], 238.0)
+        self.assertEqual(len(metrics["repeat_receipts"]), 1)
+        self.assertNotIn("execution_route", metrics)
+        self.assertEqual(build["amgx"], "91a8413ef267b1c32aff4014c02820e1c5897ac2+set_max_iters")
+        self.assertEqual(build["amgx_config"], "PCG_CLASSICAL_V_JACOBI.json")
+
+    def test_amgx_grades_the_worst_retained_repeat(self):
+        row = self.ROW.replace("6.0e-09,original-v1", "2.0e-08,original-v1")
+        status, metrics, _, _ = self._run(row, self.STDERR)
+        self.assertEqual(status, "not_converged")
+
+    def test_amgx_row_without_original_v1_is_failed(self):
+        row = "AMG+PCG [AMGX;cuda],m,4,10,2.5e-02,1.0e-02,3.5e-02,7,4.0e-09,0,1000\n"
+        status, metrics, _, _ = self._run(row, self.STDERR)
+        self.assertEqual(status, "failed")
+        self.assertIn("stopping_failure", metrics)
 
 
 class JuliaDriverPathTest(unittest.TestCase):
@@ -440,24 +546,64 @@ class CellSchemaTest(unittest.TestCase):
                 self.assertTrue(sweep_fair.cell_done("audit", "m", "amgcl", ""))
 
 
-class CapReferenceTest(unittest.TestCase):
-    def test_gpu_cap_reference_uses_declared_default_not_fastest_selector(self):
-        with tempfile.TemporaryDirectory() as store, mock.patch.object(rc, "CELLS", store):
-            base = dict(family="audit", mid="m", solver="apxchol_v1", status="complete",
-                        threads=16, device="gpu", prov={"git_sha": rc.git_sha()})
-            rc.emit_cell(config=sweep_fair.APX_DEFAULT_CONFIG,
-                         metrics={"total_s": 10.0, "stop_contract": "original-v1", "execution_route": "gpu"}, **base)
-            rc.emit_cell(config="greedy+tree[vec_pool]", metrics={"total_s": 1.0, "stop_contract": "original-v1", "execution_route": "gpu"}, **base)
-            self.assertEqual(sweep_fair.gpu_apx_total("audit", "m"), 10.0)
+class RelativeCapTest(unittest.TestCase):
+    def test_cap_is_factor_times_best_same_device_apxchol_with_floor(self):
+        self.assertEqual(sweep_fair.solve_cap([3.0, 2.0, None]), 2.0 * sweep_fair.CAP_FACTOR)
+        self.assertEqual(sweep_fair.solve_cap([0.01]), sweep_fair.CAP_FLOOR_S)
+        self.assertEqual(sweep_fair.solve_cap([]), float(sweep_fair.TIMEOUT))
 
-    def test_gpu_cap_reference_uses_campaign_thread_count(self):
-        with tempfile.TemporaryDirectory() as store, \
-             mock.patch.object(rc, "CELLS", store), \
-             mock.patch.object(sweep_fair, "THREADS", 72):
-            rc.emit_cell("audit", "m", "apxchol_v1",
-                         sweep_fair.APX_DEFAULT_CONFIG, "complete",
-                         {"total_s": 7.2, "stop_contract": "original-v1", "execution_route": "gpu"}, 72, "gpu", {"git_sha": rc.git_sha()})
-            self.assertEqual(sweep_fair.gpu_apx_total("audit", "m"), 7.2)
+    def test_run_over_cap_is_a_status_not_a_time(self):
+        receipts = ["BENCH_REPEAT phase=warmup index=1 total_s=5.0 solver=\"x\"",
+                    "BENCH_REPEAT phase=retained index=1 total_s=50.0 solver=\"x\""]
+        st, m = sweep_fair.capped(("complete", {"total_s": 5.0, "setup_s": 1.0,
+                                                "repeat_receipts": receipts}), 40.0)
+        self.assertEqual(st, "exceeded_cap")
+        self.assertNotIn("total_s", m)
+        self.assertEqual(m["capped_timings"]["total_s"], 5.0)
+        self.assertEqual(m["cap_s"], 40.0)
+
+    def test_killed_run_is_exceeded_cap_and_keeps_extra(self):
+        result = sweep_fair.capped(("timeout", None, {"na_reason": "killed"}), 40.0)
+        self.assertEqual(result[0], "exceeded_cap")
+        self.assertEqual(result[2], {"na_reason": "killed"})
+
+    def test_run_within_cap_keeps_its_times(self):
+        st, m = sweep_fair.capped(("complete", {"total_s": 3.0}), 40.0)
+        self.assertEqual((st, m["total_s"], m["cap_s"]), ("complete", 3.0, 40.0))
+
+    def test_exceeded_cap_cells_record_their_cap_and_are_terminal(self):
+        with tempfile.TemporaryDirectory() as store, mock.patch.object(rc, "CELLS", store):
+            with self.assertRaises(ValueError):
+                rc.emit_cell("audit", "m", "amgcl", "", "exceeded_cap", {}, 16, "cpu",
+                             {"git_sha": rc.git_sha()})
+            rc.emit_cell("audit", "m", "amgcl", "", "exceeded_cap", {"cap_s": 40.0}, 16, "cpu",
+                         {"git_sha": rc.git_sha()}, timeout_cap_s=40.0)
+            self.assertTrue(rc.cell_done("audit", "m", "amgcl", "", 16, "cpu"))
+            self.assertFalse(rc.cell_done("audit", "m", "amgcl", "", 16, "cpu", rerun_timeouts=True))
+
+
+class SourceIdentityTest(unittest.TestCase):
+    SHA = "1c4abb35f1cf08276bc9dc65534dbfb6d2b66059"
+
+    def setUp(self):
+        rc.git_sha.cache_clear()            # git_sha is cached per process
+        self.addCleanup(rc.git_sha.cache_clear)
+
+    def head(self, out):
+        return mock.patch.object(rc, "sh", return_value=mock.Mock(stdout=out))
+
+    def test_tarball_source_uses_declared_commit(self):
+        with self.head(""), mock.patch.dict(os.environ, {"APXCHOL_SOURCE_COMMIT": self.SHA}):
+            self.assertEqual(rc.git_sha(), self.SHA)
+
+    def test_declared_commit_must_match_checkout_and_be_full(self):
+        with self.head("0" * 40 + "\n"), mock.patch.dict(os.environ, {"APXCHOL_SOURCE_COMMIT": self.SHA}):
+            with self.assertRaises(ValueError):
+                rc.git_sha()
+        rc.git_sha.cache_clear()
+        with self.head(""), mock.patch.dict(os.environ, {"APXCHOL_SOURCE_COMMIT": "1c4abb35"}):
+            with self.assertRaises(ValueError):
+                rc.git_sha()
 
 
 class FairSweepSelectionTest(unittest.TestCase):
@@ -471,11 +617,11 @@ class FairSweepSelectionTest(unittest.TestCase):
                             for _, config in sweep_fair.APX + sweep_fair.APX_GPU
                             for retired in ("[vec]", "[bstr]", "[vec_pool]", "[fwd_star]", "[forward_star]")))
         self.assertEqual(sweep_fair.planned_cell_count(selected, "cpu"), 351)
-        self.assertEqual(sweep_fair.planned_cell_count(selected, "gpu"), 162)
+        self.assertEqual(sweep_fair.planned_cell_count(selected, "gpu"), 189)  # 27 x 7
         self.assertEqual(
             sweep_fair.planned_cell_count(selected, "cpu")
             + sweep_fair.planned_cell_count(selected, "gpu"),
-            513,
+            540,
         )
 
     def test_all_registry_entries_are_selected_once(self):
@@ -509,40 +655,162 @@ class FairSweepSelectionTest(unittest.TestCase):
         self.assertEqual(dispatched["iter0010"][0], "ipm")
 
 
-class CmgAvailabilityTest(unittest.TestCase):
-    def test_legacy_adapter_stops_before_export_or_solver_execution(self):
-        cmg = sweep_fair.cmg_matlab_runner
-        with mock.patch.object(cmg, "_dump") as export, \
-             mock.patch.object(cmg, "sh") as run, \
-             mock.patch.object(rc, "emit_cell") as emit:
-            ready, reason = cmg.available()
-            self.assertFalse(ready)
-            self.assertIn("local RHS", reason)
-            self.assertEqual(cmg.run_one("grid_500"), "UNAVAILABLE: " + reason)
-        export.assert_not_called()
-        run.assert_not_called()
-        emit.assert_not_called()
+def cmg_record(rep, status="complete", total=1.0, rel_res=5e-9, **extra):
+    record = {"repetition": rep, "retained": rep > 0, "status": status, "n": 4, "nnz": 10,
+              "setup_s": total / 2, "solve_s": total / 2, "total_s": total, "iters": 7,
+              "rel_res": rel_res, "pcg_flag": 0, "adaptation_s": 0.01, "components": 2,
+              "grounded_components": 1, "matlab_version": "26.1.0 (R2026a)"}
+    record.update(extra)
+    return record
 
-    def test_sweep_reports_unavailable_cmg_once_before_first_matrix(self):
-        state = {"probed": False, "ok": False, "why": ""}
-        def matrix(mid, *_args):
-            self.assertTrue(state["probed"])
-            sweep_fair.run_cmg(mid)
-            sweep_fair.run_cmg(mid)
+
+class CmgRunnerTest(unittest.TestCase):
+    cmg = sweep_fair.cmg_matlab_runner
+
+    def summarize(self, records, returncode=0, stderr=""):
+        return self.cmg.summarize(records, returncode, stderr, 3, "1e-8")
+
+    def test_unconfigured_matlab_is_unavailable(self):
+        with mock.patch.object(self.cmg, "MATLAB", ""):
+            ready, reason = self.cmg.available()
+        self.assertFalse(ready)
+        self.assertIn("APXCHOL_MATLAB_ROOT", reason)
+
+    def test_local_command_runs_shared_inputs_on_one_pinned_thread(self):
+        with mock.patch.object(self.cmg, "MATLAB", "/opt/matlab"), \
+             mock.patch.object(self.cmg, "CMG_SOLVER", "/src/cmg"), \
+             mock.patch.object(self.cmg, "IMAGE", ""), \
+             mock.patch.object(rc, "affinity_spec", return_value="3"):
+            command = self.cmg.command("/d/A.mtx", "/d/A.rhs.mtx", "/d/work", "/d/gauge",
+                                       3, "1e-8", 500, 900)
+        args = __import__("shlex").split(command)
+        self.assertEqual(args[:6], ["env", "CMG_ROOT=/src/cmg", "taskset", "-c", "3", "timeout"])
+        self.assertIn("900", args)
+        self.assertEqual(args[args.index("/opt/matlab/bin/matlab") + 1:][:2],
+                         ["-singleCompThread", "-batch"])
+        self.assertIn("bench_cmg_common('/d/A.mtx','/d/A.rhs.mtx','/d/work',3,1e-8,500,1)",
+                      args[-1])
+        self.assertIn("'-outdir',g", args[-1])
+
+    def test_container_command_mounts_host_paths_and_keeps_deadline_inside(self):
+        with mock.patch.object(self.cmg, "MATLAB", "/opt/matlab"), \
+             mock.patch.object(self.cmg, "CMG_SOLVER", "/src/cmg"), \
+             mock.patch.object(self.cmg, "IMAGE", "apxchol-matlab-cmg:r2026a"), \
+             mock.patch.object(rc, "affinity_spec", return_value="3"):
+            command = self.cmg.command("/d/A.mtx", "/d/A.rhs.mtx", "/d/work", "/d/gauge",
+                                       3, "1e-8", 500, 900)
+        args = __import__("shlex").split(command)
+        self.assertEqual(args[:3], ["docker", "run", "--rm"])
+        self.assertIn("--user", args)
+        self.assertEqual(args[args.index("--cpuset-cpus") + 1], "3")
+        for mount in ("/opt/matlab:/opt/matlab:ro", "/src/cmg:/src/cmg:ro", "/d:/d:rw",
+                      f"{self.cmg.BENCH}:{self.cmg.BENCH}:ro"):
+            self.assertIn(mount, args)
+        image = args.index("apxchol-matlab-cmg:r2026a")
+        self.assertEqual(args[image + 1], "timeout")
+
+    def test_single_quotes_in_paths_are_rejected(self):
+        with self.assertRaises(ValueError):
+            self.cmg.command("/d/it's/A.mtx", "/d/b.mtx", "/w", "/g", 3, "1e-8", 500, 9)
+
+    def test_complete_cell_keeps_median_retained_run_and_every_total(self):
+        records = [cmg_record(0, total=9.0), cmg_record(1, total=3.0),
+                   cmg_record(2, total=1.0, rel_res=9e-9), cmg_record(3, total=2.0)]
+        status, metrics, meta = self.summarize(records)
+        self.assertEqual(status, "complete")
+        self.assertIsNone(meta)
+        self.assertEqual(metrics["representative_repeat"], 3)
+        self.assertEqual(metrics["total_s"], 2.0)
+        self.assertEqual(metrics["max_repeat_rel_res"], 9e-9)
+        self.assertEqual(metrics["stop_contract"], "original-v1")
+        self.assertEqual(metrics["effective_threads"], 1)
+        self.assertEqual(metrics["grounded_components"], 1)
+        self.assertEqual(sweep_fair._repeat_totals(metrics), [2.0, 9.0, 3.0, 1.0, 2.0])
+
+    def test_warmup_over_the_cap_is_exceeded_cap(self):
+        records = [cmg_record(0, total=50.0)] + [cmg_record(i) for i in (1, 2, 3)]
+        status, metrics, *_ = sweep_fair.capped(self.summarize(records), 30.0)
+        self.assertEqual(status, "exceeded_cap")
+        self.assertNotIn("total_s", metrics)
+
+    def test_retained_residual_above_tolerance_is_not_converged(self):
+        records = [cmg_record(i) for i in range(3)] + [cmg_record(3, rel_res=2e-8)]
+        self.assertEqual(self.summarize(records)[0], "not_converged")
+
+    def test_matlab_not_converged_stops_the_cell(self):
+        records = [cmg_record(0, status="not_converged", rel_res=1e-3, pcg_flag=1)]
+        status, metrics, _ = self.summarize(records)
+        self.assertEqual(status, "not_converged")
+        self.assertEqual((metrics["rel_res"], metrics["retained_repeats"]), (1e-3, 0))
+
+    def test_empty_hierarchy_is_na_with_its_reason(self):
+        reason = "canonical cmg_precondition returned an empty hierarchy"
+        status, metrics, meta = self.summarize([{"repetition": 0, "status": "n/a",
+                                                 "n": 4, "nnz": 10, "reason": reason}])
+        self.assertEqual((status, metrics, meta), ("n/a", {"n": 4, "nnz": 10},
+                                                   {"na_reason": reason}))
+
+    def test_failures_keep_matlab_error(self):
+        status, _, meta = self.summarize([{"repetition": 0, "status": "failed",
+                                           "error": "Expected an exactly symmetric operator"}])
+        self.assertEqual(status, "failed")
+        self.assertIn("exactly symmetric", meta["na_reason"])
+        status, _, meta = self.summarize([], returncode=1, stderr="x\nLicense checkout failed")
+        self.assertEqual(status, "failed")
+        self.assertIn("License checkout failed", meta["na_reason"])
+
+    def test_missing_retained_record_or_bad_exit_is_failed(self):
+        records = [cmg_record(i) for i in range(3)]
+        self.assertEqual(self.summarize(records)[0], "failed")
+        records.append(cmg_record(3))
+        self.assertEqual(self.summarize(records, returncode=1)[0], "failed")
+
+    def test_deadline_exit_is_timeout(self):
+        for returncode in (124, 137):
+            status, *_ = self.summarize([cmg_record(0)], returncode=returncode)
+            self.assertEqual(status, "timeout")
+
+    def test_unavailable_cmg_is_reported_once_and_not_planned(self):
         argv = ["sweep_fair.py", "--only", "grid_500", "--no-julia", "--no-parac"]
         with mock.patch.object(sys, "argv", argv), \
-             mock.patch.object(sweep_fair, "_CMG_STATE", state), \
              mock.patch.object(sweep_fair, "RUN_CMG", True), \
              mock.patch.object(sweep_fair, "JULIA", []), \
              mock.patch.object(sweep_fair, "RUN_PARAC", False), \
-             mock.patch.object(sweep_fair, "do_matrix", side_effect=matrix), \
-             mock.patch.object(sweep_fair.cmg_matlab_runner, "run_one") as run, \
+             mock.patch.object(self.cmg, "available", return_value=(False, "no MATLAB")), \
+             mock.patch.object(sweep_fair, "do_matrix") as do_matrix, \
              mock.patch("builtins.print") as output:
             sweep_fair.main()
-        unavailable = [call for call in output.call_args_list
-                       if "UNAVAILABLE" in str(call.args[0])]
-        self.assertEqual(len(unavailable), 1)
-        run.assert_not_called()
+            self.assertFalse(sweep_fair.RUN_CMG)
+        lines = [str(call.args[0]) for call in output.call_args_list if call.args]
+        self.assertEqual(sum("no MATLAB" in line for line in lines), 1)
+        do_matrix.assert_called_once()
+
+    def test_cpu_sweep_hands_cmg_the_exported_operator_and_rhs(self):
+        def run(operator, rhs, **kwargs):
+            self.assertEqual((operator, rhs), ("/d/A.mtx", "/d/A.rhs.mtx"))
+            self.assertEqual(kwargs["repeats"], sweep_fair.REPS)
+            self.assertEqual(kwargs["timeout"], int((1 + sweep_fair.REPS) * 40.0
+                                                    + sweep_fair.CAP_STARTUP_S))
+            return "complete", {"total_s": 1.0}
+        with mock.patch.object(sweep_fair, "APX", [("apxchol_v1", "c")]), \
+             mock.patch.object(sweep_fair, "COMP", []), \
+             mock.patch.object(sweep_fair, "JULIA", []), \
+             mock.patch.object(sweep_fair, "RUN_PARAC", False), \
+             mock.patch.object(sweep_fair, "RUN_CMG", True), \
+             mock.patch.object(sweep_fair, "DEVICE", "cpu"), \
+             mock.patch.object(sweep_fair, "cell_done", return_value=False), \
+             mock.patch.object(sweep_fair, "run_cpp", return_value=("complete", {"total_s": 2.0})), \
+             mock.patch.object(sweep_fair, "dump_mtx", return_value="/d/A.mtx"), \
+             mock.patch.object(sweep_fair, "dump_rhs", return_value="/d/A.rhs.mtx"), \
+             mock.patch.object(self.cmg, "run", side_effect=run) as cmg_run, \
+             mock.patch.object(sweep_fair, "emit") as emit, \
+             mock.patch("builtins.print"):
+            sweep_fair.do_matrix("grid_500", "grids", "grid", 500, True, 250000, None)
+        cmg_run.assert_called_once()
+        cell = [call.args for call in emit.call_args_list if call.args[2] == "cmg"]
+        self.assertEqual(len(cell), 1)
+        self.assertEqual(cell[0][4], "complete")
+        self.assertEqual(cell[0][5]["cap_s"], 40.0)
 
 
 class JuliaPreflightTest(unittest.TestCase):

@@ -13,10 +13,9 @@
 #include <algorithm>
 #include <atomic>
 
-namespace apxchol {
+namespace apxchol::detail {
 
 struct priority_greedy_partitioner {
-    static constexpr std::string_view name = "priority_greedy";
     static constexpr size_t residual_handoff_threshold = 500;
     static constexpr bool degree_prepass = true;
 
@@ -24,9 +23,9 @@ struct priority_greedy_partitioner {
     /// Parallel fixed-priority passes before the exact serial fallback.
     int parallel_passes = 16;
 
-    void find_partition(graph& G, std::span<const node_index> candidates,
+    void find_partition(const partition_graph& G, std::span<const node_index> candidates,
                         const partition_context& ctx, selection& out) {
-        select_into_chosen_k0(G, candidates, out, ctx);
+        select_into_chosen_k0(partition_graph_access::graph_of(G), candidates, out, ctx);
         ++round;
     }
 
@@ -50,7 +49,7 @@ private:
         // the full hash and vertex id. The local-min IS prefers low-degree
         // candidates (parallel min-degree) without the overflow/collision risk
         // of packing a truncated hash into one integer. Plain hash otherwise.
-        const bool tiebreak = ctx.options.degree_tiebreak;
+        const bool tiebreak = ctx.degree_tiebreak;
         const auto degrees  = ctx.degrees;
         auto hash = [&](node_index v) -> uint64_t {
             return detail::fibonacci_vertex_hash(v, round_seed);
@@ -136,4 +135,4 @@ private:
     }
 };
 
-} // namespace apxchol
+} // namespace apxchol::detail

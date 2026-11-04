@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <apxchol/solver/detail/gpu_pcg.h>
 #include <apxchol/solver/detail/gpu_scaling.h>
+#include <apxchol/solver/detail/pcg_restart.h>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -31,7 +32,9 @@ struct step_math {
     double sum_row(double sum) const { return sum; }
 };
 
+template<unsigned Width>
 struct commands {
+    static constexpr unsigned batch_iterations = Width;
     unsigned stop;
     bool active = true;
     unsigned batches = 0, initializations = 0, iterations = 0, directions = 0, preconditions = 0;
@@ -137,6 +140,7 @@ TEST(GpuPcg, ProductsRequireFinitePositiveValues) {
             state = pcg::advance(recurrence_math{}, state, mode, product, 4);
             EXPECT_EQ(state.active, unsigned(product == 1.0));
             EXPECT_EQ(state.iters, 3u);
+            EXPECT_EQ(state.tolerance_stop, 0u);
             if (product != 1.0) {
                 EXPECT_EQ(state.rz, 2);
             } else if (mode == pcg::kFinalizeAlpha) {
@@ -161,6 +165,7 @@ TEST(GpuPcg, OverflowingCoefficientsBreakDownBeforeUpdatingTheSolution) {
                              mode == pcg::kFinalizeRz ? large : small, 1);
         EXPECT_EQ(state.active, 0u);
         EXPECT_EQ(state.iters, 0u);
+        EXPECT_EQ(state.tolerance_stop, 0u);
     }
 }
 
@@ -176,6 +181,7 @@ TEST(GpuPcg, ResidualCheckCountsTheCompletedIterationEvenOnBreakdown) {
                              residual_squared, 4);
         EXPECT_EQ(state.active, 0u);
         EXPECT_EQ(state.iters, 4u);
+        EXPECT_EQ(state.tolerance_stop, unsigned(residual_squared == 0.0));
         if (!std::isnan(residual_squared)) {
             EXPECT_EQ(state.rr, residual_squared);
         }
@@ -183,18 +189,22 @@ TEST(GpuPcg, ResidualCheckCountsTheCompletedIterationEvenOnBreakdown) {
 }
 
 TEST(GpuPcg, DevicePredicationRespectsIterationLimitsAndConvergence) {
-    for (unsigned batch : {0u, 1u, 4u}) for (unsigned limit : {0u, 1u, 5u})
-    for (unsigned stop : {1u, 3u, 9u}) {
-        SCOPED_TRACE(::testing::Message() << batch << ' ' << limit << ' ' << stop);
-        commands gpu{stop};
-        pcg::solve(gpu, limit, batch);
-        const unsigned expected = std::min(limit, stop), width = std::max(batch, 1u);
-        EXPECT_EQ(gpu.initializations, unsigned(expected > 0));
-        EXPECT_EQ(gpu.iterations, expected);
-        EXPECT_EQ(gpu.directions, expected ? expected - 1 : 0);
-        EXPECT_EQ(gpu.preconditions, expected);
-        EXPECT_EQ(gpu.batches, std::max(1u, (expected + width - 1) / width));
-    }
+    const auto check = [&]<unsigned Width>() {
+        for (unsigned limit : {0u, 1u, 5u, 9u}) for (unsigned stop : {1u, 3u, 9u}) {
+            SCOPED_TRACE(::testing::Message() << Width << ' ' << limit << ' ' << stop);
+            commands<Width> gpu{stop};
+            pcg::solve(gpu, limit);
+            const unsigned expected = std::min(limit, stop);
+            EXPECT_EQ(gpu.initializations, unsigned(expected > 0));
+            EXPECT_EQ(gpu.iterations, expected);
+            EXPECT_EQ(gpu.directions, expected ? expected - 1 : 0);
+            EXPECT_EQ(gpu.preconditions, expected);
+            EXPECT_EQ(gpu.batches, std::max(1u, (expected + Width - 1) / Width));
+        }
+    };
+    check.template operator()<1>();
+    check.template operator()<4>();
+    check.template operator()<8>();
 }
 
 TEST(GpuPcg, ResidualGrowthDoesNotStopBeforeTolerance) {
@@ -228,4 +238,16 @@ TEST(GpuPcg, InputScalingKeepsOrdinaryValuesAndNormalizesExtremes) {
     const double scale = scaling::fp32_scale(tiny);
     EXPECT_TRUE(std::isnormal(float(tiny * scale)));
     EXPECT_EQ((tiny * scale) / scale, tiny);
+}
+
+TEST(GpuPcg, OnlyVerifiedToleranceFailuresCanRestartWithinTheBudget) {
+    using apxchol::detail::pcg_restart;
+    EXPECT_TRUE(pcg_restart(true, false, 2e-8, 4, 1));
+    EXPECT_FALSE(pcg_restart(false, false, 2e-8, 4, 1));
+    EXPECT_FALSE(pcg_restart(true, true, 1e-9, 4, 1));
+    EXPECT_FALSE(pcg_restart(true, false, 2e-8, 0, 1));
+    EXPECT_FALSE(pcg_restart(true, false, 2e-8, 4, 0));
+    for (double value : {std::numeric_limits<double>::infinity(),
+                         std::numeric_limits<double>::quiet_NaN()})
+        EXPECT_FALSE(pcg_restart(true, false, value, 4, 1));
 }

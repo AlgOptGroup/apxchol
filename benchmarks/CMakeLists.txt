@@ -2,21 +2,19 @@ cmake_minimum_required(VERSION 3.20)
 project(laplacian_benchmarks LANGUAGES C CXX)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_device.cmake)
-if (APXCHOL_DEVICE STREQUAL "METAL")
-    message(FATAL_ERROR "The competitor benchmark supports CPU or CUDA; use the root project for Metal")
-endif()
 
-# The shipped core configuration: C++23, Eigen, OpenMP, the architecture flag,
+# The shipped core configuration: C++23, OpenMP, the architecture flag,
 # index/pool options and, for CUDA, static cudart. apxchol_v1 below is built by
-# the same apxchol_configure_core() as the root library and Python module.
+# the same _apxchol_configure_core() as the root library and Python module.
 include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apxchol_core.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/eigen.cmake)
 set(CMAKE_CXX_STANDARD 17) # The apxchol targets request C++23 explicitly.
 
 # Competitors get the same machine-tuning flag as the core. It is recorded into
 # the binary as BUILD_META's arch_flags (see the benchmark target), so a stored
 # cell records the native tuning or portable baseline used by that build.
-add_compile_options(-Wall -Wextra -Wpedantic ${APXCHOL_ARCH_FLAG})
-set(APXCHOL_BENCH_ARCH_FLAGS "${APXCHOL_ARCH_FLAG}")
+add_compile_options(-Wall -Wextra -Wpedantic ${_APXCHOL_ARCH_FLAG})
+set(APXCHOL_BENCH_ARCH_FLAGS "${_APXCHOL_ARCH_FLAG}")
 
 include(FetchContent)
 
@@ -27,6 +25,15 @@ set(BENCH_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_library(bench_input STATIC ${BENCH_SRC}/graphs.cpp ${BENCH_SRC}/mmio.cpp)
 target_link_libraries(bench_input PUBLIC Eigen3::Eigen)
 target_include_directories(bench_input PUBLIC ${BENCH_SRC})
+# Per-process device memory for every GPU solver (src/gpu_memory.h), linked by
+# the benchmark and by the tests that include benchmark.cpp.
+set(BENCH_GPU_MEMORY "")
+if (APXCHOL_DEVICE STREQUAL "CUDA")
+    add_library(bench_gpu_memory STATIC ${BENCH_SRC}/gpu_memory.cpp)
+    # NVML is opened at run time (the driver provides it); only its header is needed.
+    target_link_libraries(bench_gpu_memory PUBLIC CUDA::cudart_static ${CMAKE_DL_LIBS})
+    set(BENCH_GPU_MEMORY bench_gpu_memory)
+endif()
 
 # ══════════════════════════════════════════════════════
 # External solver dependencies (all fetched at configure time)
@@ -212,6 +219,11 @@ set_target_properties(rchol_lib PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 target_compile_options(rchol_lib PRIVATE -w -O3)
+if (APPLE)
+    # rchol_lap.cpp pins threads with Linux-only calls; see the shim.
+    target_compile_options(rchol_lib PRIVATE
+        "SHELL:-include \"${CMAKE_CURRENT_SOURCE_DIR}/src/macos_affinity_shim.h\"")
+endif()
 if (HAVE_METIS)
     target_compile_definitions(rchol_lib PUBLIC HAVE_METIS)
     target_include_directories(rchol_lib PUBLIC ${METIS_INCLUDE})
@@ -261,6 +273,78 @@ if (APXCHOL_DEVICE STREQUAL "CUDA" AND BENCH_HYPRE_USE_CUDA)
 endif()
 FetchContent_MakeAvailable(hypre)
 
+# ── NVIDIA AMGX (optional GPU competitor) ────────────
+# v2.5.0 does not compile with CUDA 13.x: CCCL 3 removed the legacy
+# thrust::tuple API its headers use. 91a8413 ("Fix CUDA 13 tuple compatibility")
+# supplies the tuple compatibility shim. Other changes since v2.5.0 include
+# C++17 support, an export macro and an example convergence-status fix. Patch 0001 adds
+# AMGX_solver_set_max_iters so original-v1 retries stay within the remaining
+# iteration budget without rebuilding the hierarchy.
+# AMGX is built as its own CMake project because its top level forces global
+# cache settings (C++ standard, compiler flags, CUDA architectures).
+option(BENCH_AMGX "Build the NVIDIA AMGX GPU competitor (CUDA builds only)" OFF)
+if (BENCH_AMGX)
+    if (NOT APXCHOL_DEVICE STREQUAL "CUDA")
+        message(FATAL_ERROR "BENCH_AMGX requires -DAPXCHOL_DEVICE=CUDA")
+    endif()
+    set(BENCH_AMGX_COMMIT 91a8413ef267b1c32aff4014c02820e1c5897ac2)
+    FetchContent_Declare(amgx
+        URL https://github.com/NVIDIA/AMGX/archive/${BENCH_AMGX_COMMIT}.tar.gz
+        URL_HASH SHA256=81d64b6fa744704e6dee1a7e71ef06fd422d4abcf9867c0451108f40f20707c4
+        # patch, not git apply: inside another git work tree (this repository),
+        # git apply resolves paths against that tree and silently skips the files.
+        PATCH_COMMAND patch -p1 --forward -i
+            ${CMAKE_CURRENT_SOURCE_DIR}/patches/amgx/0001-solver-set-max-iters.patch
+    )
+    FetchContent_GetProperties(amgx)
+    if (NOT amgx_POPULATED)
+        FetchContent_Populate(amgx)
+    endif()
+    include(ExternalProject)
+    set(_amgx_binary_dir ${CMAKE_CURRENT_BINARY_DIR}/amgx-build)
+    set(_amgx_library
+        ${_amgx_binary_dir}/${CMAKE_SHARED_LIBRARY_PREFIX}amgxsh${CMAKE_SHARED_LIBRARY_SUFFIX})
+    set(_amgx_args
+        -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+        -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+        -DCMAKE_CUDA_COMPILER=${CMAKE_CUDA_COMPILER}
+        -DCMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES}
+        -DCMAKE_CUDA_FLAGS=${CMAKE_CUDA_FLAGS}
+        -DCMAKE_DISABLE_FIND_PACKAGE_MPI=ON)
+    if (CMAKE_CUDA_HOST_COMPILER)
+        list(APPEND _amgx_args -DCMAKE_CUDA_HOST_COMPILER=${CMAKE_CUDA_HOST_COMPILER})
+    endif()
+    ExternalProject_Add(amgx_external
+        SOURCE_DIR ${amgx_SOURCE_DIR}
+        BINARY_DIR ${_amgx_binary_dir}
+        CMAKE_ARGS ${_amgx_args}
+        BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target amgxsh
+        INSTALL_COMMAND ""
+        BUILD_BYPRODUCTS ${_amgx_library})
+    add_library(bench_amgx SHARED IMPORTED)
+    set_target_properties(bench_amgx PROPERTIES
+        IMPORTED_LOCATION ${_amgx_library}
+        INTERFACE_INCLUDE_DIRECTORIES ${amgx_SOURCE_DIR}/include)
+    add_dependencies(bench_amgx amgx_external)
+
+    # The pinned solver configuration is compiled into the binary, so a cell
+    # cannot run a config file that changed after the build.
+    set(BENCH_AMGX_CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/amgx/PCG_CLASSICAL_V_JACOBI.json)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${BENCH_AMGX_CONFIG})
+    file(READ ${BENCH_AMGX_CONFIG} BENCH_AMGX_CONFIG_JSON)
+    file(SHA256 ${BENCH_AMGX_CONFIG} BENCH_AMGX_CONFIG_SHA256)
+    get_filename_component(BENCH_AMGX_CONFIG_NAME ${BENCH_AMGX_CONFIG} NAME)
+    file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/generated/bench_amgx_config.h
+        CONTENT "#pragma once
+// Generated from benchmarks/amgx/@BENCH_AMGX_CONFIG_NAME@ by CMake.
+inline constexpr const char* kAmgxCommit = \"@BENCH_AMGX_COMMIT@\";
+inline constexpr const char* kAmgxConfigName = \"@BENCH_AMGX_CONFIG_NAME@\";
+inline constexpr const char* kAmgxConfigSha256 = \"@BENCH_AMGX_CONFIG_SHA256@\";
+inline constexpr const char* kAmgxConfigJson = R\"amgxjson(@BENCH_AMGX_CONFIG_JSON@)amgxjson\";
+" @ONLY)
+endif()
+
 # ── GPU RCHOL — Liang et al. (2025) ──────────────────
 # Builds both the CPU driver (experiment/) and GPU driver (gpu_implementation/).
 # Invoked as standalone binaries from run.sh; parses stdout for timing.
@@ -284,6 +368,8 @@ if (BUILD_GPU_RCHOL)
                     ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0006-separate-graph-algorithm-preparation.patch
             COMMAND git apply
                     ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0007-original-residual-stopping.patch
+            COMMAND git apply
+                    ${CMAKE_CURRENT_SOURCE_DIR}/patches/parac/0008-benchmark-io-portable-solve-and-by-value-kernels.patch
     )
     FetchContent_Declare(fast_matrix_market
         GIT_REPOSITORY https://github.com/alugowski/fast_matrix_market.git
@@ -321,10 +407,35 @@ if (BUILD_GPU_RCHOL)
     _parac_require_marker(_parac_cpu_solver "APX stop contract: original-v1" "patch 0007")
     _parac_require_marker(_parac_gpu_solver "APX stop contract: original-v1" "patch 0007")
     _parac_require_marker(_parac_gpu_driver "APX CUDA init time:" "patch 0004")
+    _parac_require_marker(_parac_cpu_solver "APXCHOL_PARAC_PORTABLE_CPP" "patch 0008")
+    _parac_require_marker(_parac_gpu_solver "apx_io::write_xb" "patch 0008")
+    file(READ "${gpu_rchol_SOURCE_DIR}/gpu_implementation/driver_physics.cu" _parac_gpu_physics)
+    _parac_require_marker(_parac_gpu_physics
+        "input_check_last(sparse_matrix_device<type_int, type_data> spmat" "patch 0008")
+
+    # CPU solve backend: AUTO keeps upstream's oneMKL RCI loop when MKL LP64 is
+    # found and otherwise builds patch 0008's serial portable translation.
+    set(APXCHOL_PARAC_CPU_BACKEND "auto" CACHE STRING
+        "ParAC CPU solve backend: auto, mkl-rci or portable-cpp")
+    set_property(CACHE APXCHOL_PARAC_CPU_BACKEND PROPERTY STRINGS auto mkl-rci portable-cpp)
+    set(_parac_cpu_backend "${APXCHOL_PARAC_CPU_BACKEND}")
+    if (_parac_cpu_backend STREQUAL "auto")
+        if (HAVE_MKL AND MKL_LP64)
+            set(_parac_cpu_backend "mkl-rci")
+        else()
+            set(_parac_cpu_backend "portable-cpp")
+        endif()
+    endif()
+    if (NOT _parac_cpu_backend MATCHES "^(mkl-rci|portable-cpp)$")
+        message(FATAL_ERROR "APXCHOL_PARAC_CPU_BACKEND must be auto, mkl-rci or portable-cpp")
+    endif()
+    if (_parac_cpu_backend STREQUAL "mkl-rci" AND NOT (HAVE_MKL AND MKL_LP64))
+        message(FATAL_ERROR "ParAC mkl-rci backend requested, but oneMKL LP64 was not found")
+    endif()
 
     # CPU driver (experiment/ — includes MKL PCG solve). LP64: unlike RCHOL's pcg.hpp
     # this driver uses MKL's default 32-bit MKL_INT, so it must NOT get the ILP64 layer.
-    if (HAVE_MKL AND MKL_LP64)
+    if (OpenMP_CXX_FOUND)
         add_executable(gpu_rchol_cpu_driver
             ${gpu_rchol_SOURCE_DIR}/experiment/driver_local.cpp
         )
@@ -333,20 +444,24 @@ if (BUILD_GPU_RCHOL)
             ${gpu_rchol_SOURCE_DIR}/experiment
             ${gpu_rchol_SOURCE_DIR}/cpu_implementation
             ${fast_matrix_market_SOURCE_DIR}/include
-            ${MKL_INCLUDE}
         )
-        target_link_libraries(gpu_rchol_cpu_driver PRIVATE
-            OpenMP::OpenMP_CXX ${MKL_LIBRARIES_LP64}
-        )
+        target_link_libraries(gpu_rchol_cpu_driver PRIVATE OpenMP::OpenMP_CXX)
+        if (_parac_cpu_backend STREQUAL "mkl-rci")
+            target_compile_definitions(gpu_rchol_cpu_driver PRIVATE APXCHOL_PARAC_MKL_RCI)
+            target_include_directories(gpu_rchol_cpu_driver PRIVATE ${MKL_INCLUDE})
+            target_link_libraries(gpu_rchol_cpu_driver PRIVATE ${MKL_LIBRARIES_LP64})
+        else()
+            target_compile_definitions(gpu_rchol_cpu_driver PRIVATE APXCHOL_PARAC_PORTABLE_CPP)
+        endif()
         # Upstream relies on transitive standard headers for INT_MAX/int64_t.
         # Supply them as build flags, without rewriting its source tree.
         # Keep each -include pair in one SHELL group: CMake otherwise de-duplicates
         # the repeated `-include` token and leaves `cstdint` as a bogus input file.
         target_compile_options(gpu_rchol_cpu_driver PRIVATE
             -O3 -w "SHELL:-include climits" "SHELL:-include cstdint")
-        message(STATUS "GPU RCHOL CPU driver enabled (experiment/driver_local.cpp)")
+        message(STATUS "GPU RCHOL CPU driver enabled: ParAC backend=${_parac_cpu_backend}")
     else()
-        message(STATUS "GPU RCHOL CPU driver needs MKL (LP64) — skipped")
+        message(STATUS "GPU RCHOL CPU driver needs OpenMP — skipped")
     endif()
 
     # GPU driver (needs CUDA). The convergence test remains upstream: the runner
@@ -435,7 +550,7 @@ endif()
 # ApxChol v1 (C++23 solver — multiple IS × elimination combos)
 # ══════════════════════════════════════════════════════
 add_library(apxchol_v1 STATIC)
-apxchol_configure_core(apxchol_v1)
+_apxchol_configure_core(apxchol_v1)
 
 # Boost headers are needed only by AMGCL (HAVE_AMGCL gate below); the apxchol
 # core itself is Boost-free.
@@ -445,7 +560,7 @@ find_package(Boost CONFIG QUIET)
 # Benchmark executable
 # ══════════════════════════════════════════════════════
 add_executable(benchmark src/benchmark.cpp)
-target_link_libraries(benchmark PRIVATE bench_input rchol_lib apxchol_v1)
+target_link_libraries(benchmark PRIVATE bench_input rchol_lib apxchol_v1 ${BENCH_GPU_MEMORY})
 target_include_directories(benchmark PRIVATE ${AMGCL_INCLUDE})
 target_compile_definitions(benchmark PRIVATE HAVE_RCHOL HAVE_APXCHOL_V1)
 target_compile_features(benchmark PRIVATE cxx_std_23)
@@ -507,6 +622,11 @@ if (APXCHOL_DEVICE STREQUAL "CUDA" AND BENCH_HYPRE_USE_CUDA)
     # generic APXCHOL_USE_CUDA definition says only that our own CUDA path exists.
     target_compile_definitions(benchmark PRIVATE APXCHOL_BENCH_HYPRE_CUDA)
 endif()
+if (BENCH_AMGX)
+    target_link_libraries(benchmark PRIVATE bench_amgx)
+    target_include_directories(benchmark PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+    target_compile_definitions(benchmark PRIVATE HAVE_AMGX)
+endif()
 if (HAVE_CHOLMOD)
     target_compile_definitions(benchmark PRIVATE HAVE_CHOLMOD)
     target_include_directories(benchmark PRIVATE ${CHOLMOD_INCLUDE})
@@ -514,6 +634,19 @@ if (HAVE_CHOLMOD)
 endif()
 if (HAVE_METIS)
     target_compile_definitions(benchmark PRIVATE HAVE_METIS)
+endif()
+# ── Optional: Apple Accelerate sparse Cholesky (macOS) ──
+option(BENCH_ACCELERATE "Build the Apple Accelerate sparse Cholesky competitor (macOS)" OFF)
+set(HAVE_ACCELERATE FALSE)
+if (BENCH_ACCELERATE)
+    find_library(ACCELERATE_FRAMEWORK Accelerate)
+    if (NOT APPLE OR NOT ACCELERATE_FRAMEWORK)
+        message(FATAL_ERROR "BENCH_ACCELERATE=ON needs macOS with the Accelerate framework")
+    endif()
+    set(HAVE_ACCELERATE TRUE)
+    target_compile_definitions(benchmark PRIVATE HAVE_ACCELERATE)
+    target_link_libraries(benchmark PRIVATE ${ACCELERATE_FRAMEWORK})
+    message(STATUS "Found Accelerate: ${ACCELERATE_FRAMEWORK} — Accelerate Cholesky enabled")
 endif()
 if (HAVE_MKL)
     target_compile_definitions(benchmark PRIVATE HAVE_MKL)
@@ -560,6 +693,27 @@ endif()
 if (NOT APXCHOL_DEVICE STREQUAL "CUDA")
     test_solver_rejection(contract_rejects_unavailable_cuda amgcl_cuda)
 endif()
+if (NOT BENCH_AMGX)
+    test_solver_rejection(contract_rejects_unavailable_amgx amgx)
+endif()
+
+if (HAVE_ACCELERATE)
+    add_executable(accelerate_tests tests/test_accelerate.cpp)
+    target_compile_features(accelerate_tests PRIVATE cxx_std_23)
+    target_compile_definitions(accelerate_tests PRIVATE HAVE_ACCELERATE)
+    target_link_libraries(accelerate_tests PRIVATE bench_input apxchol_v1
+        ${ACCELERATE_FRAMEWORK} ${CMAKE_DL_LIBS})
+    add_test(NAME contract_accelerate_cholesky COMMAND accelerate_tests)
+else()
+    test_solver_rejection(contract_rejects_unavailable_accelerate accelerate)
+endif()
+if (APXCHOL_DEVICE STREQUAL "METAL")
+    add_test(NAME contract_v1_metal_route
+        COMMAND ${CMAKE_COMMAND} -DBENCHMARK=$<TARGET_FILE:benchmark>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_v1_metal_route.cmake)
+    set_tests_properties(contract_v1_metal_route PROPERTIES
+        SKIP_REGULAR_EXPRESSION "SKIP: no usable Metal device")
+endif()
 
 foreach(case requires_class rejects_wrong_class rejects_class_on_graph)
     add_test(NAME contract_${case}
@@ -574,5 +728,18 @@ add_test(NAME contract_original_stopping COMMAND original_stop_tests)
 
 add_executable(split_components_tests tests/test_split_components.cpp)
 target_compile_features(split_components_tests PRIVATE cxx_std_23)
-target_link_libraries(split_components_tests PRIVATE bench_input apxchol_v1 ${CMAKE_DL_LIBS})
+target_link_libraries(split_components_tests PRIVATE bench_input apxchol_v1 ${BENCH_GPU_MEMORY} ${CMAKE_DL_LIBS})
 add_test(NAME contract_split_components COMMAND split_components_tests)
+
+add_executable(v1_config_tests tests/test_v1_configs.cpp)
+target_compile_features(v1_config_tests PRIVATE cxx_std_23)
+target_compile_definitions(v1_config_tests PRIVATE HAVE_APXCHOL_V1)
+target_link_libraries(v1_config_tests PRIVATE bench_input apxchol_v1 ${BENCH_GPU_MEMORY} ${CMAKE_DL_LIBS})
+add_test(NAME contract_v1_configs COMMAND v1_config_tests)
+
+# RCHOL's stdout silencing must tolerate the parallel variant's worker threads.
+find_package(Threads REQUIRED)
+add_executable(discard_streambuf_tests tests/test_discard_streambuf.cpp)
+target_include_directories(discard_streambuf_tests PRIVATE src)
+target_link_libraries(discard_streambuf_tests PRIVATE Threads::Threads)
+add_test(NAME contract_discard_streambuf COMMAND discard_streambuf_tests)

@@ -18,11 +18,13 @@
 #include "apxchol/sparse_csc.h"
 #include "apxchol/solver/sptrsv/omp.h"
 
+using csc_access = apxchol::detail::sparse_csc_access;
+
 using apxchol::edge_index;
 using apxchol::node_index;
 using apxchol::sparse_csc;
 using apxchol::factor_value_t;
-using apxchol::sptrsv_value_t;
+using apxchol::detail::sptrsv_value_t;
 
 // The DEFAULT storage width is fp32, and value_name / value_bytes (what the
 // verbose banner prints) report what the last setup() resolved.
@@ -35,9 +37,9 @@ TEST(SpTRSVKernels, StorageWidthFollowsTheExplicitOption) {
     EXPECT_EQ(apxchol::widen(0.75), 0.75);
     EXPECT_EQ(apxchol::widen(_Float16(0.75f)), 0.75);
 
-    sparse_csc L; L.n_ = 2; L.outer_ = {0, 2, 3}; L.inner_ = {0, 1, 1}; L.vals_ = {2.0f, -0.5f, 3.0f};
+    sparse_csc L; csc_access::n(L) = 2; csc_access::outer(L) = {0, 2, 3}; csc_access::inner(L) = {0, 1, 1}; csc_access::vals(L) = {2.0f, -0.5f, 3.0f};
     {
-        apxchol::omp_sptrsv t; t.setup(L, 2);
+        apxchol::detail::omp_sptrsv t; t.setup(L, 2);
         EXPECT_FALSE(t.fp16());
         EXPECT_EQ(t.value_bytes(), 4u);
         EXPECT_STREQ(t.value_name(), "float (fp32)");
@@ -46,8 +48,8 @@ TEST(SpTRSVKernels, StorageWidthFollowsTheExplicitOption) {
     }
     {
         const apxchol::factor_options options{.factor_storage = apxchol::factor_storage_type::fp16};
-        apxchol::omp_sptrsv t;
-        if (apxchol::omp_sptrsv::fp16_supported()) {
+        apxchol::detail::omp_sptrsv t;
+        if (apxchol::detail::omp_sptrsv::fp16_supported()) {
             t.setup(L, 2, options);
             EXPECT_TRUE(t.fp16());
             EXPECT_EQ(t.value_bytes(), 2u);
@@ -87,26 +89,26 @@ namespace {
 // rescaled) for the OFF-DIAGONAL entry with value v in a column with scale s:
 // through narrow_value. On the fp32 storage this is v itself.
 double kernel_offdiag(factor_value_t v, float s, bool fp16) {
-    return fp16 ? apxchol::widen(apxchol::omp_sptrsv::narrow_value<_Float16>(v, s))
-                : apxchol::widen(apxchol::omp_sptrsv::narrow_value<float>(v, s));
+    return fp16 ? apxchol::widen(apxchol::detail::omp_sptrsv::narrow_value<_Float16>(v, s))
+                : apxchol::widen(apxchol::detail::omp_sptrsv::narrow_value<float>(v, s));
 }
 // The per-column scale the kernels' input / output carry (1.0f on fp32).
 float pair_scale(const sparse_csc& L, node_index j, bool fp16) {
     if (!fp16) return 1.0f;
-    return apxchol::omp_sptrsv::column_scale(L.vals_.data(), L.outer_[j], L.outer_[j + 1]);
+    return apxchol::detail::omp_sptrsv::column_scale(csc_access::vals(L).data(), csc_access::outer(L)[j], csc_access::outer(L)[j + 1]);
 }
 // What the kernels DIVIDE by for column j: the factor diagonal on fp32; on
 // fp16 the fp32 stored_diag PLUS the column's storage-rounding residual (the
 // compensation omp_sptrsv::setup applies unconditionally -- omp.h).
 double kernel_diag(const sparse_csc& L, node_index j, bool fp16) {
-    const edge_index p0 = L.outer_[j];
-    if (!fp16) return apxchol::omp_sptrsv::stored_diag<float>(L.vals_[p0], 1.0f);
+    const edge_index p0 = csc_access::outer(L)[j];
+    if (!fp16) return apxchol::detail::omp_sptrsv::stored_diag<float>(csc_access::vals(L)[p0], 1.0f);
     const float s = pair_scale(L, j, true);
-    double d = apxchol::omp_sptrsv::stored_diag<_Float16>(L.vals_[p0], s);
+    double d = apxchol::detail::omp_sptrsv::stored_diag<_Float16>(csc_access::vals(L)[p0], s);
     double resid = 0.0;
-    for (edge_index p = p0 + 1; p < L.outer_[j + 1]; ++p)
-        resid += static_cast<double>(L.vals_[p]) / static_cast<double>(s)
-               - kernel_offdiag(L.vals_[p], s, true);
+    for (edge_index p = p0 + 1; p < csc_access::outer(L)[j + 1]; ++p)
+        resid += static_cast<double>(csc_access::vals(L)[p]) / static_cast<double>(s)
+               - kernel_offdiag(csc_access::vals(L)[p], s, true);
     return static_cast<float>(d + resid);
 }
 
@@ -116,8 +118,8 @@ sparse_csc make_random_lower(node_index m, double avg_offdiag, unsigned seed) {
     std::uniform_real_distribution<double> udiag(1.0, 3.0);
     std::poisson_distribution<int> pcount(avg_offdiag);
     sparse_csc L;
-    L.n_ = m;
-    L.outer_.assign(static_cast<size_t>(m) + 1, 0);
+    csc_access::n(L) = m;
+    csc_access::outer(L).assign(static_cast<size_t>(m) + 1, 0);
     std::vector<std::vector<node_index>> col_rows(m);
     for (node_index j = 0; j < m; ++j) {
         int k = pcount(rng);
@@ -132,14 +134,14 @@ sparse_csc make_random_lower(node_index m, double avg_offdiag, unsigned seed) {
         rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
     }
     for (node_index j = 0; j < m; ++j)
-        L.outer_[j + 1] = L.outer_[j] + static_cast<edge_index>(col_rows[j].size());
-    L.inner_.resize(static_cast<size_t>(L.outer_[m]));
-    L.vals_.resize(static_cast<size_t>(L.outer_[m]));
+        csc_access::outer(L)[j + 1] = csc_access::outer(L)[j] + static_cast<edge_index>(col_rows[j].size());
+    csc_access::inner(L).resize(static_cast<size_t>(csc_access::outer(L)[m]));
+    csc_access::vals(L).resize(static_cast<size_t>(csc_access::outer(L)[m]));
     for (node_index j = 0; j < m; ++j) {
-        edge_index out = L.outer_[j];
+        edge_index out = csc_access::outer(L)[j];
         for (node_index r : col_rows[j]) {
-            L.inner_[out] = r;
-            L.vals_[out]  = static_cast<factor_value_t>(r == j ? udiag(rng) : uval(rng));
+            csc_access::inner(L)[out] = r;
+            csc_access::vals(L)[out]  = static_cast<factor_value_t>(r == j ? udiag(rng) : uval(rng));
             ++out;
         }
     }
@@ -156,10 +158,10 @@ void check_kernel_residual(const sparse_csc& L, const std::vector<double>& b,
     for (node_index i = 0; i < m; ++i) scale[i] = std::fabs(b[i]);
     for (node_index j = 0; j < m; ++j) {
         const float s_j = pair_scale(L, j, fp16);
-        for (edge_index p = L.outer_[j]; p < L.outer_[j + 1]; ++p) {
-            const node_index i = L.inner_[p];
+        for (edge_index p = csc_access::outer(L)[j]; p < csc_access::outer(L)[j + 1]; ++p) {
+            const node_index i = csc_access::inner(L)[p];
             const double v = (i == j) ? kernel_diag(L, j, fp16)
-                                      : kernel_offdiag(L.vals_[p], s_j, fp16);
+                                      : kernel_offdiag(csc_access::vals(L)[p], s_j, fp16);
             if (!transpose) { r[i] -= v * y[j]; scale[i] += std::fabs(v * y[j]); }
             else            { r[j] -= v * y[i]; scale[j] += std::fabs(v * y[i]); }
         }
@@ -181,10 +183,10 @@ void reference_pair(const sparse_csc& L, const std::vector<double>& x,
     for (node_index j = 0; j < m; ++j) {
         const float s_j = pair_scale(L, j, fp16);
         const double sd = static_cast<double>(s_j);
-        const edge_index p0 = L.outer_[j];
+        const edge_index p0 = csc_access::outer(L)[j];
         y[j] /= kernel_diag(L, j, fp16) * sd;
-        for (edge_index p = p0 + 1; p < L.outer_[j + 1]; ++p)
-            y[L.inner_[p]] -= kernel_offdiag(L.vals_[p], s_j, fp16) * sd * y[j];
+        for (edge_index p = p0 + 1; p < csc_access::outer(L)[j + 1]; ++p)
+            y[csc_access::inner(L)[p]] -= kernel_offdiag(csc_access::vals(L)[p], s_j, fp16) * sd * y[j];
     }
     // Column-oriented back substitution (L_s^T z = y: column j of L_s is row j of L_s^T).
     z.assign(m, 0.0);
@@ -192,10 +194,10 @@ void reference_pair(const sparse_csc& L, const std::vector<double>& x,
         const node_index j = jj;
         const float s_j = pair_scale(L, j, fp16);
         const double sd = static_cast<double>(s_j);
-        const edge_index p0 = L.outer_[j];
+        const edge_index p0 = csc_access::outer(L)[j];
         double acc = y[j];
-        for (edge_index p = p0 + 1; p < L.outer_[j + 1]; ++p)
-            acc -= kernel_offdiag(L.vals_[p], s_j, fp16) * sd * z[L.inner_[p]];
+        for (edge_index p = p0 + 1; p < csc_access::outer(L)[j + 1]; ++p)
+            acc -= kernel_offdiag(csc_access::vals(L)[p], s_j, fp16) * sd * z[csc_access::inner(L)[p]];
         z[j] = acc / (kernel_diag(L, j, fp16) * sd);
     }
 }
@@ -204,13 +206,13 @@ void run_kernel_precision_check() {
     for (const char* env : {"float32", "float16"})
     for (node_index m : {node_index(3000), node_index(60000) /* parallel transpose path */}) {
         const bool fp16 = std::string_view(env) == "float16";
-        if (fp16 && !apxchol::omp_sptrsv::fp16_supported()) continue;
+        if (fp16 && !apxchol::detail::omp_sptrsv::fp16_supported()) continue;
         SCOPED_TRACE("m=" + std::to_string(m) + " factor_storage=" + env);
         const apxchol::factor_options options{
             .factor_storage = fp16 ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32,
             .drop_tolerance = 0};
         sparse_csc L = make_random_lower(m, 4.0, 99);
-        apxchol::omp_sptrsv trsv;
+        apxchol::detail::omp_sptrsv trsv;
         trsv.setup(L, m, options);
         ASSERT_EQ(trsv.fp16(), fp16);
         std::mt19937 rng(7);
@@ -224,7 +226,7 @@ void run_kernel_precision_check() {
         trsv.transpose_solve(yp.data(), z.data());
         std::vector<double> ryp(m);
         for (node_index j = 0; j < m; ++j) {
-            const double r = fp16 ? apxchol::omp_sptrsv::inv_scale<_Float16>(pair_scale(L, j, true)) : 1.0;
+            const double r = fp16 ? apxchol::detail::omp_sptrsv::inv_scale<_Float16>(pair_scale(L, j, true)) : 1.0;
             ryp[j] = yp[j] * (r * r);
         }
         check_kernel_residual(L, ryp, z, /*transpose=*/true, fp16);
@@ -289,19 +291,19 @@ sparse_csc make_round_structured_lower(node_index R, node_index B, unsigned seed
         for (node_index j : cols) col_rows[j].push_back(i);
     }
     sparse_csc L;
-    L.n_ = m;
-    L.outer_.assign(static_cast<size_t>(m) + 1, 0);
+    csc_access::n(L) = m;
+    csc_access::outer(L).assign(static_cast<size_t>(m) + 1, 0);
     for (node_index j = 0; j < m; ++j) {
         std::sort(col_rows[j].begin(), col_rows[j].end());
-        L.outer_[j + 1] = L.outer_[j] + static_cast<edge_index>(col_rows[j].size());
+        csc_access::outer(L)[j + 1] = csc_access::outer(L)[j] + static_cast<edge_index>(col_rows[j].size());
     }
-    L.inner_.resize(static_cast<size_t>(L.outer_[m]));
-    L.vals_.resize(static_cast<size_t>(L.outer_[m]));
+    csc_access::inner(L).resize(static_cast<size_t>(csc_access::outer(L)[m]));
+    csc_access::vals(L).resize(static_cast<size_t>(csc_access::outer(L)[m]));
     for (node_index j = 0; j < m; ++j) {
-        edge_index out = L.outer_[j];
+        edge_index out = csc_access::outer(L)[j];
         for (node_index r : col_rows[j]) {
-            L.inner_[out] = r;
-            L.vals_[out]  = static_cast<factor_value_t>(r == j ? udiag(rng) : uval(rng));
+            csc_access::inner(L)[out] = r;
+            csc_access::vals(L)[out]  = static_cast<factor_value_t>(r == j ? udiag(rng) : uval(rng));
             ++out;
         }
     }
@@ -313,7 +315,7 @@ sparse_csc make_round_structured_lower(node_index R, node_index B, unsigned seed
 } // namespace
 
 TEST(SpTRSVKernels, SpTRSVFatLevelKernelsBothGatherFlavours) {
-    const node_index R = 8, B = 2 * apxchol::kSpTRSVOMPThreshold;   // 8 fat levels of 2048
+    const node_index R = 8, B = 2 * apxchol::detail::kSpTRSVOMPThreshold;   // 8 fat levels of 2048
     std::vector<node_index> bounds;
     const sparse_csc L = make_round_structured_lower(R, B, 4321, bounds);
     const node_index m = R * B;
@@ -322,7 +324,7 @@ TEST(SpTRSVKernels, SpTRSVFatLevelKernelsBothGatherFlavours) {
         std::vector<int> hist(4, 0); int ge8 = 0, ge4 = 0;
         std::vector<int> rowlen(m, 0);
         for (node_index j = 0; j < m; ++j)
-            for (edge_index p = L.outer_[j] + 1; p < L.outer_[j + 1]; ++p) rowlen[L.inner_[p]]++;
+            for (edge_index p = csc_access::outer(L)[j] + 1; p < csc_access::outer(L)[j + 1]; ++p) rowlen[csc_access::inner(L)[p]]++;
         for (node_index i = 0; i < m; ++i) { hist[rowlen[i] % 4]++; ge8 += rowlen[i] >= 8; ge4 += rowlen[i] >= 4; }
         for (int t = 0; t < 4; ++t) ASSERT_GT(hist[t], 100) << "tail length " << t;
         ASSERT_GT(ge8, static_cast<int>(m / 4));
@@ -334,23 +336,23 @@ TEST(SpTRSVKernels, SpTRSVFatLevelKernelsBothGatherFlavours) {
     for (auto& v : x) v = ux(rng);
     for (const char* env : {"float32", "float16"}) {
         const bool fp16 = std::string_view(env) == "float16";
-        if (fp16 && !apxchol::omp_sptrsv::fp16_supported()) continue;
+        if (fp16 && !apxchol::detail::omp_sptrsv::fp16_supported()) continue;
         SCOPED_TRACE(std::string("factor_storage=") + env);
         const apxchol::factor_options options{
             .factor_storage = fp16 ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32,
             .drop_tolerance = 0};
         std::vector<double> y_ref, z_ref;
         reference_pair(L, x, y_ref, z_ref, fp16);
-        apxchol::omp_sptrsv trsv;
+        apxchol::detail::omp_sptrsv trsv;
         trsv.set_round_bounds(bounds);
         trsv.setup(L, m, options);
         ASSERT_EQ(trsv.fp16(), fp16);
 #ifdef __x86_64__
         const bool simd = __builtin_cpu_supports("avx") && __builtin_cpu_supports("f16c")
             && __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
-        EXPECT_EQ(apxchol::omp_sptrsv::simd_fp16_kernel(), simd);
+        EXPECT_EQ(apxchol::detail::omp_sptrsv::simd_fp16_kernel(), simd);
 #else
-        EXPECT_FALSE(apxchol::omp_sptrsv::simd_fp16_kernel());
+        EXPECT_FALSE(apxchol::detail::omp_sptrsv::simd_fp16_kernel());
 #endif
         // Every level is fat (round-as-level).
         std::vector<int> sizes; std::vector<long long> work;
@@ -367,7 +369,7 @@ TEST(SpTRSVKernels, SpTRSVFatLevelKernelsBothGatherFlavours) {
         trsv.transpose_solve(yp.data(), z.data());
         std::vector<double> ryp(m);
         for (node_index j = 0; j < m; ++j) {
-            const double r = fp16 ? apxchol::omp_sptrsv::inv_scale<_Float16>(pair_scale(L, j, true)) : 1.0;
+            const double r = fp16 ? apxchol::detail::omp_sptrsv::inv_scale<_Float16>(pair_scale(L, j, true)) : 1.0;
             ryp[j] = yp[j] * (r * r);
         }
         check_kernel_residual(L, ryp, z,  /*transpose=*/true, fp16);

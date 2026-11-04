@@ -1,0 +1,8 @@
+%%MatrixMarket matrix array real general
+% One right-hand side for path5_sddm, as an n x 1 array.
+5 1
+1
+0
+0
+0
+-1

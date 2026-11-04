@@ -251,11 +251,11 @@ class Engine {
                           : 1;
                 const unsigned row_bound = s.state->active;
                 const auto before = std::size_t(s.state->active) + s.state->selected;
-                const double min_yield = detail::adaptive_is_yield_fraction(options.min_is_fraction,
+                const double min_yield = detail::adaptive_is_yield_fraction(options.experimental.min_is_fraction,
                     before, before ? double(s.state->edges) / before : 0, residual_threshold);
                 const bool handoff = s.state->round &&
                     detail::selection_should_handoff(s.state->selected,
-                        s.state->eligible, before, min_yield, residual_threshold, options.omp_threshold);
+                        s.state->eligible, before, min_yield, residual_threshold, options.experimental.omp_threshold);
                 if (handoff) s.state->prune_enabled = 0;
                 const bool sparsify = handoff && !sparse_attempted;
                 // At least half the physical incidences must be parallel entries.

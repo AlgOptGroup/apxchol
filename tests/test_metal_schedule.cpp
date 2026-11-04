@@ -150,7 +150,7 @@ TEST(MetalSchedule, RejectsInvalidStructureAndValues) {
                         std::numeric_limits<float>::quiet_NaN()}) {
         a = make_triangle(5, false, 1);
         a.val[0] = value;
-        EXPECT_THROW(ms::build(a.ptr, a.col, a.val, false), std::domain_error);
+        EXPECT_THROW(ms::build(a.ptr, a.col, a.val, false), std::invalid_argument);
     }
 }
 
@@ -168,7 +168,7 @@ TEST(MetalSchedule, OffDiagonalsOnlyRequireFiniteValues) {
                             std::numeric_limits<float>::quiet_NaN()}) {
             SCOPED_TRACE(::testing::Message() << "reverse=" << reverse << " value=" << value);
             a.val[1] = value;
-            EXPECT_THROW(ms::build(a.ptr, a.col, a.val, reverse), std::domain_error);
+            EXPECT_THROW(ms::build(a.ptr, a.col, a.val, reverse), std::invalid_argument);
         }
     }
 }

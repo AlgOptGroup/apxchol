@@ -1,0 +1,6 @@
+{% extends "!page.html" %}
+{% block announcement %}
+These pages document the development version.
+{%- if latest_release %} The latest release, {{ latest_release }}, does not include the changes in the
+<a href="{{ pathto('CHANGELOG') }}">changelog</a>.{% endif %}
+{% endblock announcement %}

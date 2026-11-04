@@ -13,26 +13,43 @@ x = res.x;
 res2 = s.solve(b2, 1e-10, 1000);   % tolerance and iteration budget for this call
 ```
 
-For one solve, use `apxchol_solve(A, b)`. Results contain `x`, `iters`,
-`residual` and `converged`. The built-in solver always checks the returned
-solution against the original matrix and RHS.
+For one solve, use `apxchol_solve(A, b)`. Results contain `x`, `iterations`,
+`residual`, `converged` and `solve_seconds`. The built-in solver always checks
+the returned solution against the original matrix and RHS.
 
-These bindings accept one RHS vector at a time. GPU routes, matrix-RHS
-batching, warm starts, factor export and wide indices are not exposed.
+`s.setup_seconds` is the wall-clock time of the native setup (or `load`),
+excluding the conversion of `A` before it, and `res.solve_seconds` that of one
+solve call, for all columns of a batch. Over `k` separate one-RHS calls each
+costs `setup_seconds / k + solve_seconds` on average, and one batched call of
+`k` columns costs `(setup_seconds + solve_seconds) / k` per RHS; see
+[judging whether reuse pays off](../docs/usage.md#judging-whether-reuse-pays-off).
+
+Pass an `n`-by-`k` matrix to solve or apply the preconditioner to `k` RHSs
+through the native batched path. Results have `k` columns; `iterations`, `residual`
+and `converged` are `1`-by-`k` arrays. A row-vector RHS is still accepted and
+returns a column, except that a one-row system treats each column as a RHS.
+
+GPU routes, factor export and wide indices are not exposed. See the shared
+[binding capabilities](../docs/usage.md#binding-capabilities).
 
 ## Inputs and solve controls
 
 Pass the sparse matrix `A` in `A * x = b`. For graph adjacency input, first
-use `A = apxchol_laplacian(Adj)`. The [input guide](../docs/usage.md) explains
-supported matrices, adjacency conversion and Laplacian RHS requirements.
+use `A = apxchol_as_operator(Adj)`: it returns a valid operator unchanged and
+otherwise forms the graph Laplacian. The [input guide](../docs/usage.md)
+explains supported matrices, input conversion and Laplacian RHS requirements.
 
-`solve(b, rtol, maxiter)` takes a positive, finite relative tolerance and a
+`solve(b, rtol, maxiter, x0)` takes a positive, finite relative tolerance and a
 nonnegative integer iteration budget. Omitted arguments or `[]` use native
 defaults, shown in the [native reference](../docs/reference/cpp.md#solve-defaults):
 
 ```matlab
 res = s.solve(b, [], 500);         % default tolerance, at most 500 iterations
+warm = s.solve(B, 1e-8, 200, X0);  % optional initial guess, same shape as B
 ```
+
+Omit `x0` or pass `[]` to start from zero. The one-shot form accepts it as
+`apxchol_solve(A, B, rtol, maxiter, X0, options)`, in the order of `s.solve`.
 
 ## Setup options
 
@@ -44,19 +61,47 @@ s = apxchol_solver(A, struct('num_threads', 4, 'factor_storage', 'float32'));
 
 Unspecified fields use the C++ defaults. Unknown fields are rejected.
 
+Invalid input or options raise errors with the identifier `apxchol:badInput`,
+and execution failures use `apxchol:error` (see
+[results and errors](../docs/usage.md#results-and-errors)).
+
 | Field | Meaning |
 |---|---|
 | `num_threads` | CPU thread ceiling; `0` inherits the caller's OpenMP setting |
 | `seed` | Sampling seed |
+| `partitioner` | `block_greedy` (default), `priority_greedy` or `baumann_kyng` |
+| `sampler` | Clique sampler: `gks` (default) or `trace_cycle` (CPU and CUDA only) |
 | `factor_storage` | `auto`, `float16` or `float32`; affects triangular-solve storage |
-| `cpu_schedule` | CPU triangular-solve scheduling: `auto` or `levels` |
+| `degree_quantile` | Degree cutoff quantile in `[0, 1)`; `0` selects the multiplier-based cutoff (Metal requires `(0, 1)`); omitted uses the default |
+| `degree_multiplier` | Positive degree multiplier, used only when `degree_quantile` is `0` |
 | `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
-| `regularization` | Nonnegative diagonal fraction added during factor construction; `0` disables it |
+| `regularization` | Minimum diagonal excess of the preconditioner, as a fraction of each diagonal after lumping; excess below 1e-12 of the diagonal counts as zero first; `A` is not modified; `0` disables it |
 | `lump_max_mass` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
 | `verbose` | Logical flag for setup diagnostics; off by default |
 
 See [precision](../docs/precision.md) and the [native option reference](../docs/reference/cpp.md)
-for storage behavior and advanced controls.
+for storage behavior and the meaning of each control.
+
+## Save and load a solver
+
+Save a solver's original matrix and its installed factor, the preconditioner
+the solves actually use, together:
+
+```matlab
+s = apxchol_solver(A);
+s.save('system.apxchol');
+restored = apxchol_solver.load('system.apxchol');
+res = restored.solve(B);  % scalar/matrix RHS and warm starts work as usual
+```
+
+The path must be a character row vector. Saving replaces an existing file,
+writing to `<path>.tmp` first and renaming it into place. Loading accepts the
+same optional options struct as the constructor. The file fixes the factor
+storage and dropping, so `factor_storage` and `drop_tolerance` have no effect;
+`num_threads` and `lump_max_mass` apply. A loaded solver can be saved again.
+
+Archives use the shared [portable file format](../docs/serialization.md).
+Loading prepares the saved factor without factorizing the matrix again.
 
 ## Use another iterative solver
 
@@ -73,8 +118,8 @@ That outer solver controls convergence and reports its own result. Use
 
 ## Build for Octave
 
-Requires `mkoctfile` (Octave development tools), Eigen3 and an OpenMP-capable
-C++23 compiler (GCC 14 or equivalent). Use matching C/C++ compiler families
+Requires CMake 3.20+, `mkoctfile` (Octave development tools) and an
+OpenMP-capable C++23 compiler (GCC 14 or equivalent). Use matching C/C++ compiler families
 and one OpenMP runtime.
 
 ```bash
@@ -83,14 +128,15 @@ cd octave
 octave --no-gui --eval "addpath(pwd); run('tests/test_apxchol.m')"
 ```
 
-The extension compiles the three core CPU sources directly; a root CMake
-build is not required.
+The extension links the native CMake target. A root build is not required.
+`CMAKE_BUILD_PARALLEL_LEVEL` sets the build worker count (default: 2).
+The MEX file goes to `octave/private/`, so only the `apxchol_*` wrappers can call it.
 
 ## Build for MATLAB
 
 MATLAB and Octave share the wrapper source and tests, but their MEX binaries
 are not interchangeable. Linux x86-64 builds are tested with MATLAB R2026b
-and GCC 13. Install OpenMP and Eigen, then run:
+and GCC 13. Install CMake and OpenMP, then run:
 
 ```bash
 matlab -batch "run('/path/to/apxchol/octave/build_and_test.m')"

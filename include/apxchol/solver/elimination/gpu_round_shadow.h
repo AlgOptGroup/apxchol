@@ -18,7 +18,7 @@
 #endif
 
 #if !defined(__CUDACC__)
-#include <Eigen/Sparse>
+#include "apxchol/detail/csc_matrix.h"
 #include "apxchol/operator_class.h"
 #endif
 #include <algorithm>
@@ -44,9 +44,9 @@
 #include <utility>
 #include <vector>
 
-namespace apxchol { class cuda_sptrsv_device_factor; }
 
 namespace apxchol::detail {
+class cuda_sptrsv_device_factor;
 
 inline constexpr std::uint64_t gpu_round_shadow_pivot_seed(
         std::uint64_t run_seed, node_index pivot) noexcept {
@@ -57,7 +57,7 @@ inline constexpr std::uint64_t gpu_round_shadow_pivot_seed(
 struct gpu_round_shadow_incidence {
     node_index owner = 0;
     node_index neighbor = 0;
-    pool_value_t weight = 0;
+    float weight = 0;
 };
 
 struct gpu_round_shadow_input {
@@ -74,38 +74,41 @@ struct gpu_round_shadow_input {
 };
 
 // Internal host-buffer ABI only. The owning import is synchronous, so these
-// borrowed CSC arrays need survive only that call. CUDA never includes Eigen.
+// borrowed CSC arrays need survive only that call.
 struct gpu_owned_csc_buffers {
     int vertex_count = 0;
     std::size_t nonzeros = 0;
     const int* offsets = nullptr;
     const int* rows = nullptr;
     const double* values = nullptr;
+    // offsets and rows point here when the host CSC has wider indices.
+    std::vector<int> converted_offsets, converted_rows;
 };
 #if !defined(__CUDACC__)
-// Internal eligibility, before any CUDA allocation or mutation.
-inline bool gpu_owned_csc_layout_supported(const Eigen::SparseMatrix<double>& A,
+// Internal eligibility, before any CUDA allocation or mutation. The device
+// builders read int arrays: dimensions and stored entries must fit int, and
+// gpu_owned_csc_host_buffers narrows wider index arrays.
+inline bool gpu_owned_csc_layout_supported(csc_ref<double> A,
                                            std::size_t& offdiagonals,
                                            bool* has_zero_offdiagonals = nullptr) {
-    if (!A.isCompressed() || A.rows() != A.cols() || A.rows() <= 0 ||
-        A.rows() >= INT_MAX) return false;
-    const int n = static_cast<int>(A.rows());
-    const int* ptr = A.outerIndexPtr();
-    const int* idx = A.innerIndexPtr();
-    const Eigen::Index nnz = ptr[n];
-    if (ptr[0] != 0 || nnz < 0 || nnz > A.data().size() || nnz > INT_MAX) return false;
-    bool sorted = true, zeros = false;
     offdiagonals = 0;
+    if (A.n == 0 || A.n >= static_cast<node_index>(INT_MAX)) return false;
+    const node_index n = A.n;
+    const edge_index* ptr = A.ptr;
+    const node_index* idx = A.idx;
+    const edge_index nnz = ptr[n];
+    if (ptr[0] != 0 || nnz > static_cast<edge_index>(INT_MAX)) return false;
+    bool sorted = true, zeros = false;
     #pragma omp parallel for schedule(static) reduction(&& : sorted) reduction(|| : zeros) reduction(+ : offdiagonals)
-    for (int v = 0; v < n; ++v) {
-        if (ptr[v] < 0 || ptr[v] > ptr[v + 1] || ptr[v + 1] > nnz) {
+    for (std::int64_t v = 0; v < static_cast<std::int64_t>(n); ++v) {
+        if (ptr[v] > ptr[v + 1] || ptr[v + 1] > nnz) {
             sorted = false; continue;
         }
-        for (int p = ptr[v]; p < ptr[v + 1]; ++p) {
-            if (idx[p] < 0 || idx[p] >= n || (p > ptr[v] && idx[p-1] >= idx[p]))
+        for (edge_index p = ptr[v]; p < ptr[v + 1]; ++p) {
+            if (idx[p] >= n || (p > ptr[v] && idx[p-1] >= idx[p]))
                 sorted = false;
-            offdiagonals += idx[p] != v;
-            if (has_zero_offdiagonals && idx[p] != v && A.valuePtr()[p] == 0.0)
+            offdiagonals += idx[p] != static_cast<node_index>(v);
+            if (has_zero_offdiagonals && idx[p] != static_cast<node_index>(v) && A.val[p] == 0.0)
                 zeros = true;
         }
     }
@@ -113,27 +116,28 @@ inline bool gpu_owned_csc_layout_supported(const Eigen::SparseMatrix<double>& A,
     return sorted;
 }
 
-// Requires the strict, unique compressed layout checked above.
-inline bool gpu_owned_csc_paired(const Eigen::SparseMatrix<double>& A) {
-    const int n = static_cast<int>(A.rows());
-    const int* ptr = A.outerIndexPtr();
-    const int* idx = A.innerIndexPtr();
+// Requires the strict, unique layout checked above.
+inline bool gpu_owned_csc_paired(csc_ref<double> A) {
+    const node_index n = A.n;
+    const edge_index* ptr = A.ptr;
+    const node_index* idx = A.idx;
     bool paired = true;
     std::size_t lower = 0, upper = 0;
     #pragma omp parallel for schedule(static) reduction(&& : paired) reduction(+ : lower, upper)
-    for (int v = 0; v < n; ++v)
-        for (int p = ptr[v]; p < ptr[v+1]; ++p) {
-            const int u = idx[p];
-            if (u > v) { ++lower; continue; }
-            if (u == v) continue;
+    for (std::int64_t v = 0; v < static_cast<std::int64_t>(n); ++v)
+        for (edge_index p = ptr[v]; p < ptr[v+1]; ++p) {
+            const node_index u = idx[p];
+            const auto vertex = static_cast<node_index>(v);
+            if (u > vertex) { ++lower; continue; }
+            if (u == vertex) continue;
             ++upper;
-            const int* mate = std::lower_bound(idx + ptr[u], idx + ptr[u+1], v);
-            if (mate == idx + ptr[u+1] || *mate != v) paired = false;
+            const node_index* mate = std::lower_bound(idx + ptr[u], idx + ptr[u+1], vertex);
+            if (mate == idx + ptr[u+1] || *mate != vertex) paired = false;
         }
     return paired && lower == upper;
 }
 // Raw/test callers have no numerical symmetry certificate and keep the full check.
-inline bool gpu_owned_csc_supported(const Eigen::SparseMatrix<double>& A) {
+inline bool gpu_owned_csc_supported(csc_ref<double> A) {
     std::size_t offdiagonals = 0;
     return gpu_owned_csc_layout_supported(A, offdiagonals) && gpu_owned_csc_paired(A);
 }
@@ -144,17 +148,33 @@ inline bool gpu_owned_csc_supported(const Eigen::SparseMatrix<double>& A) {
 // agree. A lumped view's scan describes its original input, so it cannot supply
 // this proof for the transformed matrix. Stored zeros likewise need pairing.
 inline bool gpu_owned_csc_supported(const operator_view& op) {
-    const auto& A = op.matrix();
+    const auto A = op.matrix();
     std::size_t offdiagonals = 0;
     if (!gpu_owned_csc_layout_supported(A, offdiagonals)) return false;
     if (op.lumped() == 0 && offdiagonals == static_cast<std::size_t>(op.scan().offdiag_nnz))
         return true;
     return gpu_owned_csc_paired(A);
 }
-// Precondition: gpu_owned_csc_supported has succeeded on this same matrix.
-inline gpu_owned_csc_buffers gpu_owned_csc_host_buffers(const Eigen::SparseMatrix<double>& A) {
-    return {static_cast<int>(A.rows()), static_cast<std::size_t>(A.nonZeros()),
-            A.outerIndexPtr(), A.innerIndexPtr(), A.valuePtr()};
+// Precondition: gpu_owned_csc_supported has succeeded on this same matrix,
+// so every index fits int. 32-bit arrays are borrowed.
+inline gpu_owned_csc_buffers gpu_owned_csc_host_buffers(csc_ref<double> A) {
+    gpu_owned_csc_buffers out;
+    out.vertex_count = static_cast<int>(A.n);
+    out.nonzeros = static_cast<std::size_t>(A.nnz());
+    out.values = A.val;
+    if constexpr (sizeof(edge_index) == sizeof(int)) {
+        out.offsets = reinterpret_cast<const int*>(A.ptr);
+    } else {
+        out.converted_offsets.assign(A.ptr, A.ptr + static_cast<std::size_t>(A.n) + 1);
+        out.offsets = out.converted_offsets.data();
+    }
+    if constexpr (sizeof(node_index) == sizeof(int)) {
+        out.rows = reinterpret_cast<const int*>(A.idx);
+    } else {
+        out.converted_rows.assign(A.idx, A.idx + out.nonzeros);
+        out.rows = out.converted_rows.data();
+    }
+    return out;
 }
 #endif
 #if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
@@ -167,7 +187,7 @@ gpu_owned_csc_test_result gpu_initial_owned_csc_buffers_for_test(
     const gpu_owned_csc_buffers& input, double reg_eps);
 #if !defined(__CUDACC__)
 inline gpu_owned_csc_test_result gpu_initial_owned_csc_for_test(
-        const Eigen::SparseMatrix<double>& A, double reg_eps = 0.0) {
+        csc_ref<double> A, double reg_eps = 0.0) {
     if (!gpu_owned_csc_supported(A)) return {};
     return gpu_initial_owned_csc_buffers_for_test(gpu_owned_csc_host_buffers(A), reg_eps);
 }
@@ -224,8 +244,8 @@ inline void validate_owned_factor_columns(
         if (metadata) {
             // outer[i] = i + sum_{j<i} offdiagonal_count[j]. Both terms
             // are integers; this is exactly build_csc(false)'s recurrence.
-            if (i > sparse_csc::kEdgeMax ||
-                next_entry > sparse_csc::kEdgeMax - i)
+            if (i > std::numeric_limits<edge_index>::max() ||
+                next_entry > std::numeric_limits<edge_index>::max() - i)
                 edge_index_overflow("factor_metadata(nnz)");
             permutation[c.vertex] = static_cast<node_index>(i);
             raw_offsets[i] = static_cast<edge_index>(next_entry + i);
@@ -235,7 +255,8 @@ inline void validate_owned_factor_columns(
     if (next_entry != entry_count)
         throw std::logic_error("GPU-owned complete factor entry extent mismatch");
     if (metadata) {
-        if (n > sparse_csc::kEdgeMax || next_entry > sparse_csc::kEdgeMax - n)
+        constexpr auto edge_max = std::numeric_limits<edge_index>::max();
+        if (n > edge_max || next_entry > edge_max - n)
             edge_index_overflow("factor_metadata(nnz)");
         raw_offsets[n] = static_cast<edge_index>(next_entry + n);
     }
@@ -393,12 +414,7 @@ gpu_round_shadow_ordered_residual_hash(
 }
 
 inline std::uint64_t gpu_round_shadow_pool_bits(double value) noexcept {
-    const pool_value_t stored = static_cast<pool_value_t>(value);
-#if defined(APXCHOL_POOL_FP32)
-    return std::bit_cast<std::uint32_t>(stored);
-#else
-    return std::bit_cast<std::uint64_t>(stored);
-#endif
+    return std::bit_cast<std::uint32_t>(static_cast<float>(value));
 }
 
 inline std::uint64_t gpu_round_shadow_factor_bits(
@@ -497,7 +513,7 @@ inline gpu_round_shadow_input make_gpu_round_shadow_input(
         input.incidences.reserve(incidence_count);
         for (node_index owner = 0; owner < residual.n(); ++owner) {
             for (const auto& [neighbor, weight] : residual.neighbors(owner))
-                input.incidences.push_back({owner, neighbor, static_cast<pool_value_t>(weight)});
+                input.incidences.push_back({owner, neighbor, static_cast<float>(weight)});
         }
         if (input.incidences.size() != incidence_count)
             throw std::logic_error(
@@ -925,7 +941,7 @@ inline gpu_round_shadow_report reference_gpu_round_shadow(
     report.excess_updates = excess_updates.size();
 
     // graph is an append-only multigraph.  Every
-    // sampled fill is stored separately and narrowed separately to pool_value_t;
+    // sampled fill is stored separately and narrowed separately to float;
     // colliding endpoint pairs must not be coalesced in fp64 here.
     for (const auto& edge : fills)
         gpu_round_shadow_digest_add(
@@ -1197,8 +1213,7 @@ gpu_round_shadow_cpu_comparison compare_gpu_round_shadow_with_cpu(
             mismatch("non-finite or negative excess at vertex " +
                      std::to_string(vertex));
         if (bound.additions <= 1) {
-            if (std::bit_cast<std::uint64_t>(actual) !=
-                std::bit_cast<std::uint64_t>(bound.expected))
+            if (actual != bound.expected)
                 mismatch("exact excess at vertex " +
                          std::to_string(vertex));
             continue;
@@ -1477,14 +1492,14 @@ public:
             std::vector<node_index>& permutation, sparse_csc& metadata,
             std::vector<factor_entry>* entries = nullptr) {
         if (!active_ || !owned_rounds_ || owned_materialized_ ||
-            !permutation.empty() || !metadata.outer_.empty())
+            !permutation.empty() || !metadata.col_ptrs().empty())
             throw std::logic_error("GPU-owned factorization completion is out of order");
         try {
             permutation.resize(factor_log_columns_);
-            metadata.resize(static_cast<node_index>(factor_log_columns_),
-                            static_cast<node_index>(factor_log_columns_));
+            detail::sparse_csc_access::resize(
+                metadata, static_cast<node_index>(factor_log_columns_));
             auto headers = device_state_->download_owned_factor_columns(
-                permutation, metadata.outer_, entries);
+                permutation, detail::sparse_csc_access::outer(metadata), entries);
             owned_download_bytes_ = headers.size() * sizeof(gpu_round_shadow_factor_column);
             owned_entry_download_bytes_ = entries ? entries->size() * sizeof(factor_entry) : 0;
             owned_materialized_ = true;

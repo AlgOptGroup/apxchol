@@ -13,9 +13,9 @@
 /// apache2 carry rows that break it and converge fine today, so requiring it
 /// would reject matrices that work.
 ///
-/// `require_operator` reports violated conditions with counts. When the diagonal
-/// check finds no positive diagonal but positive off-diagonals, its diagnostic
-/// suggests assembling the operator with `laplacian(A)`.
+/// `require_operator` reports violated conditions with counts. When the matrix
+/// has no negative off-diagonal entry, its diagnostic suggests reading it as a
+/// graph adjacency matrix (`detail::is_graph_adjacency`).
 ///
 /// ── M-matrix lumping ────────────────────────────────────────────────────────
 /// A symmetric operator that is SPD but carries positive off-diagonals is not
@@ -68,13 +68,14 @@
 /// contract rchol uses for its own non-SDD compensation (arXiv:2011.07769
 /// §5.2.1, where apache2 and G3_circuit are benchmarked as published).
 ///
-/// Everything here depends on Eigen only.
+/// Everything here works on the library's own CSC storage (csc_matrix.h).
 
+#include "apxchol/detail/csc_matrix.h"
 #include "apxchol/detail/operator_options.h"
-#include <Eigen/Sparse>
+#include <cstdint>
 #include <string>
 
-namespace apxchol {
+namespace apxchol::detail {
 
 /// One-pass structural census of a candidate operator matrix.
 ///
@@ -82,26 +83,26 @@ namespace apxchol {
 /// a symmetric matrix — legitimate because `require_operator` rejects an
 /// asymmetric matrix before anything else reads these fields.
 struct operator_scan {
-    Eigen::Index rows = 0;
-    Eigen::Index cols = 0;
-    Eigen::Index stored_nnz   = 0;  ///< stored entries, explicit zeros included
-    Eigen::Index nonfinite    = 0;  ///< ... whose value is NaN or +-Inf
-    Eigen::Index offdiag_nnz  = 0;  ///< stored off-diagonal entries with value != 0
-    Eigen::Index offdiag_pos  = 0;  ///< ... with a strictly positive value
+    std::int64_t rows = 0;
+    std::int64_t cols = 0;
+    std::int64_t stored_nnz   = 0;  ///< stored entries, explicit zeros included
+    std::int64_t nonfinite    = 0;  ///< ... whose value is NaN or +-Inf
+    std::int64_t offdiag_nnz  = 0;  ///< stored off-diagonal entries with value != 0
+    std::int64_t offdiag_pos  = 0;  ///< ... with a strictly positive value
     /// Columns with at least one nonzero entry.
-    Eigen::Index nonempty     = 0;
+    std::int64_t nonempty     = 0;
     /// ... of which carry a strictly positive diagonal entry.
-    Eigen::Index diag_pos     = 0;
+    std::int64_t diag_pos     = 0;
     /// Non-empty columns whose diagonal is <= 0 (missing counts as 0). A PSD
     /// matrix cannot have one: e_i^T A e_i = a_ii would be <= 0 with a nonzero
     /// row. This is the hard diagonal condition.
-    Eigen::Index bad_diag     = 0;
-    Eigen::Index first_bad_diag = -1;
+    std::int64_t bad_diag     = 0;
+    std::int64_t first_bad_diag = -1;
     double       first_bad_diag_value = 0.0;
 
     /// Off-diagonal entries whose transpose partner differs by more than
     /// `kSymmetryRelTol` relatively (a missing partner counts as 0).
-    Eigen::Index asymmetric   = 0;
+    std::int64_t asymmetric   = 0;
     /// The strictly lower and strictly upper triangles hold the same entries
     /// bit for bit: every column is strictly index-sorted (so no duplicate
     /// coordinates), no off-diagonal entry is an explicit zero or non-finite,
@@ -111,7 +112,7 @@ struct operator_scan {
     /// entry itself instead of searching for its transpose partner.
     bool         triangles_bit_identical = false;
     double       worst_asym_rel = 0.0;
-    Eigen::Index worst_asym_row = -1, worst_asym_col = -1;
+    std::int64_t worst_asym_row = -1, worst_asym_col = -1;
     double       worst_asym_a = 0.0, worst_asym_b = 0.0;
 
     /// Sum over stored off-diagonals of |a_ij|, and of a_ij where a_ij > 0.
@@ -123,11 +124,11 @@ struct operator_scan {
     /// DIAGNOSTIC ONLY — never gates a run (G3_circuit / apache2 have them and
     /// converge). Because lumping preserves row sums exactly, this count is
     /// also the number of rows the LUMPED matrix fails to dominate.
-    Eigen::Index deficient_rows = 0;
+    std::int64_t deficient_rows = 0;
     double       worst_row_sum  = 0.0;
-    Eigen::Index worst_row      = -1;
+    std::int64_t worst_row      = -1;
     /// Rows carrying a positive diagonal excess (the SDDM surplus).
-    Eigen::Index excess_rows = 0;
+    std::int64_t excess_rows = 0;
 
     bool square() const { return rows == cols; }
     /// Fraction of the off-diagonal |mass| that lumping would delete. This —
@@ -145,26 +146,30 @@ inline constexpr double kSymmetryRelTol = 1e-10;
 /// Scan operator properties without materializing a transpose. Symmetry
 /// fingerprints provide a fast path; otherwise a second pass binary-searches
 /// transpose entries. Uses per-thread witness storage.
-operator_scan scan_operator(const Eigen::SparseMatrix<double>& A);
+operator_scan scan_operator(csc_ref<double> A);
 
 /// Assert that `A` belongs to the class apxchol is defined on, and return the
 /// census. Throws `std::invalid_argument` naming WHICH condition failed and
-/// with what counts; when the failure is the adjacency signature (no row
-/// carries a positive diagonal while positive off-diagonals exist) the message
-/// also names the explicit conversion on every surface.
+/// with what counts; when the matrix has no negative off-diagonal entry, the
+/// message also names the conversion to a graph Laplacian on every surface.
 ///
 /// Diagonal dominance is reported in the census but never enforced.
-operator_scan require_operator(const Eigen::SparseMatrix<double>& A,
+operator_scan require_operator(csc_ref<double> A,
                                double lump_max_mass = kDefaultLumpMassCeiling);
 
-/// Apply the M-matrix lumping to `A` in place; returns the number of stored
-/// positive off-diagonal ENTRIES removed (two per pair, both triangles).
+/// The error require_operator reports for a rows x cols matrix that is not square.
+[[noreturn]] void throw_operator_not_square(std::int64_t rows, std::int64_t cols);
+
+/// The M-matrix lumping of `A` as a new matrix; `removed` receives the number
+/// of stored positive off-diagonal ENTRIES removed (two per pair, both
+/// triangles). Every entry that ends up exactly zero is dropped; the
+/// remaining entries keep their order.
 ///
 /// Precondition: `A` is symmetric and every non-empty row carries a stored
 /// positive diagonal — i.e. `require_operator` has accepted it. That is what
 /// makes the transform structure-free: the mass only ever moves onto a
 /// diagonal entry that already exists, so nothing is inserted.
-Eigen::Index lump_positive_offdiagonals(Eigen::SparseMatrix<double>& A);
+csc_matrix<double> lump_positive_offdiagonals(csc_ref<double> A, std::int64_t& removed);
 
 /// Validated, factorization-ready view of a caller's operator.
 ///
@@ -178,25 +183,42 @@ Eigen::Index lump_positive_offdiagonals(Eigen::SparseMatrix<double>& A);
 /// is made and `matrix()` is a reference to the caller's own matrix.
 class operator_view {
 public:
-    explicit operator_view(const Eigen::SparseMatrix<double>& A,
+    explicit operator_view(csc_ref<double> A,
                            double lump_max_mass = kDefaultLumpMassCeiling);
 
-    const Eigen::SparseMatrix<double>& matrix() const {
-        return lumped_.rows() > 0 ? lumped_ : *src_;
+    /// The lumped copy, or the caller's own matrix when nothing was lumped.
+    csc_ref<double> matrix() const {
+        return lumped_entries_ > 0 ? lumped_.ref() : src_;
     }
     /// Stored positive off-diagonal entries lumped away (0 = untouched input).
-    Eigen::Index lumped() const { return lumped_entries_; }
+    std::int64_t lumped() const { return lumped_entries_; }
     const operator_scan& scan() const { return scan_; }
 
 private:
-    const Eigen::SparseMatrix<double>* src_;
-    Eigen::SparseMatrix<double> lumped_;
+    csc_ref<double> src_;
+    csc_matrix<double> lumped_;
     operator_scan scan_;
-    Eigen::Index lumped_entries_ = 0;
+    std::int64_t lumped_entries_ = 0;
 };
 
 /// A one-line summary of a scanned operator:
 /// how it was classified, what was lumped, and any dominance violations.
-std::string describe_operator(const operator_scan& s, Eigen::Index lumped);
+std::string describe_operator(const operator_scan& s, std::int64_t lumped);
 
-} // namespace apxchol
+/// The rule behind the CLI's `--convert-input`, Python's `apxchol.as_operator`
+/// and MATLAB/Octave's `apxchol_as_operator`.
+/// Returns true when M has off-diagonal entries and none is negative (a graph
+/// adjacency matrix: use its Laplacian), false otherwise (use M unchanged; the
+/// solver validates it). Throws `std::invalid_argument` when M is not square,
+/// finite and symmetric.
+bool is_graph_adjacency(csc_ref<double> M);
+
+/// The error is_graph_adjacency reports for a matrix that is not square.
+[[noreturn]] void throw_adjacency_not_square(std::int64_t rows, std::int64_t cols);
+
+/// The graph Laplacian L = D - M, with D the diagonal of row sums of M. A
+/// diagonal entry of M (a self-loop) adds to D and is subtracted again, so it
+/// cancels: L_ii is the sum of row i's off-diagonal weights.
+csc_matrix<double> adjacency_laplacian(csc_ref<double> M);
+
+} // namespace apxchol::detail

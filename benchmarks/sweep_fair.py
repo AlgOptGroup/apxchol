@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Single fair runner for ALL matrix families (grids + SuiteSparse + IPM), on
-either device (--device cpu | gpu). Both write the SAME per-cell JSON store
+any device (--device cpu | gpu | metal). All write the SAME per-cell JSON store
 (results/cells/<family>/<mid>__<solver>__<cfg>__t16__<device>.json) and are
 RESUME-SAFE: a terminal cell from this revision under the current contract is
 skipped; any other cell is re-run and replaced only after its runner finishes
@@ -21,15 +21,15 @@ scores every solver's true residual against the original L, so multigrid reaches
 1e-8 without the eps*I perturbation that --reg-rel used to add. (reg-rel was
 masking real solver limitations -- e.g. AMGCL floors on the disconnected
 as-Skitter -- by solving a better-conditioned L+eps*I.) IPM normal-equation
-matrices are already strictly SDDM and likewise run unshifted. The retained CMG
-adapter is unavailable because it generates its own RHS and shifts Laplacians;
-it produces no comparison cells.
+matrices are already strictly SDDM and likewise run unshifted.
 
 The CPU sweep runs apxchol and the C++ competitors in-process, ParAC through
-parac_runner.py, and AC/AC2 through benchmarks/julia/bench_laplacians.jl.
---no-julia and --no-parac skip those adapters; --no-cmg skips CMG's availability
-check. --headline-only restricts the apxchol config list; AC/AC2 are dropped
-only by an explicit --no-julia.
+parac_runner.py, AC/AC2 through benchmarks/julia/bench_laplacians.jl, and
+canonical MATLAB CMG through cmg_matlab_runner.py on the exported operator and
+RHS. --no-julia, --no-parac and --no-cmg skip those adapters; CMG is also
+skipped, with its reason printed once, when MATLAB or CMG is not configured.
+--headline-only restricts the apxchol config list; AC/AC2 are dropped only by
+an explicit --no-julia.
 A solver that cannot take a given matrix emits an explicit `n/a` cell carrying
 the reason, never a silent gap.
 
@@ -37,6 +37,8 @@ the reason, never a silent gap.
   systemd-inhibit --what=sleep:idle --mode=block python3 benchmarks/sweep_fair.py
   # GPU axis (needs the CUDA build; apxchol uses the GPU-resident PCG):
   python3 benchmarks/sweep_fair.py --device gpu
+  # Metal axis (optional SPARTA via APXCHOL_SPARTA_PYTHON):
+  python3 benchmarks/sweep_fair.py --device metal
 
 ParAC runs IN-PROCESS via parac_runner.py (graph+physics on both axes), emitting
 into the same store. Shared harness (hardened sh, matrix registry, cell store,
@@ -49,6 +51,7 @@ import argparse, json, os, re, shlex, shutil, subprocess, sys, time
 import runner_common as rc
 import parac_runner
 import cmg_matlab_runner
+import sparta_runner
 from runner_common import BIN, CELLS, matrix_args, sh
 
 # Dumped .mtx cache (grid Laplacians + the exact operator handed to the external
@@ -62,9 +65,10 @@ WARMUP = 0
 THREADS = 16
 # 30 min/cell: the >=1e8-nnz giants (com-Orkut apxchol ~170s/rep x3, BoomerAMG
 # mega-hub setup, RCHOL fill blowup) can legitimately exceed the old 1200s.
-TIMEOUT = 1800
-TIMEOUT_MULT = 10      # competitor wall-clock cap = TIMEOUT_MULT x GPU-apxchol's total time
-TIMEOUT_FLOOR = 60     # ...but never below this (so fast matrices still give solvers room)
+TIMEOUT = 1800         # per-solve competitor cap when no apxchol reference exists
+CAP_FACTOR = 20        # per-solve cap = CAP_FACTOR x the best same-device apxchol total
+CAP_FLOOR_S = 30       # ...never below this, so noise on tiny matrices does not cut a run
+CAP_STARTUP_S = 300    # per-process allowance for startup and input parsing, outside the cap
 # Per-benchmark host-memory cap (GB), CPU only. A runaway solver -- e.g. serial RCHOL's
 # natural-order fill blowup on the 237M-nnz com-Orkut hit 110GB RSS and OOM-killed the
 # desktop (2026-06-12) -- gets an address-space ceiling via `ulimit -v`, so it dies with
@@ -74,9 +78,11 @@ TIMEOUT_FLOOR = 60     # ...but never below this (so fast matrices still give so
 # headroom on the 124GB box. NOT applied on GPU (CUDA reserves large host VM; breaks runs).
 MEM_CAP_GB = float(os.environ.get("APXCHOL_BENCH_MEM_CAP_GB", "100"))
 DEVICE = "cpu"   # set in main() from --device
-# CPU PCG caps iters at 500; the GPU axis allows more (cheap per-iter), matching
+# CPU PCG caps iters at 500; the GPU axes allow more (cheap per-iter), matching
 # the retired gpu_chart_sweep.sh (2000, or 1000 for IPM).
-MAXITER = {"cpu": 500, "gpu": 2000, "gpu_ipm": 1000}
+MAXITER = {"cpu": 500, "gpu": 2000, "metal": 2000, "gpu_ipm": 1000}
+# The benchmark's --v1-backend for each device; a Metal build's gpu route is Metal.
+V1_BACKEND = {"cpu": "cpu", "gpu": "gpu", "metal": "gpu"}
 
 PROV = {"boost":"on","boost_expected":"on","git_sha":rc.git_sha(),
         "source_id": os.environ.get("APXCHOL_BENCH_SOURCE_ID", ""),
@@ -212,23 +218,40 @@ def emit(family, mid, solver, config, status, metrics, extra_meta=None,
     meta = dict(OBSERVED.get(mid) or {})
     if extra_meta:
         meta.update(extra_meta)
-    affinity = ({} if solver in JULIA_SOLVERS
-                else rc.benchmark_openmp_provenance(THREADS))
-    prov = {**PROV, **affinity,
-            **(julia_toolchain() if solver in JULIA_SOLVERS else build_toolchain())}
+    if solver in JULIA_SOLVERS:
+        runtime = julia_toolchain()
+    elif solver == "cmg":
+        runtime = cmg_matlab_runner.provenance()
+    elif solver == "sparta":
+        runtime = {"sparta_contract": rc.SPARTA_CONTRACT,
+                   **(metrics or {}).get("sparta_provenance", {})}
+    else:
+        runtime = {**rc.benchmark_openmp_provenance(THREADS), **build_toolchain()}
+    prov = {**PROV, **runtime}
     return rc.emit_cell(family, mid, solver, config, status, metrics, THREADS, DEVICE, prov,
                         matrix_meta=meta or None,
-                        timeout_cap_s=timeout_cap_s if status == "timeout" else None)
+                        timeout_cap_s=timeout_cap_s if status in ("timeout", "exceeded_cap") else None)
+
+def device_init(stderr):
+    """The process-wide CUDA or Metal initialization the binary timed outside
+    every solver's setup, as cell fields."""
+    out = {}
+    for key, parse in (("cuda_init_s", rc.parse_cuda_init), ("metal_init_s", rc.parse_metal_init)):
+        value = parse(stderr)
+        if value is not None:
+            out[key] = value
+    return out
 
 def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout=None, ground=None,
             mid=None):
-    cfg = f"--v1-configs '{config}' --v1-backend {DEVICE}" if solver=="apxchol_v1" else ""
+    cfg = (f"--v1-configs '{config}' --v1-backend {V1_BACKEND[DEVICE]}"
+           if solver=="apxchol_v1" else "")
     # AMGCL de-singularization series: ground=coarse charts the relaxed-coarse cell
     # (--decompose stays auto, so whole+coarse on connected / split+coarse on
     # disconnected). The headline AMGCL series passes no --ground (auto = pin).
     gflag = f"--ground {ground}" if ground else ""
     regflag = f"--reg-rel {reg}" if reg else ""   # IPM is native SDDM: no shift
-    mi = MAXITER["gpu_ipm"] if (DEVICE=="gpu" and family=="ipm") else MAXITER[DEVICE]
+    mi = MAXITER["gpu_ipm"] if (DEVICE!="cpu" and family=="ipm") else MAXITER[DEVICE]
     # env vars passed via `env VAR=...` so /usr/bin/time wraps the whole call.
     #   BOOMERAMG_CFG=cut : CoarsenCutFactor variant (hub->F-point; fixes mega-hub blowup).
     base_envs = []
@@ -249,10 +272,10 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
             run_env[key] = value
         inner=(f"{rc.taskset_prefix(THREADS)} {BIN[DEVICE]} {margs} --solver {solver} {cfg} "
                f"{gflag} {regflag} --threads {THREADS} --tol {TOL} --maxiter {mi} --repeat {REPS} --warmup {WARMUP} --csv")
-        # /usr/bin/time -f '%M': peak RSS (kbytes) -> stderr 'APXRSS <kb>'; the max over
+        # /usr/bin/time: peak RSS on stderr (rc.peak_rss_prefix); the max over
         # all reps (setup-phase peak dominates). solve_rss_mb (held during solve) comes
         # from the binary's CSV; peak - solve_rss = the setup transient.
-        cmd=f"/usr/bin/time -f 'APXRSS %M' {inner}"
+        cmd=f"{rc.peak_rss_prefix()} {inner}"
         # CPU only: rc.sh's mem_cap ceils the address space so a memory-bomb solver
         # dies with bad_alloc (-> 'oom') instead of OOM-killing the box.
         cap = MEM_CAP_GB if DEVICE == "cpu" else None
@@ -264,9 +287,8 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
             # 'timeout' cell it is about to write.
             BUILD.update(rc.parse_build_meta(e.stderr))
             diag = _diag(None, e.output, e.stderr)
-            cuda_init_s = rc.parse_cuda_init(e.stderr)
-            if cuda_init_s is not None:
-                diag["cuda_init_s"] = cuda_init_s
+            diag.update(device_init(e.stderr))
+            diag.update(rc.parse_gpu_memory(e.stderr))
             return "timeout", diag
         BUILD.update(rc.parse_build_meta(p.stderr))   # what built the binary that just ran
         st,m = classify(rc.parse_csv(p.stdout))
@@ -291,13 +313,11 @@ def run_cpp(margs, solver, config, reg, family=None, boomeramg_cfg=None, timeout
         if m is not None:
             m["warmup_repeats"] = WARMUP
             m["repeat_receipts"] = [line for line in p.stderr.splitlines() if line.startswith("BENCH_REPEAT ")]
-            cuda_init_s = rc.parse_cuda_init(p.stderr)
-            if cuda_init_s is not None:
-                m["cuda_init_s"] = cuda_init_s
-            for ln in p.stderr.splitlines():
-                if ln.startswith("APXRSS "):
-                    try: m["max_rss_mb"]=round(int(ln.split()[1])/1024.0,1)
-                    except: pass
+            m.update(device_init(p.stderr))
+            m.update(rc.parse_gpu_memory(p.stderr))
+            rss = rc.parse_peak_rss_mb(p.stderr)
+            if rss is not None:
+                m["max_rss_mb"] = rss
             m["gpu_memory_polling"] = False
         # How the binary read this matrix, straight from its own report.
         meta = rc.parse_matrix_meta(p.stderr)
@@ -391,26 +411,6 @@ def run_parac(mid):
                 mid, "failed", f"unhandled ParAC runner error: {type(e).__name__}: {e}")
             print(f"   {label:24} {stamped}")
 
-_CMG_STATE = {"probed": False, "ok": False, "why": ""}
-
-def cmg_preflight():
-    """Report an unavailable CMG adapter once, before starting the sweep."""
-    if not _CMG_STATE["probed"]:
-        _CMG_STATE["ok"], _CMG_STATE["why"] = cmg_matlab_runner.available()
-        _CMG_STATE["probed"] = True
-        if not _CMG_STATE["ok"]:
-            print(f"   {'cmg':24} UNAVAILABLE — no cmg cells this run: {_CMG_STATE['why']}",
-                  flush=True)
-    return _CMG_STATE["ok"]
-
-def run_cmg(mid):
-    if not cmg_preflight():
-        return
-    try:
-        print(f"   {'cmg':24} {cmg_matlab_runner.run_one(mid)}", flush=True)
-    except Exception as e:                       # never abort the sweep for one solver
-        print(f"   {'cmg':24} ERROR: {e}", flush=True)
-
 def dump_mtx(mid):
     """Write the EXACT operator the in-process solvers solve to a .mtx, cached.
 
@@ -427,6 +427,10 @@ def dump_mtx(mid):
     """
     return rc.dump_matrix(mid, DUMP, BIN[DEVICE], THREADS, TIMEOUT)
 
+def dump_rhs(mid):
+    """Write the RHS the in-process solvers solve, cached next to dump_mtx."""
+    return rc.dump_matrix(mid, DUMP, BIN[DEVICE], THREADS, TIMEOUT, rhs=True)
+
 # --- CPU axis solver sets ---
 # Solver set: (solver, config)
 APX_DEFAULT_CONFIG = rc.APXCHOL_DEFAULT_CONFIG
@@ -441,12 +445,15 @@ APX = [("apxchol_v1", APX_DEFAULT_CONFIG),
 # (smoothed-aggregation + spai0, vs BoomerAMG's classical AMG); converges to true
 # 1e-8 under --reg-rel.
 COMP = ["rchol","rchol_par","hypre_boomeramg","amgcl"]
+# Apple Accelerate's sparse Cholesky: a macOS-only direct competitor
+# (configure with -DBENCH_ACCELERATE=ON).
+if sys.platform == "darwin":
+    COMP.append("accelerate")
 # AC/AC2 = Laplacians.jl Julia reference of our method (read .mtx). Slow (julia).
 JULIA = ["ac","ac2"]
 RUN_PARAC = True     # ParAC runs as part of every sweep (skip via --no-parac)
 PARAC_ONLY = False   # --parac-only: run ONLY ParAC (skip apxchol/competitors/AC)
-# The retained CMG adapter is unavailable. Report this once and write no cells;
-# --no-cmg skips the availability check.
+# Canonical MATLAB CMG on the shared A and b (CPU only; skip via --no-cmg).
 RUN_CMG = True
 # --no-cap: drop the 10x-GPU-apxchol competitor wall cap and RE-RUN cells currently
 # stored as 'timeout' (clamped), so AMGCL/BoomerAMG get an HONEST uncapped wall time on
@@ -459,7 +466,10 @@ NOCAP_TIMEOUT = int(os.environ.get("NOCAP_TIMEOUT_S", str(4 * 3600)))
 # The GPU route owns both setup and solve. Host-only storage/selector ablations
 # remain on the CPU axis; historical mixed-route cells retain their own sources.
 APX_GPU = [("apxchol_v1", APX_DEFAULT_CONFIG)]
-COMP_GPU = ["hypre_boomeramg_gpu","amgcl_cuda"]
+COMP_GPU = ["hypre_boomeramg_gpu","amgcl_cuda","amgx"]
+
+# --- Metal axis: apxchol only (no competitor has a Metal backend) ---
+APX_METAL = [("apxchol_v1", APX_DEFAULT_CONFIG)]
 
 
 def planned_cell_count(matrices, device):
@@ -467,6 +477,8 @@ def planned_cell_count(matrices, device):
     matrices = list(matrices)
     if PARAC_ONLY:
         return 2 * len(matrices)
+    if device == "metal":
+        return (len(APX_METAL) + bool(sparta_runner.PYTHON)) * len(matrices)
     if device == "gpu":
         per_matrix = len(APX_GPU) + len(COMP_GPU)
         per_matrix += int("hypre_boomeramg_gpu" in COMP_GPU)  # cut variant
@@ -511,18 +523,42 @@ def step(family, mid, solver, config, runner, label, timeout_cap_s=TIMEOUT):
           f"total={m.get('total_s','-') if m else '-'}", flush=True)
     return st, m
 
-def gpu_apx_total(family, mid):
-    """GPU time of the declared apxchol default used to derive competitor caps.
+def solve_cap(apx_totals):
+    """Per-solve competitor cap from this device's complete apxchol totals.
 
-    This is intentionally one fixed configuration, not the fastest selector in the
-    store. None means the CPU pass must fall back to the same declared default on
-    its own device."""
-    cell = rc.stored_cell(family, mid, "apxchol_v1", APX_DEFAULT_CONFIG,
-                        THREADS, "gpu")
-    if (cell is not None and cell.get("status") == "complete"
-            and rc.cell_is_current(cell, rc.git_sha())):
-        return cell.get("metrics", {}).get("total_s")
-    return None
+    The capped quantity is a run's setup + solve as its solver reports them;
+    process startup, input parsing and CUDA/Julia initialization are excluded.
+    Without a reference the cap is TIMEOUT."""
+    totals = [t for t in apx_totals if isinstance(t, (int, float)) and t > 0]
+    return max(CAP_FACTOR * min(totals), CAP_FLOOR_S) if totals else float(TIMEOUT)
+
+
+def _repeat_totals(m):
+    """Every measured repetition's setup + solve total, warmups included."""
+    totals = [m["total_s"]] if isinstance(m.get("total_s"), (int, float)) else []
+    for line in m.get("repeat_receipts") or []:
+        hit = re.search(r"\btotal_s=([0-9.eE+-]+)", line)
+        if hit:
+            totals.append(float(hit.group(1)))
+    return totals
+
+
+def capped(result, cap):
+    """Report a run over the per-solve cap as `exceeded_cap`, never as a time.
+
+    A process killed at its cap-derived deadline is also exceeded_cap. The
+    measured timings stay in `capped_timings` as raw evidence only."""
+    st, m = result[0], dict(result[1] or {})
+    extra = result[2] if len(result) > 2 else None
+    over = st == "timeout" or (st in {"complete", "not_converged"}
+                               and any(t > cap for t in _repeat_totals(m)))
+    if over:
+        timing = {k: m.pop(k) for k in ("setup_s", "solve_s", "total_s", "us_per_nnz") if k in m}
+        if timing:
+            m["capped_timings"] = timing
+        st = "exceeded_cap"
+    m.update(cap_s=cap, cap_factor=CAP_FACTOR, cap_floor_s=CAP_FLOOR_S)
+    return (st, m, extra) if extra is not None else (st, m)
 
 def do_matrix(mid, family, source, spec, is2d, n, reg):
     kind = rc.kind_of(mid)         # declared, never guessed; raises if missing
@@ -531,87 +567,117 @@ def do_matrix(mid, family, source, spec, is2d, n, reg):
     if PARAC_ONLY:                 # --parac-only: ParAC and nothing else
         run_parac(mid); return
     margs=rc.margs_for(mid)
-    # The competitor wall-clock cap is TIMEOUT_MULT x GPU-apxchol's total time -- the
-    # declared apxchol default is the universal reference, so "10x of GPU apxchol" is the
-    # same bar on both axes (the charts clamp+mark anything slower at that cap). A
-    # competitor exceeding it is recorded as status 'timeout' (a TERMINAL status,
-    # distinct from blank = not-tested), so one slow solver on a giant doesn't stall the
-    # sweep. Falls back to same-device apxchol when the GPU axis hasn't run this matrix
-    # yet (run GPU before CPU so the cap is the intended GPU reference).
-    def comp_timeout(t_apx_same):
-        if NO_CAP:
-            return NOCAP_TIMEOUT          # uncapped: only the sane outer ceiling applies
-        ref = gpu_apx_total(family, mid) or t_apx_same
-        return int(min(TIMEOUT, max(TIMEOUT_FLOOR, TIMEOUT_MULT * (ref or TIMEOUT/TIMEOUT_MULT))))
+    # Competitor caps are relative to apxchol on the same matrix and device: a run
+    # whose setup + solve exceeds CAP_FACTOR x the best apxchol total is recorded
+    # as exceeded_cap (a terminal status), never as a time. Each process is killed
+    # once all its repetitions could have used the cap plus a startup allowance.
+    def process_timeout(cap, runs):
+        return int(runs * cap + CAP_STARTUP_S) if not NO_CAP else NOCAP_TIMEOUT
+    if DEVICE == "metal":
+        apx_totals = []
+        for solver,config in APX_METAL:
+            st, m = step(family,mid,solver,config, lambda s=solver,c=config: run_cpp(margs,s,c,reg,family,mid=mid), config)
+            if st == "complete" and m:
+                apx_totals.append(m.get("total_s"))
+        if sparta_runner.PYTHON and not cell_done(family, mid, "sparta", ""):
+            cap = solve_cap(apx_totals)
+            operator, rhs = dump_mtx(mid), dump_rhs(mid)
+            def sparta_cell():
+                if not operator or not rhs:
+                    return "failed", {}, {"na_reason": "shared operator/RHS export failed"}
+                result = sparta_runner.run(
+                    operator, rhs, timeout=process_timeout(cap, WARMUP + REPS),
+                    repeats=REPS, warmup=WARMUP, threads=THREADS, tol=TOL, maxiter=MAXITER[DEVICE])
+                return result if result[0] == "timeout" else capped(result, cap)
+            step(family, mid, "sparta", "", sparta_cell, "SPARTA Metal", timeout_cap_s=cap)
+        return
     if DEVICE == "gpu":
-        t_apx = None
+        apx_totals = []
         for solver,config in APX_GPU:
-            _,m = step(family,mid,solver,config, lambda s=solver,c=config: run_cpp(margs,s,c,reg,family,mid=mid), config)
-            if config == APX_DEFAULT_CONFIG and m and m.get("total_s"):
-                t_apx = m["total_s"]
-        to = comp_timeout(t_apx)
+            st,m = step(family,mid,solver,config, lambda s=solver,c=config: run_cpp(margs,s,c,reg,family,mid=mid), config)
+            if st == "complete" and m:
+                apx_totals.append(m.get("total_s"))
+        cap = solve_cap(apx_totals)
+        to = process_timeout(cap, WARMUP + REPS)
         comp = list(COMP_GPU)
         for solver in comp:
             if solver == "hypre_boomeramg_gpu":
                 # default (Hypre defaults) + CoarsenCutFactor 'cut' (hub->F-point),
                 # charted as two GPU series like the CPU axis -- cut is the fix on the
                 # mega-hub social giants, a no-op on grids/IPM.
-                step(family,mid,solver,"", lambda s=solver: run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), solver,
-                     timeout_cap_s=to)
+                step(family,mid,solver,"", lambda s=solver: capped(run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), cap), solver,
+                     timeout_cap_s=cap)
                 step(family,mid,solver,"cut",
-                     lambda s=solver: run_cpp(margs,s,"cut",reg,family,boomeramg_cfg="cut",timeout=to,mid=mid), solver+"/cut",
-                     timeout_cap_s=to)
+                     lambda s=solver: capped(run_cpp(margs,s,"cut",reg,family,boomeramg_cfg="cut",timeout=to,mid=mid), cap), solver+"/cut",
+                     timeout_cap_s=cap)
             else:
-                step(family,mid,solver,"", lambda s=solver: run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), solver,
-                     timeout_cap_s=to)
+                step(family,mid,solver,"", lambda s=solver: capped(run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), cap), solver,
+                     timeout_cap_s=cap)
         if RUN_PARAC:
             run_parac(mid)
         return  # no Julia on the GPU axis
-    t_apx = None
+    apx_totals = []
     for solver,config in APX:
-        _,m = step(family,mid,solver,config, lambda s=solver,c=config: run_cpp(margs,s,c,reg,family,mid=mid), config)
-        if config == APX_DEFAULT_CONFIG and m and m.get("total_s"):
-            t_apx = m["total_s"]
-    to = comp_timeout(t_apx)
+        st,m = step(family,mid,solver,config, lambda s=solver,c=config: run_cpp(margs,s,c,reg,family,mid=mid), config)
+        if st == "complete" and m:
+            apx_totals.append(m.get("total_s"))
+    cap = solve_cap(apx_totals)
+    to = process_timeout(cap, WARMUP + REPS)
     for solver in COMP:
         if solver == "hypre_boomeramg":
             # Two series: classical default + CoarsenCutFactor 'cut' (hub->F-point).
             # The cut variant is a no-op on uniform-degree grids/IPM and the fix on
             # mega-hub social graphs (com-Youtube/as-Skitter), so charting both shows
             # the methodology point instead of letting default blow up the timeout.
-            step(family,mid,solver,"", lambda s=solver: run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), solver,
-                 timeout_cap_s=to)
+            step(family,mid,solver,"", lambda s=solver: capped(run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), cap), solver,
+                 timeout_cap_s=cap)
             step(family,mid,solver,"cut",
-                 lambda s=solver: run_cpp(margs,s,"cut",reg,family,boomeramg_cfg="cut",timeout=to,mid=mid), solver+"/cut",
-                 timeout_cap_s=to)
+                 lambda s=solver: capped(run_cpp(margs,s,"cut",reg,family,boomeramg_cfg="cut",timeout=to,mid=mid), cap), solver+"/cut",
+                 timeout_cap_s=cap)
         else:
-            step(family,mid,solver,"", lambda s=solver: run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), solver,
-                 timeout_cap_s=to)
-    # AC/AC2 read the DUMPED operator — the same seam every other external solver
-    # goes through — so their cells demonstrably solve the same system as the
-    # in-process ones instead of re-deriving one from the registry file.
-    if JULIA and not all(cell_done(family, mid, s, "") for s in JULIA):
-        dumped = dump_mtx(mid)
+            step(family,mid,solver,"", lambda s=solver: capped(run_cpp(margs,s,"",reg,family,timeout=to,mid=mid), cap), solver,
+                 timeout_cap_s=cap)
+    # AC/AC2 and CMG read the DUMPED operator — the same seam every other external
+    # solver goes through — so their cells demonstrably solve the same system as
+    # the in-process ones instead of re-deriving one from the registry file.
+    need_julia = JULIA and not all(cell_done(family, mid, s, "") for s in JULIA)
+    need_cmg = RUN_CMG and not cell_done(family, mid, "cmg", "")
+    dumped = dump_mtx(mid) if need_julia or need_cmg else None
+    if need_julia:
         if dumped:
             for s in JULIA:
                 step(family,mid,s,"",
-                     lambda ss=s, cap=to: run_julia(
-                         dumped, ss, rc.class_of(mid), timeout=cap),
-                     s, timeout_cap_s=to)
+                     lambda ss=s: capped(run_julia(
+                         dumped, ss, rc.class_of(mid),
+                         timeout=process_timeout(cap + CAP_STARTUP_S, REPS)), cap),
+                     s, timeout_cap_s=cap)
         else:
             print(f"   {'AC/AC2':24} SKIP (operator dump failed)")
     if RUN_PARAC:      # ParAC graph+physics (resume-safe; the runner skips done cells)
         run_parac(mid)
-    if RUN_CMG:        # CMG in the MATLAB container (resume-safe; emits its own cell)
-        run_cmg(mid)
+    if need_cmg:
+        # CMG also needs the RHS: it solves the exported A and b in one MATLAB
+        # process (1 warmup + REPS retained repetitions).
+        rhs = dump_rhs(mid) if dumped else None
+        if rhs:
+            step(family,mid,"cmg","",
+                 lambda: capped(cmg_matlab_runner.run(
+                     dumped, rhs, timeout=process_timeout(cap, 1 + REPS),
+                     repeats=REPS, tol=TOL, maxiter=MAXITER["cpu"]), cap),
+                 "cmg", timeout_cap_s=cap)
+        else:
+            print(f"   {'cmg':24} SKIP (operator or RHS dump failed)")
+    elif RUN_CMG:
+        print(f"   {'cmg':24} (skip, done)")
 
 def main():
     global DEVICE, APX, JULIA, COMP, THREADS, REPS, CELLS, WARMUP
     ap = argparse.ArgumentParser(
         description="Run or resume the fair benchmark sweep; reusable terminal cells "
                     "skip, while stale terminal cells are replaced after their rerun.")
-    ap.add_argument("--device", choices=["cpu","gpu"], default="cpu",
-                    help="cpu (build/) or gpu (build-cuda/, apxchol GPU-resident PCG)")
+    ap.add_argument("--device", choices=list(rc.DEVICES), default="cpu",
+                    help="cpu (build/), gpu (build-cuda/, apxchol GPU-resident PCG) "
+                         "or metal (build-metal/, apxchol only)")
     ap.add_argument("--threads", type=int, default=THREADS,
                     help="threads and recorded cell thread count (default: 16)")
     ap.add_argument("--repeat", type=int, default=REPS,
@@ -635,8 +701,8 @@ def main():
     ap.add_argument("--no-parac", action="store_true",
                     help="skip ParAC (run in-process via parac_runner.py).")
     ap.add_argument("--no-cmg", action="store_true",
-                    help="skip the retained CMG adapter, currently unavailable for "
-                         "shared original-operator/RHS comparisons.")
+                    help="skip canonical MATLAB CMG (needs APXCHOL_MATLAB_ROOT and "
+                         "APXCHOL_CMG_SOLVER; see benchmarks/README.md).")
     ap.add_argument("--parac-only", action="store_true",
                     help="run ONLY ParAC (skip apxchol / competitors / AC); for filling the "
                          "ParAC giant-matrix cells without touching the rest.")
@@ -661,7 +727,6 @@ def main():
     parac_runner.REPS = REPS
     parac_runner.PROV_CPU["repeat"] = REPS
     parac_runner.PROV_GPU["repeat"] = REPS
-    cmg_matlab_runner.THREADS = THREADS
     PROV["repeat"] = REPS
     fams = {f.strip() for f in a.families.split(",") if f.strip()}
     only = {x.strip() for x in a.only.split(",") if x.strip()}
@@ -670,9 +735,17 @@ def main():
     if a.parac_only: PARAC_ONLY = True
     if a.no_cap: NO_CAP = True
     # CMG is serial MATLAB: it has no GPU axis, so its cells are device=cpu only.
-    if a.no_cmg or DEVICE == "gpu": RUN_CMG = False
+    if a.no_cmg or DEVICE != "cpu": RUN_CMG = False
+    if DEVICE == "metal":
+        if a.parac_only:
+            ap.error("--parac-only has no Metal axis")
+        RUN_PARAC = False   # ParAC has no Metal driver
     if RUN_CMG:
-        cmg_preflight()
+        cmg_ok, cmg_reason = cmg_matlab_runner.available()
+        if not cmg_ok:
+            print(f"    NOTE: CMG is unavailable, no CMG cells are planned: {cmg_reason}",
+                  flush=True)
+            RUN_CMG = False
     if DEVICE == "cpu" and JULIA:
         julia_ok, julia_reason = julia_preflight()
         if not julia_ok:
@@ -682,18 +755,21 @@ def main():
         COMP = [c for c in COMP if c not in ("rchol","rchol_par")]
     if DEVICE == "gpu" and not os.path.exists(BIN["gpu"]):
         sys.exit(f"GPU build not found: {BIN['gpu']} (configure with -DAPXCHOL_DEVICE=CUDA)")
+    if DEVICE == "metal" and not os.path.exists(BIN["metal"]):
+        sys.exit(f"Metal build not found: {BIN['metal']} (configure with -DAPXCHOL_DEVICE=METAL)")
     PROV["note"] = f"FAIR {DEVICE} run, singular L, multi-component Dirichlet pin (per-solver grounding)"
     print(f"=== fair sweep: device={DEVICE}, families={sorted(fams)}, "
           f"store={CELLS} "
           f"(stale-aware resume) ===", flush=True)
+    julia_on = bool(JULIA) and DEVICE == "cpu"   # Julia has only a CPU axis
     print(f"    external solvers: parac={'on' if RUN_PARAC else 'off'} "
-          f"ac/ac2={'on' if JULIA else 'off'} cmg={'on' if RUN_CMG else 'off'}", flush=True)
-    if not JULIA:
+          f"ac/ac2={'on' if julia_on else 'off'} cmg={'on' if RUN_CMG else 'off'}", flush=True)
+    if DEVICE == "cpu" and not JULIA:
         print("    NOTE: AC/AC2 are OFF -> their cells stay empty. Fill them with "
               "`python3 benchmarks/sweep_fair.py` without --no-julia/--headline-only "
               "(needs: julia --project=benchmarks/julia -e 'using Pkg; Pkg.instantiate()').",
               flush=True)
-    if not RUN_CMG and DEVICE == "cpu":
+    if a.no_cmg and DEVICE == "cpu":
         print("    NOTE: CMG is OFF; no CMG cells are planned.", flush=True)
     # Resume-safe: reusable terminal cells skip; stale terminal cells rerun while
     # their old JSON stays in place until the replacement runner has finished.

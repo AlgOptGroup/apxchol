@@ -3,19 +3,24 @@ import argparse
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
-GUIDES = ["README.md", "python/README.md", "octave/README.md", "CONTRIBUTING.md",
+GUIDES = ["README.md", "CHANGELOG.md", "python/README.md", "octave/README.md", "CONTRIBUTING.md",
           "benchmarks/README.md", "docs/api.md", "docs/precision.md", "docs/extending.md",
-          "docs/usage.md", "docs/building.md"]
+          "docs/usage.md", "docs/building.md", "docs/batching.md", "docs/serialization.md",
+          "docs/sdk.md", "docs/performance.md", "docs/install.md", "docs/quickstart.md",
+          "docs/cli.md", "docs/cpp.md", "docs/examples.md", "docs/input-formats.md",
+          "docs/citing.md"]
 PAGES = {name: name for name in GUIDES}
 PAGES.update({"README.md": "_readme.md", "docs/index.md": "index.md",
               "docs/reference/cpp.md": "docs/reference/cpp.md",
               "docs/reference/python.md": "docs/reference/python.md"})
+CLI_REFERENCE = "docs/reference/cli.md"  # generated from --help below
 
 
 def main():
@@ -29,6 +34,10 @@ def main():
         work = Path(temporary)
         source = work / "source"
         source.mkdir()
+        (source / "docs/performance").mkdir(parents=True)
+        for asset in (ROOT / "docs/performance").glob("*"):
+            shutil.copyfile(asset, source / "docs/performance" / asset.name)
+        shutil.copytree(ROOT / "examples", source / "examples")
         for original, destination in PAGES.items():
             def link(match):
                 href = match.group(1)
@@ -47,9 +56,11 @@ def main():
                     return match.group(0)
                 target = (ROOT / original).parent / parsed.path
                 relative = target.resolve().relative_to(ROOT).as_posix()
-                if relative in PAGES:
-                    page = "index.md" if relative == "README.md" else PAGES[relative]
+                if relative in PAGES or relative == CLI_REFERENCE:
+                    page = "index.md" if relative == "README.md" else PAGES.get(relative, relative)
                     url = os.path.relpath(source / page, (source / destination).parent)
+                elif relative.startswith("docs/performance/"):
+                    url = os.path.relpath(source / relative, (source / destination).parent)
                 else:
                     if not target.exists():
                         raise FileNotFoundError(target)
@@ -64,9 +75,15 @@ def main():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text)
         help_text = subprocess.check_output(["apxchol", "--help"], executable=str(cli), cwd=ROOT, text=True)
-        (source / "docs/reference/cli.md").write_text(
+        (source / CLI_REFERENCE).write_text(
             "# Command-line reference\n\n"
-            "See [build and run](../../index.md#build-and-run) for examples. "
+            "Solve a system with a supplied right-hand side.\n\n"
+            "```sh\napxchol matrix.mtx --rhs rhs.mtx -o solution.mtx\n```\n\n"
+            "Solve a graph Laplacian with a generated right-hand side.\n\n"
+            "```sh\napxchol graph.mtx --convert-input --random-rhs\n```\n\n"
+            "Limit CPU threads and request a residual tolerance.\n\n"
+            "```sh\napxchol matrix.mtx --rhs rhs.mtx --backend cpu --threads 4 --tol 1e-8\n```\n\n"
+            "See the [command-line guide](../cli.md) for input formats and output details. "
             "Options below come from this revision's executable.\n\n```text\n" + help_text + "```\n")
         env = dict(os.environ, APXCHOL_DOCS_BUILD=str(work))
         subprocess.run(["doxygen", str(ROOT / "docs/Doxyfile")], cwd=ROOT, env=env, check=True)

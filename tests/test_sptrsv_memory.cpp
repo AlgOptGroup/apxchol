@@ -16,6 +16,7 @@
 // accounting would not reflect the release. Linux + glibc only (skipped
 // elsewhere).
 #include <gtest/gtest.h>
+#include "csc_test_util.h"
 #include "grid_laplacian.h"
 #include <algorithm>
 #include <cmath>
@@ -33,11 +34,13 @@
 #include "apxchol/solver/factorization.h"
 #include "apxchol/solver/sptrsv/omp.h"
 
+using csc_access = apxchol::detail::sparse_csc_access;
+
 using apxchol::edge_index;
 using apxchol::node_index;
 using apxchol::sparse_csc;
 using apxchol::factor_value_t;
-using apxchol::sptrsv_value_t;
+using apxchol::detail::sptrsv_value_t;
 
 namespace {
 
@@ -64,9 +67,9 @@ using apxchol::test::grid_laplacian;
 } // namespace
 
 TEST(BigAlloc, OutputBufferSpecializationPreservesTheDefaultContract) {
-    using initialized_alloc = apxchol::util::big_alloc<std::uint32_t>;
+    using initialized_alloc = apxchol::detail::big_alloc<std::uint32_t>;
     using output_alloc =
-        apxchol::util::big_alloc<std::uint32_t, 32, false, false>;
+        apxchol::detail::big_alloc<std::uint32_t, 32, false, false>;
 
     std::vector<std::uint32_t, initialized_alloc> initialized(64);
     EXPECT_TRUE(std::all_of(initialized.begin(), initialized.end(),
@@ -120,16 +123,16 @@ TEST(SpTRSVSetupMemory, TransientsAreReleasedAtLastUse) {
     // nnz * 8 B (~28 MB) to the peak.
     const auto L = grid_laplacian(800, 800);
     apxchol::factor_options fopts; fopts.seed = 7;
-    const auto F = apxchol::factorize(L, fopts);
+    const auto F = apxchol::factorize(apxchol::test::csc(L), fopts);
     const node_index m = F.L.rows() - 1;                       // Laplacian path
     const apxchol::factor_options options{.drop_tolerance = 0.5};             // force a real drop
 
-    { apxchol::omp_sptrsv warm; warm.setup(F.L, m, options); }          // OMP team + arenas exist
+    { apxchol::detail::omp_sptrsv warm; warm.setup(F.L, m, options); }          // OMP team + arenas exist
     if (!reset_peak_rss()) GTEST_SKIP() << "/proc/self/clear_refs not writable";
     const long rss0_kb = proc_status_kb("VmRSS:");
     ASSERT_GT(rss0_kb, 0);
 
-    apxchol::omp_sptrsv trsv;
+    apxchol::detail::omp_sptrsv trsv;
     trsv.setup(F.L, m, options);
 
     const long hwm_kb  = proc_status_kb("VmHWM:");
@@ -184,7 +187,7 @@ TEST(SpTRSVSetupMemory, TransientsAreReleasedAtLastUse) {
 TEST(SpTRSVSetupMemory, SetupConsumingReleasesTheFactorAndSolvesIdentically) {
     const auto L = grid_laplacian(120, 120);
     apxchol::factor_options fopts; fopts.seed = 3;
-    auto F1 = apxchol::factorize(L, fopts);
+    auto F1 = apxchol::factorize(apxchol::test::csc(L), fopts);
     // Compare the setup ownership paths with the exact same input factor.
     // Re-factorizing can change parallel floating-point sums even at a fixed
     // seed/team; equal nnz alone never established factor identity here.
@@ -193,13 +196,13 @@ TEST(SpTRSVSetupMemory, SetupConsumingReleasesTheFactorAndSolvesIdentically) {
     const node_index m = F1.L.rows() - 1;
     const auto nnz = F2.L.nonZeros();
 
-    apxchol::omp_sptrsv a, b;
+    apxchol::detail::omp_sptrsv a, b;
     a.setup(F1.L, m);
     b.setup_consuming(F2.L, m);
-    EXPECT_EQ(F2.L.inner_.capacity(), 0u);
-    EXPECT_EQ(F2.L.vals_.capacity(), 0u);
+    EXPECT_EQ(csc_access::inner(F2.L).capacity(), 0u);
+    EXPECT_EQ(csc_access::vals(F2.L).capacity(), 0u);
     EXPECT_EQ(F2.L.nonZeros(), nnz);            // column pointers stay
-    EXPECT_EQ(F1.L.inner_.size(), static_cast<std::size_t>(nnz));  // const& setup keeps it
+    EXPECT_EQ(csc_access::inner(F1.L).size(), static_cast<std::size_t>(nnz));  // const& setup keeps it
 
     std::vector<double> x(m), ya(m), yb(m), za(m), zb(m);
     for (node_index i = 0; i < m; ++i) x[i] = std::sin(0.37 * i) + 1.5;

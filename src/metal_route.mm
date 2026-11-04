@@ -1,0 +1,1116 @@
+// Metal factor preparation, PCG and command submission.
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#include "apxchol/solver/detail/metal_route.h"
+#include "apxchol/solver/detail/metal_host.h"
+#include "apxchol/solver/detail/factor_validation.h"
+#include "apxchol/solver/detail/device_memory_error.h"
+#include "apxchol/solver/detail/gpu_pcg.h"
+#include "apxchol/solver/detail/pcg_restart.h"
+#include "apxchol/solver/detail/metal_schedule.h"
+#include "apxchol/solver/detail/permuted_operator.h"
+#include "apxchol/solver/sptrsv/gpu_factor_prep.h"
+#include "metal_device.h"
+#include "metal_compile.h"
+#include "metal_setup.h"
+#include "host_spmv.h"
+#include "solver_archive_internal.h"
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <exception>
+#include <initializer_list>
+#include <limits>
+#include <mutex>
+#include <new>
+#include <stdexcept>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+#include <omp.h>
+
+namespace apxchol::detail::metal {
+namespace {
+
+using df32 = metal_host::df;
+static_assert(sizeof(df32) == 8);
+
+#define APXCHOL_GPU_CODE(...) __VA_ARGS__
+#include "metal_params.inc"
+#undef APXCHOL_GPU_CODE
+static_assert(sizeof(Params) == 40);
+static_assert(offsetof(Params, mode) == 16);
+static_assert(offsetof(Params, m) == 24);
+static_assert(offsetof(Params, spmv_lanes) == 28);
+static_assert(offsetof(Params, preconditioner_scale) == 32);
+static_assert(offsetof(Params, mapped_rows) == 36);
+
+using solve_state = gpu_pcg::solve_state<df32, float>;
+static_assert(sizeof(solve_state) == 44);
+static_assert(offsetof(solve_state, thr) == 16);
+static_assert(offsetof(solve_state, alpha) == 24);
+static_assert(offsetof(solve_state, active) == 32);
+static_assert(offsetof(solve_state, tolerance_stop) == 40);
+
+const char kKernelSource[] =
+    "\n#include <metal_stdlib>\nusing namespace metal;\n"
+    "\n#define APXCHOL_GPU_FUNCTION inline\n"
+    "\n#define APXCHOL_GPU_BUFFER(T) device T*\n"
+#define APXCHOL_GPU_CODE(...) #__VA_ARGS__
+#include "apxchol/solver/detail/gpu_pcg.inc"
+#include "apxchol/solver/detail/double_float.inc"
+#include "apxchol/solver/detail/metal_factor_storage.inc"
+#include "metal_params.inc"
+#include "metal_kernels.inc"
+    "\n#define APXCHOL_UNROLL _Pragma(\"unroll\")\n"
+#include "gpu_dataflow.inc"
+#undef APXCHOL_GPU_CODE
+#include "metal_dataflow.inc"
+    ;
+
+constexpr std::uint32_t kRowThreads = 256;     // threads per threadgroup of the row kernels
+
+using gpu_pcg::operation;
+
+struct pipelines {
+    id<MTLComputePipelineState> pcg[4][2];  // operation, operator double-float
+    id<MTLComputePipelineState> finalize;
+    id<MTLComputePipelineState> dataflow_solve[2][3]; // backward, forward, independent forward
+    id<MTLComputePipelineState> dataflow_init[2][2];
+    id<MTLComputePipelineState> probe;
+    std::uint32_t row_threads = 0;
+};
+
+struct context {
+    device_status status;
+    id<MTLDevice> device = nil;
+    id<MTLCommandQueue> probe_queue = nil;
+    id<MTLLibrary> library = nil;
+    std::array<pipelines, 3> pipes;
+    std::array<std::once_flag, 3> pipeline_once;
+};
+
+std::vector<float> run_probe(context& ctx, const std::vector<float>& inputs);
+
+// Error-free transforms need round-to-nearest-even, separately rounded
+// intermediates and an actual fused multiply-add.
+std::string run_arithmetic_probe(context& ctx) {
+    const auto out = run_probe(ctx, {
+        0x1p0f, 0x1.8p-24f, 0x1.8p-24f, 0.0f, // Sum rounds up, leaving -2^-25.
+        0x1p0f, 0.0f, 0x1p-24f, 0.0f,         // Halfway sum rounds to the even mantissa.
+        0x1.000002p0f, 0x1p-24f, 0x1.000002p0f, 0.0f,
+    });
+    // The last quick_two_sum starts with an odd mantissa, so its tie rounds up.
+    if (out[0] != 0x1.000002p0f || out[1] != -0x1p-25f || out[15] != -0x1p-25f ||
+        out[16] != 0x1p0f || out[17] != 0x1p-24f || out[47] != -0x1p-24f)
+        return "Metal double-float transforms require round-to-nearest-even without reassociation";
+    // (1 + 2^-23)^2 = 1 + 2^-22 + 2^-46; only FMA retains the product residual.
+    if (out[34] != 0x1.000004p0f || out[35] != 0x1p-46f)
+        return "Metal double-float transforms require a fused multiply-add";
+    return {};
+}
+
+id<MTLComputePipelineState> make_pipeline(id<MTLDevice> device, id<MTLLibrary> library,
+                                          const char* name, bool forward, bool operator_df,
+                                          unsigned op = 0, bool factor_fp16 = false,
+                                          unsigned columns = 1, bool independent = false) {
+    MTLFunctionConstantValues* values = [MTLFunctionConstantValues new];
+    [values setConstantValue:&forward type:MTLDataTypeBool atIndex:0];
+    [values setConstantValue:&operator_df type:MTLDataTypeBool atIndex:1];
+    [values setConstantValue:&op type:MTLDataTypeUInt atIndex:2];
+    [values setConstantValue:&factor_fp16 type:MTLDataTypeBool atIndex:3];
+    [values setConstantValue:&columns type:MTLDataTypeUInt atIndex:4];
+    [values setConstantValue:&independent type:MTLDataTypeBool atIndex:5];
+    NSError* err = nil;
+    id<MTLFunction> fn = [library newFunctionWithName:[NSString stringWithUTF8String:name]
+                                       constantValues:values
+                                                error:&err];
+    if (fn == nil)
+        throw std::runtime_error(std::string("Metal function ") + name + ": " + describe(err));
+    id<MTLComputePipelineState> pipe = [device newComputePipelineStateWithFunction:fn error:&err];
+    if (pipe == nil)
+        throw std::runtime_error(std::string("Metal pipeline ") + name + ": " + describe(err));
+    return pipe;
+}
+
+pipelines make_pipelines(id<MTLDevice> device, id<MTLLibrary> library, unsigned columns) {
+    pipelines p{};
+    for (unsigned op = 0; op < 4; ++op)
+        for (unsigned df = 0; df < (op == unsigned(operation::multiply) ? 2u : 1u); ++df)
+            p.pcg[op][df] = make_pipeline(device, library, "pcg_step", false, df != 0, op, false, columns);
+    p.finalize = make_pipeline(device, library, "finalize", false, false, 0, false, columns);
+    for (int half = 0; half < 2; ++half) {
+        for (int fwd = 0; fwd < 2; ++fwd)
+            p.dataflow_init[half][fwd] = make_pipeline(device, library, "dataflow_init", fwd != 0, false, 0, half, columns);
+        for (unsigned variant = 0; variant < 3; ++variant) {
+            auto pipe = make_pipeline(device, library, "dataflow_solve", variant != 0, false, 0, half, columns, variant == 2);
+            p.dataflow_solve[half][variant] = pipe;
+            if ([pipe threadExecutionWidth] != 32 || [pipe maxTotalThreadsPerThreadgroup] < 256)
+                throw std::runtime_error("Metal dataflow requires 32-thread SIMD groups and 256-thread workgroups");
+        }
+    }
+    auto threads = [](id<MTLComputePipelineState> pipe) {
+        return static_cast<std::uint32_t>([pipe maxTotalThreadsPerThreadgroup]);
+    };
+    const auto tree_threads = std::min({threads(p.pcg[0][0]), threads(p.pcg[0][1]), threads(p.pcg[1][0]),
+                                       threads(p.pcg[2][0]), threads(p.finalize)});
+    p.row_threads = std::min({threads(p.pcg[unsigned(operation::direction)][0]),
+                             threads(p.dataflow_init[0][0]), threads(p.dataflow_init[0][1]),
+                             threads(p.dataflow_init[1][0]), threads(p.dataflow_init[1][1])});
+    if (tree_threads < kTreeLanes || p.row_threads == 0)
+        throw std::runtime_error("Metal pipeline thread limits are insufficient");
+    return p;
+}
+
+context* make_context() {
+    auto* ctx = new context;  // process lifetime: never destroyed
+    device_status& st = ctx->status;
+    @autoreleasepool {
+        try {
+            // Command-line tools need CoreGraphics linked for this to find the GPU.
+            id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+            if (device == nil) throw std::runtime_error("no Metal device");
+            ctx->device = device;
+            st.name = [[device name] UTF8String];
+            const auto compiled = compile_library(device, kKernelSource);
+            st.contract_pragma = compiled.contract_pragma;
+            id<MTLLibrary> library = compiled.library;
+            ctx->library = library;
+            ctx->pipes[0] = make_pipelines(device, library, 1);
+            pipelines& p = ctx->pipes[0];
+            p.probe = make_pipeline(device, library, "df_probe", false, false);
+            st.row_threads = p.row_threads;
+            ctx->probe_queue = [device newCommandQueue];
+            if (ctx->probe_queue == nil) throw std::runtime_error("no Metal command queue");
+            st.error = run_arithmetic_probe(*ctx);
+            st.ok = st.error.empty();
+        } catch (const std::exception& e) {
+            st.error = e.what();
+        } catch (...) {
+            st.error = "unknown error";
+        }
+    }
+    return ctx;
+}
+
+context& shared() {
+    static context* ctx = make_context();
+    return *ctx;
+}
+
+// Exceptions must be caught inside the pool so that it drains before rethrowing.
+template<class F>
+void with_pool(F&& f) {
+    std::exception_ptr failure;
+    @autoreleasepool {
+        try { f(); }
+        catch (...) { failure = std::current_exception(); }
+    }
+    if (failure) std::rethrow_exception(failure);
+}
+
+id<MTLBuffer> upload(id<MTLDevice> device, const void* data, std::size_t bytes, const char* name) {
+    const std::size_t len = std::max<std::size_t>(bytes, 4);
+    id<MTLBuffer> b = len <= [device maxBufferLength]
+        ? [device newBufferWithLength:len options:MTLResourceStorageModeShared] : nil;
+    if (b == nil) throw device_memory_error(std::string("Metal buffer allocation failed: ") + name);
+    if (data != nullptr && bytes != 0) std::memcpy([b contents], data, bytes);
+    else std::memset([b contents], 0, len);
+    return b;
+}
+
+void finish(id<MTLCommandBuffer> cb) {
+    [cb commit];
+    [cb waitUntilCompleted];
+    if ([cb status] != MTLCommandBufferStatusCompleted || [cb error] != nil)
+        throw std::runtime_error("Metal command buffer failed: " + describe([cb error]));
+}
+
+using prepared_tri = metal_setup::triangle;
+
+// True when F's rounds partition the factor's columns into rounds whose
+// dependencies all lie in earlier rounds, as resident setup's round plans need.
+bool round_plans_apply(const factorization& F, const gpu_factor_prep::csr_int<float>& backward) {
+    const std::size_t n = F.perm.size(), m = static_cast<std::size_t>(backward.m);
+    std::vector<unsigned> round(n);
+    std::size_t begin = 0;
+    for (std::size_t r = 0; r < F.rounds.size(); ++r) {
+        const auto& info = F.rounds[r];
+        if (info.active != n - begin || info.is_size > info.active) return false;
+        std::fill_n(round.begin() + begin, info.is_size, unsigned(r));
+        begin += info.is_size;
+    }
+    if (F.rounds.empty()) return false;
+    // Vertices no round eliminated (the final pivot) form one last round.
+    std::fill(round.begin() + begin, round.end(), unsigned(F.rounds.size()));
+    for (std::size_t j = 0; j < m; ++j)
+        for (int p = backward.ptr[j]; p < backward.ptr[j + 1]; ++p) {
+            const auto i = static_cast<std::size_t>(backward.idx[p]);
+            if (i != j && (i >= m || round[i] <= round[j])) return false;
+        }
+    return true;
+}
+
+void install_schedule(context& ctx, prepared_tri& out, metal_schedule::schedule schedule,
+                       unsigned m) {
+    auto& packed = schedule.tasks;
+    out.tag_count = m + packed.slots;
+    // Metal validates the element type even when no task reads the buffer.
+    if (packed.segments.empty())
+        packed.segments.push_back({});
+    out.stages = std::move(schedule.stages);
+    out.levels = schedule.levels;
+    with_pool([&] {
+        out.words = upload(ctx.device, packed.words.data(), packed.words.size() * sizeof(unsigned), "factor task words");
+        out.blocks = upload(ctx.device, packed.blocks.data(), packed.blocks.size() * sizeof(unsigned), "factor task blocks");
+        out.segments = upload(ctx.device, packed.segments.data(),
+                              packed.segments.size() * sizeof(gpu_dataflow::segment), "factor task segments");
+    });
+}
+
+template<class Value>
+prepared_tri prepare_tri(context &ctx, const gpu_factor_prep::csr_int<Value>& a, bool forward,
+                         std::span<const float> diagonals = {}) {
+    prepared_tri out;
+    const auto m = static_cast<unsigned>(a.m);
+    auto schedule =
+        metal_schedule::build<Value>({reinterpret_cast<const unsigned*>(a.ptr.data()), std::size_t(m) + 1},
+                               {reinterpret_cast<const unsigned*>(a.idx.get()), std::size_t(a.nnz)},
+                               {a.vals.get(), std::size_t(a.nnz)}, !forward, diagonals);
+    install_schedule(ctx, out, std::move(schedule), m);
+    with_pool([&] {
+        out.ptr = upload(ctx.device, a.ptr.data(), (m + 1) * sizeof(unsigned), "factor pointers");
+        out.idx = upload(ctx.device, a.idx.get(), a.nnz * sizeof(unsigned), "factor indices");
+        out.val = upload(ctx.device, a.vals.get(), a.nnz * sizeof(Value), "factor values");
+    });
+    return out;
+}
+
+template<class Value>
+prepared_tri prepare_lane_tri(context& ctx, const prepared_tri& base, unsigned m,
+                               bool forward, std::span<const float> diagonals) {
+    prepared_tri out{.ptr = base.ptr, .idx = base.idx, .val = base.val};
+    const auto* ptr = static_cast<const unsigned*>([base.ptr contents]);
+    install_schedule(ctx, out, metal_schedule::build<Value, 8>(
+        {ptr, std::size_t(m) + 1},
+        {static_cast<const unsigned*>([base.idx contents]), ptr[m]},
+        {static_cast<const Value*>([base.val contents]), ptr[m]}, !forward, diagonals), m);
+    return out;
+}
+
+} // namespace
+
+const device_status &status() noexcept { return shared().status; }
+
+namespace {
+std::vector<float> run_probe(context& ctx, const std::vector<float>& inputs) {
+    const std::uint32_t count = static_cast<std::uint32_t>(inputs.size() / 4);
+    std::vector<float> out(static_cast<std::size_t>(count) * 16);
+    with_pool([&] {
+        id<MTLBuffer> in = upload(ctx.device, inputs.data(), inputs.size() * sizeof(float), "probe input");
+        id<MTLBuffer> res = upload(ctx.device, nullptr, out.size() * sizeof(float), "probe result");
+        id<MTLCommandBuffer> cb = [ctx.probe_queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        if (enc == nil) throw std::runtime_error("Metal command buffer or encoder creation failed");
+        [enc setComputePipelineState:ctx.pipes[0].probe];
+        [enc setBuffer:in offset:0 atIndex:0];
+        [enc setBuffer:res offset:0 atIndex:1];
+        [enc setBytes:&count length:sizeof count atIndex:2];
+        const NSUInteger w = 64;
+        [enc dispatchThreadgroups:MTLSizeMake((count + w - 1) / w, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(w, 1, 1)];
+        [enc endEncoding];
+        finish(cb);
+        std::memcpy(out.data(), [res contents], out.size() * sizeof(float));
+    });
+    return out;
+}
+
+} // namespace
+
+std::vector<float> run_probe(const std::vector<float>& inputs) {
+    context& ctx = shared();
+    if (!ctx.status.ok) throw std::runtime_error(ctx.status.error);
+    return run_probe(ctx, inputs);
+}
+
+} // namespace apxchol::detail::metal
+
+namespace apxchol {
+
+namespace {
+
+namespace mh = detail::metal_host;
+namespace ls = detail::metal_schedule;
+namespace dm = detail::metal;
+using namespace dm;
+
+void print_banner(const detail::metal_route::statistics& st, bool factor_fp16) {
+    std::fprintf(stderr,
+                 "[apxchol] Metal PCG on %s: %s factor, "
+                 "double-float Krylov vectors, %s operator\n",
+                 st.device.c_str(), factor_fp16 ? "fp16" : "fp32",
+                 st.operator_double_float ? "double-float" : "fp32-exact");
+}
+
+}  // namespace
+
+// The factor, plans and operator: built by setup, then shared by copies
+// through a pointer to const. The lane plans are the one exception.
+struct detail::metal_route::device_state {
+    solve_options opts;
+    factorization F;
+    std::size_t n = 0;
+    bool laplacian = false;
+    // The permuted operator A' = P A P^T (canonical lower values) in fp64:
+    // the host residuals run on it.
+    detail::permuted_operator_csr op;
+    detail::csc_matrix<double> original_operator;
+    statistics stats;
+
+    context* ctx = nullptr;
+    Params arguments{};
+    bool operator_df = false, factor_fp16 = false, installed = false;
+    id<MTLBuffer> factor_metadata = nil;
+    id<MTLBuffer> device_op_ptr = nil, device_op_col = nil, op_hi = nil, op_lo = nil;
+    id<MTLBuffer> operator_row_map = nil;
+    prepared_tri fwd, bwd;
+    // The only state built after setup: the four-column panels' lane plans,
+    // built once by the first four-column solve of any copy. Building them
+    // at setup measured 2-8% of setup time (7-19 ms on 1M-4M rows).
+    struct lane_plans {
+        std::once_flag once;
+        prepared_tri forward, backward;
+    };
+    mutable lane_plans lanes;
+
+    explicit device_state(const solve_options& options) : opts(options) {
+        factor_fp16 = detail::resolve_fp16_storage(opts.factor_opts.factor_storage, false);
+    }
+
+    void setup(detail::csc_ref<double> A, checkpoint* cp,
+               detail::metal_setup::resident_factor* resident = nullptr);
+    void prepare_device(detail::gpu_factor_prep::csr_int<float> backward,
+                        const std::vector<float>& scales,
+                        const std::vector<float>& hi, const std::vector<float>& lo, unsigned m,
+                        detail::metal_setup::resident_factor* resident,
+                        const detail::metal_setup::resident_factor* device_operator);
+    const lane_plans& built_lanes() const {
+        std::call_once(lanes.once, [&] { prepare_lane_plans(); });
+        return lanes;
+    }
+    void prepare_lane_plans() const;
+
+    // x follows the retained operator's ordering; y is factor-permuted.
+    void spmv(detail::const_matrix_ref x, detail::buffer<double>& y) const {
+        const bool original = original_operator.rows() != 0;
+        const std::ptrdiff_t rows = static_cast<std::ptrdiff_t>(n);
+        const auto run = [&](const auto* ptr, const auto* col, const double* val) {
+            // Apple Clang rejects the inner lambda naming spmv's parameter
+            // inside the OpenMP region, so it reads this local instead.
+            const detail::const_matrix_ref input = x;
+            #pragma omp parallel
+            {
+                const int tid = omp_get_thread_num(), nt = omp_get_num_threads();
+                const auto [lo, hi] = detail::work_balanced_range(ptr, rows, tid, nt);
+                for (std::ptrdiff_t i = lo; i < hi; ++i) {
+                    y[original ? F.perm[i] : i] = detail::sparse_row_product<1>(
+                        col, val, std::ptrdiff_t(ptr[i]), std::ptrdiff_t(ptr[i + 1]),
+                        [&](auto row, int) { return input[std::ptrdiff_t(row)]; })[0];
+                }
+            }
+        };
+        if (original)
+            run(original_operator.ptr(), original_operator.idx(), original_operator.val());
+        else
+            run(op.ptr.data(), op.idx.get(), op.vals.get());
+    }
+
+    // work receives bp - A x.
+    double relative_residual(const detail::buffer<double>& bp, detail::const_matrix_ref xp,
+                             detail::buffer<double>& work, const mh::norm_reference& bnorm) const {
+        spmv(xp, work);
+        for (std::size_t i = 0; i < n; ++i) work[i] = bp[i] - work[i];
+        return bnorm.relative(detail::const_matrix_ref(work.data(), std::int64_t(n)));
+    }
+};
+
+// One copy's command queue and PCG workspace over the shared device state.
+struct detail::metal_route::impl {
+    std::shared_ptr<const device_state> state;
+    const device_state& d;
+    const pipelines* pipes = nullptr;
+    unsigned columns = 1, workspace_columns = 0;
+    id<MTLCommandQueue> queue = nil;
+    id<MTLBuffer> x = nil, r = nil, ap = nil, p = nil, z = nil, partial = nil, state_buffer = nil;
+    id<MTLBuffer> tags = nil;
+
+    explicit impl(std::shared_ptr<const device_state> shared_state)
+        : state(std::move(shared_state)), d(*state) {
+        with_pool([&] {
+            queue = [d.ctx->device newCommandQueue];
+            if (queue == nil) throw std::runtime_error("Metal command queue creation failed");
+        });
+        allocate_workspace(1);
+        pipes = &d.ctx->pipes[0];
+    }
+
+    static void bind(id<MTLComputeCommandEncoder> enc, unsigned index,
+                     std::initializer_list<id<MTLBuffer>> buffers) {
+        for (auto buffer : buffers) [enc setBuffer:buffer offset:0 atIndex:index++];
+    }
+
+    void dispatch(id<MTLComputePipelineState> pipe, const Params& prm,
+                  unsigned groups, unsigned threads) const {
+        [encoder setComputePipelineState:pipe];
+        [encoder setBytes:&prm length:sizeof prm atIndex:0];
+        [encoder dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+    }
+
+    void finalize(unsigned mode, unsigned it) const {
+        Params prm = d.arguments;
+        prm.mode = mode;
+        prm.iter = it;
+        dispatch(pipes->finalize, prm, 1, kTreeLanes);
+    }
+
+    void encode_tri(const prepared_tri& t, bool forward) const {
+        if (!d.arguments.m) return;
+        const bool factor_fp16 = d.factor_fp16;
+        bind(encoder, 13, {t.ptr, t.idx, t.val, t.words, t.blocks, t.segments});
+        if (factor_fp16) bind(encoder, 19, {d.factor_metadata});
+        Params prm = d.arguments;
+        prm.count = t.tag_count;
+        const unsigned threads = std::min(kRowThreads, pipes->row_threads);
+        dispatch(pipes->dataflow_init[factor_fp16][forward], prm, (t.tag_count + threads - 1) / threads, threads);
+        const unsigned dependent_threads = forward && t.resident_round_plan &&
+            [pipes->dataflow_solve[factor_fp16][1] maxTotalThreadsPerThreadgroup] >= 512 ? 512 : 256;
+        for (auto stage : t.stages) {
+            prm.offset = stage.first;
+            const bool independent = forward && t.resident_round_plan && stage.last - stage.first > 1;
+            const unsigned stage_threads = independent
+                ? (stage.one_batch_per_block ? 32 : 256) : dependent_threads;
+            dispatch(pipes->dataflow_solve[factor_fp16][independent ? 2 : unsigned(forward)], prm,
+                     stage.last - stage.first, stage_threads);
+        }
+    }
+
+    void precondition() const {
+        encode_tri(columns == 4 ? d.lanes.forward : d.fwd, true);
+        encode_tri(columns == 4 ? d.lanes.backward : d.bwd, false);
+    }
+
+    void step(operation op) const {
+        const auto pipe = pipes->pcg[unsigned(op)][op == operation::multiply && d.operator_df];
+        const bool direction = op == operation::direction;
+        const unsigned threads = direction ? std::min(kRowThreads, pipes->row_threads) : unsigned(kTreeLanes);
+        dispatch(pipe, d.arguments, direction ? (d.arguments.n + threads - 1) / threads : d.arguments.groups, threads);
+    }
+
+    id<MTLComputeCommandEncoder> encoder = nil;
+
+    // PCG iterations per command buffer. A wait costs about 270 us; a skipped
+    // iteration after convergence up to about 220 us, because every dataflow
+    // stage is still dispatched. 8 was fastest or within 1% from 40k to 4M rows.
+    static constexpr unsigned batch_iterations = 8;
+
+    template<class Record>
+    bool submit(bool first, Record&& record) {
+        with_pool([&] {
+            id<MTLCommandBuffer> cb = [queue commandBuffer];
+            if (first) {
+                id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+                if (blit == nil) throw std::runtime_error("Metal command buffer or encoder creation failed");
+                [blit fillBuffer:x range:NSMakeRange(0, static_cast<NSUInteger>(d.arguments.n) * columns * sizeof(df32)) value:0];
+                [blit endEncoding];
+            }
+            encoder = [cb computeCommandEncoder];
+            if (encoder == nil) throw std::runtime_error("Metal command buffer or encoder creation failed");
+            bind(encoder, 1, {x, r, ap, p, z, partial, state_buffer, d.device_op_ptr, d.device_op_col, d.op_hi,
+                              d.op_lo != nil ? d.op_lo : d.op_hi, tags});
+            bind(encoder, 20, {d.operator_row_map != nil ? d.operator_row_map : d.device_op_ptr});
+            record();
+            [encoder endEncoding];
+            encoder = nil;
+            finish(cb);
+        });
+        const auto* state = static_cast<const solve_state*>([state_buffer contents]);
+        bool active = false;
+        for (unsigned q = 0; q < columns; ++q) active |= state[q].active != 0;
+        return active;
+    }
+
+    void allocate_workspace(unsigned count);
+    void select_columns(unsigned count) {
+        const auto index = std::countr_zero(count);
+        if (count != 1) {
+            std::call_once(d.ctx->pipeline_once[index], [&] {
+                with_pool([&] { d.ctx->pipes[index] = make_pipelines(d.ctx->device, d.ctx->library, count); });
+            });
+        }
+        if (count == 4) d.built_lanes();
+        if (count > workspace_columns) allocate_workspace(count);
+        columns = count;
+        pipes = &d.ctx->pipes[index];
+        // A previous width used a different packed position for this ground.
+        // apply(false) needs this too: triangular sweeps only write rows < m.
+        auto* applied = static_cast<float*>([z contents]);
+        std::fill(applied + std::size_t(d.arguments.m) * count, applied + d.n * count, 0.0f);
+    }
+
+    template<unsigned Columns>
+    void solve_columns(detail::const_matrix_ref B, detail::matrix_ref X, std::span<solve_result> results,
+                       checkpoint* cp, double tol, int max_iter, const detail::const_matrix_ref* X0);
+    template<unsigned Columns>
+    std::array<bool, Columns> solve_columns_once(detail::const_matrix_ref B, detail::matrix_ref X,
+                       std::span<solve_result> results, checkpoint* cp, double tol,
+                       int max_iter, const detail::const_matrix_ref* X0);
+
+    static void centre(detail::matrix_ref x) {
+        const double mean = detail::vec::mean(x);
+        for (std::int64_t i = 0; i < x.rows(); ++i) x[i] -= mean;
+    }
+};
+
+void detail::metal_route::device_state::setup(detail::csc_ref<double> A, checkpoint* cp,
+                                              detail::metal_setup::resident_factor* resident) {
+    n = static_cast<std::size_t>(A.n);
+    // n and the operator's stored count must fit the device's 32-bit indices;
+    // the factor and the two-triangle permuted operator are checked below.
+    if (static_cast<std::uint64_t>(A.n) > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
+        static_cast<std::uint64_t>(A.nnz()) > static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
+        throw std::length_error("Metal: the operator exceeds the device's 32-bit indices");
+    laplacian = !F.sddm;
+    const auto m = static_cast<std::uint32_t>(laplacian ? n - 1 : n);
+    if (F.L.col_ptrs()[m] > static_cast<edge_index>(std::numeric_limits<int>::max()))
+        throw std::invalid_argument("Metal: the factor exceeds the device's 32-bit offsets");
+
+    if (cp) { cp->descend("setup"); cp->tick(); }
+    detail::gpu_factor_prep::csr_int<float> backward;
+    std::vector<float> scales, hi, lo;
+    bool exact;
+    // Resident setup and installed factors multiply by the same device operator,
+    // so a reloaded solver reproduces the original solves bit for bit.
+    std::optional<detail::metal_setup::resident_factor> device_operator;
+    auto adopt_device_operator = [&](const detail::metal_setup::resident_factor& source) {
+        original_operator = detail::csc_cast<double>(A);
+        if (!source.operator_triangles_identical) {
+            #pragma omp parallel
+            {
+                const auto [first, last] = detail::work_balanced_range(A.ptr, std::int64_t(A.n),
+                    omp_get_thread_num(), omp_get_num_threads());
+                bool paired = true;
+                for (auto row = first; row < last; ++row)
+                    for (edge_index p = A.ptr[row]; p < A.ptr[row + 1]; ++p)
+                        original_operator.val()[p] = detail::canonical_lower_value(
+                            A.ptr, A.idx, A.val, row, std::int64_t(A.idx[p]), std::int64_t(p), paired);
+            }
+        }
+        exact = source.operator_exact;
+        arguments.spmv_lanes = source.max_operator_row > 256 ? kTreeLanes : 1;
+        arguments.preconditioner_scale = source.preconditioner_scale;
+    };
+    if (resident) {
+        stats.drop = resident->drop;
+        adopt_device_operator(*resident);
+    } else {
+        // Keep compensated dropping in the shared FP64 host implementation.
+        // Both backends consume the CSR factor without a level-permuted value copy.
+        backward = detail::gpu_factor_prep::build_L11_csc_int<float>(F.L, m);
+        detail::sparse_csc_access::release_values(F.L);
+        // An installed factor keeps its storage, scales and values as given.
+        installed = F.storage != factor_storage_type::automatic;
+        if (installed) {
+            factor_fp16 = F.storage == factor_storage_type::fp16;
+            if (factor_fp16) scales.assign(F.scale.begin(), F.scale.begin() + m);
+        } else {
+            scales = detail::gpu_factor_prep::column_scales(backward);
+            if (factor_fp16) detail::gpu_factor_prep::normalize_fp16_scales(backward, scales);
+            stats.drop = detail::gpu_factor_prep::apply_factor_drop(backward, scales,
+                opts.factor_opts.drop_tolerance, factor_fp16);
+        }
+        std::vector<float>().swap(F.scale);
+        if (cp) (*cp)("metal_factor_prep");
+
+        if (installed)
+            with_pool([&] {
+                device_operator = detail::metal_setup::prepare_input_operator(
+                    shared().device, A, F.perm, opts.factor_opts.lump_max_mass);
+            });
+        if (device_operator) adopt_device_operator(*device_operator);
+        else {
+        // Both triangles are stored: up to twice the stored entries of one triangle.
+        if (A.nnz() > static_cast<edge_index>(std::numeric_limits<int>::max() / 2))
+            throw std::invalid_argument("Metal: operators with 2^30 or more stored entries exceed the "
+                                    "device's 32-bit offsets");
+        op = detail::build_permuted_full_symmetric_csr(A, F.perm);
+        int max_row = 0;
+        double min_diagonal = std::numeric_limits<double>::infinity(), max_diagonal = 0;
+        #pragma omp parallel for schedule(static) reduction(min : min_diagonal) reduction(max : max_diagonal, max_row)
+        for (std::size_t row = 0; row < n; ++row) {
+            max_row = std::max(max_row, op.ptr[row + 1] - op.ptr[row]);
+            const auto end = op.idx.get() + op.ptr[row + 1];
+            auto p = std::lower_bound(op.idx.get() + op.ptr[row], end, int(row));
+            double diagonal = 0;
+            for (; p != end && *p == int(row); ++p) diagonal += op.vals[p - op.idx.get()];
+            if (diagonal > 0) {
+                min_diagonal = std::min(min_diagonal, diagonal);
+                max_diagonal = std::max(max_diagonal, diagonal);
+            }
+        }
+        arguments.spmv_lanes = max_row > 256 ? kTreeLanes : 1;
+        exact = op.fp32_exact;
+        const std::size_t nnz = static_cast<std::size_t>(op.ptr.back());
+        hi.resize(nnz); lo.resize(exact ? 0 : nnz);
+        bool in_range = true;
+        #pragma omp parallel for schedule(static) reduction(&& : in_range)
+        for (std::ptrdiff_t p = 0; p < static_cast<std::ptrdiff_t>(nnz); ++p) {
+            const double v = op.vals[p];
+            in_range = in_range && ls::in_range(v);
+            const mh::df d = mh::split(v);
+            hi[p] = d.hi;
+            if (!exact) lo[p] = d.lo;
+        }
+        if (!in_range)
+            throw std::invalid_argument("Metal: an operator value is non-finite or outside [2^-100, 2^100]");
+        // A fixed positive PCG preconditioner scale preserves x while balancing
+        // rho and curvature exponents; diagonal extremes include mixed scales.
+        arguments.preconditioner_scale = 1;
+        if (max_diagonal > 0) {
+            const int exponent_sum = std::ilogb(min_diagonal) + std::ilogb(max_diagonal);
+            const int shift = static_cast<int>(std::floor(exponent_sum / 4.0));
+            arguments.preconditioner_scale = std::scalbn(1.0f, shift);
+        }
+        }
+        if (cp) (*cp)("metal_operator");
+
+    }
+    prepare_device(std::move(backward), scales, hi, lo, m, resident,
+                   device_operator ? &*device_operator : resident);
+
+    stats.n = static_cast<std::int64_t>(n);
+    stats.levels_forward = fwd.levels;
+    stats.levels_backward = bwd.levels;
+    stats.steps_forward = fwd.stages.size() + unsigned(m != 0);
+    stats.steps_backward = bwd.stages.size() + unsigned(m != 0);
+    stats.operator_double_float = !exact;
+    stats.device = ctx->status.name;
+    if (cp) { (*cp)("metal_upload"); cp->ascend(); }
+    if (opts.factor_opts.verbose) print_banner(stats, factor_fp16);
+}
+
+void detail::metal_route::device_state::prepare_device(detail::gpu_factor_prep::csr_int<float> backward,
+                                       const std::vector<float>& scales,
+                                       const std::vector<float>& hi, const std::vector<float>& lo,
+                                       unsigned m, detail::metal_setup::resident_factor* resident,
+                                       const detail::metal_setup::resident_factor* device_operator) {
+    context& ctx = shared();
+    this->ctx = &ctx;
+    arguments.n = static_cast<std::uint32_t>(n);
+    arguments.m = m;
+    arguments.groups = (arguments.n + kTreeRows - 1) / kTreeRows;
+    const auto nnz = device_operator ? 0 : op.ptr.back();
+    operator_df = device_operator ? !device_operator->operator_exact : !lo.empty();
+    with_pool([&] {
+        id<MTLDevice> dev = ctx.device;
+        if (device_operator) {
+            device_op_ptr = device_operator->operator_ptr;
+            device_op_col = device_operator->operator_idx;
+            operator_row_map = device_operator->operator_row_map;
+            op_hi = device_operator->operator_hi;
+            op_lo = device_operator->operator_lo;
+        } else {
+        device_op_ptr = upload(dev, op.ptr.data(), (n + 1) * sizeof(std::uint32_t), "operator pointers");
+        device_op_col = upload(dev, op.idx.get(), nnz * sizeof(std::uint32_t), "operator indices");
+        op_hi = upload(dev, hi.data(), nnz * sizeof(float), "operator high values");
+        if (!lo.empty()) op_lo = upload(dev, lo.data(), nnz * sizeof(float), "operator low values");
+
+        }
+    });
+    arguments.mapped_rows = operator_row_map != nil;
+    if (resident) {
+        fwd = std::move(resident->forward);
+        bwd = std::move(resident->backward);
+        factor_metadata = resident->metadata;
+    } else {
+    // An installed factor with valid elimination rounds gets the round plans its
+    // resident setup used, so a reloaded solver solves in the same order.
+    const bool round_plans = installed && round_plans_apply(F, backward);
+    auto install = [&]<class Value>(const detail::gpu_factor_prep::csr_int<Value>& bt, std::span<const float> diag = {}) {
+        const auto ft = detail::gpu_factor_prep::transpose_csr(bt);
+        if (!round_plans) {
+            fwd = prepare_tri(ctx, ft, true, diag);
+            bwd = prepare_tri(ctx, bt, false, diag);
+            return;
+        }
+        auto upload_tri = [&](const detail::gpu_factor_prep::csr_int<Value>& a) {
+            prepared_tri out;
+            with_pool([&] {
+                out.ptr = upload(ctx.device, a.ptr.data(), (a.m + 1) * sizeof(unsigned), "factor pointers");
+                out.idx = upload(ctx.device, a.idx.get(), a.nnz * sizeof(unsigned), "factor indices");
+                out.val = upload(ctx.device, a.vals.get(), a.nnz * sizeof(Value), "factor values");
+            });
+            return out;
+        };
+        fwd = upload_tri(ft);
+        bwd = upload_tri(bt);
+        with_pool([&] { detail::metal_setup::prepare_round_plans(ctx.device, F, fwd, bwd); });
+    };
+    if (factor_fp16) {
+        auto narrow = installed ? detail::gpu_factor_prep::installed_fp16_arrays(backward, scales)
+                                : detail::gpu_factor_prep::narrow_fp16_scaled(backward, scales);
+        std::vector<mh::factor_metadata> metadata(m);
+        for (unsigned j = 0; j < m; ++j) {
+            metadata[j] = mh::pack_factor_metadata(scales[j], narrow.diag[j]);
+            narrow.diag[j] = metadata[j].diagonal;
+        }
+        with_pool([&] {
+            factor_metadata = upload(ctx.device, metadata.data(), metadata.size() * sizeof(metadata[0]), "factor scales");
+        });
+        detail::gpu_factor_prep::csr_int<_Float16> half{backward.m, backward.nnz, std::move(backward.ptr),
+                                        std::move(backward.idx), std::move(narrow.vals)};
+        backward.vals.reset();
+        install(half, narrow.diag);
+    } else install(backward);
+    }
+}
+
+void detail::metal_route::device_state::prepare_lane_plans() const {
+    prepared_tri next_fwd, next_bwd;
+    if (fwd.resident_round_plan) {
+        next_fwd = {.ptr = fwd.ptr, .idx = fwd.idx, .val = fwd.val};
+        next_bwd = {.ptr = bwd.ptr, .idx = bwd.idx, .val = bwd.val};
+        with_pool([&] {
+            detail::metal_setup::prepare_lane_plans(ctx->device, F, next_fwd, next_bwd);
+        });
+    } else {
+        std::vector<float> diagonal(factor_fp16 ? arguments.m : 0);
+        if (factor_fp16) {
+            const auto* metadata = static_cast<const mh::factor_metadata*>([factor_metadata contents]);
+            for (unsigned i = 0; i < arguments.m; ++i) diagonal[i] = metadata[i].diagonal;
+        }
+        auto prepare = [&](const prepared_tri& base, bool forward) {
+            return factor_fp16 ? prepare_lane_tri<_Float16>(*ctx, base, arguments.m, forward, diagonal)
+                               : prepare_lane_tri<float>(*ctx, base, arguments.m, forward, diagonal);
+        };
+        next_fwd = prepare(fwd, true);
+        next_bwd = prepare(bwd, false);
+    }
+    lanes.forward = std::move(next_fwd);
+    lanes.backward = std::move(next_bwd);
+}
+
+void detail::metal_route::impl::allocate_workspace(unsigned count) {
+    // Only four-column panels use the lane plans, which select_columns has
+    // built by then; another copy may be building them concurrently.
+    const bool lanes = count == 4;
+    const auto n = d.n;
+    const auto tag_rows = std::max({n, std::size_t(d.fwd.tag_count), std::size_t(d.bwd.tag_count),
+                                   std::size_t(lanes ? d.lanes.forward.tag_count : 0),
+                                   std::size_t(lanes ? d.lanes.backward.tag_count : 0)});
+    if (tag_rows > std::numeric_limits<unsigned>::max() / count)
+        throw std::overflow_error("Metal RHS panel exceeds packed index range");
+    with_pool([&] {
+        id<MTLDevice> dev = d.ctx->device;
+        // Install only after every allocation succeeds; scalar use survives a
+        // failed attempt to grow the reusable workspace.
+        auto next_x = upload(dev, nullptr, n * count * sizeof(df32), "solution");
+        auto next_r = upload(dev, nullptr, n * count * sizeof(df32), "residual");
+        // Tags are reset per sweep; ap is live only from multiply to residual.
+        // Their bindings must stay in separate kernels.
+        auto next_ap = upload(dev, nullptr, count * std::max(n * sizeof(df32), tag_rows * sizeof(std::uint32_t)),
+                              "operator product and dataflow tags");
+        auto next_p = upload(dev, nullptr, n * count * sizeof(float), "search direction");
+        auto next_z = upload(dev, nullptr, n * count * sizeof(float), "preconditioner result");
+        auto next_partial = upload(dev, nullptr, std::size_t(d.arguments.groups) * count * sizeof(df32), "partial sums");
+        auto next_state = upload(dev, nullptr, count * sizeof(solve_state), "solve state");
+        x = next_x; r = next_r; ap = next_ap; p = next_p; z = next_z;
+        partial = next_partial; state_buffer = next_state; tags = next_ap;
+        workspace_columns = count;
+    });
+}
+
+detail::metal_route::metal_route(csc_ref<double> A, const solve_options& opts,
+                                 checkpoint* cp, factorization* F) {
+    auto state = std::make_shared<device_state>(opts);
+    if (F) {
+        state->F = std::move(*F);
+        state->setup(A, cp);
+    } else {
+        // Automatic routing has already checked this same input.
+        auto resident = detail::metal_setup::factorize(shared().device, A, opts, cp,
+                                                       opts.backend == solve_backend::automatic);
+        state->F = std::move(resident.factor);
+        state->setup(A, cp, &resident);
+    }
+    impl_.reset(new impl(std::move(state)));
+}
+
+detail::metal_route::metal_route(const metal_route& other)
+    : impl_(new impl(other.impl_->state)) {}
+
+void detail::metal_route::impl_deleter::operator()(impl* owner) const {
+    @autoreleasepool { delete owner; }
+}
+
+detail::metal_route::~metal_route() = default;
+detail::metal_route::metal_route(metal_route&&) noexcept = default;
+detail::metal_route& detail::metal_route::operator=(metal_route&&) noexcept = default;
+
+detail::csc_matrix<double> detail::metal_route::original_operator() const {
+    const auto& data = impl_->d;
+    if (data.original_operator.rows()) return data.original_operator;
+    // The permuted operator's int arrays in the library's index widths.
+    const auto nnz = static_cast<edge_index>(data.op.ptr.back());
+    csc_matrix<double> stored(static_cast<node_index>(data.n), nnz);
+    std::copy(data.op.ptr.begin(), data.op.ptr.end(), stored.ptr());
+    std::copy_n(data.op.idx.get(), nnz, stored.idx());
+    std::copy_n(data.op.vals.get(), nnz, stored.val());
+    return archive_operator_csc(stored.ref(), data.F.perm);
+}
+
+const factorization& detail::metal_route::factor() const { return impl_->d.F; }
+
+// The backward triangle is CSC of L in unified memory, diagonal first. fp16
+// metadata keeps s_j and d_j next to the kernels' fp32(d_j s_j).
+factorization detail::metal_route::installed_factor() const {
+    const auto& s = impl_->d;
+    factorization F;
+    F.perm = s.F.perm;
+    F.sddm = s.F.sddm;
+    F.lumped_offdiag = s.F.lumped_offdiag;
+    F.rounds = s.F.rounds;
+    F.storage = factor_storage();
+    const auto n = static_cast<node_index>(s.n), m = static_cast<node_index>(s.arguments.m);
+    const auto* ptr = static_cast<const unsigned*>([s.bwd.ptr contents]);
+    const auto* idx = static_cast<const unsigned*>([s.bwd.idx contents]);
+    const edge_index nnz = m ? ptr[m] : 0;
+    using access = detail::sparse_csc_access;
+    access::resize(F.L, n);
+    access::resize_nonzeros(F.L, nnz);
+    auto& outer = access::outer(F.L);
+    auto& vals = access::vals(F.L);
+    for (node_index j = 0; j < n; ++j) outer[j + 1] = j < m ? ptr[j + 1] : nnz;
+    std::copy(idx, idx + nnz, access::inner(F.L).begin());
+    if (!s.factor_fp16) {
+        const auto* val = static_cast<const float*>([s.bwd.val contents]);
+        std::copy(val, val + nnz, vals.begin());
+        return F;
+    }
+    const auto* val = static_cast<const _Float16*>([s.bwd.val contents]);
+    const auto* metadata = static_cast<const mh::factor_metadata*>([s.factor_metadata contents]);
+    F.scale.assign(n, 1.0f);
+    for (node_index j = 0; j < m; ++j) {
+        F.scale[j] = metadata[j].scale;
+        for (auto p = ptr[j]; p < ptr[j + 1]; ++p)
+            vals[p] = p == ptr[j] ? metadata[j].scaled_diagonal : static_cast<float>(val[p]);
+    }
+    return F;
+}
+
+std::uint64_t detail::metal_route::factor_nnz() const {
+    const auto m = impl_->d.arguments.m;
+    return m ? static_cast<const unsigned*>([impl_->d.bwd.ptr contents])[m] : 0;
+}
+detail::metal_route::statistics detail::metal_route::stats() const { return impl_->d.stats; }
+
+template<unsigned Columns>
+void detail::metal_route::impl::solve_columns(detail::const_matrix_ref B, detail::matrix_ref X,
+                                       std::span<solve_result> results, checkpoint* cp,
+                                       double tol, int max_iter, const detail::const_matrix_ref* X0) {
+    auto stopped = solve_columns_once<Columns>(B, X, results, cp, tol, max_iter, X0);
+    for (unsigned q = 0; q < Columns; ++q) {
+        auto& result = results[q];
+        auto progress = result.iterations;
+        const auto restart = [&] {
+            return detail::pcg_restart(stopped[q], result.converged, result.residual,
+                                       progress, max_iter - result.iterations);
+        };
+        if (!restart()) continue;
+        const auto output = X.col(q);
+        detail::buffer<double> initial(d.n);
+        const auto copy_output = [&] {
+            for (std::size_t i = 0; i < d.n; ++i) initial[i] = output[std::int64_t(i)];
+        };
+        copy_output();
+        const detail::const_matrix_ref warm(initial.data(), std::int64_t(d.n));
+        while (restart()) {
+            solve_result attempt;
+            const auto next = solve_columns_once<1>(B.middle_cols(q, 1), X.middle_cols(q, 1),
+                {&attempt, 1}, cp, tol, max_iter - result.iterations, &warm);
+            progress = attempt.iterations;
+            result.iterations += progress;
+            result.residual = attempt.residual;
+            result.converged = attempt.converged;
+            stopped[q] = next[0];
+            copy_output();
+        }
+    }
+}
+
+template<unsigned Columns>
+std::array<bool, Columns> detail::metal_route::impl::solve_columns_once(
+                                       detail::const_matrix_ref B, detail::matrix_ref X,
+                                       std::span<solve_result> results, checkpoint* cp,
+                                       double tol, int max_iter, const detail::const_matrix_ref* X0) {
+    if (cp) { cp->descend("pcg"); cp->tick(); }
+    select_columns(Columns);
+    const auto n = d.n;
+    const auto& F = d.F;
+    const bool laplacian = d.laplacian;
+    auto* states = static_cast<solve_state*>([state_buffer contents]);
+    std::fill_n(states, Columns, solve_state{});
+    for (std::int64_t j = 0; j < X.cols(); ++j)
+        for (std::int64_t i = 0; i < X.rows(); ++i) X(i, j) = 0.0;
+    const bool permuted = d.original_operator.rows() == 0;
+    std::array<detail::buffer<double>, Columns> bp;
+    detail::buffer<double> work;
+    const auto work_ref = [&] { return detail::matrix_ref(work.data(), std::int64_t(n)); };
+    std::array<mh::norm_reference, Columns> bnorm;
+    std::array<double, Columns> scale{};
+    std::array<bool, Columns> check{}, ran{};
+    bool active = false;
+    for (unsigned q = 0; q < Columns; ++q) {
+        auto& result = results[q];
+        result.iterations = 0;
+        result.residual = 0.0;
+        result.backend = solve_backend::gpu;
+        bnorm[q] = mh::norm_reference(B.col(q));
+        if (bnorm[q].value == 0.0) continue;
+        if (max_iter == 0 && (X0 == nullptr || detail::vec::is_zero(X0->col(q)))) {
+            result.residual = 1.0;
+            continue;
+        }
+        check[q] = true;
+        bp[q].resize(n);
+        work.resize(n);
+        auto xp = X.col(q);
+        #pragma omp parallel for schedule(static)
+        for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i) {
+            bp[q][F.perm[i]] = B(i, q);
+            if (X0) xp[permuted ? F.perm[i] : i] = (*X0)(i, q);
+        }
+        if (X0) {
+            d.spmv(xp, work);
+            for (std::size_t i = 0; i < n; ++i) work[i] = bp[q][i] - work[i];
+        } else std::copy_n(bp[q].data(), n, work.data());
+        const double initial = X0 ? bnorm[q].relative(work_ref()) : 1.0;
+        if (initial < tol || max_iter == 0) continue;
+        if (laplacian) {
+            centre(work_ref());
+            if (X0 && bnorm[q].relative(work_ref()) < tol) continue;
+        }
+        const double max_abs = detail::vec::max_abs(work_ref());
+        if (max_abs == 0.0) continue;
+        scale[q] = mh::pow2_scale(max_abs);
+        auto* packed = static_cast<df32*>([r contents]);
+        #pragma omp parallel for schedule(static)
+        for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i)
+            packed[i * Columns + q] = mh::split(scale[q] * work[i]);
+        const double reference = bnorm[q].scaled(scale[q]);
+        const double threshold = tol * reference;
+        states[q].thr = mh::split_saturated(threshold * threshold);
+        states[q].active = 1;
+        ran[q] = active = true;
+    }
+    if (active) {
+        if (cp) (*cp)("pack");
+        detail::gpu_pcg::solve(*this, static_cast<std::uint32_t>(max_iter));
+        if (cp) (*cp)("gpu_pcg_loop");
+    }
+    bool checked = false;
+    for (unsigned q = 0; q < Columns; ++q) {
+        if (!check[q]) continue;
+        checked = true;
+        auto xp = X.col(q);
+        if (ran[q]) {
+            const auto* packed = static_cast<const df32*>([x contents]);
+            bool finite = true;
+            // The device stores S*x; undo S and RHS scaling separately to avoid overflow.
+            #pragma omp parallel for schedule(static) reduction(&& : finite)
+            for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i) {
+                const auto row = permuted ? i : F.perm[i];
+                xp[i] += mh::join(packed[row * Columns + q]) / d.arguments.preconditioner_scale / scale[q];
+                finite &= std::isfinite(xp[i]);
+            }
+            if (!finite) throw std::overflow_error("Metal solve: solution exceeds the finite range");
+            results[q].iterations = states[q].iters;
+        }
+        if (laplacian) centre(xp);
+        results[q].residual = d.relative_residual(bp[q], xp, work, bnorm[q]);
+        if (permuted) {
+            // Gather through work so arbitrary output strides remain supported.
+            #pragma omp parallel for schedule(static)
+            for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i)
+                work[i] = xp[F.perm[i]];
+            for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(n); ++i)
+                xp[i] = work[i];
+        }
+    }
+    for (auto& result : results) result.converged = result.residual < tol;
+    if (cp) {
+        if (checked) (*cp)("exit_check");
+        cp->ascend();
+    }
+    std::array<bool, Columns> stopped{};
+    for (unsigned q = 0; q < Columns; ++q) stopped[q] = states[q].tolerance_stop != 0;
+    return stopped;
+}
+
+void detail::metal_route::solve_columns(const_matrix_ref B, matrix_ref X,
+                                        const const_matrix_ref* X0,
+                                        std::span<solve_result> results, checkpoint* timings,
+                                        double tol, int max_iter) const {
+    if (B.cols() == 4)
+        impl_->solve_columns<4>(B, X, results, timings, tol, max_iter, X0);
+    else if (B.cols() == 2)
+        impl_->solve_columns<2>(B, X, results, timings, tol, max_iter, X0);
+    else
+        impl_->solve_columns<1>(B, X, results, timings, tol, max_iter, X0);
+}
+
+factor_storage_type detail::metal_route::factor_storage() const {
+    return impl_->d.factor_fp16 ? factor_storage_type::fp16 : factor_storage_type::fp32;
+}
+
+void detail::metal_route::apply_columns(const_matrix_ref R, matrix_ref Z) const {
+    impl& s = *impl_;
+    const std::int64_t size = R.rows();
+    buffer<double> r(static_cast<std::size_t>(size));
+    for (std::int64_t i = 0; i < size; ++i) r[i] = R(i, 0);
+    s.select_columns(1);
+    const auto& perm = s.d.F.perm;
+    const double mean = s.d.laplacian ? vec::mean(const_matrix_ref(r.data(), size)) : 0;
+    double max_abs = 0;
+    for (std::int64_t i = 0; i < size; ++i) max_abs = std::max(max_abs, std::abs(r[i] - mean));
+    const auto output = Z.col(0);
+    if (max_abs == 0.0) {
+        for (std::int64_t i = 0; i < size; ++i) output[i] = 0.0;
+        return;
+    }
+    const double scale = mh::pow2_scale(max_abs);
+    auto* packed = static_cast<df32*>([s.r contents]);
+    #pragma omp parallel for schedule(static)
+    for (std::int64_t i = 0; i < size; ++i)
+        packed[perm[i]] = mh::split(scale * (r[i] - mean));
+    auto& cs = *static_cast<solve_state*>([s.state_buffer contents]);
+    cs = {};
+    cs.active = 1;
+    s.submit(false, [&] { s.precondition(); });
+    const float* applied = static_cast<float*>([s.z contents]);
+    const double mean_z = s.d.laplacian
+        ? vec::ordered_sum(std::int64_t(s.d.n), [applied](std::int64_t i) { return double(applied[i]); })
+              / double(s.d.n)
+        : 0;
+    #pragma omp parallel for schedule(static)
+    for (std::int64_t i = 0; i < size; ++i)
+        output[i] = (double(applied[perm[i]]) - mean_z) / scale;
+}
+
+}  // namespace apxchol

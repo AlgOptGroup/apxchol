@@ -1,0 +1,123 @@
+name: PR performance
+
+on:
+  pull_request:
+    paths:
+      - 'include/**'
+      - 'src/**'
+      - 'python/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'benchmarks/pr_regression.py'
+      - 'benchmarks/docs_benchmark.py'
+      - 'benchmarks/tests/test_pr_regression.py'
+      - '.github/workflows/performance.yml'
+      - '.github/actions/ccache/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    name: ${{ matrix.name }} base/head
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: CPU2
+            runner: ubuntu-24.04
+            device: CPU
+            route: cpu
+            cc: gcc-14
+            cxx: g++-14
+          - name: Metal
+            runner: macos-15
+            device: METAL
+            route: gpu
+            cc: clang
+            cxx: clang++
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+      CMAKE_ARGS: -DAPXCHOL_DEVICE=${{ matrix.device }} -DAPXCHOL_NATIVE_ARCH=OFF
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      OMP_NUM_THREADS: '2'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      VECLIB_MAXIMUM_THREADS: '1'
+      BASE_REVISION: ${{ github.event.pull_request.base.sha }}
+      HEAD_REVISION: ${{ github.event.pull_request.head.sha }}
+    steps:
+      # One harness from the exact head runs both installed revisions.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: build/base-source
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y g++-14 libeigen3-dev ninja-build ccache
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: brew install libomp ninja ccache
+      - uses: ./.github/actions/ccache
+        with:
+          key: performance-${{ matrix.device }}-${{ matrix.cxx }}
+      - name: Install exact base and head in separate environments
+        shell: bash
+        run: |
+          mkdir -p build/performance build/wheels
+          python -m pip download --only-binary=:all: --dest build/wheels \
+            numpy scipy scikit-build-core pybind11 cmake ninja
+          for revision in base head; do
+            python -m venv "$RUNNER_TEMP/$revision-env"
+            "$RUNNER_TEMP/$revision-env/bin/python" -m pip install --no-index --find-links build/wheels \
+              numpy scipy scikit-build-core pybind11 cmake ninja
+            source_dir="$GITHUB_WORKSPACE"
+            if [ "$revision" = base ]; then source_dir="$GITHUB_WORKSPACE/build/base-source"; fi
+            git -C "$source_dir" rev-parse HEAD > "build/performance/$revision-revision.txt"
+            expected="$HEAD_REVISION"
+            if [ "$revision" = base ]; then expected="$BASE_REVISION"; fi
+            test "$(cat "build/performance/$revision-revision.txt")" = "$expected"
+            "$RUNNER_TEMP/$revision-env/bin/python" -m pip install --no-build-isolation --no-deps "$source_dir/python" \
+              2>&1 | tee "build/performance/$revision-build.log"
+            "$RUNNER_TEMP/$revision-env/bin/python" -m pip freeze > "build/performance/$revision-packages.txt"
+          done
+          "$CXX" --version > build/performance/compiler.txt
+      - name: Check reporting gates
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/head-env/bin/python" -m unittest discover -s benchmarks/tests -p test_pr_regression.py
+      - name: Compare interleaved repeated controls
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/head-env/bin/python" benchmarks/pr_regression.py \
+            --base-python "$RUNNER_TEMP/base-env/bin/python" \
+            --head-python "$RUNNER_TEMP/head-env/bin/python" \
+            --base-revision "$BASE_REVISION" --head-revision "$HEAD_REVISION" \
+            --route '${{ matrix.route }}' --output build/performance
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-${{ matrix.name }}
+          path: build/performance
+          if-no-files-found: warn
+      - name: Show compiler cache statistics
+        if: always()
+        run: ccache --show-log-stats
