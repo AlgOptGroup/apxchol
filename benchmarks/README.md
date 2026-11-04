@@ -25,6 +25,8 @@ apxchol, since no competitor has a Metal backend. Its cells are stored under
 are found). Use it for the CPU axis with `APXCHOL_BENCH_CPU_BIN`. macOS has no
 CPU pinning, so runs are unpinned and record `benchmark_cpuset=unpinned`.
 Peak RSS comes from BSD `time -l`, and no memory cap is applied.
+Add `-DBENCH_ACCELERATE=ON` to build Apple Accelerate's sparse Cholesky, which the
+macOS CPU sweep runs as `accelerate`.
 Optional solvers require their runtimes. Julia dependencies:
 
 ```sh
@@ -295,6 +297,15 @@ component. Nonsingular components retain their equations.
 Setup covers grounding, CSR conversion, AMGX object creation, the matrix
 upload and the hierarchy. Solve covers the RHS upload, PCG passes, checks and
 each copy of the solution back to the host.
+
+Accelerate's sparse Cholesky (`SparseFactor`, default AMD ordering) factors the
+operator with the same Dirichlet pin as AMGCL and BoomerAMG. Setup includes the
+pin, conversion to its lower-triangle CSC input and the symbolic and numeric
+factorizations. Solve includes `SparseSolve` and any refinement steps on the
+original operator; each counts as one iteration. The symbolic phase reports the
+factor and workspace size; above half of physical memory the run stops as `oom`
+before the numeric factorization. Accelerate uses its own thread pool, so
+`--threads` does not control it.
 
 [ParAC Graph/Physics](patches/parac/) separates common input reading and final
 interchange from CPU Graph/AMD algorithm preparation, while retaining required
