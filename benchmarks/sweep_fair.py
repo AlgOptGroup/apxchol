@@ -221,7 +221,7 @@ def emit(family, mid, solver, config, status, metrics, extra_meta=None,
     if solver in JULIA_SOLVERS:
         runtime = julia_toolchain()
     elif solver == "cmg":
-        runtime = cmg_matlab_runner.provenance()
+        runtime = cmg_matlab_runner.provenance(THREADS)
     elif solver == "sparta":
         runtime = {"sparta_contract": rc.SPARTA_CONTRACT,
                    **(metrics or {}).get("sparta_provenance", {})}
@@ -663,7 +663,7 @@ def do_matrix(mid, family, source, spec, is2d, n, reg):
             step(family,mid,"cmg","",
                  lambda: capped(cmg_matlab_runner.run(
                      dumped, rhs, timeout=process_timeout(cap, 1 + REPS),
-                     repeats=REPS, tol=TOL, maxiter=MAXITER["cpu"]), cap),
+                     repeats=REPS, tol=TOL, maxiter=MAXITER["cpu"], threads=THREADS), cap),
                  "cmg", timeout_cap_s=cap)
         else:
             print(f"   {'cmg':24} SKIP (operator or RHS dump failed)")

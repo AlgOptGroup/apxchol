@@ -369,7 +369,11 @@ exported operator A and RHS b as the other external solvers. One MATLAB process
 per cell runs [cmg/bench_cmg_common.m](cmg/bench_cmg_common.m): one warmup and
 `--repeat` retained repetitions, each building the hierarchy with
 `cmg_precondition` and solving with MATLAB `pcg` (tol 1e-8, at most 500
-iterations) under `-singleCompThread`, pinned to one CPU. A disconnected
+iterations) within the sweep's requested computational-thread limit and CPU
+affinity. MATLAB can use its supported numerical threading; the CMG MEX is
+unchanged. Receipts record `matlab_thread_limit`, the configured limit rather
+than observed worker usage. `--threads 1` retains an explicit single-core
+comparison. A disconnected
 Laplacian gets one grounded coordinate per Laplacian component
 ([cmg/component_gauge.h](cmg/component_gauge.h)); coefficients and RHS values
 are kept unchanged, with no shift or RHS projection. Setup covers the component
@@ -379,8 +383,9 @@ PCG call on the same hierarchy, within one total iteration budget and at most
 eight calls. Numerical breakdown stops retries. Every repetition is independently
 graded by `||Ax-b||/||b||` on the original A and b, and the cell follows the
 same status and per-solve cap rules as the other competitors. The
-`shared-timed-original-v1` provenance marker distinguishes these cells from
-older CMG timings that excluded the stopping check. An empty hierarchy,
+`shared-timed-original-thread-budget-v2` provenance marker prevents reuse of
+older CMG timings that excluded stopping checks or forced MATLAB onto one core.
+An empty hierarchy,
 which CMG returns for operators it does not support such as positive
 off-diagonals, is recorded as `n/a`.
 
