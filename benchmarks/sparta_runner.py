@@ -22,7 +22,7 @@ def available():
     return True, ""
 
 
-def summarize(records, returncode, repeats, warmup, tol, timed_out=False):
+def summarize(records, returncode, repeats, warmup, tol, matrix_class, timed_out=False):
     receipts = [f"BENCH_REPEAT phase={'retained' if r.get('retained') else 'warmup'} "
                 f"index={r.get('repetition')} total_s={r['total_s']}"
                 for r in records if isinstance(r.get("total_s"), (float, int))]
@@ -30,6 +30,7 @@ def summarize(records, returncode, repeats, warmup, tol, timed_out=False):
     measured = [r for r in records if r.get("status") in ("complete", "not_converged")]
     for index, r in enumerate(measured):
         if (r.get("execution_route") != "metal" or r.get("stop_contract") != "original-v1"
+                or r.get("matrix_class") != matrix_class
                 or r.get("provenance", {}).get("sparta_contract") != rc.SPARTA_CONTRACT
                 or r.get("provenance", {}).get("sparta_revision") != rc.SPARTA_REVISION
                 or type(r.get("repetition")) is not int or r["repetition"] != index
@@ -61,13 +62,13 @@ def summarize(records, returncode, repeats, warmup, tol, timed_out=False):
     return ("complete" if complete and good else "not_converged"), metrics, None
 
 
-def run(operator, rhs, *, timeout, repeats, warmup, threads, tol, maxiter):
+def run(operator, rhs, *, timeout, repeats, warmup, threads, tol, maxiter, matrix_class):
     ready, reason = available()
     if not ready:
         return "n/a", {}, {"na_reason": reason}
     with tempfile.TemporaryDirectory(prefix=".sparta-", dir=os.path.dirname(os.path.abspath(operator))) as work:
         command = [PYTHON, str(WORKER), os.path.abspath(operator), os.path.abspath(rhs), work,
-                   "--repeat", str(repeats), "--warmup", str(warmup), "--threads", str(threads),
+                   "--class", matrix_class, "--repeat", str(repeats), "--warmup", str(warmup), "--threads", str(threads),
                    "--tol", str(tol), "--maxiter", str(maxiter)]
         with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               text=True, start_new_session=True) as process:
@@ -84,7 +85,7 @@ def run(operator, rhs, *, timeout, repeats, warmup, threads, tol, maxiter):
         try:
             records = [json.loads(p.read_text()) for p in sorted(Path(work).glob("rep*.json"),
                        key=lambda p: int(p.stem[3:]))]
-            result = summarize(records, process.returncode, repeats, warmup, tol, timed_out)
+            result = summarize(records, process.returncode, repeats, warmup, tol, matrix_class, timed_out)
         except (ValueError, KeyError, TypeError) as error:
             return "failed", {}, {"na_reason": f"invalid SPARTA receipt: {error}"}
         if timed_out:

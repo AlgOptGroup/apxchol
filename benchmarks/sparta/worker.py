@@ -15,7 +15,7 @@ from scipy import io, sparse
 from scipy.sparse.csgraph import connected_components
 
 REVISION = "7d82cdca257e1136c49e0cf84fe0cfc01c38ec4b"
-CONTRACT = "sparta-metal-original-correction-v1"
+CONTRACT = "sparta-metal-original-correction-v2"
 
 
 class Unavailable(RuntimeError):
@@ -45,8 +45,10 @@ def runtime(sparta):
             "sparta_binary_sha256": digest(extension.__file__)}
 
 
-def ground(A):
-    """Pin only components with exactly zero binary64 row sums; no shift."""
+def ground(A, matrix_class):
+    """Use the exporter's class, then the benchmark's mixed-component rule."""
+    if matrix_class not in ("laplacian", "sddm"):
+        raise ValueError("missing canonical exported matrix class")
     if A.shape[0] != A.shape[1] or not np.isfinite(A.data).all():
         raise ValueError("expected a finite square operator")
     if (A != A.T).nnz:
@@ -55,14 +57,29 @@ def ground(A):
     if np.any(entries.data[entries.row != entries.col] > 0):
         raise Unavailable("SPARTA benchmark requires nonpositive off-diagonal entries")
     count, labels = connected_components(A, directed=False)
-    R = A.tocsr()
-    # fsum preserves tiny diagonal excess that a sparse reduction can cancel.
-    excess = np.array([math.fsum(R.data[R.indptr[i]:R.indptr[i + 1]])
-                       for i in range(A.shape[0])])
-    if np.any(excess < 0):
-        raise Unavailable("SPARTA benchmark requires diagonal dominance")
-    singular = np.ones(count, dtype=bool)
-    np.logical_and.at(singular, labels, excess == 0)
+    if matrix_class == "laplacian":
+        # Match scan_operator's declaration check, not a new rank tolerance.
+        # A graph's formed diagonal includes binary64 accumulation roundoff.
+        # prepare_components trusts that declared Laplacian and pins every block.
+        column_sums = np.zeros(A.shape[0])
+        for col in range(A.shape[0]):
+            for value in A.data[A.indptr[col]:A.indptr[col + 1]]:
+                column_sums[col] += value
+        slack = 1e-10 * np.maximum(np.abs(A.diagonal()), 1.0)
+        if np.any(np.abs(column_sums) > slack):
+            raise Unavailable("declared Laplacian contradicts the exported operator")
+        singular = np.ones(count, dtype=bool)
+    else:
+        # As in prepare_components, an assembled SDDM declaration retains its
+        # equations except for exact constant-null blocks in a mixed operator.
+        # Dominance is a census, not an acceptance condition for this route.
+        singular = np.full(count, count > 1, dtype=bool)
+        if count > 1:
+            R = A.tocsr()
+            # fsum preserves tiny diagonal excess that a sparse reduction can cancel.
+            excess = np.array([math.fsum(R.data[R.indptr[i]:R.indptr[i + 1]])
+                               for i in range(A.shape[0])])
+            np.logical_and.at(singular, labels, excess == 0)
     first = np.full(count, A.shape[0])
     np.minimum.at(first, labels, np.arange(A.shape[0]))
     pins = first[singular]
@@ -118,9 +135,9 @@ def checked_solve(F, A, b, pins, tol, budget):
             "stop_check_s": check_seconds, "passes": history}
 
 
-def trial(sparta, A, b, tol, budget, threads):
+def trial(sparta, A, b, tol, budget, threads, matrix_class):
     start = time.perf_counter()
-    G, pins, components = ground(A)
+    G, pins, components = ground(A, matrix_class)
     F = sparta.analyze(G, force_cpu=False, hybrid=False, threads=threads,
                        refinement_rtol=tol,
                        refinement_steps=min(50, max(0, budget - 1))).factorize()
@@ -133,7 +150,7 @@ def trial(sparta, A, b, tol, budget, threads):
         result.update(setup_s=setup, total_s=setup + result["solve_s"],
                       components=int(components), grounded_components=len(pins),
                       n=A.shape[0], nnz=A.nnz, stop_contract="original-v1",
-                      execution_route="metal", work_unit="factor_application", factor_application_budget=budget,
+                      execution_route="metal", matrix_class=matrix_class, work_unit="factor_application", factor_application_budget=budget,
                       sparta_options=diagnostics["options"], pins=pins.tolist(),
                       host_peak_rss_mb=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1048576,
                       status="complete" if result["rel_res"] <= tol else "not_converged")
@@ -152,6 +169,7 @@ def write_record(output, index, record):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("operator"); p.add_argument("rhs"); p.add_argument("output")
+    p.add_argument("--class", dest="matrix_class", choices=("laplacian", "sddm"), required=True)
     p.add_argument("--repeat", type=int, required=True)
     p.add_argument("--warmup", type=int, required=True)
     p.add_argument("--threads", type=int, required=True)
@@ -184,7 +202,7 @@ def main():
         provenance.update(operator_sha256=digest(a.operator),
                           rhs_sha256=digest(a.rhs))
         for index in range(a.warmup + a.repeat):
-            record = trial(sparta, A, b, a.tol, a.maxiter, a.threads)
+            record = trial(sparta, A, b, a.tol, a.maxiter, a.threads, a.matrix_class)
             record.update(repetition=index, retained=index >= a.warmup, provenance=provenance,
                           sparta_init_s=init_seconds)
             write_record(output, index, record)
