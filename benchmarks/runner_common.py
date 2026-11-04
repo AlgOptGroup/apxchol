@@ -135,6 +135,8 @@ def git_sha():
 
 
 CMG_CONTRACT = "shared-timed-original-v1"
+SPARTA_CONTRACT = "sparta-metal-original-correction-v1"
+SPARTA_REVISION = "7d82cdca257e1136c49e0cf84fe0cfc01c38ec4b"
 
 
 def cell_meets_contract(cell):
@@ -154,13 +156,19 @@ def cell_meets_contract(cell):
     if (cell["cell"].get("solver") == "cmg"
             and provenance.get("cmg_contract") != CMG_CONTRACT):
         return False
+    if (cell["cell"].get("solver") == "sparta"
+            and provenance.get("sparta_contract") != SPARTA_CONTRACT):
+        return False
     if status in ("timeout", "exceeded_cap"):
         return timeout_cap({"timeout_cap_s": cell.get("timeout_cap_s")}) is not None
     if status in {"complete", "not_converged"}:
         if metrics.get("stop_contract") != "original-v1":
             return False
         identity = cell["cell"]
-        if identity.get("solver") == "apxchol_v1":
+        if (identity.get("solver") == "sparta"
+                and provenance.get("sparta_revision") != SPARTA_REVISION):
+            return False
+        if identity.get("solver") in ("apxchol_v1", "sparta"):
             if (identity.get("device") not in DEVICES
                     or metrics.get("execution_route") != identity["device"]):
                 return False

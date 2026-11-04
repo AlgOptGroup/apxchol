@@ -37,7 +37,7 @@ the reason, never a silent gap.
   systemd-inhibit --what=sleep:idle --mode=block python3 benchmarks/sweep_fair.py
   # GPU axis (needs the CUDA build; apxchol uses the GPU-resident PCG):
   python3 benchmarks/sweep_fair.py --device gpu
-  # Metal axis (macOS Metal build; apxchol only, no Metal competitors):
+  # Metal axis (optional SPARTA via APXCHOL_SPARTA_PYTHON):
   python3 benchmarks/sweep_fair.py --device metal
 
 ParAC runs IN-PROCESS via parac_runner.py (graph+physics on both axes), emitting
@@ -51,6 +51,7 @@ import argparse, json, os, re, shlex, shutil, subprocess, sys, time
 import runner_common as rc
 import parac_runner
 import cmg_matlab_runner
+import sparta_runner
 from runner_common import BIN, CELLS, matrix_args, sh
 
 # Dumped .mtx cache (grid Laplacians + the exact operator handed to the external
@@ -221,6 +222,9 @@ def emit(family, mid, solver, config, status, metrics, extra_meta=None,
         runtime = julia_toolchain()
     elif solver == "cmg":
         runtime = cmg_matlab_runner.provenance()
+    elif solver == "sparta":
+        runtime = {"sparta_contract": rc.SPARTA_CONTRACT,
+                   **(metrics or {}).get("sparta_provenance", {})}
     else:
         runtime = {**rc.benchmark_openmp_provenance(THREADS), **build_toolchain()}
     prov = {**PROV, **runtime}
@@ -474,7 +478,7 @@ def planned_cell_count(matrices, device):
     if PARAC_ONLY:
         return 2 * len(matrices)
     if device == "metal":
-        return len(APX_METAL) * len(matrices)
+        return (len(APX_METAL) + bool(sparta_runner.PYTHON)) * len(matrices)
     if device == "gpu":
         per_matrix = len(APX_GPU) + len(COMP_GPU)
         per_matrix += int("hypre_boomeramg_gpu" in COMP_GPU)  # cut variant
@@ -570,8 +574,22 @@ def do_matrix(mid, family, source, spec, is2d, n, reg):
     def process_timeout(cap, runs):
         return int(runs * cap + CAP_STARTUP_S) if not NO_CAP else NOCAP_TIMEOUT
     if DEVICE == "metal":
+        apx_totals = []
         for solver,config in APX_METAL:
-            step(family,mid,solver,config, lambda s=solver,c=config: run_cpp(margs,s,c,reg,family,mid=mid), config)
+            st, m = step(family,mid,solver,config, lambda s=solver,c=config: run_cpp(margs,s,c,reg,family,mid=mid), config)
+            if st == "complete" and m:
+                apx_totals.append(m.get("total_s"))
+        if sparta_runner.PYTHON and not cell_done(family, mid, "sparta", ""):
+            cap = solve_cap(apx_totals)
+            operator, rhs = dump_mtx(mid), dump_rhs(mid)
+            def sparta_cell():
+                if not operator or not rhs:
+                    return "failed", {}, {"na_reason": "shared operator/RHS export failed"}
+                result = sparta_runner.run(
+                    operator, rhs, timeout=process_timeout(cap, WARMUP + REPS),
+                    repeats=REPS, warmup=WARMUP, threads=THREADS, tol=TOL, maxiter=MAXITER[DEVICE])
+                return result if result[0] == "timeout" else capped(result, cap)
+            step(family, mid, "sparta", "", sparta_cell, "SPARTA Metal", timeout_cap_s=cap)
         return
     if DEVICE == "gpu":
         apx_totals = []
