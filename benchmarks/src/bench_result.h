@@ -6,6 +6,7 @@ struct BenchResult {
     std::string solver_name;
     std::string graph_name;
     std::string execution_route; // v1: complete cpu or gpu setup/solve route; empty for other solvers
+    std::string phase_contract; // full owner construction wall boundary for apxchol
     int n = 0;
     int nnz = 0;
     double setup_time = 0;

@@ -134,6 +134,7 @@ def git_sha():
     return head or declared
 
 
+APXCHOL_PHASE_CONTRACT = "apxchol-wall-v1"
 CMG_CONTRACT = "shared-timed-original-v1"
 SPARTA_CONTRACT = "sparta-metal-original-correction-v3"
 SPARTA_REVISION = "7d82cdca257e1136c49e0cf84fe0cfc01c38ec4b"
@@ -167,6 +168,9 @@ def cell_meets_contract(cell):
         identity = cell["cell"]
         if (identity.get("solver") == "sparta"
                 and provenance.get("sparta_revision") != SPARTA_REVISION):
+            return False
+        if (identity.get("solver") == "apxchol_v1"
+                and metrics.get("phase_contract") != APXCHOL_PHASE_CONTRACT):
             return False
         if identity.get("solver") in ("apxchol_v1", "sparta"):
             if (identity.get("device") not in DEVICES
@@ -898,6 +902,7 @@ def parse_csv(out):
     rows = [l for l in out.splitlines() if l and not l.startswith("solver,") and "," in l]
     if not rows: return None
     f = rows[-1].split(",")
+    phase_contract = f.pop() if len(f) == 22 or f[-1].startswith("apxchol-wall-") else None
     route = None
     if len(f) >= 15 and f[-4].startswith("original-v"):
         route = f.pop()
@@ -912,6 +917,8 @@ def parse_csv(out):
                  fillin=float(f[9]), us_per_nnz=float(f[10]))
         if not math.isfinite(d["fillin"]):
             d["fillin"] = None
+        if phase_contract:
+            d["phase_contract"] = phase_contract
         if route:
             d["execution_route"] = route
         if stopping:
@@ -956,6 +963,8 @@ def v1_route_error(metrics, stderr, device, repeats, warmups):
     """Require the fixed route in the selected CSV row and every repetition."""
     if not metrics or metrics.get("execution_route") != device:
         return f"expected complete {device} route receipt"
+    if metrics.get("phase_contract") != APXCHOL_PHASE_CONTRACT:
+        return "expected full-wall apxchol phase contract"
     expected = {(phase, str(index))
                 for phase, count in (("warmup", warmups), ("retained", repeats))
                 for index in range(1, count + 1)}

@@ -65,7 +65,7 @@ class ShellHarnessTest(unittest.TestCase):
 class CompleteRouteRunnerTest(unittest.TestCase):
     def test_current_runner_forces_device_and_rejects_other_route(self):
         for device in ("cpu", "gpu"):
-            output = "v1,m,2,4,1e-3,2e-3,3e-3,2,1e-9,1,750,original-v1,1,0.001," + device + "\n"
+            output = "v1,m,2,4,1e-3,2e-3,3e-3,2,1e-9,1,750,original-v1,1,0.001," + device + ",apxchol-wall-v1\n"
             repeats = "\n".join(f"BENCH_REPEAT phase=retained index={i} execution_route={device}"
                                 for i in range(1, 4))
             for actual in (device, "gpu" if device == "cpu" else "cpu"):
@@ -86,7 +86,7 @@ class CompleteRouteRunnerTest(unittest.TestCase):
         self.assertEqual(sweep_fair.APX_GPU, [("apxchol_v1", sweep_fair.APX_DEFAULT_CONFIG)])
 
     def test_metal_axis_requests_the_device_route_and_needs_a_metal_receipt(self):
-        output = "v1,m,2,4,1e-3,2e-3,3e-3,2,1e-9,1,750,original-v1,1,0.001,metal\n"
+        output = "v1,m,2,4,1e-3,2e-3,3e-3,2,1e-9,1,750,original-v1,1,0.001,metal,apxchol-wall-v1\n"
         for actual in ("metal", "gpu"):
             repeats = "\n".join(f"BENCH_REPEAT phase=retained index={i} execution_route={actual}"
                                  for i in range(1, 4))
@@ -302,7 +302,7 @@ class ThreadScalingStoreTest(unittest.TestCase):
              mock.patch.object(thread_scaling, "DEVICE", "cpu"):
             thread_scaling.emit("m", "audit", "A", "apxchol_v1", "cfg", 4,
                                 {"total_s": 1, "stop_contract": "original-v1",
-                                 "execution_route": "cpu"}, "complete")
+                                 "execution_route": "cpu", "phase_contract": "apxchol-wall-v1"}, "complete")
             path = pathlib.Path(store) / "m__apxchol_v1_cfg__t4.json"
             cell = json.loads(path.read_text())
             self.assertTrue(thread_scaling.done("m", "apxchol_v1", "cfg", 4))

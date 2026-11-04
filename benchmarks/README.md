@@ -457,3 +457,16 @@ PYTHONPATH=benchmarks python3 benchmarks/thread_scaling.py --render-only --compa
 
 Compact plots show absolute times and log-log speedups; no complete T1 means no
 speedup. The fair-sweep renderers live in the research archive.
+
+### apxchol phase accounting
+
+The `apxchol-wall-v1` phase contract measures Setup from the start of input
+validation through solver construction, including factorization, operator
+preparation and workspace allocation. Solve is the remaining outer wall
+interval, including original-system verification. NVML reads are excluded.
+Earlier records derived Setup from checkpoint subtotals and charged omitted
+setup work to Solve. This accounting defect does not alter their one-RHS
+totals. Other historical measurement-contract limitations still apply. Their
+separate phase times cannot establish setup cost, solve cost or factor-reuse
+estimates.
+Fresh phase measurements require the new marker.
