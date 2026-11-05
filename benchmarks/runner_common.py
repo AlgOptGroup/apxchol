@@ -307,8 +307,8 @@ def parse_peak_rss_mb(stderr):
 def benchmark_openmp_env(threads, base=None):
     """Environment for the monolithic C++ benchmark executable.
 
-    The x86 benchmark links LLVM libomp for apxchol and, through the system
-    SuiteSparse/CHOLMOD dependency, GNU libgomp.  libgomp initializes first
+    The x86 benchmark can link LLVM libomp for apxchol and GNU libgomp
+    through system dependencies such as Hypre.  libgomp initializes first
     when OMP_PROC_BIND is enabled and narrows the primary thread to the first
     place.  libomp's default ``respect`` policy then mistakes that one-core
     mask for the process allocation and puts every apxchol worker on it.

@@ -21,7 +21,7 @@
 //                      the caller and then asserted against the structural scan.
 //                        laplacian -> singular: grounded, scored mean-centred
 //                        sddm      -> retain the operator; ground only singular Laplacian blocks
-//   --solver <list>    comma-separated: apxchol,cg,ldlt,rchol,cholmod,all
+//   --solver <list>    comma-separated: apxchol,cg,ldlt,rchol,all
 //   --tol <double>     PCG tolerance                        (default: 1e-8)
 //   --maxiter <int>    PCG max iterations                   (default: 500)
 //   --csv              output in CSV format
@@ -188,9 +188,6 @@ static apxchol::factor_options v1_factor_options(const V1Combo& combo,
 #endif
 #endif
 
-#ifdef HAVE_CHOLMOD
-#include <cholmod.h>
-#endif
 
 #ifdef HAVE_AMGCL
 #include <amgcl/make_solver.hpp>
@@ -298,7 +295,7 @@ static std::string cpu_list(const std::vector<int>& cpus) {
 
 // Return false rather than silently timing an N-thread run on one physical
 // core.  The benchmark executable can contain LLVM libomp (apxchol) and GNU
-// libgomp (system SuiteSparse/Hypre).  A libgomp constructor may apply
+// libgomp (system Hypre).  A libgomp constructor may apply
 // OMP_PROC_BIND before main(), narrowing this primary thread to one place;
 // libomp's default `respect` policy then treats that thread mask as the whole
 // allocation.  The Python runners prevent this with rank-local explicit places
@@ -1285,9 +1282,6 @@ static Args parse_args(int argc, char** argv) {
             , "rchol_par"
 #endif
 #endif
-#ifdef HAVE_CHOLMOD
-            , "cholmod"
-#endif
         };
     auto available = default_solvers;
     // The costly multigrid/ICC comparisons remain explicit opt-ins.
@@ -1676,107 +1670,6 @@ static BenchResult run_rchol_parallel(
 }
 #endif
 
-#endif
-
-// ──────────────────── CHOLMOD solver ────────────────────
-#ifdef HAVE_CHOLMOD
-static BenchResult run_cholmod(
-    const Eigen::SparseMatrix<double>& L,
-    const Eigen::VectorXd& b,
-    const std::string& graph_name, double tol, int maxiter)
-{
-    BenchResult r;
-    r.solver_name = "CHOLMOD [SuiteSparse]";
-    r.graph_name = graph_name;
-    r.n = static_cast<int>(L.rows());
-    r.nnz = static_cast<int>(L.nonZeros());
-    int n = r.n;
-
-    // Regularize: L' = L + εI makes the system SPD
-    double eps = 1e-12 * L.diagonal().array().abs().mean();
-    Eigen::SparseMatrix<double> Lreg = L;
-    for (int k = 0; k < n; ++k)
-        Lreg.coeffRef(k, k) += eps;
-    Lreg.makeCompressed();
-
-    cholmod_common c;
-    cholmod_start(&c);
-
-    cholmod_sparse A_chol;
-    A_chol.nrow = n;
-    A_chol.ncol = n;
-    A_chol.nzmax = Lreg.nonZeros();
-    A_chol.p = const_cast<int*>(Lreg.outerIndexPtr());
-    A_chol.i = const_cast<int*>(Lreg.innerIndexPtr());
-    A_chol.x = const_cast<double*>(Lreg.valuePtr());
-    A_chol.z = nullptr;
-    A_chol.stype = 1;  // upper triangular (symmetric)
-    A_chol.itype = CHOLMOD_INT;
-    A_chol.xtype = CHOLMOD_REAL;
-    A_chol.dtype = CHOLMOD_DOUBLE;
-    A_chol.sorted = 1;
-    A_chol.packed = 1;
-
-    Timer t;
-    t.start();
-    cholmod_factor* factor = cholmod_analyze(&A_chol, &c);
-    cholmod_factorize(&A_chol, factor, &c);
-    r.setup_time = t.elapsed();
-
-    if (c.status != CHOLMOD_OK) {
-        r.solver_name += "(FAIL)";
-        r.solve_time = 0;
-        r.total_time = r.setup_time;
-        r.rel_residual = std::numeric_limits<double>::quiet_NaN();
-        cholmod_free_factor(&factor, &c);
-        cholmod_finish(&c);
-        return r;
-    }
-
-    Eigen::VectorXd bvec = b;  // mutable copy
-    cholmod_dense b_chol;
-    b_chol.nrow = n;
-    b_chol.ncol = 1;
-    b_chol.nzmax = n;
-    b_chol.d = n;
-    b_chol.x = bvec.data();
-    b_chol.z = nullptr;
-    b_chol.xtype = CHOLMOD_REAL;
-    b_chol.dtype = CHOLMOD_DOUBLE;
-
-    t.start();
-    Eigen::VectorXd x = solve_checked(r, L, b, tol, maxiter,
-        [&](double, int, bool warm, Eigen::VectorXd& current) {
-            Eigen::VectorXd residual;
-            cholmod_dense rhs = b_chol;
-            if (warm) {
-                residual = b - L * current;
-                center_if_laplacian(residual);
-                rhs.x = residual.data();
-            }
-            cholmod_dense* solution = cholmod_solve(CHOLMOD_A, factor, &rhs, &c);
-            if (!solution) throw std::runtime_error("CHOLMOD solve failed");
-            Eigen::Map<Eigen::VectorXd> update(static_cast<double*>(solution->x), n);
-            if (warm) current += update; else current = update;
-            cholmod_free_dense(&solution, &c);
-            return 1;
-        });
-    center_if_laplacian(x);
-    r.solve_time = t.elapsed();
-    r.total_time = r.setup_time + r.solve_time;
-    r.solve_rss_mb = read_vmrss_mb();   // solve-held host RSS (peak from /usr/bin/time)
-
-    Eigen::VectorXd res = b - L * x;
-    center_if_laplacian(res);
-    double bnorm = b.norm();
-    r.rel_residual = res.norm() / (bnorm > 0 ? bnorm : 1.0);
-    r.fillin = 0;
-    r.us_per_nnz = r.total_time / r.nnz * 1e6;
-
-    cholmod_free_factor(&factor, &c);
-    cholmod_finish(&c);
-    return r;
-}
 #endif
 
 // ────────── de-singularization helpers (shared: AMGCL, Hypre, apxchol) ──────────
@@ -3634,10 +3527,6 @@ int main(int argc, char** argv) try {
 #endif
 #endif
 
-#ifdef HAVE_CHOLMOD
-    if (args.solvers.count("cholmod"))
-        print(median_run([&]() { return run_cholmod(L, b, graph_name, args.tol, args.maxiter); }, R));
-#endif
 
 #ifdef HAVE_ACCELERATE
     if (args.solvers.count("accelerate"))
