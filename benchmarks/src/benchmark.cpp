@@ -790,7 +790,6 @@ static BenchResult median_run(Fn&& fn, int repeats) {
 // ──────────────────── solver runners ────────────────────
 
 #ifdef HAVE_APXCHOL_V1
-template<class Clock = std::chrono::high_resolution_clock>
 static BenchResult run_apxchol_v1(
     const Eigen::SparseMatrix<double>& L,
     const Eigen::VectorXd& b,
@@ -840,6 +839,7 @@ static BenchResult run_apxchol_v1(
         }
     };
 
+    using Clock = apxchol::detail::checkpoint::Clock;
     const auto t_wall_start = Clock::now();
     double memory_read_s = 0; // GPU memory reads, removed from the wall interval
     apxchol::solve_result res;
@@ -848,10 +848,9 @@ static BenchResult run_apxchol_v1(
     // The solver selects its route once, under setup.backend_selection;
     // retries reuse the same concrete owner.
     // Checking the caller's view is setup work, as in solver(csc_view, opts).
-    const apxchol::detail::csc_input input(apxchol_view(L));
-    apxchol::solver solver = apxchol::detail::solver_access::make(input, opts, &timings);
-    const auto t_setup_end = Clock::now();
-    r.phase_contract = "apxchol-wall-v1";
+    apxchol::solver solver = apxchol::detail::solver_access::make_view(
+        apxchol_view(L), nullptr, opts, dump_profile ? &timings : nullptr, t_wall_start);
+    r.phase_contract = "apxchol-wall-v2";
     const bool gpu_route = solver.backend() == apxchol::solve_backend::gpu;
 #ifdef APXCHOL_USE_METAL
     // Its own label, so a Metal cell can never be taken for a CUDA one.
@@ -890,10 +889,10 @@ static BenchResult run_apxchol_v1(
     const double wall_total =
         std::chrono::duration<double>(t_wall_end - t_wall_start).count() - memory_read_s;
 
-    // Constructor completion includes validation, factorization, operator and
-    // workspace preparation. Checkpoint subtotals omit some of that work.
-    // Keep outer residual verification in Solve and exclude only NVML reads.
-    r.setup_time = std::chrono::duration<double>(t_setup_end - t_wall_start).count();
+    // The owner and setup profile share one complete interval, including view
+    // validation and caller preparation. Keep outer verification in Solve and
+    // exclude only NVML reads from the total wall interval.
+    r.setup_time = solver.setup_seconds();
     r.solve_time = wall_total - r.setup_time;
     if (r.solve_time < 0.0) r.solve_time = 0.0;
     r.total_time = wall_total;

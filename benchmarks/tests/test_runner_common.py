@@ -346,8 +346,14 @@ class CellReuseTest(unittest.TestCase):
         self.assertFalse(rc.cell_meets_contract(old))
         self.assertFalse(rc.cell_is_current(old, self.SHA))
 
+    def test_always_profiled_phase_boundary_is_rejected(self):
+        old = self.cell()
+        old["metrics"]["phase_contract"] = "apxchol-wall-v1"
+        self.assertFalse(rc.cell_meets_contract(old))
+        self.assertFalse(rc.cell_is_current(old, self.SHA))
+
     def test_phase_marker_survives_csv(self):
-        row = rc.parse_csv("v1,m,4,12,1,2,3,7,1e-9,1,2,3,-1,-1,3,2,9e-9,original-v1,2,0.25,cpu,apxchol-wall-v1\n")
+        row = rc.parse_csv("v1,m,4,12,1,2,3,7,1e-9,1,2,3,-1,-1,3,2,9e-9,original-v1,2,0.25,cpu,apxchol-wall-v2\n")
         self.assertEqual(row["phase_contract"], rc.APXCHOL_PHASE_CONTRACT)
         self.assertEqual(row["execution_route"], "cpu")
 

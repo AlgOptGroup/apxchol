@@ -9,10 +9,6 @@
 #include "apxchol/solver/partitioner_helpers.h"
 
 namespace {
-struct ControlledClock {
-    using time_point = std::chrono::steady_clock::time_point;
-    static time_point now() { static int tick = 0; return time_point(std::chrono::seconds(10 * tick++)); }
-};
 const V1Combo& config(std::string_view name) {
     for (const auto& combo : v1_combos)
         if (combo.name == name) return combo;
@@ -51,12 +47,15 @@ int main() {
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::cpu;
         g_laplacian_mode = false;
-        const auto measured = run_apxchol_v1<ControlledClock>(matrix, rhs, "clock", "clock",
-            options, 1e-8, 100, false, false);
-        require(measured.setup_time == 10.0, "setup must include the complete construction interval");
-        require(measured.solve_time == 10.0 && measured.total_time == 20.0,
-                "solve must retain the remaining outer wall interval");
-        require(measured.phase_contract == "apxchol-wall-v1", "missing phase contract");
+        for (bool profile : {false, true}) {
+            const auto measured = run_apxchol_v1(matrix, rhs, "clock", "clock",
+                options, 1e-8, 100, profile, false);
+            require(measured.setup_time > 0.0, "setup must use the owner's complete interval");
+            require(measured.solve_time >= 0.0 &&
+                    std::abs(measured.setup_time + measured.solve_time - measured.total_time) < 1e-12,
+                    "setup and solve must partition the outer wall interval");
+            require(measured.phase_contract == "apxchol-wall-v2", "missing phase contract");
+        }
         std::cout << "v1 preset contract passed\n";
         return 0;
     } catch (const std::exception& e) {

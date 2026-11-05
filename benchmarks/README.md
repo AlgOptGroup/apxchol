@@ -169,6 +169,13 @@ comments, Pages or README measurements.
 - Setup includes required conversion, grounding, ordering, uploads, factor/hierarchy
   construction and triangular analysis. Solve includes RHS work, iterations,
   transfers and returning the solution. Total is setup + solve.
+  apxchol's owner and setup profile use one complete enclosing interval, including
+  input validation and temporary storage release. Detailed stage labels are
+  exclusive; `unattributed` accounts for work between them, so the setup subtree
+  sums to the owner's construction time used by the benchmark. Component discovery
+  and, for split runs, component slicing are charged separately to benchmark Setup.
+  The owner also measures setup when detailed profiling is disabled. Normal benchmark runs omit optional stage
+  instrumentation; `--profile` enables it for diagnosis.
 - Common parsing/assembly and independent grading are excluded. Process-wide CUDA
   initialization is separately reported; solver-specific allocations/module loading
   remain charged. Hypre initialization is charged once per row, and so are
@@ -465,11 +472,13 @@ speedup. The fair-sweep renderers live in the research archive.
 
 ### apxchol phase accounting
 
-The `apxchol-wall-v1` phase contract measures Setup from the start of input
+The `apxchol-wall-v2` phase contract measures Setup from the start of input
 validation through solver construction, including factorization, operator
 preparation and workspace allocation. Solve is the remaining outer wall
 interval, including original-system verification. NVML reads are excluded.
-Earlier records derived Setup from checkpoint subtotals and charged omitted
+The earlier `apxchol-wall-v1` contract retained stage instrumentation in normal
+runs; those receipts are not reused under the current contract. Older records
+derived Setup from checkpoint subtotals and charged omitted
 setup work to Solve. This accounting defect does not alter their one-RHS
 totals. Other historical measurement-contract limitations still apply. Their
 separate phase times cannot establish setup cost, solve cost or factor-reuse

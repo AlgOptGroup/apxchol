@@ -19,6 +19,7 @@
 - CUDA and Metal solvers can be copied: copies share the device factor and operator, and solve concurrently on their own streams or command queues and workspace.
 
 ### API and CLI changes
+- Setup profiles include unlabelled work and agree with `solver::setup_seconds()`. Normal benchmark runs omit optional stage profiling; `--profile` retains the detailed breakdown.
 - Breaking: Eigen types leave the C++ API. `solver`, `factorize` and the one-shot `solve` take a borrowed CSC matrix, `csc_view` (32-bit indices) or `csc_view64` (64-bit), from the new header `apxchol/views.h`; rows must be sorted and unique within each column, and an invalid view throws `std::invalid_argument`. Vectors are `std::span`s and matrices `const_matrix_view` / `matrix_view` (column-major).
 - apxchol no longer depends on Eigen. The installed CMake package, SDK archives, Python wheels, CLI archives and the MATLAB/Octave build neither bundle nor require it, and their notices drop Eigen's MPL-2.0 terms; only the benchmark harness still uses Eigen, for its competitors and input reading.
 - Breaking: the initial guess is a `std::span` that is empty by default instead of a `const Eigen::VectorXd*`, and the batch warm start is a `const_matrix_view` whose null `data` means none.

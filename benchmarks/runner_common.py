@@ -134,7 +134,7 @@ def git_sha():
     return head or declared
 
 
-APXCHOL_PHASE_CONTRACT = "apxchol-wall-v1"
+APXCHOL_PHASE_CONTRACT = "apxchol-wall-v2"
 CMG_CONTRACT = "shared-timed-original-thread-budget-v2"
 SPARTA_CONTRACT = "sparta-metal-original-correction-v3"
 SPARTA_REVISION = "7d82cdca257e1136c49e0cf84fe0cfc01c38ec4b"
