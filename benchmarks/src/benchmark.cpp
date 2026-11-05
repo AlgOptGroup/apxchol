@@ -706,7 +706,7 @@ static void print_result_pretty(const BenchResult& r) {
 }
 
 static void print_csv_header() {
-    std::cout << "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz,solve_rss_mb,solve_vram_mb,setup_vram_mb,retained_repeats,representative_repeat,max_repeat_rel_res,stop_contract,solve_passes,stop_check_s,execution_route\n";
+    std::cout << "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz,solve_rss_mb,solve_vram_mb,setup_vram_mb,retained_repeats,representative_repeat,max_repeat_rel_res,stop_contract,solve_passes,stop_check_s,execution_route,phase_contract\n";
 }
 
 static void print_result_csv(const BenchResult& r) {
@@ -727,7 +727,7 @@ static void print_result_csv(const BenchResult& r) {
               << r.retained_repeats << "," << r.representative_repeat << ","
               << std::scientific << std::setprecision(17)
               << r.max_repeat_rel_residual << "," << bench_stop::contract << ","
-              << r.solve_passes << "," << r.stop_check_seconds << "," << r.execution_route << "\n";
+              << r.solve_passes << "," << r.stop_check_seconds << "," << r.execution_route << "," << r.phase_contract << "\n";
 }
 
 // ──────────────────── generate RHS ────────────────────
@@ -839,7 +839,8 @@ static BenchResult run_apxchol_v1(
         }
     };
 
-    const auto t_wall_start = std::chrono::high_resolution_clock::now();
+    using Clock = apxchol::detail::checkpoint::Clock;
+    const auto t_wall_start = Clock::now();
     double memory_read_s = 0; // GPU memory reads, removed from the wall interval
     apxchol::solve_result res;
     apxchol::detail::checkpoint timings;
@@ -847,11 +848,9 @@ static BenchResult run_apxchol_v1(
     // The solver selects its route once, under setup.backend_selection;
     // retries reuse the same concrete owner.
     // Checking the caller's view is setup work, as in solver(csc_view, opts).
-    const auto t_view = std::chrono::high_resolution_clock::now();
-    const apxchol::detail::csc_input input(apxchol_view(L));
-    const double view_seconds = std::chrono::duration<double>(
-        std::chrono::high_resolution_clock::now() - t_view).count();
-    apxchol::solver solver = apxchol::detail::solver_access::make(input, opts, &timings);
+    apxchol::solver solver = apxchol::detail::solver_access::make_view(
+        apxchol_view(L), nullptr, opts, dump_profile ? &timings : nullptr, t_wall_start);
+    r.phase_contract = "apxchol-wall-v2";
     const bool gpu_route = solver.backend() == apxchol::solve_backend::gpu;
 #ifdef APXCHOL_USE_METAL
     // Its own label, so a Metal cell can never be taken for a CUDA one.
@@ -861,10 +860,10 @@ static BenchResult run_apxchol_v1(
 #endif
 #if defined(APXCHOL_USE_CUDA)
     const auto read_vram = [&] {
-        const auto begin = std::chrono::high_resolution_clock::now();
+        const auto begin = Clock::now();
         const double mib = read_vram_mb();
         memory_read_s += std::chrono::duration<double>(
-            std::chrono::high_resolution_clock::now() - begin).count();
+            Clock::now() - begin).count();
         return mib;
     };
     if (gpu_route) r.setup_vram_mb = read_vram();
@@ -886,19 +885,14 @@ static BenchResult run_apxchol_v1(
         if (gpu_route) r.solve_vram_mb = read_vram(); // the solver still holds its device state
 #endif
     }
-    const auto t_wall_end = std::chrono::high_resolution_clock::now();
+    const auto t_wall_end = Clock::now();
     const double wall_total =
         std::chrono::duration<double>(t_wall_end - t_wall_start).count() - memory_read_s;
 
-    // Honest accounting:
-    //   setup_time   — preconditioner build (from checkpoint, accurate)
-    //   solve_time   — wall_total minus setup, i.e. the PCG loop INCLUDING
-    //                  the outer SpMV / dot-product / norm cost.
-    //   The checkpoint's "solve" entry only tracks `precond.solve()` (the
-    //   triangular forward/back), which was UNDER-REPORTING solve time by
-    //   the full PCG SpMV cost — making our v1 numbers look ~2× better
-    //   than reality vs Eigen-CG-based competitors. Fixed 2026-05-24.
-    r.setup_time = timings.total("setup") + view_seconds;
+    // The owner and setup profile share one complete interval, including view
+    // validation and caller preparation. Keep outer verification in Solve and
+    // exclude only NVML reads from the total wall interval.
+    r.setup_time = solver.setup_seconds();
     r.solve_time = wall_total - r.setup_time;
     if (r.solve_time < 0.0) r.solve_time = 0.0;
     r.total_time = wall_total;
@@ -2060,6 +2054,7 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
             if (!r.execution_route.empty() && r.execution_route != rc.execution_route)
                 throw std::runtime_error("split solve changed execution route between components");
             r.execution_route = rc.execution_route;
+            r.phase_contract = rc.phase_contract;
         }
         if (dbg) dbg_rows.emplace_back(sn, rc.rel_residual, rnc, rc.iterations);
     }

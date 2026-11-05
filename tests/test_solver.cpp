@@ -1946,3 +1946,70 @@ TEST(Solver, GpuContinuesAfterFailedOriginalResidualVerification) {
     check_verified_tolerance(apxchol::solve_backend::gpu);
 #endif
 }
+
+
+namespace {
+void check_complete_setup_profile(apxchol::solve_backend backend) {
+    const auto A = operator_matrix();
+    const std::vector<std::int64_t> columns(A.col_ptr.begin(), A.col_ptr.end());
+    const std::vector<std::int64_t> rows(A.row_idx.begin(), A.row_idx.end());
+    const apxchol::csc_view64 wide{A.rows, columns, rows, A.values};
+    apxchol::solve_options opts;
+    opts.backend = backend;
+    opts.num_threads = 2;
+    apxchol::detail::checkpoint timings;
+    timings.descend("outer");
+    auto check = [&](auto view) {
+        for (bool adopt : {false, true}) {
+            for (bool profile : {false, true}) {
+                SCOPED_TRACE(adopt);
+                SCOPED_TRACE(profile);
+                auto factor = apxchol::factorize(test::csc(A));
+                const double before = timings.total("outer.setup");
+                auto owner = apxchol::detail::solver_access::make_view(
+                    view, adopt ? &factor : nullptr, opts, profile ? &timings : nullptr);
+                EXPECT_EQ(owner.backend(), backend);
+                EXPECT_GT(owner.setup_seconds(), 0);
+                EXPECT_NEAR(timings.total("outer.setup") - before,
+                            profile ? owner.setup_seconds() : 0, 1e-12);
+                const auto result = owner.solve(linspaced(A.rows, 1.0, 2.0), 1e-8, 200);
+                EXPECT_TRUE(result.converged);
+                EXPECT_LE(result.residual, 1e-8);
+            }
+        }
+    };
+    check(test::csc(A));
+    check(wide);
+    if (backend == apxchol::solve_backend::cpu) {
+        EXPECT_GT(timings.total("outer.setup.operator_scan"), 0);
+        EXPECT_GT(timings.total("outer.setup.workspace"), 0);
+    }
+    const apxchol::solver without_profile(test::csc(A), opts);
+    EXPECT_GT(without_profile.setup_seconds(), 0);
+}
+}
+
+TEST(Solver, SetupProfileAndOwnerShareTheCompleteInterval) {
+    check_complete_setup_profile(apxchol::solve_backend::cpu);
+}
+
+TEST(Solver, GpuSetupProfileAndOwnerShareTheCompleteInterval) {
+    if (!apxchol::backend_available(apxchol::solve_backend::gpu))
+        GTEST_SKIP() << "GPU unavailable";
+    check_complete_setup_profile(apxchol::solve_backend::gpu);
+}
+
+TEST(Solver, FailedProfiledSetupCanReuseCheckpoint) {
+    auto A = operator_matrix();
+    auto bad = test::csc(A);
+    bad.col_ptr = bad.col_ptr.first(1);
+    const auto opts = cpu_options();
+    apxchol::detail::checkpoint timings;
+    timings.descend("outer");
+    EXPECT_THROW(apxchol::detail::solver_access::make_view(bad, nullptr, opts, &timings),
+                 std::invalid_argument);
+    const double before = timings.total("outer.setup");
+    auto owner = apxchol::detail::solver_access::make_view(test::csc(A), nullptr, opts, &timings);
+    EXPECT_NEAR(timings.total("outer.setup") - before, owner.setup_seconds(), 1e-12);
+    EXPECT_EQ(timings.total("setup"), 0);
+}

@@ -3,6 +3,7 @@
 // route interface; tests and the benchmark read route state through
 // solver_access::route.
 #include "apxchol/solver/solve.h"
+#include "apxchol/detail/checkpoint.h"
 #include "apxchol/solver/detail/cpu_route.h"
 #if defined(APXCHOL_USE_CUDA)
 #include "apxchol/solver/detail/cuda_route.h"
@@ -38,6 +39,13 @@ struct solver_access {
                        checkpoint* timings = nullptr);
     // A solver adopting F for an operator in the library's own storage.
     static solver make(csc_ref<double> A, factorization F, const solve_options& opts);
+    // Public-view validation and temporary input storage belong to the same
+    // complete setup interval as construction. The benchmark may supply its
+    // earlier start to include caller-side preparation in that interval.
+    template<class Index>
+    static solver make_view(basic_csc_view<Index> A, factorization* F,
+                            const solve_options& opts, checkpoint* timings = nullptr,
+                            checkpoint::Clock::time_point started = checkpoint::Clock::now());
     static void save(const std::filesystem::path& path, const solver& owner);
     // started is when load() began, so setup_seconds includes reading the file.
     static void finish_load(solver& owner, std::int64_t entries,
