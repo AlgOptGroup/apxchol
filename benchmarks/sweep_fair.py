@@ -438,8 +438,6 @@ APX = [("apxchol_v1", APX_DEFAULT_CONFIG),
        ("apxchol_v1", "bk+tree[vec_pool_aos]"),
        ("apxchol_v1", "greedy+tree[vec_pool_aos]")]
 # The single headline apxchol config is bg+tree.
-# CHOLMOD not included (direct solver; the suite compares preconditioned
-# iterative methods).
 # rchol_par = pRCHOL (parallel ND factorization) — beats serial RCHOL on 3D grids.
 # AMGCL re-added: a distinct algebraic-MG competitor
 # (smoothed-aggregation + spai0, vs BoomerAMG's classical AMG); converges to true
