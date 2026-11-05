@@ -3,9 +3,9 @@
 
 sweep_fair.py exports A and b with the benchmark binary and calls run(). One
 MATLAB process runs cmg/bench_cmg_common.m: one warmup and the retained
-repetitions, each building the hierarchy and solving with MATLAB pcg on
-one computational thread. Disconnected Laplacians get one grounded coordinate
-per component (cmg/component_gauge.h); every solution is graded by
+repetitions, each building the hierarchy and solving with MATLAB pcg within
+the sweep's requested computational-thread limit. Disconnected Laplacians get
+one grounded coordinate per component (cmg/component_gauge.h); every solution is graded by
 ||A x - b|| / ||b|| on the original A and b.
 
 MATLAB runs from a local install, or inside the container from
@@ -25,7 +25,7 @@ BENCH = os.path.join(ROOT, "benchmarks", "cmg")
 _MEX = os.path.join("matlab", "cmg", "mex", "mx_preconditioner_.mexa64")
 _GAUGE_SOURCES = ("common_component_gauge_mex.cpp", "component_gauge.h")
 NOTE = ("canonical MATLAB CMG (upstream m-code, makeCMG MEX) on the shared A and b; "
-        "one MATLAB computational thread")
+        "benchmark-requested MATLAB computational-thread limit")
 
 
 def available():
@@ -43,11 +43,11 @@ def available():
     return True, ""
 
 
-def provenance():
+def provenance(threads):
     """Cell provenance: the MEX toolchain, the runtime and the CPU used."""
     return {**rc.binary_toolchain(os.path.join(CMG_SOLVER, _MEX) if CMG_SOLVER else ""),
             "cmg_note": NOTE, "cmg_contract": rc.CMG_CONTRACT, "cmg_runtime": f"container {IMAGE}" if IMAGE else "local MATLAB",
-            "cmg_cpuset": rc.affinity_spec(1) or "unpinned"}
+            "requested_threads": threads, "cmg_cpuset": rc.affinity_spec(threads) or "unpinned"}
 
 
 def gauge_dir(directory):
@@ -60,9 +60,11 @@ def gauge_dir(directory):
     return os.path.join(directory, f"cmg-gauge-{mode}-{digest.hexdigest()[:12]}")
 
 
-def command(operator, rhs, work, gauge, repeats, tol, maxiter, timeout):
+def command(operator, rhs, work, gauge, repeats, tol, maxiter, timeout, threads):
     """Shell command for one cell. Host paths are mounted at the same paths in
     the container, so the MATLAB expression is the same in both modes."""
+    if isinstance(threads, bool) or not isinstance(threads, int) or threads < 1:
+        raise ValueError("MATLAB threads must be a positive integer")
     paths = (operator, rhs, work, gauge, BENCH, CMG_SOLVER, MATLAB)
     if any("'" in p for p in paths):
         raise ValueError("CMG paths must not contain single quotes")
@@ -70,18 +72,23 @@ def command(operator, rhs, work, gauge, repeats, tol, maxiter, timeout):
             f"if ~isfile(fullfile(g,['common_component_gauge_mex.' mexext])), "
             f"mex('-R2018a','-outdir',g,fullfile('{BENCH}','common_component_gauge_mex.cpp')); end; "
             f"addpath(g); bench_cmg_common('{operator}','{rhs}','{work}',"
-            f"{repeats},{tol},{maxiter},1)")
+            f"{repeats},{tol},{maxiter},{threads})")
     # The deadline is enforced next to MATLAB: killing a docker client does not
     # stop the container it started.
     inner = ["timeout", "-k", "10", str(int(timeout)),
-             os.path.join(MATLAB, "bin", "matlab"), "-singleCompThread", "-batch", expr]
-    cpus = rc.affinity_spec(1)
+             os.path.join(MATLAB, "bin", "matlab"),
+             *(["-singleCompThread"] if threads == 1 else []), "-batch", expr]
+    cpus = rc.affinity_spec(threads)
+    runtime_env = [f"{name}={threads}" for name in
+                   ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")]
     if not IMAGE:
-        prefix = ["env", f"CMG_ROOT={CMG_SOLVER}"] + (["taskset", "-c", cpus] if cpus else [])
+        prefix = ["env", f"CMG_ROOT={CMG_SOLVER}", *runtime_env] + (["taskset", "-c", cpus] if cpus else [])
         return shlex.join(prefix + inner)
     data = os.path.dirname(os.path.abspath(operator))
     docker = ["docker", "run", "--rm", "--network=host", "--user", f"{os.getuid()}:{os.getgid()}",
               "-e", "HOME=/tmp", "-e", f"CMG_ROOT={CMG_SOLVER}"]
+    for setting in runtime_env:
+        docker += ["-e", setting]
     if cpus:
         docker += ["--cpuset-cpus", cpus]
     for path, mode in ((MATLAB, "ro"), (CMG_SOLVER, "ro"), (BENCH, "ro"), (data, "rw")):
@@ -104,10 +111,10 @@ def read_records(work, repeats):
 
 _METRICS = ("setup_s", "solve_s", "total_s", "iters", "rel_res", "n", "nnz",
             "adaptation_s", "components", "grounded_components", "matlab_version",
-            "solve_passes", "stop_check_s")
+            "solve_passes", "stop_check_s", "matlab_thread_limit")
 
 
-def summarize(records, returncode, stderr, repeats, tol):
+def summarize(records, returncode, stderr, repeats, tol, threads):
     """(status, metrics, extra_meta) for one cell from its repetition records.
 
     bench_cmg_common.m stops at the first repetition that is not complete, so
@@ -122,6 +129,10 @@ def summarize(records, returncode, stderr, repeats, tol):
             "na_reason": f"MATLAB exceeded its process deadline (rc={returncode})"}
     last = records[-1] if records else {}
     status = last.get("status")
+    if status in ("complete", "not_converged", "n/a") and any(
+            r.get("matlab_thread_limit") != threads for r in records):
+        return "failed", {"returncode": returncode, "repeat_receipts": receipts}, {
+            "na_reason": "MATLAB reported a different computational-thread limit"}
     if status == "n/a":
         return "n/a", {k: last[k] for k in ("n", "nnz") if k in last}, {
             "na_reason": last.get("reason", "CMG declined this operator")}
@@ -136,7 +147,7 @@ def summarize(records, returncode, stderr, repeats, tol):
               if status == "complete" else last)
     metrics = {k: chosen[k] for k in _METRICS if k in chosen}
     metrics.update(
-        stop_contract="original-v1", effective_threads=1, warmup_repeats=1,
+        stop_contract="original-v1", warmup_repeats=1,
         retained_repeats=len(retained), representative_repeat=chosen.get("repetition"),
         pcg_flag=chosen.get("pcg_flag"), repeat_receipts=receipts)
     if status != "complete":
@@ -146,14 +157,14 @@ def summarize(records, returncode, stderr, repeats, tol):
     return status, metrics, None
 
 
-def run(operator, rhs, *, timeout, repeats, tol, maxiter):
+def run(operator, rhs, *, timeout, repeats, tol, maxiter, threads):
     """Run one cell on the exported A (operator) and b (rhs)."""
     directory = os.path.dirname(os.path.abspath(operator))
     gauge = gauge_dir(directory)
     os.makedirs(gauge, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".cmg-", dir=directory) as work:
         cmd = command(os.path.abspath(operator), os.path.abspath(rhs), work, gauge,
-                      repeats, tol, maxiter, timeout)
+                      repeats, tol, maxiter, timeout, threads)
         try:
             cp = sh(cmd, timeout=timeout + 60)
         except subprocess.TimeoutExpired:
@@ -164,4 +175,4 @@ def run(operator, rhs, *, timeout, repeats, tol, maxiter):
         except (OSError, ValueError) as error:
             return "failed", {"returncode": cp.returncode}, {
                 "na_reason": f"unreadable CMG repetition record: {error}"}
-    return summarize(records, cp.returncode, cp.stderr, repeats, tol)
+    return summarize(records, cp.returncode, cp.stderr, repeats, tol, threads)

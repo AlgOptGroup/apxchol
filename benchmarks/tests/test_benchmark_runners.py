@@ -659,7 +659,7 @@ def cmg_record(rep, status="complete", total=1.0, rel_res=5e-9, **extra):
     record = {"repetition": rep, "retained": rep > 0, "status": status, "n": 4, "nnz": 10,
               "setup_s": total / 2, "solve_s": total / 2, "total_s": total, "iters": 7,
               "rel_res": rel_res, "pcg_flag": 0, "adaptation_s": 0.01, "components": 2,
-              "grounded_components": 1, "matlab_version": "26.1.0 (R2026a)"}
+              "grounded_components": 1, "matlab_version": "26.1.0 (R2026a)", "matlab_thread_limit": 1}
     record.update(extra)
     return record
 
@@ -668,7 +668,7 @@ class CmgRunnerTest(unittest.TestCase):
     cmg = sweep_fair.cmg_matlab_runner
 
     def summarize(self, records, returncode=0, stderr=""):
-        return self.cmg.summarize(records, returncode, stderr, 3, "1e-8")
+        return self.cmg.summarize(records, returncode, stderr, 3, "1e-8", 1)
 
     def test_unconfigured_matlab_is_unavailable(self):
         with mock.patch.object(self.cmg, "MATLAB", ""):
@@ -682,9 +682,11 @@ class CmgRunnerTest(unittest.TestCase):
              mock.patch.object(self.cmg, "IMAGE", ""), \
              mock.patch.object(rc, "affinity_spec", return_value="3"):
             command = self.cmg.command("/d/A.mtx", "/d/A.rhs.mtx", "/d/work", "/d/gauge",
-                                       3, "1e-8", 500, 900)
+                                       3, "1e-8", 500, 900, 1)
         args = __import__("shlex").split(command)
-        self.assertEqual(args[:6], ["env", "CMG_ROOT=/src/cmg", "taskset", "-c", "3", "timeout"])
+        self.assertEqual(args[:2], ["env", "CMG_ROOT=/src/cmg"])
+        self.assertEqual(args[args.index("taskset"):args.index("timeout") + 1],
+                         ["taskset", "-c", "3", "timeout"])
         self.assertIn("900", args)
         self.assertEqual(args[args.index("/opt/matlab/bin/matlab") + 1:][:2],
                          ["-singleCompThread", "-batch"])
@@ -696,22 +698,54 @@ class CmgRunnerTest(unittest.TestCase):
         with mock.patch.object(self.cmg, "MATLAB", "/opt/matlab"), \
              mock.patch.object(self.cmg, "CMG_SOLVER", "/src/cmg"), \
              mock.patch.object(self.cmg, "IMAGE", "apxchol-matlab-cmg:r2026a"), \
-             mock.patch.object(rc, "affinity_spec", return_value="3"):
+             mock.patch.object(rc, "affinity_spec", return_value="3-6"):
             command = self.cmg.command("/d/A.mtx", "/d/A.rhs.mtx", "/d/work", "/d/gauge",
-                                       3, "1e-8", 500, 900)
+                                       3, "1e-8", 500, 900, 4)
         args = __import__("shlex").split(command)
         self.assertEqual(args[:3], ["docker", "run", "--rm"])
         self.assertIn("--user", args)
-        self.assertEqual(args[args.index("--cpuset-cpus") + 1], "3")
+        self.assertNotIn("-singleCompThread", args)
+        self.assertIn("MKL_NUM_THREADS=4", args)
+        self.assertEqual(args[args.index("--cpuset-cpus") + 1], "3-6")
         for mount in ("/opt/matlab:/opt/matlab:ro", "/src/cmg:/src/cmg:ro", "/d:/d:rw",
                       f"{self.cmg.BENCH}:{self.cmg.BENCH}:ro"):
             self.assertIn(mount, args)
         image = args.index("apxchol-matlab-cmg:r2026a")
         self.assertEqual(args[image + 1], "timeout")
 
+    def test_requested_thread_budget_reaches_matlab_and_affinity(self):
+        with mock.patch.object(self.cmg, "MATLAB", "/opt/matlab"), \
+             mock.patch.object(self.cmg, "CMG_SOLVER", "/src/cmg"), \
+             mock.patch.object(self.cmg, "IMAGE", ""), \
+             mock.patch.object(rc, "affinity_spec", return_value="4-7") as affinity:
+            command = self.cmg.command("/d/A.mtx", "/d/b.mtx", "/d/work", "/d/gauge",
+                                       3, "1e-8", 500, 900, 4)
+        args = __import__("shlex").split(command)
+        affinity.assert_called_once_with(4)
+        self.assertNotIn("-singleCompThread", args)
+        self.assertIn("4-7", args)
+        self.assertIn("OMP_NUM_THREADS=4", args)
+        self.assertIn("MKL_NUM_THREADS=4", args)
+        self.assertIn("bench_cmg_common('/d/A.mtx','/d/b.mtx','/d/work',3,1e-8,500,4)", args[-1])
+
+    def test_invalid_thread_budget_is_rejected(self):
+        for threads in (0, -1, 1.5, True):
+            with self.assertRaises(ValueError):
+                self.cmg.command("/A", "/b", "/work", "/gauge", 3, "1e-8", 500, 9, threads)
+
+    def test_reported_thread_budget_must_match_request(self):
+        records = [cmg_record(i, matlab_thread_limit=4) for i in range(4)]
+        status, metrics, _ = self.cmg.summarize(records, 0, "", 3, "1e-8", 4)
+        self.assertEqual(status, "complete")
+        self.assertEqual(metrics["matlab_thread_limit"], 4)
+        records[2]["matlab_thread_limit"] = 1
+        status, _, detail = self.cmg.summarize(records, 0, "", 3, "1e-8", 4)
+        self.assertEqual(status, "failed")
+        self.assertIn("thread limit", detail["na_reason"])
+
     def test_single_quotes_in_paths_are_rejected(self):
         with self.assertRaises(ValueError):
-            self.cmg.command("/d/it's/A.mtx", "/d/b.mtx", "/w", "/g", 3, "1e-8", 500, 9)
+            self.cmg.command("/d/it's/A.mtx", "/d/b.mtx", "/w", "/g", 3, "1e-8", 500, 9, 1)
 
     def test_complete_cell_keeps_median_retained_run_and_every_total(self):
         records = [cmg_record(0, total=9.0), cmg_record(1, total=3.0),
@@ -723,7 +757,7 @@ class CmgRunnerTest(unittest.TestCase):
         self.assertEqual(metrics["total_s"], 2.0)
         self.assertEqual(metrics["max_repeat_rel_res"], 9e-9)
         self.assertEqual(metrics["stop_contract"], "original-v1")
-        self.assertEqual(metrics["effective_threads"], 1)
+        self.assertEqual(metrics["matlab_thread_limit"], 1)
         self.assertEqual(metrics["grounded_components"], 1)
         self.assertEqual(sweep_fair._repeat_totals(metrics), [2.0, 9.0, 3.0, 1.0, 2.0])
 
@@ -746,7 +780,7 @@ class CmgRunnerTest(unittest.TestCase):
     def test_empty_hierarchy_is_na_with_its_reason(self):
         reason = "canonical cmg_precondition returned an empty hierarchy"
         status, metrics, meta = self.summarize([{"repetition": 0, "status": "n/a",
-                                                 "n": 4, "nnz": 10, "reason": reason}])
+                                                 "n": 4, "nnz": 10, "reason": reason, "matlab_thread_limit": 1}])
         self.assertEqual((status, metrics, meta), ("n/a", {"n": 4, "nnz": 10},
                                                    {"na_reason": reason}))
 
@@ -789,6 +823,7 @@ class CmgRunnerTest(unittest.TestCase):
         def run(operator, rhs, **kwargs):
             self.assertEqual((operator, rhs), ("/d/A.mtx", "/d/A.rhs.mtx"))
             self.assertEqual(kwargs["repeats"], sweep_fair.REPS)
+            self.assertEqual(kwargs["threads"], sweep_fair.THREADS)
             self.assertEqual(kwargs["timeout"], int((1 + sweep_fair.REPS) * 40.0
                                                     + sweep_fair.CAP_STARTUP_S))
             return "complete", {"total_s": 1.0}
