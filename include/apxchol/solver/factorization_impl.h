@@ -860,6 +860,8 @@ factorization factorize_impl(const Eliminator& elim,
     std::vector<std::array<size_t, 256>> pre_histograms;
     std::vector<size_t> pre_filter_offsets;
     std::vector<node_index> live_degrees;   // vertex-indexed, for ctx.degrees
+    std::unique_ptr<std::atomic<std::uint32_t>[]> query_epochs;
+    std::uint32_t query_epoch = 0;
     // Keep exact degrees when their sparse updates cost less than a full walk.
     const bool incremental_degree_capable =
         std::is_same_v<Partitioner, block_greedy_partitioner> &&
@@ -1030,7 +1032,22 @@ factorization factorize_impl(const Eliminator& elim,
                                  pre_eligible.data(), eligible_count),
                              pctx, sel);
         } else {
-            p.find_partition(partition_graph_access::view(g), act, pctx, sel);
+            if constexpr (std::is_same_v<P, baumann_kyng_partitioner>) {
+                p.find_partition(partition_graph_access::view(g), act, pctx, sel);
+            } else {
+                if (!query_epochs)
+                    query_epochs = std::make_unique<std::atomic<std::uint32_t>[]>(g.n());
+                // All calls and callbacks from the previous selection have
+                // finished before this point. Elimination can then change lists.
+                if (query_epoch == std::numeric_limits<std::uint32_t>::max() - 1) {
+                    for (node_index v = 0; v < g.n(); ++v)
+                        query_epochs[v].store(0, std::memory_order_relaxed);
+                    query_epoch = 0;
+                }
+                query_epoch += 2;
+                p.find_partition(partition_graph_access::trimming_view(
+                                     g, query_epochs.get(), query_epoch), act, pctx, sel);
+            }
         }
         if (cp) (*cp)("select");
         const partition_result& part = selection_access::finalize(sel);
