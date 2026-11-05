@@ -46,10 +46,10 @@ class Engine {
                                     constantValues:values
                                              error:&error];
             if (!fn)
-                throw std::runtime_error(describe(error));
+                throw std::runtime_error("Metal setup function setup_stage stage=" + std::to_string(stage) + " scalar=" + std::to_string(scalar) + ": " + describe(error));
             auto pipe = [device newComputePipelineStateWithFunction:fn error:&error];
             if (!pipe)
-                throw std::runtime_error(describe(error));
+                throw std::runtime_error("Metal setup pipeline setup_stage stage=" + std::to_string(stage) + " scalar=" + std::to_string(scalar) + ": " + describe(error));
             return pipe;
         };
         pipelines = [NSMutableArray new];
@@ -63,7 +63,7 @@ class Engine {
                 [device newComputePipelineStateWithFunction:[library newFunctionWithName:name]
                                                       error:&error];
             if (!pipe)
-                throw std::runtime_error(describe(error));
+                throw std::runtime_error("Metal setup pipeline " + std::string(name.UTF8String) + ": " + describe(error));
             require(pipe.maxTotalThreadsPerThreadgroup >= 256, "Metal setup requires 256-thread workgroups");
             [pipelines addObject:pipe];
         }

@@ -274,9 +274,9 @@ class Finalizer {
         if (lanes) [constants setConstantValue:&lanes type:MTLDataTypeUInt atIndex:2];
         auto function = lanes ? [library newFunctionWithName:name constantValues:constants error:&error]
                               : [library newFunctionWithName:name];
-        if (!function) throw std::runtime_error(describe(error));
+        if (!function) throw std::runtime_error("Metal finalizer function " + std::string(name.UTF8String) + " lanes=" + std::to_string(lanes) + ": " + describe(error));
         auto result = [device newComputePipelineStateWithFunction:function error:&error];
-        if (!result) throw std::runtime_error(describe(error));
+        if (!result) throw std::runtime_error("Metal finalizer pipeline " + std::string(name.UTF8String) + " lanes=" + std::to_string(lanes) + ": " + describe(error));
         return result;
     }
     id<MTLBuffer> allocate(std::size_t bytes) {
@@ -340,11 +340,11 @@ class Finalizer {
                                         constantValues:constants
                                                  error:&error];
                 if (!fn)
-                    throw std::runtime_error(describe(error));
+                    throw std::runtime_error("Metal finalizer function finalize_stage stage=" + std::to_string(stage) + " fp16=" + std::to_string(half) + ": " + describe(error));
                 final_pipes[half][stage] = [device newComputePipelineStateWithFunction:fn
                                                                                  error:&error];
                 if (!final_pipes[half][stage])
-                    throw std::runtime_error(describe(error));
+                    throw std::runtime_error("Metal finalizer pipeline finalize_stage stage=" + std::to_string(stage) + " fp16=" + std::to_string(half) + ": " + describe(error));
             }
         structure = pipeline(@"plan_structure");
         count[0] = pipeline(@"plan_count", gd::lanes);

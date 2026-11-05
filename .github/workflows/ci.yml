@@ -1,393 +1,56 @@
+# Temporary diagnostic branch only. Do not merge this workflow reduction.
+# Reuses the registered ci.yml workflow so dispatch works without a main change.
 name: ci
+run-name: Metal SDK diagnostic at ${{ github.sha }}
 
 on:
-  # Manual runs, e.g. of a branch on a fork before it is proposed.
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths: &ci_paths
-      - 'include/**'
-      - 'src/**'
-      - 'tests/**'
-      - 'examples/**'
-      - 'CMakeLists.txt'
-      - 'cmake/**'
-      - 'benchmarks/**/*.py'
-      - 'benchmarks/requirements.txt'
-      - 'benchmarks/CMakeLists.txt'
-      - 'benchmarks/eigen.cmake'
-      - 'benchmarks/src/**'
-      - 'benchmarks/tests/**'
-      - 'benchmarks/patches/**'
-      - 'python/**'
-      - 'octave/**'
-      - '.github/scripts/build-cli.sh'
-      - '.github/scripts/build-sdk.sh'
-      - '.github/workflows/cli.yml'
-      - '.github/workflows/sdk.yml'
-      - '.github/workflows/ci.yml'
-      - '.github/workflows/wheels.yml'
-      - '.github/workflows/publish.yml'
-      - '.github/actions/ccache/**'
-  pull_request:
-    paths: *ci_paths
 
 permissions:
   contents: read
 
-# A newer push to the same ref cancels the in-flight run.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: metal-sdk-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  benchmark-harness:
-    name: benchmark harness (unit tests + native contracts)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      OMP_NUM_THREADS: '2'
-      OMP_DYNAMIC: 'FALSE'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # Stale-cell tests exercise ancestry against recorded fix commits.
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install harness dependencies
-        run: python -m pip install -r benchmarks/requirements.txt
-      - name: Test harness
-        run: python -B -m unittest discover -s benchmarks/tests -p 'test_*.py'
-      - name: Install native benchmark dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y g++-14 libeigen3-dev ninja-build ccache
-      - uses: ./.github/actions/ccache
-        with:
-          key: benchmark-gcc14
-      - name: Configure + build native benchmark
-        run: |
-          cmake -S benchmarks -B build-benchmark -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_C_COMPILER=gcc-14 \
-                -DAPXCHOL_NATIVE_ARCH=OFF -DAPXCHOL_DEVICE=CPU \
-                -DBENCH_HYPRE_USE_CUDA=OFF -DBUILD_GPU_RCHOL=OFF \
-                -DAPXCHOL_RCHOL_PORTABLE_PCG=ON -DAPXCHOL_BENCH_FETCH_METIS=OFF \
-                -DCMAKE_DISABLE_FIND_PACKAGE_Boost=ON
-          cmake --build build-benchmark --target benchmark original_stop_tests split_components_tests v1_config_tests discard_streambuf_tests -j2
-      - name: Run native benchmark contracts
-        run: ctest --test-dir build-benchmark --no-tests=error --output-on-failure --timeout 60
-      - &ccache-stats
-        name: Show compiler cache statistics
-        if: always()
-        run: ccache --show-log-stats
-
-  benchmark-macos:
-    name: benchmark (macOS, Apple Clang, Metal, native contracts)
+  metal-sdk-diagnostic:
+    if: github.ref == 'refs/heads/codex/metal-sdk-hosted-diagnostic'
     runs-on: macos-15
     timeout-minutes: 30
     env:
-      OMP_NUM_THREADS: '2'
-      OMP_DYNAMIC: 'FALSE'
-      CMAKE_BUILD_PARALLEL_LEVEL: '3'
+      CC: clang
+      CXX: clang++
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '1'
     steps:
       - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: brew install libomp ninja ccache
-      - uses: ./.github/actions/ccache
         with:
-          key: benchmark-mac-metal
-      # OpenMP_ROOT lets Hypre's own FindOpenMP see Homebrew's keg-only libomp.
-      # AMGCL is skipped (no Boost); CUDA competitors and ParAC do not build here.
-      - name: Configure + build native benchmark
+          persist-credentials: false
+      - name: Record source and Apple Silicon environment
+        shell: bash
         run: |
-          cmake -S benchmarks -B build-benchmark -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                -DAPXCHOL_DEVICE=METAL -DAPXCHOL_NATIVE_ARCH=OFF -DBUILD_GPU_RCHOL=OFF \
-                -DOpenMP_ROOT="$(brew --prefix libomp)" -DCMAKE_DISABLE_FIND_PACKAGE_Boost=ON \
-                -DBENCH_ACCELERATE=ON
-          cmake --build build-benchmark --target benchmark original_stop_tests split_components_tests v1_config_tests discard_streambuf_tests accelerate_tests
-      - name: Run native benchmark contracts and a tiny Metal cell
-        run: ctest --test-dir build-benchmark --no-tests=error --output-on-failure --timeout 120
-      - *ccache-stats
-
-  linux:
-    name: Linux (${{ matrix.name }}, build + ctest)
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: GCC 14, native
-            cc: gcc-14
-            cxx: g++-14
-            packages: g++-14
-            native_arch: 'ON'
-          - name: GCC 14, portable, 64-bit nodes
-            cc: gcc-14
-            cxx: g++-14
-            packages: g++-14
-            native_arch: 'OFF'
-            cmake_args: -DAPXCHOL_INDEX_WIDTH=64
-          - name: Clang 18, portable
-            cc: clang-18
-            cxx: clang++-18
-            packages: clang-18 libomp-18-dev
-            native_arch: 'OFF'
-          - name: Clang 22, portable
-            cc: clang-22
-            cxx: clang++-22
-            llvm: '22'
-            packages: libomp-22-dev
-            native_arch: 'OFF'
-    env:
-      CC: ${{ matrix.cc }}
-      CXX: ${{ matrix.cxx }}
-      NATIVE_ARCH: ${{ matrix.native_arch }}
-      CMAKE_ARGS: ${{ matrix.cmake_args }}
-      CMAKE_BUILD_PARALLEL_LEVEL: '3'
-    steps:
-      - uses: actions/checkout@v4
-      - name: Add the LLVM apt repository
-        if: matrix.llvm
+          mkdir -p diagnostic-logs
+          test "$(uname -m)" = arm64
+          {
+            git rev-parse HEAD
+            uname -a
+            sw_vers
+            xcodebuild -version
+            clang++ --version
+          } 2>&1 | tee diagnostic-logs/environment.log
+      - name: Build installed Metal SDK and check CPU/GPU roundtrips once
+        shell: bash
         run: |
-          wget -qO "$RUNNER_TEMP/llvm.sh" https://apt.llvm.org/llvm.sh
-          sudo bash "$RUNNER_TEMP/llvm.sh" ${{ matrix.llvm }}
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y ${{ matrix.packages }} ninja-build ccache
-      - uses: ./.github/actions/ccache
+          brew install libomp
+          bash .github/scripts/build-sdk.sh METAL 2>&1 | tee diagnostic-logs/build.log
+          python3 tests/check_sdk_archive.py dist/*.tar.gz tests/cmake_install cpu gpu 2>&1 | tee diagnostic-logs/consumer.log
+      - name: Retain diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          key: native-${{ matrix.cc }}-${{ matrix.native_arch }}
-      - &configure-build
-        name: Configure + build (Release)
-        run: |
-          cmake -S tests/cmake_consumer -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                -DAPXCHOL_NATIVE_ARCH=${NATIVE_ARCH} -DCMAKE_COMPILE_WARNING_AS_ERROR=ON ${CMAKE_ARGS:-}
-          cmake --build build
-      - &ctest
-        name: Run unit tests and examples
-        run: ctest --test-dir build --no-tests=error --output-on-failure
-      - name: Test library-only root embedding
-        if: matrix.cxx == 'clang++-18'
-        run: |
-          cmake -S tests/cmake_subdirectory -B build-subdirectory -G Ninja \
-                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
-          cmake --build build-subdirectory --parallel 2
-          ctest --test-dir build-subdirectory --no-tests=error --output-on-failure
-          cmake -S tests/cmake_subdirectory -B build-subdirectory-tests -G Ninja \
-                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
-                -DAPXCHOL_BUILD_TESTS=ON -DAPXCHOL_BUILD_CLI=OFF
-          cmake --build build-subdirectory-tests --parallel 2
-          ctest --test-dir build-subdirectory-tests --no-tests=error --output-on-failure
-          cmake -S tests/cmake_subdirectory -B build-subdirectory-march -G Ninja \
-                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
-                -DCMAKE_CXX_FLAGS=-march=x86-64-v3 | tee subdirectory-march.log
-          grep -q "using the -march/-mcpu flag from CMAKE_CXX_FLAGS" subdirectory-march.log
-          cmake --build build-subdirectory-march --parallel 2
-          ctest --test-dir build-subdirectory-march --no-tests=error --output-on-failure
-          # A portable core with a consumer built for a wider instruction set.
-          cmake -S tests/cmake_subdirectory -B build-subdirectory-avx2 -G Ninja \
-                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
-                -DAPXCHOL_TEST_CONSUMER_FLAGS=-mavx2
-          cmake --build build-subdirectory-avx2 --parallel 2
-          ctest --test-dir build-subdirectory-avx2 --no-tests=error --output-on-failure
-      - name: Test relocated SDK
-        if: matrix.cxx == 'clang++-18'
-        run: |
-          cmake -S cmake/core -B build-sdk -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                -DAPXCHOL_NATIVE_ARCH=OFF -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
-          cmake --build build-sdk
-          cmake --install build-sdk --prefix "$RUNNER_TEMP/apxchol-sdk"
-          mv "$RUNNER_TEMP/apxchol-sdk" "$RUNNER_TEMP/apxchol-sdk-relocated"
-          mv build-sdk build-sdk-relocated
-          cmake -S tests/cmake_install -B build-sdk-consumer -G Ninja \
-                -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/apxchol-sdk-relocated" \
-                -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF \
-                -DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF
-          cmake --build build-sdk-consumer
-          ctest --test-dir build-sdk-consumer --no-tests=error --output-on-failure
-      - *ccache-stats
-
-  linux-gcc15:
-    name: Linux (GCC 15, portable, build + ctest)
-    runs-on: ubuntu-latest
-    # Ubuntu 24.04 does not package GCC 15; the official image does.
-    container: gcc:15
-    env:
-      CC: gcc
-      CXX: g++
-      NATIVE_ARCH: 'OFF'
-      CMAKE_BUILD_PARALLEL_LEVEL: '3'
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: |
-          apt-get update -qq
-          apt-get install -y --no-install-recommends cmake ninja-build ccache
-      - uses: ./.github/actions/ccache
-        with:
-          key: native-gcc15
-      - *configure-build
-      - *ctest
-      - *ccache-stats
-
-  cuda:
-    name: Linux (CUDA 13.4, GCC 14, compile only)
-    runs-on: ubuntu-24.04
-    # Compile only; native CUDA validation runs separately. C++23 needs CMake 4.4+.
-    env:
-      CC: gcc-14
-      CXX: g++-14
-      CUDAHOSTCXX: g++-14
-      CUDACXX: /usr/local/cuda-13.4/bin/nvcc
-      NATIVE_ARCH: 'OFF'
-      CMAKE_ARGS: -DAPXCHOL_DEVICE=CUDA -DCMAKE_CUDA_ARCHITECTURES=80
-      CMAKE_BUILD_PARALLEL_LEVEL: '3'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install dependencies
-        run: |
-          python -m pip install 'cmake>=4.4'
-          wget -qO "$RUNNER_TEMP/cuda-keyring.deb" \
-            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-          sudo dpkg -i "$RUNNER_TEMP/cuda-keyring.deb"
-          sudo apt-get update -qq
-          sudo apt-get install -y g++-14 ninja-build cuda-nvcc-13-4 cuda-cudart-dev-13-4 ccache
-      - uses: ./.github/actions/ccache
-        with:
-          key: cuda13.4-gcc14-sm80
-      - *configure-build
-      - name: Build root-embedding consumer
-        run: |
-          cmake -S tests/cmake_subdirectory -B build-subdirectory -G Ninja \
-                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON ${CMAKE_ARGS}
-          cmake --build build-subdirectory --parallel 2
-      - *ccache-stats
-
-  macos:
-    name: macOS (Apple Clang, ${{ matrix.device }}, ${{ matrix.native_arch == 'ON' && 'native' || 'portable' }}, build + ctest)
-    runs-on: macos-15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - device: CPU
-            native_arch: 'OFF'
-          - device: METAL
-            native_arch: 'ON'
-    env:
-      CMAKE_ARGS: -DAPXCHOL_DEVICE=${{ matrix.device }}
-      NATIVE_ARCH: ${{ matrix.native_arch }}
-      CMAKE_BUILD_PARALLEL_LEVEL: '3'
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: brew install libomp ninja ccache
-      - uses: ./.github/actions/ccache
-        with:
-          key: mac-${{ matrix.device }}-${{ matrix.native_arch }}
-      - *configure-build
-      - *ctest
-      - name: Test Metal root-embedding consumer
-        if: matrix.device == 'METAL'
-        run: |
-          cmake -S tests/cmake_subdirectory -B build-subdirectory -G Ninja \
-                -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON ${CMAKE_ARGS}
-          cmake --build build-subdirectory --parallel 2
-          ctest --test-dir build-subdirectory --no-tests=error --output-on-failure
-      - *ccache-stats
-
-  python:
-    uses: ./.github/workflows/wheels.yml
-
-  cli:
-    uses: ./.github/workflows/cli.yml
-
-  sdk:
-    uses: ./.github/workflows/sdk.yml
-
-  input-formats:
-    name: input-format examples (Eigen, CHOLMOD, Matrix Market)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    env:
-      CC: gcc-14
-      CXX: g++-14
-      CMAKE_BUILD_PARALLEL_LEVEL: '3'
-    steps:
-      - uses: actions/checkout@v4
-      # Eigen and SuiteSparse are installed for these examples only; the
-      # library itself does not use them.
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y g++-14 libeigen3-dev libsuitesparse-dev ninja-build ccache
-      - uses: ./.github/actions/ccache
-        with:
-          key: input-formats-gcc14
-      - name: Build the examples of docs/input-formats.md
-        run: |
-          cmake -S examples/input_formats -B build-input-formats -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                -DAPXCHOL_NATIVE_ARCH=OFF -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
-          cmake --build build-input-formats
-      - name: Run the examples
-        run: ctest --test-dir build-input-formats --no-tests=error --output-on-failure
-      - *ccache-stats
-
-  octave:
-    name: octave (mkoctfile + tests)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -qq
-          # g++-14 for the C++23 core (mkoctfile honors the CXX env var below).
-          # octave-dev (not liboctave-dev) provides mkoctfile on Ubuntu 24.04.
-          # Skip optional Java, plotting and documentation packages. Keep the
-          # pthread BLAS/LAPACK runtime selected by the full Octave install.
-          sudo apt-get install -y --no-install-recommends \
-            g++-14 octave octave-dev libopenblas0-pthread
-      - name: Build MEX + run tests
-        env:
-          CC: gcc-14
-          CXX: g++-14
-        run: |
-          cd octave
-          ./build.sh
-          octave --no-gui --eval "addpath(pwd); run('tests/test_apxchol.m')"
-      - name: Run the input-formats example
-        run: octave --no-gui --eval "addpath(fullfile(pwd, 'octave')); run('examples/input_formats/octave_input.m')"
-
-  matlab:
-    name: MATLAB (R2026b, GCC 13, MEX + tests)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    env:
-      OMP_NUM_THREADS: '2'
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install build dependencies
-        run: |
-          # Use the runner's official HTTPS mirrors for MATLAB's dependency downloads.
-          sudo sed -i.bak '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
-          sudo apt-get update -qq
-          sudo apt-get install -y g++-13
-      - uses: matlab-actions/setup-matlab@v3
-        with:
-          release: R2026b
-      - name: Build MEX + run tests
-        uses: matlab-actions/run-command@v3
-        with:
-          command: >-
-            mex('-setup', 'C++');
-            compiler = mex.getCompilerConfigurations('C++', 'Selected');
-            assert(isscalar(compiler) && strcmp(compiler.Manufacturer, 'GNU'));
-            [status, version] = system([compiler.Details.CompilerExecutable ' -dumpversion']);
-            assert(status == 0 && sscanf(version, '%d', 1) == 13, 'Expected GCC 13 for this job');
-            run('octave/build_and_test.m');
+          name: metal-sdk-diagnostic-${{ github.run_id }}
+          path: diagnostic-logs/
+          if-no-files-found: warn
+          retention-days: 7
