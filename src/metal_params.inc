@@ -11,5 +11,5 @@ struct Params {
     float preconditioner_scale;
     unsigned mapped_rows; // operator rows retain input order
 };
-enum : unsigned { kTreeRows = 256, kTreeLanes = 16 };
+enum : unsigned { kTreeRows = 256, kTreeLanes = 32 };
 )

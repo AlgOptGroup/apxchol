@@ -144,6 +144,12 @@ pipelines make_pipelines(id<MTLDevice> device, id<MTLLibrary> library, unsigned 
         for (unsigned df = 0; df < (op == unsigned(operation::multiply) ? 2u : 1u); ++df)
             p.pcg[op][df] = make_pipeline(device, library, "pcg_step", false, df != 0, op, false, columns);
     p.finalize = make_pipeline(device, library, "finalize", false, false, 0, false, columns);
+    for (unsigned op = 0; op < 4; ++op)
+        for (unsigned df = 0; df < (op == unsigned(operation::multiply) ? 2u : 1u); ++df)
+            if ([p.pcg[op][df] threadExecutionWidth] != kTreeLanes)
+                throw std::runtime_error("Metal PCG requires 32-thread SIMD groups");
+    if ([p.finalize threadExecutionWidth] != kTreeLanes)
+        throw std::runtime_error("Metal PCG finalization requires 32-thread SIMD groups");
     for (int half = 0; half < 2; ++half) {
         for (int fwd = 0; fwd < 2; ++fwd)
             p.dataflow_init[half][fwd] = make_pipeline(device, library, "dataflow_init", fwd != 0, false, 0, half, columns);
