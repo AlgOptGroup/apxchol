@@ -727,6 +727,18 @@ TEST_F(MetalDevice, LongOperatorRowAndPartialTile) {
                 EXPECT_LE(true_residual(A, b, result.x), 1e-8);
                 guess = times(result.x, 0.5);
             }
+            for (const int width : {2, 4}) {
+                SCOPED_TRACE(testing::Message() << "width=" << width);
+                dense_matrix B(n, width), X(n, width);
+                for (int q = 0; q < width; ++q) set_column(B, q, rhs(n, q + 1, false));
+                const auto batch = solver.solve(cview(B), X.view(), 1e-8, 500);
+                ASSERT_EQ(batch.columns.size(), std::size_t(width));
+                for (int q = 0; q < width; ++q) {
+                    EXPECT_TRUE(batch.columns[q].converged);
+                    ASSERT_TRUE(all_finite(X.col(q)));
+                    EXPECT_LE(true_residual(A, column(B, q), X.col(q)), 1e-8);
+                }
+            }
         }
     }
 }

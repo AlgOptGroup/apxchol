@@ -11,6 +11,7 @@
 - Any 1.x release reads the solver archives written by earlier 1.x releases. A minor release may add a format version and keeps reading older ones; an older apxchol given a newer archive fails with an upgrade message.
 
 ### GPU backends
+- Metal PCG uses full 32-thread SIMD groups for reductions and long-row multiplication.
 - CUDA setup, factorization and PCG run entirely on the device, with a sync-free dataflow triangular solve and optional fp16 factor storage.
 - New Apple Metal backend: setup, factorization and PCG run on the device, for single and batched solves.
 - Metal backend and macOS support contributed by Samuel Talkington (@samtalki).

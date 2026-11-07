@@ -109,7 +109,7 @@ inline void finalize_columns(constant Params& P, device const df* partial,
     }
 }
 
-// ---- one threadgroup of 16 lanes: fold the partials, then the PCG scalars ----
+// ---- one threadgroup of kTreeLanes lanes: fold the partials, then the PCG scalars ----
 kernel void finalize(constant Params& P [[buffer(0)]],
                      device const df* partial [[buffer(6)]],
                      device SolveState* state [[buffer(7)]],
