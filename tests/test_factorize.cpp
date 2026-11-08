@@ -1349,8 +1349,9 @@ TEST_P(StrategyConvergenceTest, GridConverges) {
     auto [is, name] = GetParam();
     auto L = grid_laplacian(15, 15);
     auto b = apxchol::test::random_rhs(225);
-    auto res = apxchol::solve(csc(L), b, 1e-6, 1000,
-        {}, {.factor_opts = {.seed = 42, .experimental = {.partitioner = is}}});
+    apxchol::solve_options opts;
+    opts.factor_opts.experimental.partitioner = is;
+    auto res = apxchol::solve(csc(L), b, 1e-6, 1000, {}, opts);
     EXPECT_LT(res.residual, 1e-4)
         << "strategy " << name << " failed: iters=" << res.iterations
         << " residual=" << res.residual;
@@ -1360,8 +1361,9 @@ TEST_P(StrategyConvergenceTest, SDDMConverges) {
     auto [is, name] = GetParam();
     auto M = sddm_grid(10, 10, 2.0);
     const std::vector<double> b = apxchol::test::random_vector(100);
-    auto res = apxchol::solve(csc(M), b, 1e-6, 1000,
-        {}, {.factor_opts = {.seed = 42, .experimental = {.partitioner = is}}});
+    apxchol::solve_options opts;
+    opts.factor_opts.experimental.partitioner = is;
+    auto res = apxchol::solve(csc(M), b, 1e-6, 1000, {}, opts);
     EXPECT_LT(res.residual, 1e-4)
         << "strategy " << name << " failed on SDDM: iters=" << res.iterations
         << " residual=" << res.residual;
