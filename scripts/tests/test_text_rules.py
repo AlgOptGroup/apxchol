@@ -87,16 +87,24 @@ class Solver:
         """Apply it; four."""
 '''
 
-    def units(self, enabled=True):
-        return RULES.python_units(self.SRC, {"python_public_docstrings": enabled})
+    def units(self, src=None):
+        return RULES.python_units(src or self.SRC, {"python_public_docstrings": True})
 
     def test_public_docstrings_keep_their_lines(self):
         units = self.units()
         self.assertEqual([ln for ln, t in units if ";" in t], [1, 9, 11, 22])
         self.assertFalse(any("Hidden" in t for _, t in units))
 
+    def test_fields_are_separate_items(self):
+        src = 'def f():\n    """Do it.\n\n    :param a: First; one.\n    :param b: Second; two.\n    """\n'
+        self.assertEqual([ln for ln, t in self.units(src) if ";" in t], [4, 5])
+
+    def test_doctests_are_code(self):
+        src = 'def f():\n    """Do it.\n\n    >>> retry; now()\n    a; b\n\n    Text; here.\n    """\n'
+        self.assertEqual([ln for ln, t in self.units(src) if ";" in t], [7])
+
     def test_docstrings_are_off_by_default(self):
-        self.assertEqual(self.units(False), [])
+        self.assertEqual(RULES.python_units(self.SRC, {}), [])
 
 
 class AllowComment(unittest.TestCase):

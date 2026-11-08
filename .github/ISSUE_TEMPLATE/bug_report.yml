@@ -22,7 +22,6 @@ body:
       description: >-
         The smallest command, script or matrix that shows the problem.
         Attach a small Matrix Market file or say how to generate the input.
-      render: shell
     validations:
       required: true
   - type: textarea

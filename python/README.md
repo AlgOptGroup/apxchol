@@ -175,7 +175,7 @@ support fewer construction choices.
 | `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
 | `regularization` | Minimum diagonal excess of the preconditioner, as a fraction of each diagonal after lumping; excess below 1e-12 of the diagonal counts as zero first; `A` is not modified; `0` disables it |
 | `lump_max_mass` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
-| `verbose` | Print setup and solve diagnostics; off by default |
+| `verbose` | Print setup diagnostics, and solve diagnostics on CPU; off by default |
 
 Unknown keywords raise `ValueError`, like other invalid input or options;
 execution failures raise `RuntimeError` (see

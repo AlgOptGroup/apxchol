@@ -209,12 +209,21 @@ def _public_docstrings(tree):
         rest = [l for l in lines[1:] if l.strip()]
         indent = min((len(l) - len(l.lstrip()) for l in rest), default=0)
         lines = [lines[0].strip()] + [l[indent:] for l in lines[1:]]
-        # A dedent starts a new item, such as the next parameter: scan each item on its own.
+        # Doctest examples and their output are code. Blank them and keep the line numbers.
+        in_doctest = False
+        for i, l in enumerate(lines):
+            if l.lstrip().startswith(">>>"):
+                in_doctest = True
+            elif not l.strip():
+                in_doctest = False
+            if in_doctest:
+                lines[i] = ""
+        # A dedent or a field such as `:param x:` starts a new item: scan each item on its own.
         chunks, prev = [[0, []]], 0
         for i, l in enumerate(lines):
             cur = len(l) - len(l.lstrip())
             if l.strip():
-                if cur < prev:
+                if cur < prev or (re.match(r":[\w ]+:(\s|$)", l.lstrip()) and chunks[-1][1]):
                     chunks.append([i, []])
                 prev = cur
             chunks[-1][1].append(l)

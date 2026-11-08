@@ -1134,8 +1134,8 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
     }
     if (!compatible) {
         if (opts.backend == solve_backend::gpu)
-            throw std::invalid_argument("apxchol: Metal GPU setup requires the default sampler and "
-                "partitioner and compressed, sorted, paired CSC input. Request the CPU backend.");
+            throw std::invalid_argument("apxchol: Metal GPU setup supports only the default factor options "
+                "and compressed, sorted, paired CSC input. Request the CPU backend.");
         return solve_backend::cpu;
     }
     if (!detail::metal_setup_regularization_supported(opts.factor_opts.regularization,

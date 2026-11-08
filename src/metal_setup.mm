@@ -145,8 +145,8 @@ resident_factor factorize(id<MTLDevice> device, csc_ref<double> A,
     @autoreleasepool {
         validate_factor_options(options.factor_opts);
         if (!metal_setup_options_supported(options.factor_opts))
-            throw std::invalid_argument("Metal device setup requires the default block-greedy "
-                                        "partitioner and GKS sampler options. Request the CPU backend.");
+            throw std::invalid_argument("Metal device setup supports only the default factor options. "
+                                        "Request the CPU backend.");
         auto& cached = pipelines_for(device);
         if (cp) {
             cp->descend("setup");
