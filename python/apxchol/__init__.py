@@ -194,7 +194,7 @@ class Solver:
         apply; ``backend="auto"`` uses CPU, ``"gpu"`` requests upload.
         ``lump_max_mass`` still bounds the archived operator, so pass it again
         if the solver was built with a non-default value. Tolerance, iteration
-        budget and warm starts remain solve arguments.
+        budget and initial guess remain solve arguments.
         """
         options = _solver_options(**opts)
         self = cls.__new__(cls)
@@ -282,7 +282,7 @@ class Solver:
         batched solver and return one convergence result per column. Omitted
         ``rtol`` and ``maxiter`` use the compiled native defaults.
 
-        ``x0`` is an initial solution estimate with the RHS shape; an
+        ``x0`` is an initial guess with the RHS shape; an
         already-converged guess takes zero iterations. ``out`` must have
         that shape and be writable, C- or F-contiguous float64. It is returned
         as :attr:`SolveResult.x`.

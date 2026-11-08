@@ -133,7 +133,7 @@ represents several independent systems with the same `A`; pass the columns
 together to use native batching. This reuses the factor and shares work across
 columns.
 
-A **warm start** is an initial guess `x0`, often the solution of a related
+An **initial guess** `x0` is often the solution of a related
 system. Without one, the solver starts from zero. A useful guess can reduce
 iterations; a poor guess need not help. C++, Python and MATLAB/Octave support
 vector and matrix initial guesses, and the CLI reads one with `--x0`. See the [Python](../python/README.md) and

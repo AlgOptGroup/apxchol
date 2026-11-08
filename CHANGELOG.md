@@ -3,7 +3,7 @@
 ## Unreleased (since v0.2.2)
 
 ### Solver and factorization
-- New trace-cycle clique sampler (`--sampler trace_cycle`) on CPU and GPU; GKS stays the default.
+- New trace-cycle clique sampler (`--sampler trace_cycle`) on CPU and CUDA; GKS stays the default.
 - Faster setup: one AoS graph throughout factorization, incremental degrees, and parallel residual sparsification.
 - Inputs are validated by operator class; nearly-SDDM inputs are repaired by M-matrix lumping.
 - Batched solves take any number of right-hand sides on CPU, CUDA and Metal, processed in panels of up to eight columns on CPU and four on GPU.
@@ -23,7 +23,7 @@
 - Setup profiles include unlabelled work and agree with `solver::setup_seconds()`. Normal benchmark runs omit optional stage profiling; `--profile` retains the detailed breakdown.
 - Breaking: Eigen types leave the C++ API. `solver`, `factorize` and the one-shot `solve` take a borrowed CSC matrix, `csc_view` (32-bit indices) or `csc_view64` (64-bit), from the new header `apxchol/views.h`; rows must be sorted and unique within each column, and an invalid view throws `std::invalid_argument`. Vectors are `std::span`s and matrices `const_matrix_view` / `matrix_view` (column-major).
 - apxchol no longer depends on Eigen. The installed CMake package, SDK archives, Python wheels, CLI archives and the MATLAB/Octave build neither bundle nor require it, and their notices drop Eigen's MPL-2.0 terms; only the benchmark harness still uses Eigen, for its competitors and input reading.
-- Breaking: the initial guess is a `std::span` that is empty by default instead of a `const Eigen::VectorXd*`, and the batch warm start is a `const_matrix_view` whose null `data` means none.
+- Breaking: the initial guess is a `std::span` that is empty by default instead of a `const Eigen::VectorXd*`, and the batch initial guess is a `const_matrix_view` whose null `data` means none.
 - Breaking: `solve_result::x` and the vector `solver::apply` return `std::vector<double>`; `solve_result::iterations`, `factorization::lumped_offdiag`, `solver::rows()` and `solver::operator_nnz()` are `std::int64_t`.
 - Breaking: the C++ one-shot `solve(A, b, tol, max_iter, x0, opts)` takes an optional initial guess before the options, like the reusable solver, Python and MATLAB/Octave; the CLI reads one with `--x0 FILE`, shaped like the right-hand side.
 - Breaking: runtime environment variables are replaced by explicit solver options.

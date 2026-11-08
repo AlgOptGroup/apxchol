@@ -95,7 +95,7 @@ Over `k` separate one-RHS calls each costs `setup_seconds / k + solve_seconds`
 on average, and one batched call of `k` columns costs
 `(setup_seconds + solve_seconds) / k` per RHS; see [judging whether reuse pays off](https://algoptgroup.github.io/apxchol/docs/usage.html#judging-whether-reuse-pays-off).
 
-A *warm start* supplies an initial solution estimate:
+An initial guess `x0` starts the solve from a known estimate:
 
 ```python
 result = solver.solve(b2, x0=first.x)
@@ -175,7 +175,7 @@ support fewer construction choices.
 | `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
 | `regularization` | Minimum diagonal excess of the preconditioner, as a fraction of each diagonal after lumping; excess below 1e-12 of the diagonal counts as zero first; `A` is not modified; `0` disables it |
 | `lump_max_mass` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
-| `verbose` | Print setup diagnostics; off by default |
+| `verbose` | Print setup and solve diagnostics; off by default |
 
 Unknown keywords raise `ValueError`, like other invalid input or options;
 execution failures raise `RuntimeError` (see
