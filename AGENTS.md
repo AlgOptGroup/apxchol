@@ -80,18 +80,17 @@ Integration correctness is not performance acceptance: compare original-system q
 
 ## Writing for people
 
-Read the shared guides in `docs/writing/` before you write:
+Before you change documentation, `--help`, error messages or docstrings, read `docs/writing/guides/PRINCIPLES.md` and
+the house profile below. In a fresh clone, first run `git submodule update --init -- docs/writing`.
 
-- Documentation, `--help` or error messages: `docs/writing/PRINCIPLES.md`.
-- A PR, an issue, a review or a commit message: the relevant section of `docs/writing/ENGINEERING.md`.
-- A new option, mode or public parameter: `docs/writing/STEWARDSHIP.md`.
-- Text that teaches how the method works: `docs/writing/TEACHING.md`.
+- A PR, an issue, a review or a commit message: read the relevant section of `docs/writing/guides/ENGINEERING.md`.
+- A new option, mode or public parameter: read `docs/writing/guides/STEWARDSHIP.md`.
+- Text that teaches how the method works: read `docs/writing/guides/TEACHING.md`.
 
 `docs/writing/` is a submodule of [ratschlab/writing-rules](https://github.com/ratschlab/writing-rules), pinned to one
-revision. Run `git submodule update --init docs/writing` if it is empty. Move the pin in a reviewed change of its own.
+revision. Move the pin in a reviewed change of its own.
 
-The apxchol house profile below adds exact limits and local terms. Follow it where it is stricter than the shared
-guides. It applies to everything a person reads in this repository:
+The guides and the house profile apply to everything a person reads in this repository:
 
 - `README.md`, `python/README.md`, `octave/README.md` and the guides in `docs/`.
 - The CLI's `--help` and the Python docstrings.
@@ -99,43 +98,50 @@ guides. It applies to everything a person reads in this repository:
 - `CHANGELOG.md` and `SECURITY.md`.
 - PR descriptions, review comments and commit messages.
 
-It doesn't apply to code comments, debug logs or the shared guides in `docs/writing/`. The checked rules (R1, R2 and R4 to
-R9) use the numbers of the checks in the writing-rules `GUIDE.md`. The other numbers are local.
+They don't apply to code comments or debug logs.
 
-- R1. One idea per sentence. No semicolons, no em dash between clauses, and at most 1 colon per sentence. Split the
-  sentence or use a list.
-- R2. Short sentences: 20 words or fewer on average, none over 30.
-- R3. Outcome first. The first 2 words carry the outcome or the action.
-- R4. An error says what happened, why, and what to do next, in that order. The next step names who or what: a flag,
-  a file, a page, a contact. Codes and IDs go after the sentence. No "sorry", "oops" or a bare "something went
-  wrong".
-- R5. The reader's words. Defined technical terms such as preconditioner, PCG or CSR are fine. Define an internal
-  name (a route code, a struct name) the first time, or leave it out.
-- R6. Active voice with a named actor: you, the solver, the CLI. Passive voice is fine when no actor matters, as in
-  "Nothing was changed."
-- R7. Digits and units for every number and time: "1 hour", "5 GB". No "soon" or "a while" when the code knows the
-  answer. "May" and "might" are fine for permission and real uncertainty, not to soften a fact the code fixes.
-- R8. One term per thing and one verb per action. The term list in `scripts/text-rules.json` is closed: a new term
-  goes into it in the same commit. A default in the guides matches `--help` and `factor_options.h`.
-- R9. No "we" unless the text says who "we" is.
-- R10. Every number, limit, default or guarantee matches the code or config that sets it. The commit that adds a
-  value to the text names where the code sets it. A change to the value changes the text in the same commit.
-- R12. A `--help` option fits on 1 line. An option with a default ends with it.
-- R17. Paragraphs: at most 5 sentences in a guide and 3 sentences in an exception message. Three or more parallel
-  items become a list.
-- R18. Headings are statements that name the topic, with the key word first.
-- R19. Details last. IDs, codes, raw output and internals go after what most readers need, in a Details part.
-- R23. A link names its destination, never "here" or "click here".
+## House profile
 
-What a PR, a review and a commit look like:
+apxchol follows the shared writing guides with these differences. P, E and D refer to the guides. "Check R1" and so
+on are the text checks below.
 
-- **Commit message.** The subject says what changed, in plain words, in 72 characters or fewer. The body says why,
-  then the numbers (before and after, with the machine and command), then the risk.
-- **PR description.** At most about 15 lines. The first line is the outcome for a user. Then 2 to 4 bullets: what
-  changed and why. Then the numbers with the command, matrix and machine, the risk, and how it was checked. Name the
-  `CHANGELOG.md` line. Say what is not done. Don't list open review points.
-- **Review comment.** One finding per comment. Start with the severity (Must, Should or Nit) and the outcome: what
-  breaks, for whom. Then the evidence (`file:line`, input, output) and a concrete fix.
+- P1, stricter: the first 2 words carry the outcome or the action. Details such as IDs, codes, raw output and
+  internals go after what most readers need. Reason: readers scan docs and `--help` for the result.
+- P3 and check R1, stricter: one idea per sentence. No semicolons, no em dash between clauses, and at most 1 colon per
+  sentence. Reason: many readers read English as a second language.
+- P3 and check R2, stricter: sentences have 20 words or fewer on average and none over 30. Reason: same as R1.
+- P3 and check R5, stricter: defined technical terms such as preconditioner, PCG or CSR are fine. Define an internal
+  name, such as a route code or a struct name, the first time, or leave it out. Reason: users never see internal
+  names elsewhere.
+- P3 and check R6, stricter: active voice with a named actor, such as you, the solver or the CLI. Passive voice is fine
+  when no actor matters, as in "Nothing was changed." Reason: the reader needs to know who acts.
+- P3 and check R8, stricter: one term per thing and one verb per action. The term list in `scripts/text-rules.json` is
+  closed, so a new term goes into it in the same commit. Reason: the same option text exists in up to 6 copies.
+- P4, stricter: every number, limit, default or guarantee matches the code or config that sets it. A default in the
+  guides matches `--help` and `factor_options.h`. The commit that adds a value names where the code sets it, and a
+  change to the value changes the text in the same commit. Reason: option text is copied by hand across interfaces.
+- P5 and check R4, stricter: an error says what happened, why, and what to do next, in that order. The next step names
+  a flag, a file, a page or a contact. Codes and IDs go after the sentence. No "sorry", "oops" or a bare "something
+  went wrong". Reason: most errors come from options, and the fix is usually another value or the CPU backend.
+- P6, stricter: headings are statements that name the topic, with the key word first. Reason: readers scan headings.
+- Check R7, narrowed: digits and units for every number and time, such as "1 hour" or "5 GB". No "soon" or "a while"
+  when the code knows the answer. "May" and "might" stay allowed for permission and real uncertainty. Reason: P4
+  keeps real uncertainty, and a word list can't tell it from hedging.
+- Check R9, on: no "we" unless the text says who "we" is. Reason: the docs speak to users, not for a team.
+- H1, added: a `--help` option fits on 1 line, and an option with a default ends with it. Reason: users scan options in
+  a terminal.
+- H2, added: paragraphs have at most 5 sentences in a guide and 3 in an exception message. Three or more parallel
+  items become a list. Reason: short blocks are easier to scan.
+- ENGINEERING "Commit titles and bodies", stricter: the subject says what changed, in plain words, in 72 characters or
+  fewer. The body says why, then the numbers (before and after, with the machine and command), then the risk. Reason:
+  performance changes need their evidence in the history.
+- ENGINEERING "Pull request descriptions", stricter: at most about 15 lines. The first line is the outcome for a user.
+  Then 2 to 4 bullets: what changed and why. Then the numbers with the command, matrix and machine, the risk, and how
+  it was checked. Name the `CHANGELOG.md` line. Say what is not done. Don't list open review points. Reason: same as
+  for commits.
+- ENGINEERING "Reviews and review replies", stricter: one finding per comment. Start with the severity (Must, Should
+  or Nit) and the outcome: what breaks, for whom. Then the evidence (`file:line`, input, output) and a concrete fix.
+  Reason: the maintainer triages comments by severity.
 
 `python3 scripts/check_text_rules.py` compares the files in `scripts/text-rules.json` with
 `scripts/text-rules-baseline.json`. It fails only when a file gains one of these hits:
@@ -147,12 +153,11 @@ What a PR, a review and a commit look like:
 - R8: a banned term from the term list.
 - R9: "we", "our" or "us" where the scope bans them.
 
-It reports R2 (sentences over 30 words) and R6 (passive voice) with `--report` and never fails on them. Every other
-rule, and em dashes and colons for R1, is for the reviewer. Text outside these files, such as commit messages and PR
+It reports R2 (sentences over 30 words) and R6 (passive voice) with `--report` and never fails on them. The rest of
+the house profile, and em dashes and colons for R1, is for the reviewer. Text outside these files, such as commit messages and PR
 descriptions, is not linted.
 
 A file with fewer hits than its baseline passes with a note. Lower its baseline with `--update-baseline`, which
 refuses increases. A deliberate exception takes a comment on that line or the line before: `text-rules-allow: <rule>
 <term> <reason>`, such as `text-rules-allow: R8 kmer the flag name`. The term must occur in the text.
 
-Reviewers use this list.
