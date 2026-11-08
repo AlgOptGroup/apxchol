@@ -12,9 +12,6 @@
     "octave/README.md",
     "CHANGELOG.md",
     "SECURITY.md"
-   ],
-   "exclude": [
-    "docs/writing/*"
    ]
   },
   {
