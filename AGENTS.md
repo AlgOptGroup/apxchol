@@ -80,16 +80,28 @@ Integration correctness is not performance acceptance: compare original-system q
 
 ## Writing for people
 
-These rules apply to everything a person reads in this repository:
+Read the shared guides in `docs/writing/` before you write:
 
-- `README.md`, `python/README.md` and the guides in `docs/`.
-- The CLI's `--help`.
+- Documentation, `--help` or error messages: `docs/writing/PRINCIPLES.md`.
+- A PR, an issue, a review or a commit message: the relevant section of `docs/writing/ENGINEERING.md`.
+- A new option, mode or public parameter: `docs/writing/STEWARDSHIP.md`.
+- Text that teaches how the method works: `docs/writing/TEACHING.md`.
+
+These files are a pinned snapshot of [ratschlab/writing-rules](https://github.com/ratschlab/writing-rules).
+`docs/writing/SNAPSHOT.json` records the revision and checksums. Update the files and that record together in one
+reviewed change.
+
+The apxchol house profile below adds exact limits and local terms. Follow it where it is stricter than the shared
+guides. It applies to everything a person reads in this repository:
+
+- `README.md`, `python/README.md`, `octave/README.md` and the guides in `docs/`.
+- The CLI's `--help` and the Python docstrings.
 - The messages of exceptions that reach a user.
-- `CHANGELOG.md`.
+- `CHANGELOG.md` and `SECURITY.md`.
 - PR descriptions, review comments and commit messages.
 
-They don't apply to code comments or debug logs. The numbers follow the shared list R1 to R28. A missing number is a
-rule that doesn't apply here.
+It doesn't apply to code comments, debug logs or the snapshot in `docs/writing/`. The checked rules (R1, R2 and R4 to
+R9) use the numbers of the checks in the writing-rules `GUIDE.md`. The other numbers are local.
 
 - R1. One idea per sentence. No semicolons, no em dash between clauses, and at most 1 colon per sentence. Split the
   sentence or use a list.

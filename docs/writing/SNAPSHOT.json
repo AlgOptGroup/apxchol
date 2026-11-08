@@ -1,0 +1,12 @@
+{
+  "repository": "https://github.com/ratschlab/writing-rules",
+  "revision": "fe9defad9a3552bce895c3720243adc61178d6ce",
+  "sha256": {
+    "PRINCIPLES.md": "6cf4a999b87ed47de5da580d4f2357afa53d5883d8fd51b89a2b35570efb8fd7",
+    "ENGINEERING.md": "e4021b93561523009a1ae018d6682a7b2ad8747d931402f0ee6d0cde8df8a9a2",
+    "TEACHING.md": "706dc365d6bd9f5f6ba0d2f834bcc78809c8d3f8e50f972a131bdebb29822cd4",
+    "STEWARDSHIP.md": "6b2355579571d9da52a8c5132872140b1c923238dbdcc1033de37217b29cb6d1",
+    "SOURCES.md": "5f3559abec8158bd7ab356c5163403f5ea2e18d6c7a8cb9c033009863392e907",
+    "LICENSE": "ca04b6fe196a6104f3e514b2050f90c4c3d9f0c2c14a19f4e5fb9a09de7d64c5"
+  }
+}
