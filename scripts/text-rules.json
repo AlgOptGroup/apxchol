@@ -8,7 +8,13 @@
     "docs/*.md",
     "docs/**/*.md",
     "python/README.md",
-    "CONTRIBUTING.md"
+    "CONTRIBUTING.md",
+    "octave/README.md",
+    "CHANGELOG.md",
+    "SECURITY.md"
+   ],
+   "exclude": [
+    "docs/writing/*"
    ]
   },
   {
@@ -45,7 +51,18 @@
     "right hand side",
     "right hand sides"
    ]
+  },
+  {
+   "use": "initial guess",
+   "not": [
+    "warm start",
+    "warm starts",
+    "warm-start",
+    "warm-started",
+    "initial solution estimate"
+   ]
   }
  ],
- "jargon": []
+ "jargon": [],
+ "python_public_docstrings": true
 }

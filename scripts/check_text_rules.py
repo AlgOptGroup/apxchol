@@ -120,7 +120,7 @@ def markdown_units(src, rst=False):
 
 
 def python_units(src, cfg):
-    """Strings passed to the calls and keywords named in the config."""
+    """Strings passed to the calls and keywords named in the config, and public docstrings when enabled."""
     try:
         tree = ast.parse(src)
     except SyntaxError:
@@ -185,6 +185,42 @@ def python_units(src, cfg):
                     base = node.body[0].lineno
                     for off, para in _paragraphs(doc):
                         out.append((base + off, para))
+    if cfg.get("python_public_docstrings"):
+        out += _public_docstrings(tree)
+    return out
+
+
+def _public_docstrings(tree):
+    """Docstrings of the module and its public classes, functions and methods, read as reST."""
+    nodes = [tree]
+    for node in tree.body:
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and not node.name.startswith("_"):
+            nodes.append(node)
+            if isinstance(node, ast.ClassDef):
+                nodes += [m for m in node.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+                          and not m.name.startswith("_")]
+    out = []
+    for node in nodes:
+        body = node.body
+        if not (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            continue
+        lines = body[0].value.value.split("\n")
+        rest = [l for l in lines[1:] if l.strip()]
+        indent = min((len(l) - len(l.lstrip()) for l in rest), default=0)
+        lines = [lines[0].strip()] + [l[indent:] for l in lines[1:]]
+        # A dedent starts a new item, such as the next parameter: scan each item on its own.
+        chunks, prev = [[0, []]], 0
+        for i, l in enumerate(lines):
+            cur = len(l) - len(l.lstrip())
+            if l.strip():
+                if cur < prev:
+                    chunks.append([i, []])
+                prev = cur
+            chunks[-1][1].append(l)
+        base = body[0].lineno
+        for first, chunk in chunks:
+            out += [(base + first + ln - 1, text) for ln, text in markdown_units("\n".join(chunk), rst=True)]
     return out
 
 

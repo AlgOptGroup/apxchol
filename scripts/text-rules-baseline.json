@@ -1,6 +1,13 @@
 {
+ "CHANGELOG.md": {
+  "R1": 48,
+  "R7": 3
+ },
  "CONTRIBUTING.md": {
   "R1": 6
+ },
+ "SECURITY.md": {
+  "R7": 1
  },
  "docs/api.md": {
   "R1": 3,
@@ -63,12 +70,16 @@
  "include/apxchol/solver/sptrsv/omp.h": {
   "R1": 2
  },
+ "octave/README.md": {
+  "R1": 3
+ },
  "python/README.md": {
   "R1": 14,
   "R7": 1
  },
  "python/apxchol/__init__.py": {
-  "R1": 3
+  "R1": 21,
+  "R7": 2
  },
  "python/src/apxchol_ext.cpp": {
   "R1": 1
@@ -81,9 +92,6 @@
   "R1": 1
  },
  "src/operator_class.cpp": {
-  "R1": 1
- },
- "src/solve.cpp": {
   "R1": 1
  },
  "src/solver_archive.cpp": {

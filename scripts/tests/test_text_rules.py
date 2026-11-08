@@ -58,6 +58,43 @@ class TextExtraction(unittest.TestCase):
         self.assertEqual(results["include/apxchol/detail/call_guard.h"][0][1], "R4")
 
 
+class PublicDocstrings(unittest.TestCase):
+    SRC = '''"""Module text; one."""
+
+
+def solve(b, x0=None):
+    """Solve a system.
+
+    Parameters
+    ----------
+    b : array
+        Right side; two.
+    x0 : array
+        Initial guess; three.
+    """
+
+
+def _private():
+    """Hidden; skip."""
+
+
+class Solver:
+    def apply(self):
+        """Apply it; four."""
+'''
+
+    def units(self, enabled=True):
+        return RULES.python_units(self.SRC, {"python_public_docstrings": enabled})
+
+    def test_public_docstrings_keep_their_lines(self):
+        units = self.units()
+        self.assertEqual([ln for ln, t in units if ";" in t], [1, 9, 11, 22])
+        self.assertFalse(any("Hidden" in t for _, t in units))
+
+    def test_docstrings_are_off_by_default(self):
+        self.assertEqual(self.units(False), [])
+
+
 class AllowComment(unittest.TestCase):
     def scan(self, src):
         cfg = {"scopes": [{"name": "docs", "include": ["a.md"]}], "terms": [{"use": "k-mer", "not": ["kmer"]}]}
