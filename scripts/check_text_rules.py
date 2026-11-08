@@ -333,7 +333,7 @@ def check_text(t, cfg, scope):
             hits.append(("R2", f"{n} words: {s}"))
     if re.search(r"\b(sorry|oops|whoops|something went wrong|an error occurred|unknown error)\b", t, re.I):
         hits.append(("R4", t))
-    if re.search(r"\b(may|might|soon|shortly|a while|eventually)\b", re.sub(r"\bMay\s+\d", "", t)):
+    if re.search(r"\b(soon|shortly|a while|eventually)\b", t):
         hits.append(("R7", t))
     elif re.search(r"\b(two|three|four|five|six|seven|eight|nine|ten|twelve|twenty|thirty|sixty)\s+(seconds?|minutes?|hours?|days?|weeks?|months?|times|threads?|files?|steps?|results?|GB|MB|TB)\b", t, re.I):
         hits.append(("R7", t))

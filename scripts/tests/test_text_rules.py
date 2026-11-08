@@ -24,6 +24,10 @@ class TextExtraction(unittest.TestCase):
         cfg = {"terms": [{"use": "k-mer", "not": ["kmer"]}]}
         self.assertIn("R8", [r for r, _ in RULES.check_text("kmer", cfg, {})])
 
+    def test_r7_checks_timing_words_not_modals(self):
+        self.assertIn("R7", [r for r, _ in RULES.check_text("The build finishes soon.", {}, {})])
+        self.assertEqual(RULES.check_text("Small workloads may use fewer threads.", {}, {}), [])
+
     def test_jargon_needs_prose(self):
         cfg, scope = {"jargon": ["re:\\b[a-z]+_[a-z_]+\\b"]}, {"jargon": True}
         self.assertEqual(RULES.check_text("min_kmers", cfg, scope), [])
