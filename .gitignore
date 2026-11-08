@@ -53,3 +53,6 @@ __pycache__/
 # Local tool state (worktrees, session state)
 .claude/
 benchmarks/cmg/octave-workspace
+
+# Shared writing-rules style package, exported locally before `vale sync`
+.writing/

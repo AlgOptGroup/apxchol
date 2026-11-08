@@ -1,0 +1,86 @@
+{
+  "include/apxchol/solver/sptrsv/cuda.h": {
+    "Writing.R1": 3
+  },
+  "include/apxchol/solver/sptrsv/omp.h": {
+    "Writing.R1": 4
+  },
+  "src/solver_archive.cpp": {
+    "Writing.R1": 1
+  },
+  "CHANGELOG.md": {
+    "Writing.R1": 49
+  },
+  "CONTRIBUTING.md": {
+    "Writing.R1": 10
+  },
+  "docs/api.md": {
+    "Writing.R1": 3
+  },
+  "docs/batching.md": {
+    "Writing.R1": 4
+  },
+  "docs/building.md": {
+    "Writing.R1": 8
+  },
+  "docs/cli.md": {
+    "Writing.R1": 5
+  },
+  "docs/cpp.md": {
+    "Writing.R1": 4
+  },
+  "docs/examples.md": {
+    "Writing.R1": 1
+  },
+  "docs/extending.md": {
+    "Writing.R1": 12
+  },
+  "docs/install.md": {
+    "Writing.R1": 3
+  },
+  "docs/performance.md": {
+    "Writing.R1": 1
+  },
+  "docs/precision.md": {
+    "Writing.R1": 26
+  },
+  "docs/quickstart.md": {
+    "Writing.R1": 1
+  },
+  "docs/reference/cpp.md": {
+    "Writing.R1": 10
+  },
+  "docs/sdk.md": {
+    "Writing.R1": 5
+  },
+  "docs/serialization.md": {
+    "Writing.R1": 19
+  },
+  "docs/usage.md": {
+    "Writing.R1": 19
+  },
+  "include/apxchol/solver/pcg_cuda.h": {
+    "Writing.R1": 2
+  },
+  "octave/README.md": {
+    "Writing.R1": 13
+  },
+  "python/README.md": {
+    "Writing.R1": 31
+  },
+  "python/apxchol/__init__.py": {
+    "Writing.R1": 24
+  },
+  "python/src/apxchol_ext.cpp": {
+    "Writing.R1": 1
+  },
+  "src/config.cpp": {
+    "Writing.R1": 6
+  },
+  "src/factorization.cpp": {
+    "Writing.R1": 1
+  },
+  "src/operator_class.cpp": {
+    "Writing.R1": 1
+  }
+}

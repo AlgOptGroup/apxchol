@@ -1,0 +1,10 @@
+extends: existence
+message: Use a precise time or number instead of '%s'.
+level: error
+scope: text
+tokens:
+  - 'soon'
+  - 'shortly'
+  - 'a while'
+  - 'eventually'
+  - '(?i:(two|three|four|five|six|seven|eight|nine|ten|twelve|twenty|thirty|sixty)\s+(seconds?|minutes?|hours?|days?|weeks?|months?|times|threads?|files?|steps?|results?|GB|MB|TB))'

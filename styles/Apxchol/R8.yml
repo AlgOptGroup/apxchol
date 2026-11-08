@@ -1,0 +1,9 @@
+extends: substitution
+message: Use '%s' instead of '%s'.
+level: error
+scope: text
+ignorecase: true
+nonword: true
+swap:
+  '(?<![\w-])right hand sides?(?![\w-])': right-hand side
+  '(?<![\w-])(?:warm starts?|warm-start(?:ed)?|initial solution estimate)(?![\w-])': initial guess
