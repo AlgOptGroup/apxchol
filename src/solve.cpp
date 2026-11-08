@@ -54,7 +54,7 @@ void detail::validate_solve_parameters(double tol, int max_iter) {
         throw std::invalid_argument("apxchol: the solve tolerance must be finite and positive. "
                                     "Pass a value such as 1e-8, or omit it for the default.");
     if (max_iter < 0)
-        throw std::invalid_argument("apxchol: the iteration budget must be 0 or more. "
+        throw std::invalid_argument("apxchol: max_iter, the iteration budget, must be 0 or more. "
                                     "Pass a nonnegative value, or omit it for the default.");
 }
 
