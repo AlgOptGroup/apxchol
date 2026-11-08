@@ -266,7 +266,7 @@ factorization detail::factorize_for_solver(csc_ref<double> L,
     const csc_ref<double> A = op.matrix();
     if (route == setup_route::gpu) {
 #if defined(APXCHOL_USE_CUDA)
-        if (opts.partitioner != partitioner_kind::block_greedy ||
+        if (opts.experimental.partitioner != partitioner_kind::block_greedy ||
             opts.experimental.exact_clique_max_degree != 0 ||
             opts.experimental.exact_core_max_h.value_or(0) != 0 ||
             opts.experimental.double_cycle_min_h != 0)
@@ -289,7 +289,7 @@ factorization detail::factorize_for_solver(csc_ref<double> L,
     // make_graph then skips its per-entry transpose-partner search.
     const bool triangles_bit_identical =
         op.lumped() == 0 && op.scan().triangles_bit_identical;
-    auto G = detail::make_graph_from_operator(A, triangles_bit_identical, opts.regularization);
+    auto G = detail::make_graph_from_operator(A, triangles_bit_identical, opts.experimental.regularization);
     return do_factorize(std::move(G));
 }
 

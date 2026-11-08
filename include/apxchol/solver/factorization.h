@@ -112,12 +112,12 @@ factorization factorize_operator(csc_ref<double> L,
     const operator_view op(L, options.lump_max_mass);
     // The graph builder applies these matrix-only options.
     auto graph_options = options;
-    graph_options.regularization = 0;
+    graph_options.experimental.regularization = 0;
     graph_options.lump_max_mass = kDefaultLumpMassCeiling;
     // The scan's bit-identical-triangles proof holds for L, i.e. only when
     // nothing was lumped.
     factorization F = build(make_graph_from_operator(op.matrix(),
-        op.lumped() == 0 && op.scan().triangles_bit_identical, options.regularization), graph_options);
+        op.lumped() == 0 && op.scan().triangles_bit_identical, options.experimental.regularization), graph_options);
     F.lumped_offdiag = op.lumped();
     return F;
 }
@@ -126,8 +126,8 @@ factorization factorize_operator(csc_ref<double> L,
 
 /// Extension overloads validate the operator, apply permitted lumping and
 /// regularization, then run the chosen partitioner and eliminator. A passed
-/// partitioner instance replaces `opts.partitioner`; otherwise
-/// `opts.partitioner` names the built-in one.
+/// partitioner instance replaces `opts.experimental.partitioner`; otherwise
+/// `opts.experimental.partitioner` names the built-in one.
 ///
 /// Custom-eliminator overload: substitute your own star-vertex elimination
 /// rule (see elimination/elimination.h for the `eliminator` contract).

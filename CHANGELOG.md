@@ -3,7 +3,7 @@
 ## Unreleased (since v0.2.2)
 
 ### Solver and factorization
-- New trace-cycle clique sampler (`--sampler trace_cycle`) on CPU and GPU; GKS stays the default.
+- New experimental trace-cycle clique sampler (`factor_options::experimental.sampler`) on CPU and CUDA. GKS stays the default.
 - Faster setup: one AoS graph throughout factorization, incremental degrees, and parallel residual sparsification.
 - Inputs are validated by operator class; nearly-SDDM inputs are repaired by M-matrix lumping.
 - Batched solves take any number of right-hand sides on CPU, CUDA and Metal, processed in panels of up to eight columns on CPU and four on GPU.
@@ -72,7 +72,7 @@
 - Breaking: the raw MATLAB/Octave `apxchol_mex` entry point moves to `octave/private/`; use the `apxchol_*` wrappers.
 - Breaking: custom partitioners receive a read-only `apxchol::partition_graph` (`n`, `is_active`, `for_each_neighbor`, `degree`) instead of the mutable graph; `graph`, `make_graph` and `laplacian` move to `apxchol::detail`.
 - Breaking: partitioners no longer declare a `name`, and `partitioner_list.h` with `dispatch_partitioner` is removed; pass a custom partitioner as an instance to `factorize`.
-- Breaking: `factorize(A, eliminator, opts)` no longer takes a partitioner template argument, and now uses the partitioner `opts.partitioner` names instead of always `block_greedy`; pass an instance to use another partitioner.
+- Breaking: `factorize(A, eliminator, opts)` no longer takes a partitioner template argument, and now uses the partitioner `opts.experimental.partitioner` names instead of always `block_greedy`; pass an instance to use another partitioner.
 - Breaking: `tree_elimination` moves to `apxchol::detail`; configure the built-in rule through `factor_options`.
 - Breaking: `sparse_csc::kEdgeMax` is removed; use `std::numeric_limits<apxchol::edge_index>::max()`.
 - New `apxchol.as_operator(M)`, `apxchol_as_operator(M)` and CLI `--convert-input`: a finite symmetric matrix with at least one off-diagonal entry, all of them positive, becomes its graph Laplacian `L = D - M` (self-loops cancel), any other finite symmetric matrix is used as given and checked by the solver, and asymmetric or non-finite input is an error.
@@ -81,11 +81,14 @@
 - Breaking: from 1.0, the installed CMake package accepts any version request with the same major version (0.x stays minor-scoped), and the shared core library's soname now carries `major.minor` (`libapxchol_core.so.0.3` for this version).
 - The partitioner and eliminator extension interfaces are experimental in 1.x and may change in minor releases.
 - Breaking: research controls (`omp_threshold`, `min_is_fraction`, `parallel_residual_threshold`, `exact_clique_max_degree`, `exact_core_max_h`, `double_cycle_min_h`, `degree_tiebreak`, `cpu_schedule`) move to `factor_options::experimental`, outside the 1.x compatibility promise, and leave the CLI, Python and MATLAB/Octave.
+- Breaking: `partitioner`, `partition` (`degree_quantile`, `degree_multiplier`), `sampler`, `regularization` and `verbose` move to `factor_options::experimental`, outside the 1.x compatibility promise. No user need is recorded for changing them. The stable factorization options are now `seed`, `factor_storage`, `drop_tolerance` and `lump_max_mass`.
+- Breaking: CLI `--partitioner`, `--sampler`, `--regularization`, `--degree-quantile` and `--degree-multiplier` are removed. `-v` still prints setup diagnostics and the timing tree.
+- Breaking: Python `factorize` and `solve` drop the `partitioner`, `sampler`, `degree_quantile`, `degree_multiplier`, `regularization` and `verbose` keywords, and MATLAB/Octave drops the same option fields. Passing one raises the unknown-option error.
 - Breaking: the `residual_peel` option and its `min_degree` and `bk_serial` strategies are removed; the serial tail always uses the natural order.
-- Breaking: `factor_options::is_select` (a string) is replaced by `partitioner`, a `partitioner_kind` enum that option validation checks.
+- Breaking: `factor_options::is_select` (a string) is replaced by `experimental.partitioner`, a `partitioner_kind` enum that option validation checks.
 - Breaking: unset `degree_quantile`, `parallel_residual_threshold` and `exact_core_max_h` are `std::nullopt` instead of -1 or `SIZE_MAX`, and the sentinel constants and resolvers such as `exact_core_by_route` and `degree_quantile_or_host_default` are removed.
-- Breaking: CLI `--is`, `--factor-drop` and `--maxiter` are renamed `--partitioner`, `--drop-tolerance` and `--max-iter`; `--sampler`, `--factor-storage` and `--partitioner` accept names only.
-- Python and MATLAB/Octave accept the same stable setup options, adding `sampler` to Python and `partitioner`, `sampler`, `degree_quantile` and `degree_multiplier` to MATLAB/Octave.
+- Breaking: CLI `--is` is removed, `--factor-drop` and `--maxiter` are renamed `--drop-tolerance` and `--max-iter`, and `--factor-storage` accepts names only.
+- Python and MATLAB/Octave accept the same stable setup options.
 - Python wheels for CPython 3.11+ on Linux and macOS arm64 (GPU wheels select the backend at runtime), standalone CLI archives, and MATLAB/Octave batched solves with save/load.
 - Wheels declare a `License-Expression` that matches their contents (BSD-3-Clause and Apache-2.0 WITH LLVM-exception; Linux CUDA wheels add the NVIDIA CUDA EULA and ship its text) and take the root LICENSE at build time; minimum scikit-build-core is 0.12.
 - Relicensed from BSD-4-Clause to BSD-3-Clause.

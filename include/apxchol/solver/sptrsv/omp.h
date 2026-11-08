@@ -402,7 +402,7 @@ private:
                         const factor_options& options, bool fp16, bool exact,
                         const float* exact_scale) {
         detail::validate_factor_options(options);
-        verbose_ = options.verbose;
+        verbose_ = options.experimental.verbose;
         fp16_ = fp16;
         if (fp16_) {
             setup_impl<_Float16>(L, m, consumed, options, exact, exact_scale);

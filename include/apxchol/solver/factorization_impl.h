@@ -614,7 +614,7 @@ void eliminate_partition(const Eliminator& elim,
     }
     eliminate_partition_singleton(elim, G, part, factor_cols, ws, opts, cp,
                                   work_hint, live_degrees);
-    if (live_degrees && opts.verbose) {
+    if (live_degrees && opts.experimental.verbose) {
         const std::size_t raw = ws.degree_decrements.size();
         std::size_t unique = 0;
         double maximum_ms = 0.0;
@@ -701,8 +701,8 @@ factorization factorize_impl(const Eliminator& elim,
     // Resolve unset options to this factorization route's defaults.
     const factor_options opts = [&] {
         factor_options o = opts_in;
-        if (!o.partition.degree_quantile)
-            o.partition.degree_quantile = gpu_owned_setup_route
+        if (!o.experimental.partition.degree_quantile)
+            o.experimental.partition.degree_quantile = gpu_owned_setup_route
                                               ? detail::degree_quantile_device_default
                                               : detail::degree_quantile_host_default;
         // The device route does not implement the host trace-cycle core rules.
@@ -726,7 +726,7 @@ factorization factorize_impl(const Eliminator& elim,
     if (cp) (*cp)("graph_copy");
     auto gpu_round_shadow =
         detail::make_gpu_round_shadow_session<Eliminator>(elim,
-            route, opts.verbose);
+            route, opts.experimental.verbose);
 
     // Record diagonal excess to select the full factor dimension. Excess in
     // one component does not prove every component positive definite.
@@ -772,12 +772,12 @@ factorization factorize_impl(const Eliminator& elim,
             std::unique_ptr<detail::gpu_block_frontend> gpu_frontend;
             result.sddm = gpu_round_shadow.initialize_owned_csc(
                 detail::gpu_owned_csc_host_buffers(*initial_csc), gpu_frontend,
-                opts.regularization);
+                opts.experimental.regularization);
             if (cp) (*cp)("gpu_csc_initialize");
             bool sparsification_attempted = false;
             peak_graph_bytes = std::max(peak_graph_bytes, work.memory_bytes());
             while (!active.empty()) {
-                const auto prep = gpu_frontend->prepare(active, opts.partition,
+                const auto prep = gpu_frontend->prepare(active, opts.experimental.partition,
                     opts.seed, ws.round_index, opts.experimental.degree_tiebreak);
                 auto part = gpu_frontend->select_block_greedy();
                 if (part.data.empty())
@@ -800,14 +800,14 @@ factorization factorize_impl(const Eliminator& elim,
                         worthwhile = detail::residual_sparsify_worthwhile(active.size(),
                             residual_thresh, handoff, distinct_degree);
                     }
-                    if (opts.verbose)
+                    if (opts.experimental.verbose)
                         std::fprintf(stderr, "[gpu-owned-sparsify-gate] round=%zu active=%zu "
                             "handoff=%zu avg_distinct_degree=%.17g attempted=1 worthwhile=%d\n",
                             ws.round_index, active.size(), handoff, distinct_degree, int(worthwhile));
                     if (worthwhile) {
                         const auto sparse_seed = opts.seed ^ ws.round_index;
                         const auto stats = gpu_round_shadow.sparsify_owned_residual(*gpu_frontend, sparse_seed);
-                        if (opts.verbose)
+                        if (opts.experimental.verbose)
                             std::fprintf(stderr, "[gpu-owned-sparsify] implementation=device round=%zu "
                                 "seed=%llu physical_before=%zu distinct_before=%zu kept=%zu backbone=%zu "
                                 "expected=%.17g min_p=%.17g max_inv_p=%.17g "
@@ -908,7 +908,7 @@ factorization factorize_impl(const Eliminator& elim,
         last_avg_degree = 0.0;
         last_candidate_count = act.size();
         partition_context pctx{
-            .options = opts.partition,
+            .options = opts.experimental.partition,
             .seed = opts.seed,
             .omp_threshold = opts.experimental.omp_threshold,
             .degree_tiebreak = opts.experimental.degree_tiebreak,
@@ -941,7 +941,7 @@ factorization factorize_impl(const Eliminator& elim,
                 avg_deg = total_degree / static_cast<double>(act.size());
             } else {
                 if (refresh_incremental &&
-                    opts.verbose)
+                    opts.experimental.verbose)
                     std::fprintf(stderr,
                         "[incremental-refresh] round=%llu dead=%zu live=%zu "
                         "ratio=%.6f threshold=%.6f\n",
@@ -982,7 +982,7 @@ factorization factorize_impl(const Eliminator& elim,
                     prune_skip_gap = hidden == 0
                         ? std::min(2u * prune_skip_gap, 8u) : 1u;
                     prune_skip_streak = 0;
-                    if (opts.verbose)
+                    if (opts.experimental.verbose)
                         std::fprintf(stderr,
                             "[prune-skip] round=%llu active=%zu hidden=%zu next_gap=%u\n",
                             static_cast<unsigned long long>(ws.round_index),
@@ -995,13 +995,13 @@ factorization factorize_impl(const Eliminator& elim,
                     incremental_dead_incidence = 0;
                 }
             }
-            const double q = *opts.partition.degree_quantile;
+            const double q = *opts.experimental.partition.degree_quantile;
             const double thr = q > 0.0 && q < 1.0
                                    && act.size() > opts.experimental.omp_threshold
                 ? static_cast<double>(parallel_degree_quantile(
                       pre_degrees, act.size(), q, pre_histograms))
                 : candidate_degree_cap(pre_degrees, act.size(), avg_deg,
-                                       opts.partition, pre_scratch);
+                                       opts.experimental.partition, pre_scratch);
             previous_degree_threshold = thr;
             if (live_degrees.size() < static_cast<size_t>(g.n()))
                 live_degrees.resize(g.n());
@@ -1099,7 +1099,7 @@ factorization factorize_impl(const Eliminator& elim,
                     last_candidate_count, active.size(), min_yield,
                     residual_thresh, opts.experimental.omp_threshold)) {
                 handoff_vertices = part.data.size();
-                if (opts.verbose)
+                if (opts.experimental.verbose)
                     std::fprintf(stderr,
                         "[apxchol] selector handoff: active=%zu candidates=%zu "
                         "selected=%zu yield=%.6f base=%.6f effective=%.6f "
@@ -1178,7 +1178,7 @@ factorization factorize_impl(const Eliminator& elim,
             }
         }
         if (incremental_degree_capable &&
-            opts.verbose) {
+            opts.experimental.verbose) {
             std::fprintf(stderr,
                 "[incremental-gate] round=%llu active=%zu candidates=%zu "
                 "selected=%zu avg_degree=%.6f selected_work=%zu "
@@ -1227,7 +1227,7 @@ factorization factorize_impl(const Eliminator& elim,
             const bool worthwhile = detail::residual_sparsify_worthwhile(
                 active.size(), residual_thresh, handoff_vertices,
                 sample.avg_distinct_degree);
-            if (opts.verbose)
+            if (opts.experimental.verbose)
                 std::fprintf(stderr,
                     "[apxchol] residual sparsify gate: active=%zu "
                     "handoff_vertices=%zu avg_distinct_degree=%.6f "
@@ -1243,7 +1243,7 @@ factorization factorize_impl(const Eliminator& elim,
                         work, active,
                         detail::kResidualSparsifyKeepProbability,
                         opts.seed ^ ws.round_index);
-                if (opts.verbose)
+                if (opts.experimental.verbose)
                     std::fprintf(stderr,
                         "[apxchol] residual sparsify: active=%zu p=%.2f "
                         "edges=%zu/%zu->%zu expected=%.1f backbone=%zu "
@@ -1335,7 +1335,7 @@ factorization factorize_impl(const Eliminator& elim,
     // live_frac well below 1 => abandoned slabs dominate -> compaction would help.
     // Read off the working graph HERE, before it is freed below (nnz(L) is the
     // off-diagonal count + one diagonal per column -- what assemble_csc builds).
-    if (opts.verbose) {
+    if (opts.experimental.verbose) {
         const double MB = 1.0 / (1024.0 * 1024.0);
         size_t nnz = gpu_owned_setup_route ? result.L.nonZeros() : factor_cols.size();
         for (const auto& c : factor_cols) nnz += c.entry_count;
@@ -1392,7 +1392,7 @@ factorization factorize_impl(const Eliminator& elim,
         factorization_access::device_factor(result) = gpu_round_shadow.finalize_device_factor(
             result.perm, result.sddm ? n : n - 1, opts.factor_storage, opts.drop_tolerance);
         if (cp) (*cp)("gpu_factor_finalize");
-        if (opts.verbose) {
+        if (opts.experimental.verbose) {
             const std::size_t omitted_payload_bytes =
                 (static_cast<std::size_t>(result.L.nonZeros()) - n) * sizeof(detail::factor_entry);
             std::fprintf(stderr,
@@ -1428,10 +1428,10 @@ inline tree_elimination make_tree_elim(const factor_options& opts,
         .exact_clique_max_degree = opts.experimental.exact_clique_max_degree,
         .exact_core_max_h = exact_core,
         .double_cycle_min_h = opts.experimental.double_cycle_min_h,
-        .sampler = opts.sampler};
+        .sampler = opts.experimental.sampler};
 }
 
-// Factorize on the CPU with the built-in partitioner opts.partitioner names.
+// Factorize on the CPU with the built-in partitioner opts.experimental.partitioner names.
 template<typename Eliminator>
 factorization factorize_with_named_partitioner(const Eliminator& elim, graph G,
                                                const factor_options& opts,
@@ -1439,7 +1439,7 @@ factorization factorize_with_named_partitioner(const Eliminator& elim, graph G,
     auto run = [&](auto partitioner) {
         return factorize_impl(elim, partitioner, std::move(G), opts, cp);
     };
-    switch (opts.partitioner) {
+    switch (opts.experimental.partitioner) {
     case partitioner_kind::block_greedy:    return run(block_greedy_partitioner{});
     case partitioner_kind::priority_greedy: return run(priority_greedy_partitioner{});
     case partitioner_kind::baumann_kyng:    return run(baumann_kyng_partitioner{});

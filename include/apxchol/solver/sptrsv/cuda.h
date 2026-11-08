@@ -401,7 +401,7 @@ private:
         destroy();
         const auto next = std::make_shared<state>();
         state& s = *next;
-        s.verbose = options.verbose;
+        s.verbose = options.experimental.verbose;
         s.m = static_cast<int64_t>(m);
         const bool trace = s.verbose;
         auto t_prev = detail::gpu_setup_diagnostic_clock::now(s.verbose);
@@ -580,7 +580,7 @@ public:
             throw std::invalid_argument(
                 "apxchol cuda_sptrsv adoption: active CUDA device differs from the factor owner");
         const bool requested_fp16 = fp16_resolved(options.factor_storage);
-        s.verbose = options.verbose;
+        s.verbose = options.experimental.verbose;
         const bool factor_fp16 =
             factor.data_.format == cuda_sptrsv_device_factor::storage::fp16_scaled;
         if (requested_fp16 != factor_fp16)

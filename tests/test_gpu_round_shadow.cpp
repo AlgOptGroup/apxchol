@@ -3187,9 +3187,9 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
     apxchol::factor_options factor_options;
     factor_options.factor_storage = apxchol::factor_storage_type::fp32;
     factor_options.drop_tolerance = 0;
-    factor_options.verbose = true;
-    factor_options.partition.degree_quantile = 0.0;
-    factor_options.partition.degree_multiplier = 100.0;
+    factor_options.experimental.verbose = true;
+    factor_options.experimental.partition.degree_quantile = 0.0;
+    factor_options.experimental.partition.degree_multiplier = 100.0;
     factor_options.experimental.min_is_fraction = 0.0;
     for (double shift : {0.0, 1.0}) {
         SCOPED_TRACE(shift);
@@ -3206,7 +3206,7 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
         EXPECT_GT(gpu_round_trace_size(trace, "rounds="), 2u);
         EXPECT_NE(trace.find("[gpu-owned-csc] n="), std::string::npos);
         EXPECT_NE(trace.find("factor_entry_download_bytes=0"), std::string::npos);
-        expect_setup_api_receipt(trace, preconditioner, factor_options.verbose);
+        expect_setup_api_receipt(trace, preconditioner, factor_options.experimental.verbose);
         EXPECT_GT(owned_cp.total("setup.gpu_owned_factorization"), 0.0);
         EXPECT_EQ(owned_cp.total("setup.factor_metadata"), 0.0);
         const auto& factor = preconditioner.factor();
@@ -3511,8 +3511,8 @@ TEST(GpuCycleSampler, OwnedSolveReturnsOriginalSystemSolution) {
         const std::vector<double> b=apxchol::test::multiply(A,exact);
         apxchol::solve_options opts;
         opts.backend=apxchol::solve_backend::gpu;
-        opts.factor_opts.verbose = true;
-        opts.factor_opts.sampler=sampler;opts.factor_opts.partition.degree_quantile=.8;
+        opts.factor_opts.experimental.verbose = true;
+        opts.factor_opts.experimental.sampler=sampler;opts.factor_opts.experimental.partition.degree_quantile=.8;
         testing::internal::CaptureStderr();
         const auto result=apxchol::solve(apxchol::test::csc(A), b, 1e-8, 1000, {}, opts);
         const auto trace=testing::internal::GetCapturedStderr();

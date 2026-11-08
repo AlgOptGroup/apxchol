@@ -48,12 +48,12 @@ public:
         F_ = std::move(factor);
         // Lumping changes only the factorization; the GPU operator uses A itself.
         if (cp) { cp->descend("setup"); cp->tick(); }
-        const auto operator_setup_begin = gpu_setup_diagnostic_clock::now(opts_.verbose);
-        gpcg_.setup(A, F_->perm, opts_.verbose);
+        const auto operator_setup_begin = gpu_setup_diagnostic_clock::now(opts_.experimental.verbose);
+        gpcg_.setup(A, F_->perm, opts_.experimental.verbose);
         if (cp) { (*cp)("gpu_pcg_setup"); cp->ascend(); }
-        if (opts_.verbose) {
+        if (opts_.experimental.verbose) {
             const double operator_setup_wall_s = std::chrono::duration<double>(
-                gpu_setup_diagnostic_clock::now(opts_.verbose) - operator_setup_begin).count();
+                gpu_setup_diagnostic_clock::now(opts_.experimental.verbose) - operator_setup_begin).count();
             // Host API interval, disjoint from factorize/install. The device
             // builder completes inside setup. Common benchmark timing adds its
             // own completion boundary.
@@ -151,7 +151,7 @@ public:
 private:
     void factorize(factorization& F, csc_ref<double> A, checkpoint* cp) {
         [[maybe_unused]] const auto factorize_install_begin =
-            gpu_setup_diagnostic_clock::now(opts_.verbose);
+            gpu_setup_diagnostic_clock::now(opts_.experimental.verbose);
         cuda_context::prewarm();
         F = factorize_for_solver(A, opts_, cp, setup_route::gpu);
         // Reject inadmissible factors before installation can initialize
@@ -166,10 +166,10 @@ private:
             throw std::runtime_error(std::string("GPU setup completion: ") +
                                      cudaGetErrorString(setup_completion));
         if (cp) { cp->descend("setup"); (*cp)("gpu_setup_complete"); cp->ascend(); }
-        if (opts_.verbose) {
+        if (opts_.experimental.verbose) {
             // Host API duration; device-adopted setup additionally completed its work.
             const double factorize_install_wall_s = std::chrono::duration<double>(
-                gpu_setup_diagnostic_clock::now(opts_.verbose) - factorize_install_begin).count();
+                gpu_setup_diagnostic_clock::now(opts_.experimental.verbose) - factorize_install_begin).count();
             const auto& drop = trsv_.drop_stats();
             std::fprintf(stderr,
                 "[gpu-setup-receipt] factorize_install_wall_s=%.17g "
@@ -199,7 +199,7 @@ private:
         // "cuda_init", so sptrsv_setup below reports its own work only.
         const double cuda_init_s = cuda_context::ensure_context();
         if (cp) (*cp)("cuda_init");
-        if (opts_.verbose)
+        if (opts_.experimental.verbose)
             std::fprintf(stderr, "[sptrsv-setup gpu] %-22s %8.2f ms  (context creation %.2f ms)\n",
                          "cuda_init", cuda_init_s * 1e3, cuda_context::context_seconds() * 1e3);
         auto& device = factorization_access::device_factor(F);

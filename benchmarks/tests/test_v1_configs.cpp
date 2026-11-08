@@ -28,17 +28,17 @@ int main() {
         std::vector<apxchol::node_index> scratch;
         for (std::optional<double> quantile : {std::optional<double>{}, {0.0}, {0.8}}) {
             apxchol::factor_options requested;
-            requested.partition.degree_quantile = quantile;
-            requested.partition.degree_multiplier = 3;
+            requested.experimental.partition.degree_quantile = quantile;
+            requested.experimental.partition.degree_multiplier = 3;
             const auto opts = v1_factor_options(capped, requested);
-            require(opts.partition.degree_quantile == 0, "cap4 did not disable quantile selection");
-            require(opts.partition.degree_multiplier == 4, "cap4 did not set multiplier 4");
+            require(opts.experimental.partition.degree_quantile == 0, "cap4 did not disable quantile selection");
+            require(opts.experimental.partition.degree_multiplier == 4, "cap4 did not set multiplier 4");
             require(apxchol::detail::candidate_degree_cap(degrees, degrees.size(), average,
-                        opts.partition, scratch) == 4 * average,
+                        opts.experimental.partition, scratch) == 4 * average,
                     "cap4 did not apply the advertised average-degree threshold");
             const auto unchanged = v1_factor_options(standard, requested);
-            require(unchanged.partition.degree_quantile == quantile &&
-                        unchanged.partition.degree_multiplier == 3,
+            require(unchanged.experimental.partition.degree_quantile == quantile &&
+                        unchanged.experimental.partition.degree_multiplier == 3,
                     "default tree preset changed requested degree controls");
         }
         Eigen::SparseMatrix<double> matrix(3, 3);

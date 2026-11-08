@@ -107,7 +107,7 @@ dense_file read_dense_body(std::istream& f, const fast_matrix_market::matrix_mar
 solver make_solver(const detail::csc_matrix<double>& L, const run_config& cfg,
                    detail::checkpoint& timings) {
     return detail::solver_access::make(L, cfg.solve_opts,
-                                       cfg.solve_opts.factor_opts.verbose ? &timings : nullptr);
+                                       cfg.solve_opts.factor_opts.experimental.verbose ? &timings : nullptr);
 }
 
 // The --x0 file must have the RHS's shape. The header is checked before the
@@ -146,7 +146,7 @@ int solve_batch(const detail::csc_matrix<double>& L, const dense_file& B,
                      col.residual, col.converged ? "" : " (did not converge)");
         failed += !col.converged;
     }
-    if (cfg.solve_opts.factor_opts.verbose)
+    if (cfg.solve_opts.factor_opts.experimental.verbose)
         spdlog::info("timings:\n{}", timings.report());
 
     if (cfg.output_path)
@@ -242,7 +242,7 @@ int main(int argc, char* argv[]) try {
     spdlog::info("backend:    {}", res.backend == solve_backend::gpu ? "gpu" : "cpu");
     spdlog::info("iterations: {}", res.iterations);
     spdlog::info("residual:   {}", res.residual);
-    if (cfg.solve_opts.factor_opts.verbose)
+    if (cfg.solve_opts.factor_opts.experimental.verbose)
         spdlog::info("timings:\n{}", timings.report());
 
     if (cfg.output_path)

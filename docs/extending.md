@@ -105,7 +105,7 @@ concurrent calls must use distinct `v`, and `f` must not query `v` itself.
 Querying another vertex inside `f` is fine when no other thread visits it.
 
 Pass a partitioner instance to `factorize`, alone or with an eliminator; it is
-taken by value and replaces `factor_options::partitioner`. Callable adapters
+taken by value and replaces `factor_options::experimental.partitioner`. Callable adapters
 are `as_partitioner` and `as_prepass_partitioner`.
 [custom_order.cpp](../examples/custom_order.cpp) shows complete integration.
 

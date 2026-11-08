@@ -49,11 +49,11 @@ void expect_solution(const test::sparse_matrix& matrix,
 
 std::vector<apxchol::solve_options> host_only_options() {
     std::vector<apxchol::solve_options> options(4);
-    options[0].factor_opts.partitioner = apxchol::partitioner_kind::priority_greedy;
+    options[0].factor_opts.experimental.partitioner = apxchol::partitioner_kind::priority_greedy;
     options[1].factor_opts.experimental.exact_clique_max_degree = 3;
-    options[2].factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
+    options[2].factor_opts.experimental.sampler = apxchol::clique_sampler::trace_cycle;
     options[2].factor_opts.experimental.exact_core_max_h = 3;
-    options[3].factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
+    options[3].factor_opts.experimental.sampler = apxchol::clique_sampler::trace_cycle;
     options[3].factor_opts.experimental.double_cycle_min_h = 4;
     return options;
 }
@@ -310,7 +310,7 @@ TEST(SolveRoutes, AutomaticAndExplicitGpuUseOwnedSetup) {
             SCOPED_TRACE(static_cast<int>(sampler));
             apxchol::solve_options options;
             options.backend = backend;
-            options.factor_opts.sampler = sampler;
+            options.factor_opts.experimental.sampler = sampler;
             apxchol::detail::checkpoint timings;
             const auto result = test::with_timings(matrix, options, timings).solve(rhs, 1e-10);
             EXPECT_EQ(result.backend, apxchol::solve_backend::gpu);

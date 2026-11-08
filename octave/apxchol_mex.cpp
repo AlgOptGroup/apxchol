@@ -105,24 +105,11 @@ apxchol::solve_options setup_options(const mxArray* options) {
             if (value == nullptr) fail("apxchol:badInput", "option '" + name + "' is empty");
             if (name == "num_threads") result.num_threads = integer_option<int>(value, name.c_str());
             else if (name == "seed") result.factor_opts.seed = integer_option<unsigned>(value, name.c_str());
-            else if (name == "partitioner")
-                result.factor_opts.partitioner = apxchol::detail::parse_option_name(
-                    apxchol::detail::partitioner_names, string_option(value, name.c_str()), name);
-            else if (name == "sampler")
-                result.factor_opts.sampler = apxchol::detail::parse_option_name(
-                    apxchol::detail::clique_sampler_names, string_option(value, name.c_str()), name);
-            else if (name == "degree_quantile") result.factor_opts.partition.degree_quantile = scalar_option(value, name.c_str());
-            else if (name == "degree_multiplier") result.factor_opts.partition.degree_multiplier = scalar_option(value, name.c_str());
             else if (name == "factor_storage")
                 result.factor_opts.factor_storage = apxchol::detail::parse_factor_storage(string_option(value, name.c_str()));
             else if (name == "drop_tolerance") result.factor_opts.drop_tolerance = scalar_option(value, name.c_str());
-            else if (name == "regularization") result.factor_opts.regularization = scalar_option(value, name.c_str());
             else if (name == "lump_max_mass") result.factor_opts.lump_max_mass = scalar_option(value, name.c_str());
-            else if (name == "verbose") {
-                const double flag = scalar_option(value, name.c_str());
-                if (flag != 0 && flag != 1) fail("apxchol:badInput", name + " must be logical or 0/1");
-                result.factor_opts.verbose = flag != 0;
-            } else fail("apxchol:badInput", "unknown option '" + name + "'");
+            else fail("apxchol:badInput", "unknown option '" + name + "'");
         }
     }
     return result;

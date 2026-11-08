@@ -22,9 +22,8 @@ classdef apxchol_solver < handle
   %
   % Omitted or [] solve options use the C++ defaults. rtol must be finite
   % and positive; maxiter must be an integer in [0, 2^31-1].
-  % Setup options: num_threads, seed, partitioner, sampler, factor_storage,
-  % degree_quantile, degree_multiplier, drop_tolerance, regularization,
-  % lump_max_mass, verbose. See README.md.
+  % Setup options: num_threads, seed, factor_storage, drop_tolerance,
+  % lump_max_mass. See README.md.
 
   properties (SetAccess = private)
     setup_seconds = 0

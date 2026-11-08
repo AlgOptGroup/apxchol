@@ -101,13 +101,6 @@ run_config parse_args(int argc, char* argv[]) {
     app.add_option("-o,--output", output_str,
                    "Write the solution to a dense Matrix Market file (n x k for an n x k RHS)");
 
-    app.option_defaults()->group("Setup (advanced)");
-    const auto samplers = name_map(detail::clique_sampler_names);
-    app.add_option("--sampler", cfg.solve_opts.factor_opts.sampler,
-                   "Clique sampler: gks or trace_cycle")
-        ->default_str("gks")
-        ->transform(CLI::IsMember(samplers) & CLI::Transformer(samplers));
-
     app.option_defaults()->group("Solve");
     app.add_option("--backend", cfg.solve_opts.backend,
                    "Complete setup/solve route: auto, cpu or gpu (no runtime fallback)")
@@ -127,9 +120,6 @@ run_config parse_args(int argc, char* argv[]) {
     app.add_option("--drop-tolerance", cfg.solve_opts.factor_opts.drop_tolerance,
                    "Relative factor-entry dropping threshold in [0, 1] (0 disables dropping)")
         ->capture_default_str();
-    app.add_option("--regularization", cfg.solve_opts.factor_opts.regularization,
-                   "Minimum preconditioner diagonal excess relative to the diagonal")
-        ->capture_default_str();
     app.add_option("--lump-max-mass", cfg.solve_opts.factor_opts.lump_max_mass,
                    "Maximum positive off-diagonal mass fraction allowed for lumping")
         ->capture_default_str();
@@ -141,26 +131,6 @@ run_config parse_args(int argc, char* argv[]) {
     app.add_option("--seed", cfg.solve_opts.factor_opts.seed,
                    "Random seed for factorization and test RHS")
         ->capture_default_str();
-    app.option_defaults()->group("Setup (advanced)");
-    app.add_option("--degree-quantile", cfg.solve_opts.factor_opts.partition.degree_quantile,
-                   "IS degree cap as a quantile of current degrees in [0, 1); "
-                   "0 = use --degree-multiplier; omitted = route default "
-                   "(0.2 CPU/Metal, 0.5 CUDA; Metal requires (0, 1))")
-        ->default_str("by route");
-    app.add_option("--degree-multiplier", cfg.solve_opts.factor_opts.partition.degree_multiplier,
-                   "IS degree threshold = multiplier × avg_degree "
-                   "(fallback, used only when --degree-quantile is 0)")
-        ->capture_default_str();
-    const auto partitioners = name_map(detail::partitioner_names);
-    std::string partitioner_help = "Independent set strategy: ";
-    for (std::size_t i = 0; i < detail::partitioner_names.size(); ++i) {
-        if (i) partitioner_help += i + 1 == detail::partitioner_names.size() ? " or " : ", ";
-        partitioner_help += detail::partitioner_names[i].name;
-    }
-    app.add_option("--partitioner", cfg.solve_opts.factor_opts.partitioner, partitioner_help)
-        ->default_str("block_greedy")
-        ->transform(CLI::IsMember(partitioners) & CLI::Transformer(partitioners));
-
     app.option_defaults()->group("Output detail");
 
     // ── verbosity (mutually exclusive) ──
@@ -178,7 +148,7 @@ run_config parse_args(int argc, char* argv[]) {
     if (!rhs_str.empty())    cfg.rhs_path     = rhs_str;
     if (!x0_str.empty())     cfg.x0_path      = x0_str;
     if (!output_str.empty()) cfg.output_path  = output_str;
-    cfg.solve_opts.factor_opts.verbose = verbose;
+    cfg.solve_opts.factor_opts.experimental.verbose = verbose;
     detail::validate_solve_parameters(cfg.tol, cfg.max_iter);
     detail::validate_solve_options(cfg.solve_opts);
     setup_logging(quiet, verbose);

@@ -160,14 +160,14 @@ static const V1Combo v1_combos[] = {
 
 static apxchol::factor_options v1_factor_options(const V1Combo& combo,
                                                 apxchol::factor_options opts) {
-    opts.partitioner = combo.partitioner;
-    opts.sampler = combo.sampler;
+    opts.experimental.partitioner = combo.partitioner;
+    opts.experimental.sampler = combo.sampler;
     opts.experimental.exact_clique_max_degree = combo.exact_clique_max_degree;
     opts.experimental.exact_core_max_h = combo.exact_core_max_h;
     opts.experimental.double_cycle_min_h = combo.double_cycle_min_h;
     if (combo.degree_mult > 0) {
-        opts.partition.degree_quantile = 0;
-        opts.partition.degree_multiplier = combo.degree_mult;
+        opts.experimental.partition.degree_quantile = 0;
+        opts.experimental.partition.degree_multiplier = combo.degree_mult;
     }
     return opts;
 }
@@ -1216,9 +1216,9 @@ static Args parse_args(int argc, char** argv) {
         else if (arg == "--cpu-schedule")
             a.v1_options.factor_opts.experimental.cpu_schedule = apxchol::detail::parse_cpu_schedule(next());
         else if (arg == "--factor-drop") a.v1_options.factor_opts.drop_tolerance = std::stod(next());
-        else if (arg == "--regularization") a.v1_options.factor_opts.regularization = std::stod(next());
+        else if (arg == "--regularization") a.v1_options.factor_opts.experimental.regularization = std::stod(next());
         else if (arg == "--lump-max-mass") a.v1_options.factor_opts.lump_max_mass = std::stod(next());
-        else if (arg == "--degree-quantile") a.v1_options.factor_opts.partition.degree_quantile = std::stod(next());
+        else if (arg == "--degree-quantile") a.v1_options.factor_opts.experimental.partition.degree_quantile = std::stod(next());
         else if (arg == "--v1-backend") {
             const auto backend = next();
             if (backend == "cpu") a.v1_options.backend = apxchol::solve_backend::cpu;

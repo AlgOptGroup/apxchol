@@ -27,9 +27,7 @@ noted in the [changelog](../CHANGELOG.md).
 The research controls in `factor_options::experimental` (the
 `experimental_options` struct) are outside this promise: they may change or
 disappear in any release. The stable factorization options are `seed`,
-`sampler`, `factor_storage`, `drop_tolerance`, `regularization`,
-`lump_max_mass`, `partitioner`, `partition.degree_quantile` and
-`partition.degree_multiplier`, plus `verbose`; the
+`factor_storage`, `drop_tolerance` and `lump_max_mass`; the
 [usage guide](usage.md#option-names) lists their names in each interface.
 
 Errors use two classes in every interface: `std::invalid_argument`

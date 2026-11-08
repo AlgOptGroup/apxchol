@@ -1154,7 +1154,7 @@ TEST_F(MetalDevice, CommonSolverApiRespectsBackendSelection) {
 TEST_F(MetalDevice, CommonSolverAdoptsHostFactorWithCpuOnlyOptions) {
     const sparse_matrix A = grid(9, 11, 0.25, true);
     auto options = keep_opts();
-    options.factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
+    options.factor_opts.experimental.sampler = apxchol::clique_sampler::trace_cycle;
     const auto F = apxchol::factorize(apxchol::test::csc(A), options.factor_opts);
     options.backend = apxchol::solve_backend::gpu;
     EXPECT_THROW(apxchol::solver(apxchol::test::csc(A), options), std::invalid_argument);
@@ -1187,9 +1187,9 @@ TEST_F(MetalDevice, PerSolverPreparationOptionsAreIndependent) {
     const sparse_matrix A = grid(7, 9);
     auto options = keep_opts();
     EXPECT_FALSE(apxchol::solver(apxchol::test::csc(A), gpu_options(options)).factor().sddm);
-    options.factor_opts.regularization = 1e-8;
+    options.factor_opts.experimental.regularization = 1e-8;
     EXPECT_TRUE(apxchol::solver(apxchol::test::csc(A), gpu_options(options)).factor().sddm);
-    options.factor_opts.regularization = 0;
+    options.factor_opts.experimental.regularization = 0;
     EXPECT_FALSE(apxchol::solver(apxchol::test::csc(A), gpu_options(options)).factor().sddm);
 
     const sparse_matrix near = with_entry(with_entry(grid(7, 9, 0.25), 0, 1, 1e-6), 1, 0, 1e-6);
@@ -1311,7 +1311,7 @@ TEST_F(MetalDevice, VerbosityIsPerSolver) {
     for (bool verbose : {false, true, false}) {
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::gpu;
-        options.factor_opts.verbose = verbose;
+        options.factor_opts.experimental.verbose = verbose;
         testing::internal::CaptureStderr();
         apxchol::solve_result result;
         try { result = apxchol::solve(apxchol::test::csc(A), b, std::nullopt, std::nullopt, {}, options); }
@@ -1411,12 +1411,12 @@ TEST(MetalOptions, ResidentSetupRejectsUnsupportedOptionsAndLayouts) {
     apxchol::solve_options options;
     options.backend = apxchol::solve_backend::gpu;
     const auto A = grid(4, 4, 0.25);
-    options.factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
+    options.factor_opts.experimental.sampler = apxchol::clique_sampler::trace_cycle;
     EXPECT_THROW(apxchol::solver(apxchol::test::csc(A), options), std::invalid_argument);
-    options.factor_opts.sampler = apxchol::clique_sampler::gks;
-    options.factor_opts.partitioner = apxchol::partitioner_kind::priority_greedy;
+    options.factor_opts.experimental.sampler = apxchol::clique_sampler::gks;
+    options.factor_opts.experimental.partitioner = apxchol::partitioner_kind::priority_greedy;
     EXPECT_THROW(apxchol::solver(apxchol::test::csc(A), options), std::invalid_argument);
-    options.factor_opts.partitioner = apxchol::partitioner_kind::block_greedy;
+    options.factor_opts.experimental.partitioner = apxchol::partitioner_kind::block_greedy;
     if (!apxchol::backend_available(apxchol::solve_backend::gpu)) GTEST_SKIP() << "no usable Metal device";
     auto lower_entries = apxchol::test::triplets(A);
     std::erase_if(lower_entries, [](const triplet& e) { return e.row < e.col; });
@@ -1437,7 +1437,7 @@ TEST_F(MetalDevice, ResidentSetupAcceptsIntermediateDegreeQuantiles) {
             SCOPED_TRACE(testing::Message() << int(storage) << ' ' << quantile);
             auto options = keep_opts();
             options.factor_opts.factor_storage = storage;
-            options.factor_opts.partition.degree_quantile = quantile;
+            options.factor_opts.experimental.partition.degree_quantile = quantile;
             apxchol::solver solver(apxchol::test::csc(A), gpu_options(options));
             const auto result = solver.solve(b, 1e-8, 300);
             EXPECT_LE(result.residual, 1e-8);
@@ -1549,9 +1549,9 @@ TEST_F(MetalDevice, ExportedRoundsAreIndependentCpuLevels) {
 TEST(MetalOptions, AutomaticSelectionRejectsResidentIncompatibleOptions) {
     const sparse_matrix A = apxchol::test::identity(32769);
     apxchol::solve_options options;
-    options.factor_opts.sampler = apxchol::clique_sampler::trace_cycle;
+    options.factor_opts.experimental.sampler = apxchol::clique_sampler::trace_cycle;
     EXPECT_EQ(apxchol::test::select_solve_backend(options, A), apxchol::solve_backend::cpu);
-    options.factor_opts.sampler = apxchol::clique_sampler::gks;
+    options.factor_opts.experimental.sampler = apxchol::clique_sampler::gks;
     options.backend = apxchol::solve_backend::gpu;
     EXPECT_EQ(apxchol::test::select_solve_backend(options, A), apxchol::solve_backend::gpu);
 }

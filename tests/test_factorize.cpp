@@ -617,7 +617,7 @@ TEST(FactorRegularization, RejectsUnrepresentableExcess) {
              {std::pair{1e10, 1e300}, std::pair{1e-30, 1e-300}}) {
             const Sparse A = apxchol::test::scaled(L, scale);
             apxchol::factor_options opts;
-            opts.regularization = regularization;
+            opts.experimental.regularization = regularization;
             EXPECT_THROW(apxchol::factorize(csc(A), opts), std::range_error);
         }
     }
@@ -631,7 +631,7 @@ TEST(FactorRegularization, RejectsUnrepresentableStoredDiagonal) {
         apxchol::solve_options opts;
         opts.backend = apxchol::solve_backend::cpu;
         opts.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
-        opts.factor_opts.regularization = regularization;
+        opts.factor_opts.experimental.regularization = regularization;
         EXPECT_THROW(apxchol::solver(csc(L), opts), std::range_error);
     }
 }
@@ -643,7 +643,7 @@ TEST(FactorRegularization, AcceptsRepresentableExtremesAndGroundedDefaults) {
     for (double regularization : {0.0, 4.0}) {
         apxchol::solve_options opts;
         opts.backend = apxchol::solve_backend::cpu;
-        opts.factor_opts.regularization = regularization;
+        opts.factor_opts.experimental.regularization = regularization;
         const auto result = apxchol::solve(csc(L), b, std::nullopt, std::nullopt, {}, opts);
         EXPECT_TRUE(result.converged);
         EXPECT_LT(apxchol::test::relative_residual(L, result.x, b), apxchol::default_tol);
@@ -651,7 +651,7 @@ TEST(FactorRegularization, AcceptsRepresentableExtremesAndGroundedDefaults) {
     const Sparse identity = apxchol::test::identity(3);
     for (double regularization : {1e-300, 1e50}) {
         apxchol::factor_options opts;
-        opts.regularization = regularization;
+        opts.experimental.regularization = regularization;
         const auto factor = apxchol::factorize(csc(identity), opts);
         EXPECT_TRUE(factor.sddm);
         for (int col = 0; col < 3; ++col) {
@@ -955,7 +955,7 @@ TEST(FactorizeDeterminism, ParallelRebuiltFactorsPreserveSolveContract) {
         apxchol::factor_options opts;
         opts.seed = 3;
         opts.experimental.omp_threshold = 256;
-        opts.partitioner = kind;
+        opts.experimental.partitioner = kind;
         const auto ref = apxchol::factorize(csc(L), opts);
         ASSERT_GT(ref.L.nonZeros(), 70000) << sel;   // the parallel path really ran
         for (int rep = 1; rep <= 3; ++rep) {
@@ -1350,7 +1350,7 @@ TEST_P(StrategyConvergenceTest, GridConverges) {
     auto L = grid_laplacian(15, 15);
     auto b = apxchol::test::random_rhs(225);
     auto res = apxchol::solve(csc(L), b, 1e-6, 1000,
-        {}, {.factor_opts = {.seed = 42, .partitioner = is}});
+        {}, {.factor_opts = {.seed = 42, .experimental = {.partitioner = is}}});
     EXPECT_LT(res.residual, 1e-4)
         << "strategy " << name << " failed: iters=" << res.iterations
         << " residual=" << res.residual;
@@ -1361,7 +1361,7 @@ TEST_P(StrategyConvergenceTest, SDDMConverges) {
     auto M = sddm_grid(10, 10, 2.0);
     const std::vector<double> b = apxchol::test::random_vector(100);
     auto res = apxchol::solve(csc(M), b, 1e-6, 1000,
-        {}, {.factor_opts = {.seed = 42, .partitioner = is}});
+        {}, {.factor_opts = {.seed = 42, .experimental = {.partitioner = is}}});
     EXPECT_LT(res.residual, 1e-4)
         << "strategy " << name << " failed on SDDM: iters=" << res.iterations
         << " residual=" << res.residual;
@@ -1426,7 +1426,7 @@ TEST(ExactCliqueOption, Grid40_FewerItersThanSampled) {
     auto b = apxchol::test::random_rhs(L.rows);
     apxchol::factor_options opts;
     opts.seed = 42;
-    opts.partitioner = apxchol::partitioner_kind::block_greedy;
+    opts.experimental.partitioner = apxchol::partitioner_kind::block_greedy;
     auto sampled = apxchol::solve(csc(L), b, 1e-8, 200, {}, {.factor_opts = opts});
     opts.experimental.exact_clique_max_degree = 8;
     auto exact = apxchol::solve(csc(L), b, 1e-8, 200, {}, {.factor_opts = opts});
@@ -2122,7 +2122,7 @@ TEST(GpuBoundedSelection, ConsumingSolveChecksOriginalOperatorResidual) {
         options.factor_opts.seed = seed;
         options.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
         options.factor_opts.drop_tolerance = 0;
-        options.factor_opts.partition.degree_quantile = 0.5;
+        options.factor_opts.experimental.partition.degree_quantile = 0.5;
         std::vector<double> first_solution;
         std::int64_t first_iterations = 0;
         for (unsigned repeat = 0; repeat < 2; ++repeat) {

@@ -849,7 +849,7 @@ TEST_F(SolverArchive, PreservesLumpingAndRegularizationWithoutReapplyingThem) {
     const Sparse positive = test::from_triplets(2, 2, entries);
     auto construction = options();
     construction.factor_opts.lump_max_mass = 1.0;
-    construction.factor_opts.regularization = 0.25;
+    construction.factor_opts.experimental.regularization = 0.25;
     solver before(csc(positive), construction);
     ASSERT_EQ(before.factor().lumped_offdiag, 2);
     const auto path = directory / "positive.apxchol";

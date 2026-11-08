@@ -151,7 +151,6 @@ Pass these keywords to `factorize` or the one-shot `solve`:
 | `backend` | `"auto"` chooses a compatible CPU/GPU route; `"cpu"` or `"gpu"` requests one explicitly |
 | `num_threads` | CPU thread ceiling; `0` inherits the caller's OpenMP setting |
 | `seed` | Sampling seed; `None` uses the native default |
-| `partitioner` | `"block_greedy"`, `"priority_greedy"` or `"baumann_kyng"`; `None` uses the native default |
 | `factor_storage` | `"auto"` (default) for the backend default, `"float16"` or `"float32"`; NumPy dtypes also work |
 
 Read the chosen route from `solver.backend` and storage type from
@@ -164,18 +163,13 @@ FP16 requests fail; FP64 storage is unavailable. See [precision](https://algoptg
 
 ### Advanced options
 
-These share the native defaults and can usually be left unset. GPU routes
-support fewer construction choices.
+These share the native defaults and can usually be left unset. The research
+controls in the C++ `factor_options::experimental` are not available from Python.
 
 | Keyword | Meaning |
 |---|---|
-| `sampler` | Clique sampler: `"gks"` (default) or `"trace_cycle"` (CPU and CUDA only) |
-| `degree_quantile` | Degree cutoff quantile in `[0, 1)`; `0` selects the multiplier-based cutoff (Metal requires `(0, 1)`); `None` uses the backend default |
-| `degree_multiplier` | Positive degree multiplier, used only when `degree_quantile=0` |
 | `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
-| `regularization` | Minimum diagonal excess of the preconditioner, as a fraction of each diagonal after lumping; excess below 1e-12 of the diagonal counts as zero first; `A` is not modified; `0` disables it |
 | `lump_max_mass` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
-| `verbose` | Print setup diagnostics; off by default |
 
 Unknown keywords raise `ValueError`, like other invalid input or options;
 execution failures raise `RuntimeError` (see

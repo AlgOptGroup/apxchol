@@ -1121,7 +1121,7 @@ TEST(Solver, CudaOwnerAdoptsHostFactorsAndRejectsInvalidWarmStarts) {
         GTEST_SKIP() << "CUDA unavailable: " << cudaGetErrorString(status);
     ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
     if (count == 0) GTEST_SKIP() << "No CUDA devices";
-    options.factor_opts.partitioner = apxchol::partitioner_kind::priority_greedy;
+    options.factor_opts.experimental.partitioner = apxchol::partitioner_kind::priority_greedy;
     EXPECT_THROW(apxchol::solver(test::csc(matrix), options), std::invalid_argument);
     apxchol::solver owner(test::csc(matrix), host_factor, options);
     const Vector rhs = linspaced(matrix.rows, 1.0, 2.0);
@@ -1349,7 +1349,7 @@ TEST(Solver, GpuOwnerPreservesStorageAndAdoptsItsFactor) {
         EXPECT_EQ(owner->factor_storage(), storage);
         const auto exported = owner->factor();
         EXPECT_EQ(exported.storage, storage);
-        options.factor_opts.partitioner = apxchol::partitioner_kind::priority_greedy;
+        options.factor_opts.experimental.partitioner = apxchol::partitioner_kind::priority_greedy;
         EXPECT_THROW(apxchol::solver(test::csc(matrix), options), std::invalid_argument);
         apxchol::solver adopted(test::csc(matrix), exported, options);
         EXPECT_EQ(adopted.backend(), apxchol::solve_backend::gpu);
@@ -1806,7 +1806,7 @@ void check_thread_budget(const Sparse& matrix, int ambient, int budget,
                  std::invalid_argument);
     EXPECT_EQ(omp_get_max_threads(), ambient);
     auto invalid = options;
-    invalid.factor_opts.partitioner = static_cast<apxchol::partitioner_kind>(99);
+    invalid.factor_opts.experimental.partitioner = static_cast<apxchol::partitioner_kind>(99);
     EXPECT_THROW(Owner(test::csc(matrix), invalid), std::invalid_argument);
     EXPECT_EQ(omp_get_max_threads(), ambient);
 }

@@ -499,7 +499,7 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
         const std::vector<double> b = apxchol::test::multiply(A, exact);
         apxchol::solve_options setup;
         setup.backend = apxchol::solve_backend::gpu;
-        setup.factor_opts.verbose = true;
+        setup.factor_opts.experimental.verbose = true;
         testing::internal::CaptureStderr();
         std::optional<apxchol::solver> owner;
         try { owner.emplace(apxchol::test::csc(A), setup); }

@@ -466,7 +466,7 @@ detail::cpu_route::cpu_route(csc_ref<double> A,
     if (F) {
         install_factor(std::move(*F), cp);
     } else {
-        const bool _pcg_trace = opts_.factor_opts.verbose;
+        const bool _pcg_trace = opts_.factor_opts.experimental.verbose;
         const auto _t_compute_start = std::chrono::high_resolution_clock::now();
         const double stages_before = cp ? cp->total("setup") : 0.0;
         install_factor(detail::factorize_for_solver(A, opts_.factor_opts, cp, setup_route::cpu), cp);
@@ -478,7 +478,7 @@ detail::cpu_route::cpu_route(csc_ref<double> A,
                          dt*1000, stages*1000, (dt - stages)*1000);
         }
     }
-    print_sptrsv_banner<solve_backend::cpu>(trsv().fp16(), opts_.factor_opts.verbose);
+    print_sptrsv_banner<solve_backend::cpu>(trsv().fp16(), opts_.factor_opts.experimental.verbose);
     build_operator(A, cp);
 }
 
@@ -536,7 +536,7 @@ void detail::cpu_route::build_operator(csc_ref<double> L, checkpoint* cp) {
     // The common full-symmetric CSC needs no histogram/scatter/sort: its three
     // arrays already have the CSR layout. Other stored patterns take the
     // general selfadjoint(Lower) reconstruction below.
-    const bool pcg_trace_outer = opts_.factor_opts.verbose;
+    const bool pcg_trace_outer = opts_.factor_opts.experimental.verbose;
     if (cp) { cp->descend("setup"); cp->tick(); }
     auto next = std::make_shared<pcg_operator>();
     auto& op = *next;
@@ -822,7 +822,7 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
     if (use_cp)
         (*timings)("copy_p");
 
-    const bool trace = opts_.factor_opts.verbose;
+    const bool trace = opts_.factor_opts.experimental.verbose;
     const auto now = [] {
         return std::chrono::duration<double, std::micro>(
                    std::chrono::steady_clock::now().time_since_epoch())
@@ -1103,7 +1103,7 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
     }
 #if defined(APXCHOL_USE_CUDA)
     bool compatible = sizeof(node_index) == sizeof(std::uint32_t) &&
-        opts.factor_opts.partitioner == partitioner_kind::block_greedy &&
+        opts.factor_opts.experimental.partitioner == partitioner_kind::block_greedy &&
         opts.factor_opts.experimental.cpu_schedule == cpu_sptrsv_schedule::automatic &&
         opts.factor_opts.experimental.exact_clique_max_degree == 0 &&
         opts.factor_opts.experimental.exact_core_max_h.value_or(0) == 0 &&
@@ -1134,7 +1134,7 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
             throw std::invalid_argument("Metal GPU setup requires supported GKS options and compressed, sorted, paired CSC input");
         return solve_backend::cpu;
     }
-    if (!detail::metal_setup_regularization_supported(opts.factor_opts.regularization,
+    if (!detail::metal_setup_regularization_supported(opts.factor_opts.experimental.regularization,
             opts.backend == solve_backend::automatic ? A : nullptr)) {
         if (opts.backend == solve_backend::gpu)
             throw std::invalid_argument(detail::metal_regularization_error);
@@ -1222,7 +1222,7 @@ struct solver::impl {
           num_threads(opts.num_threads), timings(cp) {
 #if defined(APXCHOL_USE_CUDA)
         if (const auto* gpu = std::get_if<detail::cuda_route>(&route))
-            print_sptrsv_banner<solve_backend::gpu>(gpu->trsv().fp16(), opts.factor_opts.verbose);
+            print_sptrsv_banner<solve_backend::gpu>(gpu->trsv().fp16(), opts.factor_opts.experimental.verbose);
 #endif
     }
 

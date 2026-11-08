@@ -482,10 +482,10 @@ TEST(OperatorContract, RegularizationIsExplicitPerFactorization) {
     const auto A = grid_laplacian(6, 6);
     apxchol::factor_options options;
     EXPECT_FALSE(apxchol::factorize(apxchol::test::csc(A), options).sddm);
-    options.regularization = 1e-8;
+    options.experimental.regularization = 1e-8;
     EXPECT_TRUE(apxchol::factorize(apxchol::test::csc(A), options).sddm);
     EXPECT_TRUE(apxchol::factorize(apxchol::test::csc(A), apxchol::detail::block_greedy_partitioner{}, options).sddm);
-    options.regularization = 0;
+    options.experimental.regularization = 0;
     EXPECT_FALSE(apxchol::factorize(apxchol::test::csc(A), options).sddm);
 }
 
@@ -496,7 +496,7 @@ TEST(OperatorContract, NumericalOptionsRejectInvalidValues) {
                          std::numeric_limits<double>::quiet_NaN()}) {
         SCOPED_TRACE(value);
         apxchol::factor_options options;
-        options.regularization = value;
+        options.experimental.regularization = value;
         EXPECT_THROW(apxchol::factorize(apxchol::test::csc(empty), options), std::invalid_argument);
         options = {};
         options.lump_max_mass = value;

@@ -97,43 +97,40 @@ argument of `factorize`. Storage precision is separate from construction
 precision and exported values; see the [precision guide](../precision.md).
 
 ```{doxygenstruct} apxchol::factor_options
-:members: seed, regularization, lump_max_mass, factor_storage, drop_tolerance, partition, partitioner, sampler, verbose, experimental
+:members: seed, lump_max_mass, factor_storage, drop_tolerance, experimental
 :undoc-members:
 ```
 
 ```{doxygenenum} apxchol::factor_storage_type
 ```
 
-```{doxygenenum} apxchol::clique_sampler
+### Experimental controls
+
+`factor_options::experimental` holds research controls: the partitioner and
+its degree cutoff, the clique sampler, regularization, setup diagnostics,
+scheduling, how factorization finishes the remaining graph, and sampling
+rules. They are
+outside the [1.x compatibility promise](../api.md) and may change in any
+release. Keep their defaults unless comparing a specific alternative.
+GPU routes require the defaults of `partitioner`, `cpu_schedule`,
+`exact_clique_max_degree`, `exact_core_max_h` and `double_cycle_min_h`. Metal
+also requires the defaults of `sampler` and `degree_tiebreak`. See [backend selection](../usage.md).
+
+```{doxygenstruct} apxchol::experimental_options
+:members: partitioner, partition, sampler, regularization, verbose, cpu_schedule, degree_tiebreak, min_is_fraction, omp_threshold, parallel_residual_threshold, exact_clique_max_degree, exact_core_max_h, double_cycle_min_h
+```
+
+```{doxygenenum} apxchol::cpu_sptrsv_schedule
 ```
 
 ```{doxygenenum} apxchol::partitioner_kind
 ```
 
-### Candidate selection
-
-The partitioner chooses independent vertices for elimination. Its degree
-controls live in `factor_options::partition`.
-
 ```{doxygenstruct} apxchol::partition_options
 :members: degree_quantile, degree_multiplier
 ```
 
-### Experimental controls
-
-`factor_options::experimental` holds research controls for scheduling, how
-factorization finishes the remaining graph, and sampling rules. They are
-outside the [1.x compatibility promise](../api.md) and may change in any
-release. Keep their defaults unless comparing a specific alternative.
-GPU routes require the defaults of `cpu_schedule`, `exact_clique_max_degree`,
-`exact_core_max_h` and `double_cycle_min_h`; Metal also requires
-`degree_tiebreak`. See [backend selection](../usage.md).
-
-```{doxygenstruct} apxchol::experimental_options
-:members: cpu_schedule, degree_tiebreak, min_is_fraction, omp_threshold, parallel_residual_threshold, exact_clique_max_degree, exact_core_max_h, double_cycle_min_h
-```
-
-```{doxygenenum} apxchol::cpu_sptrsv_schedule
+```{doxygenenum} apxchol::clique_sampler
 ```
 
 ## Constructing and reusing a factor
