@@ -102,59 +102,37 @@ They don't apply to code comments or debug logs.
 
 ## House profile
 
-apxchol follows the shared writing guides with these differences. P, E and D refer to the guides. "Check R1" and so
-on are the text checks below.
+apxchol follows the shared writing guides with these differences. P refers to `docs/writing/guides/PRINCIPLES.md`.
+"Check R1" and so on are the text checks below.
 
-- P1, stricter: the first 2 words carry the outcome or the action. Details such as IDs, codes, raw output and
-  internals go after what most readers need. Reason: readers scan docs and `--help` for the result.
-- P3 and check R1, stricter: one idea per sentence. No semicolons, no em dash between clauses, and at most 1 colon per
-  sentence. Reason: many readers read English as a second language.
-- P3 and check R2, stricter: sentences have 20 words or fewer on average and none over 30. Reason: same as R1.
-- P3 and check R5, stricter: defined technical terms such as preconditioner, PCG or CSR are fine. Define an internal
-  name, such as a route code or a struct name, the first time, or leave it out. Reason: users never see internal
-  names elsewhere.
-- P3 and check R6, stricter: active voice with a named actor, such as you, the solver or the CLI. Passive voice is fine
-  when no actor matters, as in "Nothing was changed." Reason: the reader needs to know who acts.
-- P3 and check R8, stricter: one term per thing and one verb per action. The term list in `scripts/text-rules.json` is
-  closed, so a new term goes into it in the same commit. Reason: the same option text exists in up to 6 copies.
-- P4, stricter: every number, limit, default or guarantee matches the code or config that sets it. A default in the
-  guides matches `--help` and `factor_options.h`. The commit that adds a value names where the code sets it, and a
-  change to the value changes the text in the same commit. Reason: option text is copied by hand across interfaces.
-- P5 and check R4, stricter: an error says what happened, why, and what to do next, in that order. The next step names
-  a flag, a file, a page or a contact. Codes and IDs go after the sentence. No "sorry", "oops" or a bare "something
-  went wrong". Reason: most errors come from options, and the fix is usually another value or the CPU backend.
-- P6, stricter: headings are statements that name the topic, with the key word first. Reason: readers scan headings.
-- Check R7, narrowed: digits and units for every number and time, such as "1 hour" or "5 GB". No "soon" or "a while"
-  when the code knows the answer. "May" and "might" stay allowed for permission and real uncertainty. Reason: P4
-  keeps real uncertainty, and a word list can't tell it from hedging.
-- Check R9, on: no "we" unless the text says who "we" is. Reason: the docs speak to users, not for a team.
-- H1, added: a `--help` option fits on 1 line, and an option with a default ends with it. Reason: users scan options in
-  a terminal.
-- H2, added: paragraphs have at most 5 sentences in a guide and 3 in an exception message. Three or more parallel
-  items become a list. Reason: short blocks are easier to scan.
-- ENGINEERING "Commit titles and bodies", stricter: the subject says what changed, in plain words, in 72 characters or
-  fewer. The body says why, then the numbers (before and after, with the machine and command), then the risk. Reason:
-  performance changes need their evidence in the history.
-- ENGINEERING "Pull request descriptions", stricter: at most about 15 lines. The first line is the outcome for a user.
-  Then 2 to 4 bullets: what changed and why. Then the numbers with the command, matrix and machine, the risk, and how
-  it was checked. Name the `CHANGELOG.md` line. Say what is not done. Don't list open review points. Reason: same as
-  for commits.
-- ENGINEERING "Reviews and review replies", stricter: one finding per comment. Start with the severity (Must, Should
-  or Nit) and the outcome: what breaks, for whom. Then the evidence (`file:line`, input, output) and a concrete fix.
-  Reason: the maintainer triages comments by severity.
+- Check R1, on: no semicolons in prose. Split the sentence or use a list. Reason: a project choice, which P10 leaves to
+  each project.
+- P4, stricter: defaults and limits come from `include/apxchol/solver/factor_options.h`. A change to a value updates
+  every copy (CLI help, docstrings, READMEs, `docs/usage.md`) in the same commit. Reason: option text is copied by hand
+  into up to 6 places.
+- Check R4, on: when another flag, value or the CPU backend fixes an error, the message names it. Reason: most option
+  and backend errors have such a fix.
+- Check R7, narrowed: no "soon", "shortly", "a while" or "eventually", and digits for numbers with units. "May" and
+  "might" stay allowed. Reason: P4 keeps real uncertainty, and a word list can't tell it from hedging.
+- Check R8, on: the terms live in `scripts/text-rules.json`. A new term goes into it in the same commit. Reason: one
+  term per thing across all interfaces.
+- ENGINEERING "Commit titles and bodies", stricter: the subject has 72 characters or fewer. A performance change gives
+  before and after numbers with the machine and command. Reason: performance evidence must stay in the history.
+- ENGINEERING "Pull request descriptions", added: name the `CHANGELOG.md` line. A performance change gives numbers with
+  the command, matrix and machine. Reason: CONTRIBUTING.md asks for a CHANGELOG line with every user-visible change.
+- ENGINEERING "Reviews and review replies", added: one finding per comment, starting with the severity Must, Should or
+  Nit. Reason: ENGINEERING asks to use the project's severity scale, and this is apxchol's.
 
 `python3 scripts/check_text_rules.py` compares the files in `scripts/text-rules.json` with
 `scripts/text-rules-baseline.json`. It fails only when a file gains one of these hits:
 
 - R1: a semicolon in prose.
 - R4: "sorry", "oops", "something went wrong", "an error occurred" or "unknown error".
-- R5: a word from the jargon list, in prose.
 - R7: "soon", "shortly", "a while", "eventually", or a number in words before a unit.
 - R8: a banned term from the term list.
-- R9: "we", "our" or "us" where the scope bans them.
 
 It reports R2 (sentences over 30 words) and R6 (passive voice) with `--report` and never fails on them. The rest of
-the house profile, and em dashes and colons for R1, is for the reviewer. Text outside these files, such as commit messages and PR
+the house profile is for the reviewer. Text outside these files, such as commit messages and PR
 descriptions, is not linted.
 
 A file with fewer hits than its baseline passes with a note. Lower its baseline with `--update-baseline`, which
