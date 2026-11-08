@@ -102,6 +102,7 @@
 - The website separates user and developer guides, adds installation, quick start, examples, changelog and citing pages, and marks development pages with a banner.
 - The precision guide states when results are reproducible and that a release may change results, within the documented precision, for measured speed or memory gains.
 - Clearer messages for a solver used by 2 threads at once, an archive from a newer version, and positive off-diagonal input entries.
+- Errors from invalid solve options, unsupported GPU requests and a missing Metal device start with `apxchol:` and name the next step, such as requesting the CPU backend.
 - A new Input formats page shows how to pass matrices from Eigen, SuiteSparse/CHOLMOD, SciPy, MATLAB/Octave, raw CSR/CSC arrays and Matrix Market files; CI builds and runs its examples.
 
 ### Fixes

@@ -183,7 +183,7 @@ private:
         static_assert(Columns == 1 || Columns == 2 || Columns == 4);
         if (std::uint64_t(n_) > std::numeric_limits<unsigned>::max() / Columns)
             throw std::overflow_error("GPU RHS panel exceeds packed index range");
-        if (!ready_) throw std::runtime_error("cuda_pcg::solve: setup() not called");
+        if (!ready_) throw std::logic_error("cuda_pcg::solve called before setup()");
         if (b_host.rows() != n_ || b_host.cols() != Columns ||
             x_host.rows() != n_ || x_host.cols() != Columns ||
             (x0 && (x0->rows() != n_ || x0->cols() != Columns)))

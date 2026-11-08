@@ -51,17 +51,20 @@ bool backend_available(solve_backend backend) noexcept {
 
 void detail::validate_solve_parameters(double tol, int max_iter) {
     if (!(tol > 0) || !std::isfinite(tol))
-        throw std::invalid_argument("solve tolerance must be finite and positive");
+        throw std::invalid_argument("apxchol: the solve tolerance must be finite and positive. "
+                                    "Pass a value such as 1e-8, or omit it for the default.");
     if (max_iter < 0)
-        throw std::invalid_argument("max_iter must be nonnegative");
+        throw std::invalid_argument("apxchol: the iteration budget must be 0 or more. "
+                                    "Pass a nonnegative value, or omit it for the default.");
 }
 
 void detail::validate_solve_options(const solve_options& opts) {
     if (opts.num_threads < 0)
-        throw std::invalid_argument("num_threads must be nonnegative");
+        throw std::invalid_argument("apxchol: num_threads must be nonnegative. "
+                                    "Pass 0 to inherit the OpenMP thread setting.");
     if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu &&
         opts.backend != solve_backend::gpu)
-        throw std::invalid_argument("invalid solve backend");
+        throw std::invalid_argument("apxchol: invalid solve backend. Use automatic, cpu or gpu.");
     validate_factor_options(opts.factor_opts);
 }
 
@@ -82,7 +85,7 @@ void check_matrix_views(const_matrix_ref B, matrix_ref X, std::int64_t rows,
                         const const_matrix_ref* X0 = nullptr) {
     if (B.rows() != rows || X.rows() != rows || X.cols() != B.cols() ||
         (X0 && (X0->rows() != rows || X0->cols() != B.cols())))
-        throw std::invalid_argument("apxchol: RHS, output and warm-start shapes must match");
+        throw std::invalid_argument("apxchol: RHS, output and initial-guess shapes must match");
     const auto extent = [](const auto &value) {
         if (!value.size())
             return std::pair<std::uintptr_t, std::uintptr_t>{0, 0};
@@ -101,7 +104,7 @@ void check_matrix_views(const_matrix_ref B, matrix_ref X, std::int64_t rows,
         return output_extent.first < hi && lo < output_extent.second;
     };
     if (overlaps(B) || (X0 && overlaps(*X0)))
-        throw std::invalid_argument("apxchol: output must not overlap RHS or warm start");
+        throw std::invalid_argument("apxchol: output must not overlap RHS or initial guess");
 }
 
 template<solve_backend Route>
@@ -1089,7 +1092,7 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
                                           const csc_ref<double>* A) {
     if (opts.backend == solve_backend::cpu) return solve_backend::cpu;
     if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::gpu)
-        throw std::invalid_argument("invalid solve backend");
+        throw std::invalid_argument("apxchol: invalid solve backend. Use automatic, cpu or gpu.");
     // Keep small solves on CPU unless it cannot honor the requested storage.
 #if defined(APXCHOL_USE_METAL)
     constexpr node_index cpu_limit = 32 * 1024;
@@ -1120,8 +1123,8 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
                        backend_available(solve_backend::gpu)))
         return solve_backend::gpu;
     if (opts.backend == solve_backend::gpu)
-        throw std::invalid_argument("GPU setup does not support the requested factor options "
-            "or node-index width; request CPU explicitly");
+        throw std::invalid_argument("apxchol: GPU setup does not support the requested factor options "
+            "or node-index width. Request the CPU backend.");
     return solve_backend::cpu;
 #elif defined(APXCHOL_USE_METAL)
     bool compatible = detail::metal_setup_options_supported(opts.factor_opts);
@@ -1131,7 +1134,8 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
     }
     if (!compatible) {
         if (opts.backend == solve_backend::gpu)
-            throw std::invalid_argument("Metal GPU setup requires supported GKS options and compressed, sorted, paired CSC input");
+            throw std::invalid_argument("apxchol: Metal GPU setup requires the default sampler and "
+                "partitioner and compressed, sorted, paired CSC input. Request the CPU backend.");
         return solve_backend::cpu;
     }
     if (!detail::metal_setup_regularization_supported(opts.factor_opts.regularization,
@@ -1143,7 +1147,8 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
     return solve_backend::gpu;
 #else
     if (opts.backend == solve_backend::gpu)
-        throw std::invalid_argument("GPU route requested but GPU support is not built");
+        throw std::invalid_argument("apxchol: GPU route requested but GPU support is not built. "
+            "Request the CPU backend, or install a CUDA or Metal build.");
     return solve_backend::cpu;
 #endif
 }
@@ -1205,9 +1210,11 @@ struct solver::impl {
         if (route == solve_backend::gpu) {
             const auto& device = detail::metal::status();
             if (!device.ok)
-                throw std::runtime_error("apxchol: the Metal backend is unavailable: " + device.error);
+                throw std::runtime_error("apxchol: the Metal backend is unavailable (" + device.error +
+                                         "). Request the CPU backend.");
             if (F && opts.factor_opts.experimental.cpu_schedule != cpu_sptrsv_schedule::automatic)
-                throw std::invalid_argument("Metal cannot use a CPU triangular-solve schedule");
+                throw std::invalid_argument("apxchol: Metal cannot use a CPU triangular-solve schedule. "
+                    "Leave experimental.cpu_schedule at automatic, or request the CPU backend.");
             return detail::solver_route(std::in_place_type<detail::metal_route>, A, opts, cp, F);
         }
 #else
