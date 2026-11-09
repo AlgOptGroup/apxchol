@@ -125,10 +125,11 @@ struct baumann_kyng_partitioner {
         // Degree-aware IS priority: a sampled neighbor blocks v only if its
         // (degree,hash) is strictly lower -> ineligible high-degree neighbors
         // (higher degree) never block eligible low-degree ones, and low-degree
-        // wins, giving a min-degree-like elimination order.
+        // wins, giving a min-degree-like elimination order. The degree is
+        // clamped to the 24 bits above the hash so a huge hub cannot wrap.
         auto prio2 = [&](node_index v) -> uint64_t {
             const uint64_t h = prio(v);
-            return (uint64_t(deg_by_vertex_[v]) << 40) | (h >> 24);
+            return (std::min<uint64_t>(deg_by_vertex_[v], 0xFFFFFFULL) << 40) | (h >> 24);
         };
 
         // ── PASS 2: keep eligible sampled vertices that are priority-IS minima.

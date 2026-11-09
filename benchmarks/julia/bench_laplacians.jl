@@ -259,7 +259,7 @@ function operator_facts(A)
 end
 
 # apxchol's default ceiling on the positive off-diagonal MASS fraction
-# (kDefaultPositiveOffdiagTolerance in include/apxchol/operator_class.h).
+# (kDefaultPositiveOffdiagTolerance in include/apxchol/detail/operator_options.h).
 const LUMP_MASS_CEILING = 0.25
 
 # The n/a sentinel: iterations and rel_residual = -1, which the runner's

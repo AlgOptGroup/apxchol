@@ -61,7 +61,9 @@
 /// caller.  The eliminator only controls which clique edges are generated.
 ///
 /// The built-in rule, which factor_options configures, is
-/// detail::tree_elimination: a random spanning tree of the clique (d-1 edges).
+/// detail::tree_elimination. By default it emits a random spanning tree of the
+/// clique (d-1 edges). The experimental trace-cycle sampler can emit extra
+/// cycle and exact-core edges.
 
 #include "apxchol/types.h"
 #include "apxchol/solver/factor_options.h"

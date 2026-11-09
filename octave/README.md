@@ -72,7 +72,7 @@ and execution failures use `apxchol:error` (see
 | `factor_storage` | `auto`, `float16` or `float32`; affects triangular-solve storage |
 | `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
 | `positive_offdiag_tolerance` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
-| `verbose` | Logical flag for setup and solve diagnostics; off by default |
+| `verbose` | Logical flag for setup and solve diagnostics; off by default. The output format is not stable |
 
 See [precision](../docs/precision.md) and the [native option reference](../docs/reference/cpp.md)
 for storage behavior and the meaning of each control.
