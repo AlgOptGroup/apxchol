@@ -113,7 +113,7 @@ public:
         ready_ = true;
     }
 
-    /// Solve A*X = B for one, two or four columns via PCG using a
+    /// Solve A*X = B for 1, 2, 4, 8, 16 or 32 columns via PCG using a
     /// device-capable preconditioner, whose `trsv().solve_LLt_dev` runs per
     /// iteration. Reports iteration counts and final relative residuals.
     template<unsigned Columns, class Precond>
@@ -127,6 +127,14 @@ public:
 
     bool ready() const { return ready_; }
     int64_t n() const { return n_; }
+    /// Grows this copy's workspace to hold a panel of this many columns. On
+    /// device_memory_error or overflow_error the previous workspace stays in use.
+    void reserve_panel(unsigned columns) {
+        if (std::uint64_t(n_) > std::numeric_limits<unsigned>::max() / columns)
+            throw std::overflow_error("GPU RHS panel exceeds packed index range");
+        const detail::cuda_device_scope device(device_, detail::cuda_device_scope::checked{});
+        reserve_columns(columns);
+    }
     int64_t nnz() const { return op_ ? op_->matrix.nnz : 0; }
     /// Operator storage precision resolved at setup (FP32 only when exact).
     bool fp32_operator() const { return op_ && op_->matrix.fp32; }
@@ -180,7 +188,8 @@ private:
                        std::array<int, Columns>& iterations,
                        std::array<double, Columns>& residuals, bool laplacian,
                        const const_matrix_ref* x0) {
-        static_assert(Columns == 1 || Columns == 2 || Columns == 4);
+        static_assert(Columns == 1 || Columns == 2 || Columns == 4 ||
+                      Columns == 8 || Columns == 16 || Columns == 32);
         if (std::uint64_t(n_) > std::numeric_limits<unsigned>::max() / Columns)
             throw std::overflow_error("GPU RHS panel exceeds packed index range");
         if (!ready_) throw std::logic_error("apxchol: cuda_pcg::solve called before setup()");
