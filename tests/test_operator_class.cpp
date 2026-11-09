@@ -478,17 +478,6 @@ TEST(OperatorContract, LumpingCeilingIsExplicitPerCall) {
     EXPECT_EQ(apxchol::factorize(apxchol::test::csc(A), options).lumped_offdiag, 2);
 }
 
-TEST(OperatorContract, RegularizationIsExplicitPerFactorization) {
-    const auto A = grid_laplacian(6, 6);
-    apxchol::factor_options options;
-    EXPECT_FALSE(apxchol::factorize(apxchol::test::csc(A), options).sddm);
-    options.experimental.regularization = 1e-8;
-    EXPECT_TRUE(apxchol::factorize(apxchol::test::csc(A), options).sddm);
-    EXPECT_TRUE(apxchol::factorize(apxchol::test::csc(A), apxchol::detail::block_greedy_partitioner{}, options).sddm);
-    options.experimental.regularization = 0;
-    EXPECT_FALSE(apxchol::factorize(apxchol::test::csc(A), options).sddm);
-}
-
 TEST(OperatorContract, NumericalOptionsRejectInvalidValues) {
     const Sparse empty(0, 0);
     const auto empty_csc = to_csc(empty);
@@ -496,9 +485,6 @@ TEST(OperatorContract, NumericalOptionsRejectInvalidValues) {
                          std::numeric_limits<double>::quiet_NaN()}) {
         SCOPED_TRACE(value);
         apxchol::factor_options options;
-        options.experimental.regularization = value;
-        EXPECT_THROW(apxchol::factorize(apxchol::test::csc(empty), options), std::invalid_argument);
-        options = {};
         options.positive_offdiag_tolerance = value;
         EXPECT_THROW(apxchol::factorize(apxchol::test::csc(empty), options), std::invalid_argument);
         EXPECT_THROW(operator_view(empty_csc, value), std::invalid_argument);

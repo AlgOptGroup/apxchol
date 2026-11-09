@@ -75,14 +75,11 @@ private:
                             const partition_context& ctx) {
         size_t nn = G.n();
         block_of.resize(nn);
-        const bool tiebreak  = ctx.degree_tiebreak;
         const auto degrees   = ctx.degrees;
         // u beats v (u survives the conflict, v drops) — low-degree wins, index
-        // breaks ties. Falls back to plain index order when tiebreak is off.
-        // Either way it is a STRICT TOTAL ORDER on the candidates, which is what
-        // makes the repair pass below terminate.
+        // breaks ties. It is a STRICT TOTAL ORDER on the candidates, which is
+        // what makes the repair pass below terminate.
         auto u_beats_v = [&](node_index u, node_index v) {
-            if (!tiebreak) return u < v;
             const node_index du = degrees[u], dv = degrees[v];
             return du < dv || (du == dv && u < v);
         };

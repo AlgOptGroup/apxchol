@@ -401,8 +401,9 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None,
         stays FP64. Unsupported FP16 requests fail; FP64 storage is unavailable.
     **advanced
         Passed straight through to the core options:
-        `drop_tolerance` (in [0, 1]; 0 disables dropping) and
-        `positive_offdiag_tolerance` (fraction in [0, 1]; 0 rejects positive off-diagonals).
+        `drop_tolerance` (in [0, 1]; 0 disables dropping),
+        `positive_offdiag_tolerance` (fraction in [0, 1]; 0 rejects positive off-diagonals)
+        and `verbose` (default False).
 
     Notes
     -----

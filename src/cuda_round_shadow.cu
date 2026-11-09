@@ -1325,7 +1325,7 @@ std::size_t add_bytes(std::size_t total, std::size_t count,
 
 __global__ void csc_initial_counts_excess(
         int n, const int* ptr, const int* idx, const double* values,
-        double reg_eps, std::uint32_t* counts, std::uint8_t* active,
+        std::uint32_t* counts, std::uint8_t* active,
         double* excess, std::uint32_t* status) {
     const int v = blockIdx.x * blockDim.x + threadIdx.x;
     if (v >= n) return;
@@ -1344,10 +1344,6 @@ __global__ void csc_initial_counts_excess(
     }
     double e = __dadd_rn(diag, -degree);
     e = e > __dmul_rn(diag, 1e-12) ? e : 0.0;
-    if (reg_eps > 0.0) {
-        const double regularized = __dmul_rn(reg_eps, diag);
-        if (e < regularized) e = regularized;
-    }
     if (!isfinite(e) || e < 0.0) atomicOr(status, 1u);
     if (e > 0.0) atomicOr(status + 1, 1u);
     counts[v] = count;
@@ -2708,7 +2704,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::compute_owned_prefix(
 }
 
 std::unique_ptr<gpu_block_frontend> gpu_round_shadow_device_state::initialize_owned_csc(
-        const gpu_owned_csc_buffers& input, double reg_eps, bool& sddm) {
+        const gpu_owned_csc_buffers& input, bool& sddm) {
     // Private constructor path: dispatch (or the test wrapper) has checked
     // gpu_owned_csc_supported once before entering the owning session.
     // Repeating its full stored-pattern traversal here would undo the import
@@ -2764,7 +2760,7 @@ std::unique_ptr<gpu_block_frontend> gpu_round_shadow_device_state::initialize_ow
     });
     const float count_ms = timer.measure_ms([&] {
         csc_initial_counts_excess<<<blocks_for(n), kBlock>>>(static_cast<int>(n), ptr.get(), idx.get(),
-            values.get(), reg_eps, counts.get(), impl_->active.get(), impl_->excess.get(), status.get());
+            values.get(), counts.get(), impl_->active.get(), impl_->excess.get(), status.get());
         cuda_check(cudaGetLastError(), "initialize CSC counts and exact excess");
         std::size_t bytes = cub_bytes;
         cuda_check(cub::DeviceScan::ExclusiveSum(scratch.get(), bytes, counts.get(),
@@ -2893,10 +2889,10 @@ gpu_round_shadow_device_state::initialize_owned_raw_for_test(
 }
 
 gpu_owned_csc_test_result gpu_initial_owned_csc_buffers_for_test(
-        const gpu_owned_csc_buffers& input, double reg_eps) {
+        const gpu_owned_csc_buffers& input) {
     gpu_owned_csc_test_result result;
     gpu_round_shadow_device_state state;
-    auto frontend = state.initialize_owned_csc(input, reg_eps, result.sddm);
+    auto frontend = state.initialize_owned_csc(input, result.sddm);
     result.initial = state.download_owned_prefix().residual;
     result.eligible = true;
     return result;

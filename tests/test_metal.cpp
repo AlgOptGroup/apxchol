@@ -1186,12 +1186,6 @@ TEST_F(MetalDevice, CommonSolverAdoptsHostFactorWithCpuOnlyOptions) {
 TEST_F(MetalDevice, PerSolverPreparationOptionsAreIndependent) {
     const sparse_matrix A = grid(7, 9);
     auto options = keep_opts();
-    EXPECT_FALSE(apxchol::solver(apxchol::test::csc(A), gpu_options(options)).factor().sddm);
-    options.factor_opts.experimental.regularization = 1e-8;
-    EXPECT_TRUE(apxchol::solver(apxchol::test::csc(A), gpu_options(options)).factor().sddm);
-    options.factor_opts.experimental.regularization = 0;
-    EXPECT_FALSE(apxchol::solver(apxchol::test::csc(A), gpu_options(options)).factor().sddm);
-
     const sparse_matrix near = with_entry(with_entry(grid(7, 9, 0.25), 0, 1, 1e-6), 1, 0, 1e-6);
     options.factor_opts.positive_offdiag_tolerance = 0;
     EXPECT_THROW(apxchol::solver(apxchol::test::csc(near), gpu_options(options)), std::invalid_argument);
@@ -1311,7 +1305,7 @@ TEST_F(MetalDevice, VerbosityIsPerSolver) {
     for (bool verbose : {false, true, false}) {
         apxchol::solve_options options;
         options.backend = apxchol::solve_backend::gpu;
-        options.factor_opts.experimental.verbose = verbose;
+        options.factor_opts.verbose = verbose;
         testing::internal::CaptureStderr();
         apxchol::solve_result result;
         try { result = apxchol::solve(apxchol::test::csc(A), b, std::nullopt, std::nullopt, {}, options); }

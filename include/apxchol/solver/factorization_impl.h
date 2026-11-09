@@ -614,7 +614,7 @@ void eliminate_partition(const Eliminator& elim,
     }
     eliminate_partition_singleton(elim, G, part, factor_cols, ws, opts, cp,
                                   work_hint, live_degrees);
-    if (live_degrees && opts.experimental.verbose) {
+    if (live_degrees && opts.verbose) {
         const std::size_t raw = ws.degree_decrements.size();
         std::size_t unique = 0;
         double maximum_ms = 0.0;
@@ -726,11 +726,11 @@ factorization factorize_impl(const Eliminator& elim,
     if (cp) (*cp)("graph_copy");
     auto gpu_round_shadow =
         detail::make_gpu_round_shadow_session<Eliminator>(elim,
-            route, opts.experimental.verbose);
+            route, opts.verbose);
 
     // Record diagonal excess to select the full factor dimension. Excess in
     // one component does not prove every component positive definite.
-    // make_graph suppresses row-sum noise before applying regularization.
+    // make_graph has already suppressed row-sum noise.
     if (!initial_csc) for (node_index v = 0; v < n; ++v) {
         if (work.excess(v) > 0.0) { result.sddm = true; break; }
     }
@@ -771,14 +771,13 @@ factorization factorize_impl(const Eliminator& elim,
                 throw std::invalid_argument("GPU setup requires a supported CSC operator");
             std::unique_ptr<detail::gpu_block_frontend> gpu_frontend;
             result.sddm = gpu_round_shadow.initialize_owned_csc(
-                detail::gpu_owned_csc_host_buffers(*initial_csc), gpu_frontend,
-                opts.experimental.regularization);
+                detail::gpu_owned_csc_host_buffers(*initial_csc), gpu_frontend);
             if (cp) (*cp)("gpu_csc_initialize");
             bool sparsification_attempted = false;
             peak_graph_bytes = std::max(peak_graph_bytes, work.memory_bytes());
             while (!active.empty()) {
                 const auto prep = gpu_frontend->prepare(active, opts.experimental.partition,
-                    opts.seed, ws.round_index, opts.experimental.degree_tiebreak);
+                    opts.seed, ws.round_index);
                 auto part = gpu_frontend->select_block_greedy();
                 if (part.data.empty())
                     throw std::runtime_error("GPU-owned factorization selection made no progress");
@@ -800,14 +799,14 @@ factorization factorize_impl(const Eliminator& elim,
                         worthwhile = detail::residual_sparsify_worthwhile(active.size(),
                             residual_thresh, handoff, distinct_degree);
                     }
-                    if (opts.experimental.verbose)
+                    if (opts.verbose)
                         std::fprintf(stderr, "[gpu-owned-sparsify-gate] round=%zu active=%zu "
                             "handoff=%zu avg_distinct_degree=%.17g attempted=1 worthwhile=%d\n",
                             ws.round_index, active.size(), handoff, distinct_degree, int(worthwhile));
                     if (worthwhile) {
                         const auto sparse_seed = opts.seed ^ ws.round_index;
                         const auto stats = gpu_round_shadow.sparsify_owned_residual(*gpu_frontend, sparse_seed);
-                        if (opts.experimental.verbose)
+                        if (opts.verbose)
                             std::fprintf(stderr, "[gpu-owned-sparsify] implementation=device round=%zu "
                                 "seed=%llu physical_before=%zu distinct_before=%zu kept=%zu backbone=%zu "
                                 "expected=%.17g min_p=%.17g max_inv_p=%.17g "
@@ -911,7 +910,6 @@ factorization factorize_impl(const Eliminator& elim,
             .options = opts.experimental.partition,
             .seed = opts.seed,
             .omp_threshold = opts.experimental.omp_threshold,
-            .degree_tiebreak = opts.experimental.degree_tiebreak,
             .degrees = {},
         };
         if (cp) { cp->descend("find_partition"); cp->tick(); }
@@ -941,7 +939,7 @@ factorization factorize_impl(const Eliminator& elim,
                 avg_deg = total_degree / static_cast<double>(act.size());
             } else {
                 if (refresh_incremental &&
-                    opts.experimental.verbose)
+                    opts.verbose)
                     std::fprintf(stderr,
                         "[incremental-refresh] round=%llu dead=%zu live=%zu "
                         "ratio=%.6f threshold=%.6f\n",
@@ -982,7 +980,7 @@ factorization factorize_impl(const Eliminator& elim,
                     prune_skip_gap = hidden == 0
                         ? std::min(2u * prune_skip_gap, 8u) : 1u;
                     prune_skip_streak = 0;
-                    if (opts.experimental.verbose)
+                    if (opts.verbose)
                         std::fprintf(stderr,
                             "[prune-skip] round=%llu active=%zu hidden=%zu next_gap=%u\n",
                             static_cast<unsigned long long>(ws.round_index),
@@ -1099,7 +1097,7 @@ factorization factorize_impl(const Eliminator& elim,
                     last_candidate_count, active.size(), min_yield,
                     residual_thresh, opts.experimental.omp_threshold)) {
                 handoff_vertices = part.data.size();
-                if (opts.experimental.verbose)
+                if (opts.verbose)
                     std::fprintf(stderr,
                         "[apxchol] selector handoff: active=%zu candidates=%zu "
                         "selected=%zu yield=%.6f base=%.6f effective=%.6f "
@@ -1178,7 +1176,7 @@ factorization factorize_impl(const Eliminator& elim,
             }
         }
         if (incremental_degree_capable &&
-            opts.experimental.verbose) {
+            opts.verbose) {
             std::fprintf(stderr,
                 "[incremental-gate] round=%llu active=%zu candidates=%zu "
                 "selected=%zu avg_degree=%.6f selected_work=%zu "
@@ -1227,7 +1225,7 @@ factorization factorize_impl(const Eliminator& elim,
             const bool worthwhile = detail::residual_sparsify_worthwhile(
                 active.size(), residual_thresh, handoff_vertices,
                 sample.avg_distinct_degree);
-            if (opts.experimental.verbose)
+            if (opts.verbose)
                 std::fprintf(stderr,
                     "[apxchol] residual sparsify gate: active=%zu "
                     "handoff_vertices=%zu avg_distinct_degree=%.6f "
@@ -1243,7 +1241,7 @@ factorization factorize_impl(const Eliminator& elim,
                         work, active,
                         detail::kResidualSparsifyKeepProbability,
                         opts.seed ^ ws.round_index);
-                if (opts.experimental.verbose)
+                if (opts.verbose)
                     std::fprintf(stderr,
                         "[apxchol] residual sparsify: active=%zu p=%.2f "
                         "edges=%zu/%zu->%zu expected=%.1f backbone=%zu "
@@ -1335,7 +1333,7 @@ factorization factorize_impl(const Eliminator& elim,
     // live_frac well below 1 => abandoned slabs dominate -> compaction would help.
     // Read off the working graph HERE, before it is freed below (nnz(L) is the
     // off-diagonal count + one diagonal per column -- what assemble_csc builds).
-    if (opts.experimental.verbose) {
+    if (opts.verbose) {
         const double MB = 1.0 / (1024.0 * 1024.0);
         size_t nnz = gpu_owned_setup_route ? result.L.nonZeros() : factor_cols.size();
         for (const auto& c : factor_cols) nnz += c.entry_count;
@@ -1392,7 +1390,7 @@ factorization factorize_impl(const Eliminator& elim,
         factorization_access::device_factor(result) = gpu_round_shadow.finalize_device_factor(
             result.perm, result.sddm ? n : n - 1, opts.factor_storage, opts.drop_tolerance);
         if (cp) (*cp)("gpu_factor_finalize");
-        if (opts.experimental.verbose) {
+        if (opts.verbose) {
             const std::size_t omitted_payload_bytes =
                 (static_cast<std::size_t>(result.L.nonZeros()) - n) * sizeof(detail::factor_entry);
             std::fprintf(stderr,
@@ -1425,7 +1423,6 @@ inline tree_elimination make_tree_elim(const factor_options& opts,
     const std::size_t exact_core = opts.experimental.exact_core_max_h.value_or(
         route == detail::setup_route::gpu ? 0u : detail::exact_core_host_default);
     return tree_elimination{
-        .exact_clique_max_degree = opts.experimental.exact_clique_max_degree,
         .exact_core_max_h = exact_core,
         .double_cycle_min_h = opts.experimental.double_cycle_min_h,
         .sampler = opts.experimental.sampler};

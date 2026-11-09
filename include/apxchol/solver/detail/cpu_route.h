@@ -23,7 +23,7 @@ public:
     static constexpr std::array<int, 4> apply_widths{8, 4, 2, 1};
 
     /// Factorizes A, or installs F when it is not null. Construction options
-    /// (including regularization/lumping) are not reapplied to F; factor
+    /// (including lumping) are not reapplied to F; factor
     /// storage and dropping apply only to a construction factor (automatic
     /// storage), and scheduling and solve options always apply. A is the
     /// PCG operator, read through its lower triangle. cp receives setup

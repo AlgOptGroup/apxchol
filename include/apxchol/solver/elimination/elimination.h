@@ -61,8 +61,7 @@
 /// caller.  The eliminator only controls which clique edges are generated.
 ///
 /// The built-in rule, which factor_options configures, is
-/// detail::tree_elimination: a random spanning tree of the clique (d-1 edges),
-/// with an optional exact-clique mode below a degree threshold.
+/// detail::tree_elimination: a random spanning tree of the clique (d-1 edges).
 
 #include "apxchol/types.h"
 #include "apxchol/solver/factor_options.h"
@@ -172,8 +171,7 @@ inline void sample_cycle_clique(std::span<weighted_neighbor>, double,
                                 std::size_t double_cycle_min_h = 0);
 
 /// Tree elimination: spanning tree of the clique (CliqueTreeSample).
-/// The built-in (and default) eliminator; configured from factor_options
-/// (exact_clique_max_degree).
+/// The built-in (and default) eliminator; configured from factor_options.
 ///
 /// Implements Algorithm 3 / Equation (7) of Gao, Kyng, Spielman (2023),
 /// "Robust and Practical Solution of Laplacian Equations by Approximate
@@ -199,11 +197,6 @@ inline void sample_cycle_clique(std::span<weighted_neighbor>, double,
 /// agree for a two-neighbor star without diagonal excess
 /// (where deg = w_i+w_j).
 struct tree_elimination {
-    /// Exact-clique-at-low-degree: when the eliminated vertex's degree is at
-    /// most this value, emit the FULL exact Schur-complement clique
-    /// (all d(d-1)/2 edges, weight w_i·w_j/deg) instead of the d-1 sampled
-    /// edges. Zero-variance where it is cheap (quadratic in d). 0 = off.
-    size_t exact_clique_max_degree = 0;
     /// Trace-cycle core rules; see factor_options for semantics. 0 = off.
     size_t exact_core_max_h = 0;
     size_t double_cycle_min_h = 0;
@@ -213,8 +206,6 @@ struct tree_elimination {
     /// vertex of the given degree (used by tests / capacity reservations).
     size_t max_clique_edges(node_index deg) const {
         const size_t d = static_cast<size_t>(deg);
-        if (exact_clique_max_degree > 0 && d <= exact_clique_max_degree)
-            return d * (d - 1) / 2;
         if (sampler == clique_sampler::trace_cycle && d >= 3) {
             // Exact core adds at most h(h-1)/2 - h edges with h <= exact_core_max_h;
             // a second cycle adds at most h <= d edges. Upper bounds, never exact.
@@ -232,18 +223,6 @@ struct tree_elimination {
                        edge_emitter out) const {
         const size_t d = neighbors.size();
         if (d < 2 || deg <= 0.0) return;
-
-        // Exact clique at low degree: emit the full Schur-complement update
-        // (every neighbor pair, weight w_i·w_j/deg) with zero sampling
-        // variance. Quadratic in d, so gated by exact_clique_max_degree.
-        if (exact_clique_max_degree > 0 && d <= exact_clique_max_degree) {
-            for (const auto& [u, wu] : neighbors)
-                for (const auto& [v, wv] : neighbors) {
-                    if (u == v) break;                 // each unordered pair once
-                    out(u, v, wu * wv / deg);
-                }
-            return;
-        }
 
         // Canonical order for the suffix sampler (see the header comment).
         // Vertex id breaks weight ties so the order — and therefore the

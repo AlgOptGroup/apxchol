@@ -27,7 +27,8 @@ noted in the [changelog](../CHANGELOG.md).
 The research controls in `factor_options::experimental` (the
 `experimental_options` struct) are outside this promise: they may change or
 disappear in any release. The stable factorization options are `seed`,
-`factor_storage`, `drop_tolerance` and `positive_offdiag_tolerance`; the
+`factor_storage`, `drop_tolerance`, `positive_offdiag_tolerance` and
+`verbose`. The diagnostics that `verbose` prints have no stable format. The
 [usage guide](usage.md#option-names) lists their names in each interface.
 
 Errors use two classes in every interface: `std::invalid_argument`

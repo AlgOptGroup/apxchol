@@ -708,7 +708,7 @@ void detail::metal_route::device_state::setup(detail::csc_ref<double> A, checkpo
     stats.operator_double_float = !exact;
     stats.device = ctx->status.name;
     if (cp) { (*cp)("metal_upload"); cp->ascend(); }
-    if (opts.factor_opts.experimental.verbose) print_banner(stats, factor_fp16);
+    if (opts.factor_opts.verbose) print_banner(stats, factor_fp16);
 }
 
 void detail::metal_route::device_state::prepare_device(detail::gpu_factor_prep::csr_int<float> backward,

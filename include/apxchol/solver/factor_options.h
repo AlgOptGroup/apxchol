@@ -65,8 +65,8 @@ struct partition_options {
 /// Research controls outside the 1.x compatibility promise. Members may change
 /// or disappear in any release; keep the defaults for ordinary use.
 /// GPU routes require the defaults of partitioner, cpu_schedule,
-/// exact_clique_max_degree, exact_core_max_h and double_cycle_min_h. Metal also
-/// requires the defaults of sampler and degree_tiebreak.
+/// exact_core_max_h and double_cycle_min_h. Metal also
+/// requires the default sampler.
 struct experimental_options {
     /// Built-in partitioner; GPU construction requires block_greedy.
     partitioner_kind partitioner = partitioner_kind::block_greedy;
@@ -74,18 +74,8 @@ struct experimental_options {
     partition_options partition{};
     /// Clique-sampling algorithm for factor construction.
     clique_sampler sampler = clique_sampler::gks;
-    /// Minimum diagonal excess of the preconditioner, as a fraction of each
-    /// diagonal after lumping. Excess below 1e-12 of the diagonal
-    /// counts as zero first, as row-sum rounding noise. The operator is not
-    /// modified. Zero disables it.
-    double regularization = 0;
-    /// Print setup and solve diagnostics to stderr. The output format is not stable.
-    bool verbose = false;
     /// CPU triangular-solve schedule; automatic chooses the installed schedule.
     cpu_sptrsv_schedule cpu_schedule = cpu_sptrsv_schedule::automatic;
-    /// Prefer lower-degree candidates in conflicts. block_greedy breaks degree
-    /// ties by index; priority_greedy uses its hashed priority to break ties.
-    bool degree_tiebreak = true;
     /// Base selection-yield threshold before switching to Baumann-Kyng rounds.
     /// Measured as selected regions divided by degree-eligible vertices; dense
     /// residuals may use a higher threshold. Zero disables yield-based handoff,
@@ -98,9 +88,6 @@ struct experimental_options {
     /// Unset uses the partitioner's default: 500 for block_greedy and
     /// priority_greedy. A small serial tail limits fill.
     std::optional<size_t> parallel_residual_threshold;
-    /// Emit an exact Schur clique for degrees at most this value; zero disables
-    /// it. Intended for small degrees because it adds d(d-1)/2 edges.
-    size_t exact_clique_max_degree = 0;
     /// Trace-cycle exact-clique limit for near-equal heavy neighbors; zero
     /// disables it. Unset selects 4 on CPU or 0 on GPU.
     /// Other CPU samplers ignore it.
@@ -122,6 +109,8 @@ struct factor_options {
     factor_storage_type factor_storage = factor_storage_type::automatic;
     /// Relative off-diagonal drop threshold in [0, 1]; zero disables dropping.
     double drop_tolerance = 1e-4;
+    /// Print setup and solve diagnostics to stderr. The output format is not stable.
+    bool verbose = false;
     /// Research controls outside the 1.x compatibility promise.
     experimental_options experimental{};
 };
@@ -134,7 +123,6 @@ inline void validate_drop_tolerance(double value) {
 
 inline void validate_factor_options(const factor_options& options) {
     const auto& experimental = options.experimental;
-    validate_regularization(experimental.regularization);
     validate_positive_offdiag_tolerance(options.positive_offdiag_tolerance);
     validate_drop_tolerance(options.drop_tolerance);
     if (const auto quantile = experimental.partition.degree_quantile;

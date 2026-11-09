@@ -674,7 +674,7 @@ TEST(SpTRSVLevelset, GroundingPreservesOuterTeamAndHonorsChangedLimit) {
     apxchol::factor_options options{.drop_tolerance = 0};
     options.factor_storage = apxchol::factor_storage_type::fp32;
     options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
-    options.experimental.verbose = true;
+    options.verbose = true;
     std::vector<node_index> bounds;
     const sparse_csc L11 = make_round(1024, 8, 114, bounds);
     auto L = L11;

@@ -170,6 +170,7 @@ controls in the C++ `factor_options::experimental` are not available from Python
 |---|---|
 | `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
 | `positive_offdiag_tolerance` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
+| `verbose` | Print setup diagnostics, and solve diagnostics on CPU; off by default |
 
 Unknown keywords raise `ValueError`, like other invalid input or options;
 execution failures raise `RuntimeError` (see

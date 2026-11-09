@@ -148,7 +148,7 @@ run_config parse_args(int argc, char* argv[]) {
     if (!rhs_str.empty())    cfg.rhs_path     = rhs_str;
     if (!x0_str.empty())     cfg.x0_path      = x0_str;
     if (!output_str.empty()) cfg.output_path  = output_str;
-    cfg.solve_opts.factor_opts.experimental.verbose = verbose;
+    cfg.solve_opts.factor_opts.verbose = verbose;
     detail::validate_solve_parameters(cfg.tol, cfg.max_iter);
     detail::validate_solve_options(cfg.solve_opts);
     setup_logging(quiet, verbose);

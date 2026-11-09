@@ -38,7 +38,7 @@ public:
 
     /// Factorizes A on the device, or adopts F when it is not null (exactly,
     /// if F is an installed factor). Construction options (including
-    /// regularization/lumping) are not reapplied to F. Factorization requires supported GKS options and
+    /// lumping) are not reapplied to F. Factorization requires supported GKS options and
     /// compressed, sorted, paired CSC input satisfying operator_class.h;
     /// numerical limits are in docs/precision.md.
     metal_route(csc_ref<double> A, const solve_options& opts,

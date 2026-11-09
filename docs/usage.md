@@ -84,7 +84,7 @@ have its matching `(j, i)`. GPU setup also requires 32-bit vertex indices.
 
 CPU setup supports custom partitioners and eliminators. CUDA setup supports
 the experimental `block_greedy` partitioner and GKS or trace-cycle sampling.
-The experimental exact-clique, exact-core and double-cycle rules require CPU
+The experimental exact-core and double-cycle rules require CPU
 construction. Metal setup supports the default `block_greedy`/GKS options and
 FP32 graph weights. See [precision limits](precision.md#apple-metal-pcg) for Metal ranges.
 
@@ -111,16 +111,15 @@ zero and the others take the
 | `factor_options::factor_storage` | `--factor-storage` | `factor_storage` | `factor_storage` |
 | `factor_options::drop_tolerance` | `--drop-tolerance` | `drop_tolerance` | `drop_tolerance` |
 | `factor_options::positive_offdiag_tolerance` | `--positive-offdiag-tolerance` | `positive_offdiag_tolerance` | `positive_offdiag_tolerance` |
+| `factor_options::verbose` | `--verbose` | `verbose` | `verbose` |
 
 Factor storage
 is `auto`, `float16` or `float32` in the CLI, Python and MATLAB/Octave (Python
 also accepts a NumPy dtype), and `factor_storage_type::automatic`, `fp16` or
 `fp32` in C++. Python's `rtol` and `maxiter` follow SciPy's `cg`, and the CLI's
 `--threads` is the usual command-line spelling. The research controls in `factor_options::experimental` are
-set from C++; see the [API policy](api.md). They include the
-partitioner, the clique sampler, the degree cutoff, regularization and
-setup diagnostics. The one exception is the CLI's `--verbose`, which turns on
-the diagnostics.
+available only from C++; see the [API policy](api.md). They include the
+partitioner, the clique sampler and the degree cutoff.
 
 ## Reuse, batches and initial guesses
 

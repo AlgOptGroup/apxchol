@@ -160,10 +160,6 @@ struct partition_context {
     /// because draws from a shared stream would depend on thread scheduling.
     unsigned seed = 42;
     std::size_t omp_threshold = 2000;  ///< min work size before OpenMP engages
-    /// Prefer the lower-degree vertex when adjacent candidates compete
-    /// (factor_options::experimental.degree_tiebreak). Never applied by the
-    /// orchestrator — honoring it is always the rule's job.
-    bool degree_tiebreak = true;
     /// Degree counts indexed by vertex ID, valid for every active vertex.
     /// Audited prune skipping may supply conservative counts; otherwise they
     /// are exact. Non-empty when this partitioner declares degree_prepass.

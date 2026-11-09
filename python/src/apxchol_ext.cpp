@@ -98,7 +98,7 @@ py::tuple csc_to_numpy(const apxchol::detail::csc_matrix<double>& A) {
 // Every key the binding understands, in the order reported by the error message.
 const char* const kValidKeys[] = {
     "backend", "num_threads", "seed", "factor_storage", "drop_tolerance",
-    "positive_offdiag_tolerance",
+    "positive_offdiag_tolerance", "verbose",
 };
 
 std::string join(const char* const* items, std::size_t count) {
@@ -131,7 +131,8 @@ apxchol::solve_options parse_options(const py::dict& d) {
         else if (key == "factor_storage")
             so.factor_opts.factor_storage = apxchol::detail::parse_factor_storage(v.cast<std::string>());
         else if (key == "drop_tolerance")     so.factor_opts.drop_tolerance = v.cast<double>();
-        else if (key == "positive_offdiag_tolerance")       so.factor_opts.positive_offdiag_tolerance = v.cast<double>();
+        else if (key == "positive_offdiag_tolerance") so.factor_opts.positive_offdiag_tolerance = v.cast<double>();
+        else if (key == "verbose")            so.factor_opts.verbose = v.cast<bool>();
         else
             throw std::invalid_argument(
                 "unknown option '" + key + "'; valid keys: " +

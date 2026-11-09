@@ -305,7 +305,7 @@ function test_apxchol()
 
   % ── 13. explicit setup controls and input shape ──
   options = struct('num_threads', 1, 'seed', 7, 'factor_storage', 'float32', ...
-                   'drop_tolerance', 0, 'positive_offdiag_tolerance', 0.25);
+                   'drop_tolerance', 0, 'positive_offdiag_tolerance', 0.25, 'verbose', false);
   for drop = [0 1]
     options.drop_tolerance = drop;
     controlled = apxchol_solver(Aopts, options);
@@ -322,7 +322,7 @@ function test_apxchol()
                  struct('positive_offdiag_tolerance', -0.1), struct('unknown', 1), ...
                  struct('partitioner', 'block_greedy'), struct('sampler', 'gks'), ...
                  struct('degree_quantile', 0.2), struct('degree_multiplier', 2), ...
-                 struct('regularization', 0), struct('verbose', false)};
+                 struct('regularization', 0), struct('verbose', 2)};
   for k = 1:numel(bad_options)
     rejected_option = false;
     try, apxchol_solver(Aopts, bad_options{k}); catch, rejected_option = true; end

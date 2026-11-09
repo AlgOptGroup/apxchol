@@ -82,7 +82,7 @@ class solver {
 public:
     explicit solver(csc_view A, const solve_options& opts = {});
     explicit solver(csc_view64 A, const solve_options& opts = {});
-    /// Adopt F without rebuilding or regularizing it. positive_offdiag_tolerance still bounds
+    /// Adopt F without rebuilding it. positive_offdiag_tolerance still bounds
     /// operator validation, and backend and num_threads apply. Factor storage and
     /// dropping apply to a construction factor from factorize(); an installed
     /// factor from factor() is adopted exactly (factorization.h).

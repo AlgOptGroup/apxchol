@@ -8,11 +8,6 @@ namespace apxchol {
 inline constexpr double kDefaultPositiveOffdiagTolerance = 0.25;
 
 namespace detail {
-inline void validate_regularization(double value) {
-    if (!std::isfinite(value) || value < 0)
-        throw std::invalid_argument("regularization must be finite and nonnegative");
-}
-
 inline void validate_positive_offdiag_tolerance(double value) {
     if (!std::isfinite(value) || value < 0 || value > 1)
         throw std::invalid_argument("positive_offdiag_tolerance must be in [0, 1]");

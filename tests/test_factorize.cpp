@@ -608,62 +608,6 @@ TEST(FactorAssembly, RejectsNonfiniteEntriesOutsideParallelRegion) {
     }
 }
 
-TEST(FactorRegularization, RejectsUnrepresentableExcess) {
-    const scoped_threads team(2);
-    for (int n : {3, 16385}) {
-        SCOPED_TRACE(n);
-        const auto L = path_laplacian(n);
-        for (const auto& [scale, regularization] :
-             {std::pair{1e10, 1e300}, std::pair{1e-30, 1e-300}}) {
-            const Sparse A = apxchol::test::scaled(L, scale);
-            apxchol::factor_options opts;
-            opts.experimental.regularization = regularization;
-            EXPECT_THROW(apxchol::factorize(csc(A), opts), std::range_error);
-        }
-    }
-}
-
-TEST(FactorRegularization, RejectsUnrepresentableStoredDiagonal) {
-    const scoped_threads team(2);
-    const auto L = path_laplacian(3);
-    for (double regularization : {1e300, 1e-100}) {
-        SCOPED_TRACE(regularization);
-        apxchol::solve_options opts;
-        opts.backend = apxchol::solve_backend::cpu;
-        opts.factor_opts.factor_storage = apxchol::factor_storage_type::fp32;
-        opts.factor_opts.experimental.regularization = regularization;
-        EXPECT_THROW(apxchol::solver(csc(L), opts), std::range_error);
-    }
-}
-
-TEST(FactorRegularization, AcceptsRepresentableExtremesAndGroundedDefaults) {
-    const scoped_threads team(2);
-    const auto L = path_laplacian(3);
-    const std::vector<double> b{1, -2, 1};
-    for (double regularization : {0.0, 4.0}) {
-        apxchol::solve_options opts;
-        opts.backend = apxchol::solve_backend::cpu;
-        opts.factor_opts.experimental.regularization = regularization;
-        const auto result = apxchol::solve(csc(L), b, std::nullopt, std::nullopt, {}, opts);
-        EXPECT_TRUE(result.converged);
-        EXPECT_LT(apxchol::test::relative_residual(L, result.x, b), apxchol::default_tol);
-    }
-    const Sparse identity = apxchol::test::identity(3);
-    for (double regularization : {1e-300, 1e50}) {
-        apxchol::factor_options opts;
-        opts.experimental.regularization = regularization;
-        const auto factor = apxchol::factorize(csc(identity), opts);
-        EXPECT_TRUE(factor.sddm);
-        for (int col = 0; col < 3; ++col) {
-            const auto diagonal = factor_diag(factor.L, col);
-            EXPECT_GT(diagonal, 0);
-            EXPECT_TRUE(std::isfinite(diagonal));
-        }
-    }
-}
-
-
-
 TEST(VecPoolAos, ParallelRebuiltFactorsPreserveSolveContract) {
     const scoped_threads team(16);
     const auto L = weighted_grid_laplacian(120, 120, 7.25, 0.03125);
@@ -1422,22 +1366,6 @@ TEST(FactorQualityTest, SddmGrid20Tree) {
     EXPECT_LT(factor_residual(F, M), f1_bounds::sddm_grid20_tree);
 }
 
-// ─── Exact-clique-at-low-degree option ──────────────────────────────────────
-TEST(ExactCliqueOption, Grid40_FewerItersThanSampled) {
-    auto L = grid_laplacian(40, 40);
-    auto b = apxchol::test::random_rhs(L.rows);
-    apxchol::factor_options opts;
-    opts.seed = 42;
-    opts.experimental.partitioner = apxchol::partitioner_kind::block_greedy;
-    auto sampled = apxchol::solve(csc(L), b, 1e-8, 200, {}, {.factor_opts = opts});
-    opts.experimental.exact_clique_max_degree = 8;
-    auto exact = apxchol::solve(csc(L), b, 1e-8, 200, {}, {.factor_opts = opts});
-    EXPECT_LT(exact.residual, 1e-6);
-    EXPECT_LE(exact.iterations, sampled.iterations)
-        << "exact low-degree cliques should not need more PCG iterations: "
-        << "exact=" << exact.iterations << ", sampled=" << sampled.iterations;
-}
-
 // ─── BK residual loop (parallel_residual_threshold) ─────────────────────────
 //
 // A complete graph is the cheapest way to reach this code from a unit test: its
@@ -1783,7 +1711,7 @@ TEST(PriorityGreedy, ParallelPicksExcludeSharedNeighborsAndResetScratch) {
     std::iota(candidates.begin(), candidates.end(), apxchol::node_index{0});
     (void)apxchol::detail::prune_and_degrees(G, candidates, degrees, 2000);
     apxchol::partition_context ctx{
-        .options = {}, .seed = 17, .omp_threshold = 1, .degree_tiebreak = true,
+        .options = {}, .seed = 17, .omp_threshold = 1,
         .degrees = degrees,
     };
     std::vector<apxchol::node_index> expected(candidates.begin(),
@@ -1959,7 +1887,7 @@ static bounded_oracle_result bounded_four_pass_oracle(
         if (result.degrees[v] <= threshold) {
             state[v] = 0; result.candidates.push_back(v);
         }
-    // The selector prefers lower degrees (the default degree_tiebreak).
+    // The selector prefers lower degrees.
     auto precedes = [&](bounded_vertex a, bounded_vertex b) {
         return std::tuple(result.degrees[a], bounded_fixture_key(seed, phase, a), a)
              < std::tuple(result.degrees[b], bounded_fixture_key(seed, phase, b), b);

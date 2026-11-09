@@ -109,7 +109,11 @@ apxchol::solve_options setup_options(const mxArray* options) {
                 result.factor_opts.factor_storage = apxchol::detail::parse_factor_storage(string_option(value, name.c_str()));
             else if (name == "drop_tolerance") result.factor_opts.drop_tolerance = scalar_option(value, name.c_str());
             else if (name == "positive_offdiag_tolerance") result.factor_opts.positive_offdiag_tolerance = scalar_option(value, name.c_str());
-            else fail("apxchol:badInput", "unknown option '" + name + "'");
+            else if (name == "verbose") {
+                const double flag = scalar_option(value, name.c_str());
+                if (flag != 0 && flag != 1) fail("apxchol:badInput", name + " must be logical or 0/1");
+                result.factor_opts.verbose = flag != 0;
+            } else fail("apxchol:badInput", "unknown option '" + name + "'");
         }
     }
     return result;

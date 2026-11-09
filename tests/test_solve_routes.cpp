@@ -50,7 +50,7 @@ void expect_solution(const test::sparse_matrix& matrix,
 std::vector<apxchol::solve_options> host_only_options() {
     std::vector<apxchol::solve_options> options(4);
     options[0].factor_opts.experimental.partitioner = apxchol::partitioner_kind::priority_greedy;
-    options[1].factor_opts.experimental.exact_clique_max_degree = 3;
+    options[1].factor_opts.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
     options[2].factor_opts.experimental.sampler = apxchol::clique_sampler::trace_cycle;
     options[2].factor_opts.experimental.exact_core_max_h = 3;
     options[3].factor_opts.experimental.sampler = apxchol::clique_sampler::trace_cycle;

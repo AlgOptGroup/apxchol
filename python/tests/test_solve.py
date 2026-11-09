@@ -703,7 +703,8 @@ def test_factor_settings_match_native_options(construct, options):
 def test_explicit_factor_settings(drop_tolerance):
     A = grid2d_sddm(6)
     solver = apxchol.factorize(A, backend="cpu", num_threads=1, seed=7,
-                               drop_tolerance=drop_tolerance, positive_offdiag_tolerance=0.25)
+                               drop_tolerance=drop_tolerance, positive_offdiag_tolerance=0.25,
+                               verbose=False)
     b = np.ones(A.shape[0])
     result = solver.solve(b)
     assert result.converged
@@ -721,7 +722,7 @@ def test_invalid_factor_settings_rejected(option, value):
 
 @pytest.mark.parametrize("option,value", [("partitioner", "block_greedy"), ("sampler", "gks"),
                                          ("degree_quantile", 0.2), ("degree_multiplier", 2),
-                                         ("regularization", 0), ("verbose", False)])
+                                         ("regularization", 0), ("degree_tiebreak", True)])
 def test_research_options_are_not_keywords(option, value):
     with pytest.raises(ValueError, match="unknown option"):
         apxchol.factorize(sp.eye(2, format="csc"), **{option: value})

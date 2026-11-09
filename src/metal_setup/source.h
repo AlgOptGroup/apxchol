@@ -290,7 +290,6 @@ struct CscInput {
 kernel void import_count(device uchar* arena [[buffer(0)]],device Edge* factors [[buffer(1)]],
                          constant Layout& layout [[buffer(2)]],device const unsigned* ptr [[buffer(3)]],
                          device const unsigned* idx [[buffer(4)]],device const Memory::wide* values [[buffer(5)]],
-                         constant float& regularization [[buffer(6)]],
                          constant unsigned& triangles_identical [[buffer(7)]],
                          uint row [[thread_position_in_grid]]) {
     auto s=view<Memory::wide>(arena,factors,layout);
@@ -303,11 +302,6 @@ kernel void import_count(device uchar* arena [[buffer(0)]],device Edge* factors 
         else {degree=math.subtract(degree,v);if(math.less(v,math.from_float(0)))++count;}}
     auto excess=math.subtract(diagonal,degree);
     if(!math.less(math.multiply(diagonal,math.from_float(1e-12f)),excess))excess=math.from_float(0);
-    const auto ground=math.multiply(diagonal,math.from_float(regularization));
-    if(regularization>0 && (!math.finite(ground) || ground.hi<0x1p-126f))
-        atomic_fetch_or_explicit((device atomic_uint*)&s.state->status,
-                                 1u<<sparse_round::arithmetic_range,memory_order_relaxed);
-    else if(math.less(excess,ground))excess=ground;
     s.excess[row]=excess;s.counts[row]={count,0};
     if(math.less(math.from_float(0),excess))atomic_store_explicit((device atomic_uint*)&s.state->has_excess,1u,memory_order_relaxed);
 }

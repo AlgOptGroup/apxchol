@@ -7,31 +7,6 @@
 
 namespace apxchol::detail {
 
-inline constexpr auto metal_regularization_error =
-    "Metal setup requires regularization in [2^-100, 2^100] and positive normal FP32 diagonal products";
-
-// A(row, row), or 0 when not stored.
-inline double metal_diagonal(csc_ref<double> A, node_index row) {
-    for (edge_index p = A.ptr[row]; p < A.ptr[row + 1]; ++p)
-        if (A.idx[p] == row) return A.val[p];
-    return 0.0;
-}
-
-inline bool metal_setup_regularization_supported(double regularization,
-                                                 const csc_ref<double>* A = nullptr) {
-    if (regularization == 0) return true;
-    if (!(regularization > 0) || !metal_schedule::in_range(regularization)) return false;
-    if (A) {
-        const double epsilon = float(regularization);
-        for (node_index row = 0; row < A->n; ++row) {
-            const double ground = metal_diagonal(*A, row) * epsilon;
-            if (!(ground >= std::numeric_limits<float>::min() &&
-                  ground <= std::numeric_limits<float>::max())) return false;
-        }
-    }
-    return true;
-}
-
 inline double metal_degree_quantile(std::optional<double> quantile) {
     return quantile.value_or(degree_quantile_host_default);
 }
@@ -42,10 +17,8 @@ inline bool metal_setup_options_supported(const factor_options &options) {
            options.experimental.cpu_schedule == cpu_sptrsv_schedule::automatic &&
            options.experimental.partitioner == partitioner_kind::block_greedy &&
            options.experimental.sampler == clique_sampler::gks &&
-           options.experimental.exact_clique_max_degree == 0 &&
            options.experimental.exact_core_max_h.value_or(0) == 0 &&
            options.experimental.double_cycle_min_h == 0 &&
-           options.experimental.degree_tiebreak &&
            quantile > 0 && quantile < 1;
 }
 

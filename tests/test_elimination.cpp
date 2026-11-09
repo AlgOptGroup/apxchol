@@ -58,10 +58,6 @@ TEST(EliminatorBounds, TreeReturnsDegMinusOne) {
     EXPECT_EQ(tree_elimination{}.max_clique_edges(0), 0u);
     EXPECT_EQ(tree_elimination{}.max_clique_edges(1), 0u);
     EXPECT_EQ(tree_elimination{}.max_clique_edges(5), 4u);
-    // Exact-clique mode: full pair count below the threshold.
-    tree_elimination xc{.exact_clique_max_degree = 8};
-    EXPECT_EQ(xc.max_clique_edges(5), 10u);
-    EXPECT_EQ(xc.max_clique_edges(9), 8u);   // above threshold: sampled, d-1
 }
 
 TEST(EliminatorBounds, BoundIsSafeForRandomInput) {
@@ -203,8 +199,6 @@ TEST(CycleSampler, PreservesDegreeTwoAndDeclaredCapacity) {
                 EXPECT_TRUE(std::isfinite(edge.w));
             }
         }
-        rule.exact_clique_max_degree = 4;
-        EXPECT_EQ(rule.max_clique_edges(4), 6u);
     }
 }
 
