@@ -122,9 +122,10 @@ apxchol follows the shared writing guides with these differences. P refers to `d
   before and after numbers with the machine and command. Reason: performance evidence must stay in the history.
 - ENGINEERING "Pull request descriptions", added: name the `CHANGELOG.md` line. A performance change gives numbers with
   the command, matrix and machine. Reason: CONTRIBUTING.md asks for a CHANGELOG line with every user-visible change.
-- ENGINEERING "Reviews and review replies", added: one finding per comment, with one word from the shared severity
-  scale. Automated reviewers such as cubic keep their own P0–P3 priority and add no Must, Should or Nit. Reason: two
-  labels on one finding can disagree, and cubic reads this file.
+- ENGINEERING "Reviews and review replies", added: apxchol adopts that section's Must, Should and Nit scale. One
+  finding per comment, with one word from the scale. Automated reviewers such as cubic keep their own P0–P3 priority
+  and add no Must, Should or Nit. Read P0 and P1 as Must, P2 as Should and P3 as Nit. Reason: two labels on one
+  finding can disagree, and cubic reads this file.
 
 The text check runs the shared writing-rules linter. It needs Vale 3.26.0 on `PATH` and the linter from
 `docs/writing`:
