@@ -86,6 +86,7 @@ the house profile below. In a fresh clone, first run `git submodule update --ini
 - A PR, an issue, a review or a commit message: read the relevant section of `docs/writing/guides/ENGINEERING.md`.
 - A new option, mode or public parameter: read `docs/writing/guides/STEWARDSHIP.md`.
 - Text that teaches how the method works: read `docs/writing/guides/TEACHING.md`.
+- Code written with an LLM agent, before you submit or review it: run the checklists in `docs/writing/guides/LLM_CODE.md`.
 
 `docs/writing/` is a submodule of [ratschlab/writing-rules](https://github.com/ratschlab/writing-rules), pinned to one
 revision. The text check installs its linter from the same checkout. Move the pin in a reviewed change of its own.
