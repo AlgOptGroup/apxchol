@@ -422,7 +422,7 @@ def scaling_chart(data, platform, output):
             points = sorted(((c["threads"], c) for c in scaling["cells"]
                              if c["matrix"] == matrix and series_label(c) == s), key=lambda p: p[0])
             done = [(t, c["setup_s"] + c["solve_s"]) for t, c in points if good(c)]
-            capped += [(t, s) for t, c in points if not good(c)]
+            capped += [(t, s) for t, c in points if c["status"] in ("exceeded_cap", "timeout")]
             if done:
                 ax.plot(*zip(*done), "o-", color=colors[s], markersize=3.5, linewidth=1.4)
         ax.set_yscale("log")

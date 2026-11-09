@@ -31,6 +31,10 @@ class PerformanceDataTest(unittest.TestCase):
             self.assertTrue(header["full_extract"]["repository"].startswith("https://github.com/"))
             self.assertRegex(header["full_extract"]["sha256"], r"^[0-9a-f]{64}$")
 
+    def test_every_csv_belongs_to_a_campaign(self):
+        listed = {name for path in headers() for name in json.loads(path.read_text())["files"]}
+        self.assertEqual({p.name for p in DATA.glob("*.csv")} - listed, set())
+
     def test_rows(self):
         for path in headers():
             header = json.loads(path.read_text())
@@ -55,7 +59,8 @@ class PerformanceDataTest(unittest.TestCase):
                         if row["status"] == "complete":
                             for column in ("setup_s", "solve_s", "rel_res"):
                                 self.assertGreaterEqual(float(row[column]), 0, where)
-                            int(row["iters"])
+                            self.assertLessEqual(float(row["rel_res"]), float(header["tolerance"]), where)
+                            self.assertGreaterEqual(int(row["iters"]), 0, where)
                         if row["status"] == "exceeded_cap":
                             self.assertGreater(float(row["cap_s"]), 0, where)
 

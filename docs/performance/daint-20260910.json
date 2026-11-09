@@ -21,9 +21,6 @@
    "compiler": "Clang22.1.8/llvm-libomp"
   },
   {
-   "compiler": null
-  },
-  {
    "compiler": "Clang22.1.8/libomp; NVCC host GCC14.3"
   },
   {
