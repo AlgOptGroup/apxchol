@@ -107,9 +107,10 @@ apxchol follows the shared writing guides with these differences. P refers to `d
 
 - Check R1, on: no semicolons in prose. Split the sentence or use a list. Reason: a project choice, which P10 leaves to
   each project.
-- P4, stricter: defaults and limits come from `include/apxchol/solver/factor_options.h`. A change to a value updates
-  every copy (CLI help, docstrings, READMEs, `docs/usage.md`) in the same commit. Reason: option text is copied by hand
-  into up to 6 places.
+- P4, stricter: factor defaults and limits come from `include/apxchol/solver/factor_options.h`. Solve defaults
+  (`default_tol`, `default_max_iter`) come from `include/apxchol/solver/solve.h`. A change to a value updates every
+  copy (CLI help, docstrings, READMEs, `docs/usage.md`) in the same commit. Reason: option text is copied by hand into
+  up to 6 places.
 - Check R4, on: when another flag, value or the CPU backend fixes an error, the message names it. Reason: most option
   and backend errors have such a fix.
 - Check R7, narrowed: no "soon", "shortly", "a while" or "eventually", and digits for numbers with units. "May" and
