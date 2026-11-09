@@ -686,9 +686,8 @@ def test_omitted_solver_defaults_match_compiled_defaults():
 
 
 @pytest.mark.parametrize("construct", [apxchol.Solver, apxchol.factorize])
-@pytest.mark.parametrize("options", [{}, {"seed": np.int64(7), "partitioner": "priority_greedy"},
-                                     {"sampler": "trace_cycle", "degree_quantile": 0,
-                                      "degree_multiplier": 3}])
+@pytest.mark.parametrize("options", [{}, {"seed": np.int64(7)},
+                                     {"drop_tolerance": 0, "factor_storage": "float32"}])
 def test_factor_settings_match_native_options(construct, options):
     A = grid2d_sddm(8).tocsc()
     solver = construct(A, backend="cpu", num_threads=1, **options)
@@ -700,13 +699,11 @@ def test_factor_settings_match_native_options(construct, options):
         np.testing.assert_array_equal(actual, expected)
 
 
-@pytest.mark.parametrize("sampler", ["gks", "trace_cycle"])
 @pytest.mark.parametrize("drop_tolerance", [0, 1])
-def test_explicit_factor_settings(sampler, drop_tolerance):
+def test_explicit_factor_settings(drop_tolerance):
     A = grid2d_sddm(6)
-    solver = apxchol.factorize(A, backend="cpu", num_threads=1, partitioner="baumann_kyng",
-                               sampler=sampler, degree_quantile=None, degree_multiplier=2,
-                               drop_tolerance=drop_tolerance, regularization=0, lump_max_mass=0.25,
+    solver = apxchol.factorize(A, backend="cpu", num_threads=1, seed=7,
+                               drop_tolerance=drop_tolerance, positive_offdiag_tolerance=0.25,
                                verbose=False)
     b = np.ones(A.shape[0])
     result = solver.solve(b)
@@ -714,12 +711,8 @@ def test_explicit_factor_settings(sampler, drop_tolerance):
     assert np.linalg.norm(A @ result.x - b) / np.linalg.norm(b) < 1e-8
 
 
-@pytest.mark.parametrize("option,value", [("partitioner", "unknown"), ("sampler", "unknown"),
-                                         ("sampler", 1), ("degree_quantile", 1),
-                                         ("degree_quantile", -0.1), ("degree_multiplier", 0),
-                                         ("cpu_schedule", "auto"), ("residual_peel", "natural"),
-                                         ("regularization", -1), ("lump_max_mass", -0.1),
-                                         ("lump_max_mass", 1.1)] +
+@pytest.mark.parametrize("option,value", [("cpu_schedule", "auto"), ("residual_peel", "natural"),
+                                         ("positive_offdiag_tolerance", -0.1), ("positive_offdiag_tolerance", 1.1)] +
                          [("drop_tolerance", value) for value in
                           [-1, np.nextafter(1.0, np.inf), 2, np.nan, np.inf, -np.inf]])
 def test_invalid_factor_settings_rejected(option, value):
@@ -727,16 +720,22 @@ def test_invalid_factor_settings_rejected(option, value):
         apxchol.factorize(sp.eye(2, format="csc"), **{option: value})
 
 
+@pytest.mark.parametrize("option,value", [("partitioner", "block_greedy"), ("sampler", "gks"),
+                                         ("degree_quantile", 0.2), ("degree_multiplier", 2),
+                                         ("regularization", 0), ("degree_tiebreak", True)])
+def test_research_options_are_not_keywords(option, value):
+    with pytest.raises(ValueError, match="unknown option"):
+        apxchol.factorize(sp.eye(2, format="csc"), **{option: value})
+
+
 def test_factor_settings_are_per_instance():
-    A = sp.csc_matrix([[1.0, -1.0], [-1.0, 1.0]])
-    b = np.array([1.0, -1.0])
-    plain = apxchol.factorize(A, backend="cpu", num_threads=1, regularization=0,
-                             lump_max_mass=0)
+    A = grid2d_sddm(6).tocsc()
+    b = np.ones(A.shape[0])
+    plain = apxchol.factorize(A, backend="cpu", num_threads=1, drop_tolerance=0)
     before = plain.solve(b)
-    regularized = apxchol.factorize(A, backend="cpu", num_threads=1,
-                                   regularization=0.25)
-    assert not plain.sddm and regularized.sddm
-    assert regularized.solve(b).converged
+    dropped = apxchol.factorize(A, backend="cpu", num_threads=1, drop_tolerance=1)
+    assert dropped.factor_nnz < plain.factor_nnz
+    assert dropped.solve(b).converged
     after = plain.solve(b)
     np.testing.assert_array_equal(after.x, before.x)
     assert after.residual == before.residual
@@ -810,15 +809,6 @@ def test_factor_nnz_and_version():
 
 
 # ── options ──────────────────────────────────────────────────────────────────
-
-def test_alternate_partitioner_converges():
-    L = grid2d_laplacian(30)
-    slv = apxchol.factorize(L, partitioner="priority_greedy", seed=3)
-    rng = np.random.default_rng(14)
-    b = rng.standard_normal(L.shape[0]); b -= b.mean()
-    res = slv.solve(b, rtol=1e-8, maxiter=500)
-    assert res.converged
-
 
 def test_unknown_option_raises():
     A = grid2d_sddm(10)

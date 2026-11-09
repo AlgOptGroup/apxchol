@@ -1106,9 +1106,8 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
     }
 #if defined(APXCHOL_USE_CUDA)
     bool compatible = sizeof(node_index) == sizeof(std::uint32_t) &&
-        opts.factor_opts.partitioner == partitioner_kind::block_greedy &&
+        opts.factor_opts.experimental.partitioner == partitioner_kind::block_greedy &&
         opts.factor_opts.experimental.cpu_schedule == cpu_sptrsv_schedule::automatic &&
-        opts.factor_opts.experimental.exact_clique_max_degree == 0 &&
         opts.factor_opts.experimental.exact_core_max_h.value_or(0) == 0 &&
         opts.factor_opts.experimental.double_cycle_min_h == 0;
     if (compatible && opts.backend == solve_backend::automatic && A) {
@@ -1136,12 +1135,6 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
         if (opts.backend == solve_backend::gpu)
             throw std::invalid_argument("apxchol: Metal GPU setup supports only the default factor options "
                 "and compressed, sorted, paired CSC input. Request the CPU backend.");
-        return solve_backend::cpu;
-    }
-    if (!detail::metal_setup_regularization_supported(opts.factor_opts.regularization,
-            opts.backend == solve_backend::automatic ? A : nullptr)) {
-        if (opts.backend == solve_backend::gpu)
-            throw std::invalid_argument(detail::metal_regularization_error);
         return solve_backend::cpu;
     }
     return solve_backend::gpu;
@@ -1192,7 +1185,7 @@ struct solver::impl {
         const detail::thread_budget threads(opts.num_threads);
         if (A.n == 0) throw std::invalid_argument("apxchol: empty operator");
         if (F) {
-            detail::validate_adopted_operator(A, *F, opts.factor_opts.lump_max_mass);
+            detail::validate_adopted_operator(A, *F, opts.factor_opts.positive_offdiag_tolerance);
             detail::validate_adopted_factor(*F);
         }
         if (cp) { cp->descend("setup"); cp->tick(); }

@@ -96,7 +96,6 @@ Metal rejects inputs outside these ranges:
 - Nonzero operator values and unscaled factor diagonals: magnitude in [2^-100, 2^100].
 - Factor off-diagonals: finite values.
 - Factor/operator offsets: signed 32-bit integers; the operator must have fewer than 2^30 stored entries.
-- Positive regularization: in [2^-100, 2^100], with normal positive FP32 products when multiplied by the operator diagonal.
 
 ## Accuracy and configuration choice
 

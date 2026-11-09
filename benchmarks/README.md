@@ -81,7 +81,7 @@ Machine-local paths belong in ignored `paths_local.py`/`paths_local.cmake`;
 [runner_common.py](runner_common.py) defines defaults. `--dump-mtx` and
 `--dump-rhs` export the shared operator/RHS in separate driver invocations.
 
-The C++ benchmark accepts `--factor-storage auto|float16|float32`, `--cpu-schedule auto|levels`, `--factor-drop`, `--regularization`, `--lump-max-mass` and `--degree-quantile` for apxchol v1. These pass directly to the library's options; named configurations retain their sampler/partitioner choices. `--profile` prints its timing breakdown. Timing collection remains enabled so Setup and Solve retain their measured boundaries; ambient `APXCHOL_*` solver overrides are not read.
+The C++ benchmark accepts `--factor-storage auto|float16|float32`, `--cpu-schedule auto|levels`, `--drop-tolerance`, `--positive-offdiag-tolerance` and `--degree-quantile` for apxchol v1. These pass directly to the library's options. `--factor-storage`, `--drop-tolerance` and `--positive-offdiag-tolerance` set stable options. `--cpu-schedule` and `--degree-quantile` set `factor_options::experimental` controls, which can change in minor releases. Named configurations retain their sampler/partitioner choices. `--profile` prints its timing breakdown. Timing collection remains enabled so Setup and Solve retain their measured boundaries; ambient `APXCHOL_*` solver overrides are not read.
 
 ## Measurement contract
 

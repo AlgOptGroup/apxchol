@@ -45,17 +45,16 @@ private:
         // priorities make this a parallel execution of one greedy order, not
         // textbook Luby (which redraws priorities between passes).
         const uint64_t round_seed = detail::partition_round_seed(ctx.seed, round);
-        // Degree-aware priority (degree_tiebreak): compare degree first, then
+        // Degree-aware priority: compare degree first, then
         // the full hash and vertex id. The local-min IS prefers low-degree
         // candidates (parallel min-degree) without the overflow/collision risk
-        // of packing a truncated hash into one integer. Plain hash otherwise.
-        const bool tiebreak = ctx.degree_tiebreak;
+        // of packing a truncated hash into one integer.
         const auto degrees  = ctx.degrees;
         auto hash = [&](node_index v) -> uint64_t {
             return detail::fibonacci_vertex_hash(v, round_seed);
         };
         auto precedes = [&](node_index a, node_index b) {
-            if (tiebreak && degrees[a] != degrees[b])
+            if (degrees[a] != degrees[b])
                 return degrees[a] < degrees[b];
             const uint64_t ha = hash(a), hb = hash(b);
             return ha != hb ? ha < hb : a < b;

@@ -1658,7 +1658,6 @@ struct owned_selector_view_fixture {
         apxchol::test::initialize_owned_selector(*session, graph);
     apxchol::detail::gpu_block_frontend& selector = *selector_owner;
     apxchol::partition_options options;
-    bool degree_tiebreak = true;
 
     owned_selector_view_fixture() : active(graph.n()) {
         std::iota(active.begin(), active.end(), node_index{0});
@@ -1666,7 +1665,7 @@ struct owned_selector_view_fixture {
     }
 
     std::vector<node_index> select() {
-        selector.prepare(active, options, 42, 0, degree_tiebreak);
+        selector.prepare(active, options, 42, 0);
         auto selected = selector.select_block_greedy().data;
         if (selected.empty()) throw std::logic_error("owned selector fixture exhausted too soon");
         return selected;
@@ -1692,7 +1691,7 @@ struct owned_selector_view_fixture {
 
     void compare_reference(const apxchol::detail::graph& oracle) {
         ASSERT_GT(selector.transfers().owned_residual_binds, 0u);
-        const auto prepared = selector.prepare(active, options, 42, 0, degree_tiebreak);
+        const auto prepared = selector.prepare(active, options, 42, 0);
         const auto actual_degrees = selector.host_active_degrees();
         ASSERT_EQ(actual_degrees.size(), active.size());
         std::vector<node_index> expected_degrees;
@@ -2163,13 +2162,11 @@ TEST(GpuOwnedPrefix, TwoRoundsPreserveOrderedHandbackAndCpuPeel) {
 TEST(GpuOwnedPrefix, SharedResidualViewPreservesCandidatesAndIndependentProgress) {
     REQUIRE_GPU_ROUND_SHADOW_DEVICE();
     scoped_omp_threads serial(1);
-      for (bool degree_tiebreak : {false, true}) {
-       SCOPED_TRACE(degree_tiebreak);
+      {
        for (double quantile : {0.0, 0.3}) {
         SCOPED_TRACE(quantile);
         owned_selector_view_fixture f;
         f.options.degree_quantile = quantile;
-        f.degree_tiebreak = degree_tiebreak;
         auto oracle = make_owned_order_fixture();
         for (std::size_t round = 0; round < 3; ++round) {
             SCOPED_TRACE(round);
@@ -2177,7 +2174,7 @@ TEST(GpuOwnedPrefix, SharedResidualViewPreservesCandidatesAndIndependentProgress
             std::string receipt = std::to_string(f.selector.selected_degree_work());
             for (const auto v : selected) receipt += ":" + std::to_string(v);
             RecordProperty(std::string("owned_selection_") +
-                std::to_string(degree_tiebreak) + "_" + std::to_string(quantile) + "_" +
+                std::to_string(quantile) + "_" +
                 std::to_string(round), receipt);
             const auto report = f.run_selected(selected, f.selector.device_selection());
             ASSERT_FALSE(f.active.empty());
@@ -2218,7 +2215,7 @@ TEST(GpuOwnedPrefix, SharedResidualViewRejectsPublicReadsAfterNextRound) {
         ASSERT_FALSE(f.active.empty());
         expect_exception_contains([&] {
             switch (operation) {
-            case 0: (void)f.selector.prepare(f.active, f.options, 42, 0, f.degree_tiebreak); break;
+            case 0: (void)f.selector.prepare(f.active, f.options, 42, 0); break;
             case 1: (void)f.selector.select_block_greedy(); break;
             case 2: (void)f.selector.host_candidates(); break;
             case 3: (void)f.selector.host_active_degrees(); break;
@@ -2715,7 +2712,7 @@ TEST(GpuOwnedPrefix, FactorEntryWritesMatchSerialFactorOnEveryBasis) {
         std::iota(wanted.begin(), wanted.end(), node_index{0});
         apxchol::partition_options options;
         options.degree_quantile = 0.0; options.degree_multiplier = 1024.0;
-        selector.prepare(active, options, 42, 0, false);
+        selector.prepare(active, options, 42, 0);
         const auto selected = selector.select_for_test(wanted).data;
         ASSERT_EQ(selected, wanted);
         const auto input = apxchol::detail::make_gpu_round_shadow_input(graph, selected, kOwnedSeed);
@@ -2795,7 +2792,7 @@ TEST(GpuOwnedPrefix, NormalBatchesMatchSerialHandbackAndFactorAction) {
             apxchol::partition_options options;
             options.degree_quantile = 0.0;
             options.degree_multiplier = 1024.0;
-            selector.prepare(active, options, 42, 0, false);
+            selector.prepare(active, options, 42, 0);
             const auto selected = selector.select_for_test(wanted).data;
             ASSERT_EQ(selected, wanted);
             const auto input = apxchol::detail::make_gpu_round_shadow_input(graph, selected, seed);
@@ -2961,7 +2958,7 @@ TEST(GpuOwnedPrefix, OversizedImportRejectionAndCompactContinuationMatchOracle) 
     std::ostringstream receipt;
     for (unsigned round = 0; round < 2; ++round) {
         SCOPED_TRACE(round);
-        selector.prepare(active, options, 42, 0, false);
+        selector.prepare(active, options, 42, 0);
         const auto selected = round == 0 ? selector.select_for_test(std::vector<node_index>{0}).data
             : selector.select_block_greedy().data;
         ASSERT_EQ(selected.size(), 1u);
@@ -3188,8 +3185,8 @@ TEST(GpuOwnedPrefix, ConsumingSolveEliminatesEveryColumnOnDevice) {
     factor_options.factor_storage = apxchol::factor_storage_type::fp32;
     factor_options.drop_tolerance = 0;
     factor_options.verbose = true;
-    factor_options.partition.degree_quantile = 0.0;
-    factor_options.partition.degree_multiplier = 100.0;
+    factor_options.experimental.partition.degree_quantile = 0.0;
+    factor_options.experimental.partition.degree_multiplier = 100.0;
     factor_options.experimental.min_is_fraction = 0.0;
     for (double shift : {0.0, 1.0}) {
         SCOPED_TRACE(shift);
@@ -3362,7 +3359,7 @@ TEST(GpuCycleSampler, NormalReferenceAndOversizedMomentLaw) {
                 std::iota(wanted.begin(),wanted.end(),node_index{0});
                 apxchol::partition_options options;
                 options.degree_quantile=0;options.degree_multiplier=16384;
-                selector.prepare(active,options,42,0,false);
+                selector.prepare(active,options,42,0);
                 const auto selected=selector.select_for_test(wanted).data;
                 ASSERT_EQ(selected,wanted);
                 const auto report=session.run_owned_prefix_round(selector.device_selection(),run_seed);
@@ -3512,7 +3509,7 @@ TEST(GpuCycleSampler, OwnedSolveReturnsOriginalSystemSolution) {
         apxchol::solve_options opts;
         opts.backend=apxchol::solve_backend::gpu;
         opts.factor_opts.verbose = true;
-        opts.factor_opts.sampler=sampler;opts.factor_opts.partition.degree_quantile=.8;
+        opts.factor_opts.experimental.sampler=sampler;opts.factor_opts.experimental.partition.degree_quantile=.8;
         testing::internal::CaptureStderr();
         const auto result=apxchol::solve(apxchol::test::csc(A), b, 1e-8, 1000, {}, opts);
         const auto trace=testing::internal::GetCapturedStderr();

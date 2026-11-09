@@ -32,7 +32,7 @@ struct factorization_access;
 ///     M = P^T L S^2 L^T P,
 ///
 /// which approximates the operator used for construction, including any
-/// lumping or regularization. P is the permutation matrix of perm. For a
+/// lumping. P is the permutation matrix of perm. For a
 /// Laplacian, the solve uses only the leading (n-1) x (n-1) blocks of L and S
 /// and centers its input and output.
 ///
@@ -103,31 +103,30 @@ struct factorization_access {
 
 namespace detail {
 
-/// Shared matrix-input path: validate, lump if needed, and build the graph with
-/// regularization. The caller's operator remains unchanged for PCG.
+/// Shared matrix-input path: validate, lump if needed, and build the graph.
+/// The caller's operator remains unchanged for PCG.
 template<typename Build>
 factorization factorize_operator(csc_ref<double> L,
                                  const factor_options& options, Build&& build) {
     validate_factor_options(options);
-    const operator_view op(L, options.lump_max_mass);
+    const operator_view op(L, options.positive_offdiag_tolerance);
     // The graph builder applies these matrix-only options.
     auto graph_options = options;
-    graph_options.regularization = 0;
-    graph_options.lump_max_mass = kDefaultLumpMassCeiling;
+    graph_options.positive_offdiag_tolerance = kDefaultPositiveOffdiagTolerance;
     // The scan's bit-identical-triangles proof holds for L, i.e. only when
     // nothing was lumped.
     factorization F = build(make_graph_from_operator(op.matrix(),
-        op.lumped() == 0 && op.scan().triangles_bit_identical, options.regularization), graph_options);
+        op.lumped() == 0 && op.scan().triangles_bit_identical), graph_options);
     F.lumped_offdiag = op.lumped();
     return F;
 }
 
 } // namespace detail
 
-/// Extension overloads validate the operator, apply permitted lumping and
-/// regularization, then run the chosen partitioner and eliminator. A passed
-/// partitioner instance replaces `opts.partitioner`; otherwise
-/// `opts.partitioner` names the built-in one.
+/// Extension overloads validate the operator, apply permitted lumping,
+/// then run the chosen partitioner and eliminator. A passed
+/// partitioner instance replaces `opts.experimental.partitioner`; otherwise
+/// `opts.experimental.partitioner` names the built-in one.
 ///
 /// Custom-eliminator overload: substitute your own star-vertex elimination
 /// rule (see elimination/elimination.h for the `eliminator` contract).

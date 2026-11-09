@@ -119,12 +119,12 @@ void prepare_round_plans(id<MTLDevice> device, const factorization& factor,
 
 std::optional<resident_factor> prepare_input_operator(id<MTLDevice> device,
     csc_ref<double> A, const std::vector<node_index>& perm,
-    double lump_max_mass) {
+    double positive_offdiag_tolerance) {
     @autoreleasepool {
         std::size_t offdiagonals = 0;
         if (!gpu_owned_csc_layout_supported(A, offdiagonals) || !gpu_owned_csc_paired(A))
             return std::nullopt;
-        const operator_view validated(A, lump_max_mass);
+        const operator_view validated(A, positive_offdiag_tolerance);
         const auto input = upload(device, A);
         const unsigned n = unsigned(A.n);
         resident_factor out;
@@ -157,9 +157,7 @@ resident_factor factorize(id<MTLDevice> device, csc_ref<double> A,
         if (!input_prechecked && !gpu_owned_csc_layout_supported(A, offdiagonals, &zeros))
             throw std::invalid_argument(
                 "Metal device setup requires compressed, sorted, unique and paired 32-bit CSC storage");
-        if (!input_prechecked && !metal_setup_regularization_supported(options.factor_opts.regularization, &A))
-            throw std::invalid_argument(metal_regularization_error);
-        const operator_view validated(A, options.factor_opts.lump_max_mass);
+        const operator_view validated(A, options.factor_opts.positive_offdiag_tolerance);
         if (cp)
             (*cp)("operator_prepare");
         const bool unchanged = validated.lumped() == 0;
@@ -172,11 +170,10 @@ resident_factor factorize(id<MTLDevice> device, csc_ref<double> A,
         const auto graph = unchanged ? input : upload(device, validated.matrix());
         if (cp)
             (*cp)("metal_input");
-        const float regularization = float(options.factor_opts.regularization);
         auto raw = cached.factorizer.run(
             unsigned(A.n), unsigned(validated.matrix().nnz()),
             unsigned(validated.scan().offdiag_nnz - validated.lumped()), options.factor_opts.seed,
-            graph.ptr, graph.idx, graph.values, regularization,
+            graph.ptr, graph.idx, graph.values,
             unsigned(unchanged && validated.scan().triangles_bit_identical), options.factor_opts,
             options.factor_opts.experimental.parallel_residual_threshold.value_or(
                 block_greedy_partitioner::residual_handoff_threshold));

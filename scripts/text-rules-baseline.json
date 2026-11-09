@@ -1,12 +1,12 @@
 {
  "CHANGELOG.md": {
-  "R1": 48
+  "R1": 46
  },
  "CONTRIBUTING.md": {
   "R1": 6
  },
  "docs/api.md": {
-  "R1": 3
+  "R1": 2
  },
  "docs/batching.md": {
   "R1": 4
@@ -39,7 +39,7 @@
   "R1": 1
  },
  "docs/reference/cpp.md": {
-  "R1": 10
+  "R1": 9
  },
  "docs/sdk.md": {
   "R1": 5
@@ -48,7 +48,7 @@
   "R1": 13
  },
  "docs/usage.md": {
-  "R1": 17
+  "R1": 16
  },
  "include/apxchol/solver/pcg_cuda.h": {
   "R1": 2
@@ -72,7 +72,7 @@
   "R1": 1
  },
  "src/config.cpp": {
-  "R1": 4
+  "R1": 3
  },
  "src/factorization.cpp": {
   "R1": 1

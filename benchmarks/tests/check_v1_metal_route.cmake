@@ -5,7 +5,7 @@ execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env OMP_NUM_THREADS=2
         "${BENCHMARK}" --graph grid --n 64 --report-fill
         --solver apxchol_v1 --v1-configs "bg+tree[vec_pool_aos]" --v1-backend gpu
-        --factor-drop 0.01 --threads 2 --repeat 2 --tol 1e-8 --maxiter 1000 --csv
+        --drop-tolerance 0.01 --threads 2 --repeat 2 --tol 1e-8 --maxiter 1000 --csv
     RESULT_VARIABLE status OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr)
 if (NOT status STREQUAL "0" AND stderr MATCHES "Metal backend is unavailable")
     message("SKIP: no usable Metal device: ${stderr}")
