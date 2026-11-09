@@ -5,5 +5,8 @@ scope: text
 ignorecase: true
 nonword: true
 swap:
-  '(?<![\w-])right hand sides?(?![\w-])': right-hand side
-  '(?<![\w-])(?:warm starts?|warm-start(?:ed)?|initial solution estimate)(?![\w-])': initial guess
+  '(?<![\w-])right hand side(?![\w-])': right-hand side
+  '(?<![\w-])right hand sides(?![\w-])': right-hand sides
+  '(?<![\w-])(?:warm start|warm-start|initial solution estimate)(?![\w-])': initial guess
+  '(?<![\w-])(?:warm starts|warm-starts|initial solution estimates)(?![\w-])': initial guesses
+  '(?<![\w-])warm[- ]started(?![\w-])': started from an initial guess

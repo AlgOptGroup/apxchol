@@ -10,6 +10,7 @@
     "src/*.cpp",
     "src/*.h",
     "src/*.cu",
+    "src/*.mm",
     "include/*.h",
     "include/*.hpp",
     "python/src/*.cpp",
