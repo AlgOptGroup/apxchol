@@ -1654,8 +1654,7 @@ TEST(PartitionGraphView, QueriesSkipEliminatedNeighborsWithoutPruning) {
     std::vector<apxchol::node_index> seen;
     EXPECT_EQ(view.for_each_neighbor(7, [&](auto u) { seen.push_back(u); }), 3);
     EXPECT_EQ(view.degree(7), 3);
-    std::sort(seen.begin(), seen.end());
-    EXPECT_EQ(seen, (std::vector<apxchol::node_index>{2, 8, 12}));
+    EXPECT_EQ(seen, (std::vector<apxchol::node_index>{2, 8, 12}));  // stored order
     EXPECT_EQ(G.adj_count(7), stored);  // the view never prunes
     EXPECT_EQ(G.prune_and_degree(7), 3);
     EXPECT_EQ(G.adj_count(7), 3);
@@ -2107,20 +2106,23 @@ TEST(GpuBoundedSelection, ConsumingSolveChecksOriginalOperatorResidual) {
 
 #endif
 
-TEST(PartitionGraphView, LazyRoundQueriesAreReentrantAndReleaseBeforeCallbacks) {
+TEST(PartitionGraphView, QueriesAreReentrantAndMarkRowsForCleanup) {
     const auto L = grid_laplacian(5, 5);
     auto G = apxchol::detail::make_graph(apxchol::test::internal_csc(L).ref());
-    std::vector<std::atomic<std::uint32_t>> epochs(G.n());
+    std::vector<std::atomic<bool>> touched(G.n());
     G.set_inactive_unchecked(6);
     G.bulk_decrement_active(1);
-    auto view = apxchol::detail::partition_graph_access::trimming_view(G, epochs.data(), 2);
+    const auto view = apxchol::detail::partition_graph_access::deferred_view(G, touched.data());
+    EXPECT_FALSE(touched[7].load());
     EXPECT_THROW(view.for_each_neighbor(7, [](auto) { throw std::runtime_error("visitor"); }),
                  std::runtime_error);
-    EXPECT_EQ(epochs[7].load(), 2u);
+    EXPECT_TRUE(touched[7].load());
     EXPECT_EQ(view.degree(7), 3);
     apxchol::node_index calls = 0;
     EXPECT_EQ(view.for_each_neighbor(7, [&](auto) { ++calls; return false; }), 3);
     EXPECT_EQ(calls, 3); // bool results keep their existing ignored semantics.
+    std::vector<apxchol::node_index> expected;
+    view.for_each_neighbor(7, [&](auto u) { expected.push_back(u); });
     std::barrier start(4);
     std::array<std::thread, 4> threads;
     std::atomic<bool> correct{true};
@@ -2129,19 +2131,18 @@ TEST(PartitionGraphView, LazyRoundQueriesAreReentrantAndReleaseBeforeCallbacks) 
         for (int r = 0; r < 100; ++r) {
             const apxchol::node_index v = 7 + (t % 2);
             const auto degree = view.degree(v);
-            apxchol::node_index count = 0;
+            std::vector<apxchol::node_index> order;
             view.for_each_neighbor(v, [&](auto u) {
                 if (view.degree(v) != degree || view.degree(u) < 1) correct = false;
-                ++count;
+                order.push_back(u);
             });
-            if (count != degree) correct = false;
+            if (order.size() != degree || (v == 7 && order != expected)) correct = false;
         }
     });
     for (auto& thread : threads) thread.join();
     EXPECT_TRUE(correct.load());
+    EXPECT_EQ(G.adj_count(7), 4);  // queries never change a list
     G.set_inactive_unchecked(8);
     G.bulk_decrement_active(1);
-    auto next = apxchol::detail::partition_graph_access::trimming_view(G, epochs.data(), 4);
-    EXPECT_EQ(next.degree(7), 2);
-    EXPECT_EQ(epochs[7].load(), 4u);
+    EXPECT_EQ(view.degree(7), 2);
 }

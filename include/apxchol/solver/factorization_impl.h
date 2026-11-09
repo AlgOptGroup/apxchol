@@ -859,8 +859,8 @@ factorization factorize_impl(const Eliminator& elim,
     std::vector<std::array<size_t, 256>> pre_histograms;
     std::vector<size_t> pre_filter_offsets;
     std::vector<node_index> live_degrees;   // vertex-indexed, for ctx.degrees
-    std::unique_ptr<std::atomic<std::uint32_t>[]> query_epochs;
-    std::uint32_t query_epoch = 0;
+    std::unique_ptr<std::atomic<bool>[]> query_touched;
+    bool cleanup_query_rows = false;
     // Keep exact degrees when their sparse updates cost less than a full walk.
     const bool incremental_degree_capable =
         std::is_same_v<Partitioner, block_greedy_partitioner> &&
@@ -905,6 +905,7 @@ factorization factorize_impl(const Eliminator& elim,
                                std::span<const node_index> act)
         -> const partition_result& {
         using P = std::remove_reference_t<decltype(p)>;
+        cleanup_query_rows = false;
         selection_access::reset(sel, g.n());
         last_avg_degree = 0.0;
         last_candidate_count = act.size();
@@ -1033,18 +1034,12 @@ factorization factorize_impl(const Eliminator& elim,
             if constexpr (std::is_same_v<P, baumann_kyng_partitioner>) {
                 p.find_partition(partition_graph_access::view(g), act, pctx, sel);
             } else {
-                if (!query_epochs)
-                    query_epochs = std::make_unique<std::atomic<std::uint32_t>[]>(g.n());
-                // All calls and callbacks from the previous selection have
-                // finished before this point. Elimination can then change lists.
-                if (query_epoch == std::numeric_limits<std::uint32_t>::max() - 1) {
-                    for (node_index v = 0; v < g.n(); ++v)
-                        query_epochs[v].store(0, std::memory_order_relaxed);
-                    query_epoch = 0;
-                }
-                query_epoch += 2;
-                p.find_partition(partition_graph_access::trimming_view(
-                                     g, query_epochs.get(), query_epoch), act, pctx, sel);
+                // Queries mark the lists they walk; finish_round cleans them.
+                if (!query_touched)
+                    query_touched = std::make_unique<std::atomic<bool>[]>(g.n());
+                cleanup_query_rows = true;
+                p.find_partition(partition_graph_access::deferred_view(
+                                     g, query_touched.get()), act, pctx, sel);
             }
         }
         if (cp) (*cp)("select");
@@ -1071,13 +1066,34 @@ factorization factorize_impl(const Eliminator& elim,
     // the round index.
     auto finish_round = [&] {
         peak_graph_bytes = std::max(peak_graph_bytes, work.memory_bytes());
-        if (active.size() > opts.experimental.omp_threshold) {
-            parallel_stable_active_filter(
-                active, active_scratch, pre_filter_offsets,
-                [&](node_index v) { return work.is_active(v); });
+        auto filter_active = [&](auto&& keep) {
+            if (active.size() > opts.experimental.omp_threshold) {
+                parallel_stable_active_filter(active, active_scratch, pre_filter_offsets, keep);
+            } else {
+                std::erase_if(active, [&](node_index v) { return !keep(v); });
+            }
+        };
+        const auto is_live = [&](node_index v) { return work.is_active(v); };
+        // Built-in rules never set the flags; keep their epilogue unchanged.
+        if constexpr (!partitioner_degree_prepass_v<Partitioner> &&
+                      !std::is_same_v<Partitioner, baumann_kyng_partitioner>) {
+            if (cleanup_query_rows) {
+                // Public queries only read, so drop dead incidences here for
+                // the lists this selection queried. Each vertex has one
+                // writer, and a second predicate call finds its flag cleared.
+                filter_active([&](node_index v) {
+                    const bool live = work.is_active(v);
+                    if (query_touched[v].load(std::memory_order_relaxed)) {
+                        query_touched[v].store(false, std::memory_order_relaxed);
+                        if (live) work.prune_and_degree(v);
+                    }
+                    return live;
+                });
+            } else {
+                filter_active(is_live);
+            }
         } else {
-            std::erase_if(active,
-                          [&](node_index v) { return !work.is_active(v); });
+            filter_active(is_live);
         }
         ++ws.round_index;
     };

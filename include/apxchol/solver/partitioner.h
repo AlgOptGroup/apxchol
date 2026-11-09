@@ -103,7 +103,6 @@
 #include "apxchol/solver/partition.h"
 #include <limits>
 #include <atomic>
-#include <thread>
 #include <type_traits>
 #include <span>
 #include <utility>
@@ -127,39 +126,15 @@ public:
     /// True while v has not been eliminated.
     bool is_active(node_index v) const { return g_->is_active(v); }
     /// Calls f(u) for each live neighbor u of v, repeating u once per
-    /// parallel edge, and returns that count. Queries preserve the represented graph;
-    /// any threads may query any vertices concurrently, including from f.
+    /// parallel edge, in stored order, and returns that count. Queries only
+    /// read the graph: any threads may query any vertices concurrently,
+    /// including from f. The call walks v's whole stored list.
     template<typename F>
     node_index for_each_neighbor(node_index v, F&& f) const {
-        if (!epochs_) return g_->visit_live(v, std::forward<F>(f));
-        auto& state = epochs_[v];
-        auto observed = state.load(std::memory_order_acquire);
-        if (observed != epoch_) {
-            // Each list is cleaned once in this round. No callback runs until
-            // the clean epoch is published, so reentrant readers never wait
-            // for a writer that is itself inside a callback.
-            const auto writing = epoch_ - 1;
-            for (;;) {
-                if (observed == epoch_) break;
-                if (observed != writing && state.compare_exchange_weak(
-                        observed, writing, std::memory_order_acquire,
-                        std::memory_order_relaxed)) {
-                    g_->prune_and_degree(v);
-                    state.store(epoch_, std::memory_order_release);
-                    break;
-                }
-                std::this_thread::yield();
-                observed = state.load(std::memory_order_acquire);
-            }
-        }
-        node_index count = 0;
-        for (const auto& entry : g_->adj(v)) {
-            f(entry.to);
-            ++count;
-        }
-        return count;
+        if (touched_) touched_[v].store(true, std::memory_order_relaxed);
+        return g_->visit_live(v, std::forward<F>(f));
     }
-    /// Live degree of v: the count for_each_neighbor returns.
+    /// Live degree of v: the count for_each_neighbor returns, at the same cost.
     node_index degree(node_index v) const {
         return for_each_neighbor(v, [](node_index) {});
     }
@@ -167,14 +142,13 @@ public:
 private:
     friend struct detail::partition_graph_access;
     explicit partition_graph(detail::graph& g,
-                             std::atomic<std::uint32_t>* epochs = nullptr,
-                             std::uint32_t epoch = 0)
-        : g_(&g), epochs_(epochs), epoch_(epoch) {}
+                             std::atomic<bool>* touched = nullptr)
+        : g_(&g), touched_(touched) {}
     // Built-in partitioners reach the mutable graph through
-    // partition_graph_access::graph_of. Lazy cleaning preserves neighbor order.
+    // partition_graph_access::graph_of. A set flag asks the orchestrator to
+    // drop v's dead incidences after the selection; it is only a hint.
     detail::graph* g_;
-    std::atomic<std::uint32_t>* epochs_;
-    std::uint32_t epoch_;
+    std::atomic<bool>* touched_;
 };
 
 /// Read-only services the orchestrator hands to a partitioner call.
@@ -255,10 +229,8 @@ struct selection_access {
 /// Orchestrator and built-in side of `partition_graph`.
 struct partition_graph_access {
     static partition_graph view(graph& g) { return partition_graph(g); }
-    static partition_graph trimming_view(graph& g,
-                                         std::atomic<std::uint32_t>* epochs,
-                                         std::uint32_t epoch) {
-        return partition_graph(g, epochs, epoch);
+    static partition_graph deferred_view(graph& g, std::atomic<bool>* touched) {
+        return partition_graph(g, touched);
     }
     static graph& graph_of(const partition_graph& G) { return *G.g_; }
 };

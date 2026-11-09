@@ -204,12 +204,15 @@ TEST(CustomPartitioner, ConcurrentViewQueriesMatchSerialOnes) {
         [&](const apxchol::partition_graph& G, std::span<const apxchol::node_index> active,
             const apxchol::partition_context&, apxchol::selection& out) {
             const auto summary = [&](apxchol::node_index v) {
-                long long total = G.degree(v);
-                G.for_each_neighbor(v, [&](auto u) { total += 1000LL * u + G.degree(u) + G.degree(v); });
+                // Order-sensitive, so a reordered callback sequence changes it.
+                unsigned long long total = G.degree(v);
+                G.for_each_neighbor(v, [&](auto u) {
+                    total = total * 1000003ULL + u + G.degree(u) + G.degree(v);
+                });
                 return total;
             };
             const auto count = static_cast<std::int64_t>(active.size());
-            std::vector<long long> serial(active.size()), parallel(2 * active.size());
+            std::vector<unsigned long long> serial(active.size()), parallel(2 * active.size());
             for (std::int64_t i = 0; i < count; ++i) serial[i] = summary(active[i]);
 #pragma omp parallel for schedule(dynamic, 3) num_threads(4)
             for (std::int64_t i = 0; i < 2 * count; ++i) parallel[i] = summary(active[i % count]);
