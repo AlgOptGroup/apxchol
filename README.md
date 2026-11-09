@@ -59,7 +59,7 @@ Start with the built-in solver for factor reuse and batched solves.
 The [Python](python/README.md), [C++](docs/reference/cpp.md) and
 [MATLAB/Octave](octave/README.md) guides cover each interface.
 `solver.apply` (C++) and `aslinearoperator()` (Python) let you use the
-preconditioner with another iterative solver; see [integration and factor reuse](docs/usage.md#using-another-iterative-solver).
+preconditioner with another iterative solver. See [integration and factor reuse](docs/usage.md#using-another-iterative-solver).
 
 ## Build and run
 
@@ -77,10 +77,10 @@ ctest --test-dir build --output-on-failure
 ./build/apxchol matrix.mtx --rhs rhs.mtx -o solution.mtx
 ```
 
-The CLI reads the matrix as `A`; `--convert-input` forms the Laplacian of an
+The CLI reads the matrix as `A`, and `--convert-input` forms the Laplacian of an
 adjacency matrix. An `--rhs` file with several columns is solved as one batch.
-`--random-rhs` generates a test RHS;
-the [command-line guide](docs/cli.md) lists the available controls.
+`--random-rhs` generates a test RHS.
+The [command-line guide](docs/cli.md) lists the available controls.
 
 ## Performance
 
@@ -89,7 +89,7 @@ the [command-line guide](docs/cli.md) lists the available controls.
 apxchol is faster than every other solver family except AMGCL on the CPU, where
 the median is a draw, and a median 1.3–1.7× faster than AMGX, BoomerAMG and
 AMGCL on an RTX 4090. Each dot is the speedup in setup + solve time on one of 27
-matrices on ETH Euler; [Performance](docs/performance.md) has every result,
+matrices on ETH Euler. [Performance](docs/performance.md) has every result,
 other platforms and the method.
 
 ## Learn more

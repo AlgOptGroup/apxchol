@@ -30,7 +30,7 @@ AMGCL, 1.4× faster than BoomerAMG and 1.3× faster than AMGX.
 Each small dot is one matrix: the setup + solve time of the family's fastest
 variant on that matrix, divided by apxchol's. The large dot is the median and
 the band covers the middle half. A run that failed, ran out of memory or
-exceeded its time cap counts as an apxchol win; the labels say how many there
+exceeded its time cap counts as an apxchol win. The labels say how many there
 were. apxchol runs its default configuration.
 
 ## Where apxchol wins
@@ -47,8 +47,8 @@ matrices on both the CPU and the GPU.
 
 Each cell is the speedup of apxchol over the family's fastest variant on that
 matrix. `≥20×` means the solver exceeded its time cap of 20 times apxchol's
-time; `fail`, `oom` and `nc` mean it failed, ran out of memory or did not
-converge; `n/a` means it does not accept that input. The
+time. `fail`, `oom` and `nc` mean it failed, ran out of memory or did not
+converge, and `n/a` means it does not accept that input. The
 [Euler page](performance-euler.md) breaks each family into its variants.
 
 ### CPU

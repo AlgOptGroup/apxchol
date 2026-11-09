@@ -1,7 +1,7 @@
 # Euler: x86_64 and CUDA
 
 ETH Euler `eu-g6` node: 2 × AMD EPYC 9554 (64 cores each) and 8 × NVIDIA
-RTX 4090 (24 GB). CPU series use 64 threads on one socket; CMG is serial.
+RTX 4090 (24 GB). CPU series use 64 threads on one socket. CMG is serial.
 The campaign planned 810 results (27 matrices × 30 solver configurations), and
 all of them ran: 563 met the 1e-8 tolerance on the original system.
 
@@ -70,7 +70,7 @@ for comparison with Daint.
 
 ## Thread scaling
 
-Setup + solve time from 1 to 128 threads on three matrices; 128 threads use
+Setup + solve time from 1 to 128 threads on three matrices. 128 threads use
 both sockets. Competitors are capped at 20 times apxchol's time at the same
 thread count, and a cross marks a run over the cap.
 

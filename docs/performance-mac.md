@@ -1,7 +1,7 @@
 # Apple M1 Max: CPU and Metal
 
 Apple M1 Max: 8 performance and 2 efficiency cores, a 32-core GPU and 32 GB
-unified memory, on macOS 26.0.1. The CPU runs use the 8 performance cores;
+unified memory, on macOS 26.0.1. The CPU runs use the 8 performance cores.
 macOS can't pin threads, so runs were unpinned, and processes ran at lower
 priority on a shared machine.
 
@@ -11,7 +11,7 @@ solvers, including Apple's Accelerate sparse Cholesky.
 
 ## CPU
 
-Competitors ran on the 21 matrices that fit comfortably in 32 GB; on the other
+Competitors ran on the 21 matrices that fit comfortably in 32 GB. On the other
 six, `n/a` means they were not run. apxchol ran on all 27. Competitors are
 capped at 20 times apxchol's setup + solve time on the same matrix, and at
 least 30 s.
@@ -59,6 +59,6 @@ after one warm-up. Peak memory is the whole process.
 
 [Every result](performance/mac-20261101.csv) and
 [what all results share](performance/mac-20261101.json): hardware, toolchains,
-revisions and the cap rule. The CPU runs used revision `45f42824`; the Metal
+revisions and the cap rule. The CPU runs used revision `45f42824`. The Metal
 runs used `0009d670`, from the pull request that added the benchmark's Metal
 route. The header points to the full extract with binary and matrix checksums.
