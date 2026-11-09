@@ -171,17 +171,20 @@ private:
     std::int64_t fitting_width(std::int64_t columns) {
         std::int64_t width = columns;
         for (; width > 4; width /= 2) {
+            bool trsv_reserved = false;
             try {
                 trsv_.reserve_panel(static_cast<unsigned>(width));
+                trsv_reserved = true;
                 gpcg_.reserve_panel(static_cast<unsigned>(width));
                 break;
             } catch (const device_memory_error&) {
                 (void)cudaGetLastError();
             } catch (const std::overflow_error&) {
             }
-            // A triangular-solve workspace grown before PCG failed would
-            // otherwise hold memory the narrower panel needs.
-            trsv_.release_panel();
+            // A triangular-solve workspace reserved before PCG failed would
+            // otherwise hold memory the narrower panel needs. A failed
+            // triangular-solve reservation keeps its previous workspace.
+            if (trsv_reserved) trsv_.release_panel();
         }
         return width;
     }
