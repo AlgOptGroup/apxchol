@@ -84,13 +84,13 @@ The [command-line guide](docs/cli.md) lists the available controls.
 
 ## Performance
 
-![Speedup of apxchol over other solver families on 27 matrices](docs/performance/euler-families.svg)
+![apxchol against the fastest other solver on each matrix](docs/performance/euler-best-other.svg)
 
-On the CPU, apxchol is faster than every other solver family except AMGCL, where
-the median is a draw. On an RTX 4090 it is a median 1.3–1.7× faster than AMGX,
-BoomerAMG and AMGCL. Each dot is the speedup in setup + solve time on one of 27
-matrices on ETH Euler. [Performance](docs/performance.md) has every result,
-other platforms and the method.
+Each dot is one of 27 matrices on ETH Euler (AMD EPYC CPU, RTX 4090): how much
+faster apxchol's setup + solve is than the fastest of seven other solvers on that
+matrix. apxchol leads on linear programs and most social graphs, and is close to
+algebraic multigrid on grids and meshes. [Performance](docs/performance.md) has
+per-solver results, other platforms and the method.
 
 ## Learn more
 

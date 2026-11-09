@@ -291,7 +291,7 @@ def best_other_chart(run, platform, output):
         ax.set_yticks(range(len(CLASSES)), list(CLASSES.values()))
         ax.set_ylim(len(CLASSES) - .5, -.5)
         ax.set_title(DEVICES[device], loc="left", fontsize=10)
-        log_axis(ax, "speedup over the fastest other solver")
+        log_axis(ax, "speedup of apxchol in setup + solve time  (right of 1: apxchol faster)")
     handles = [plt.Line2D([], [], marker="o", linestyle="", color=c, label=f) for f, c in FAMILY_COLORS.items()
                if f in winners]
     if set(winners) - set(FAMILY_COLORS) - {"none"}:
