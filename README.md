@@ -86,9 +86,9 @@ The [command-line guide](docs/cli.md) lists the available controls.
 
 ![apxchol against the fastest other solver on each matrix](docs/performance/euler-best-other.svg)
 
-Each dot is one of 27 matrices on ETH Euler (AMD EPYC CPU, RTX 4090): how much
-faster apxchol's setup + solve is than the fastest of seven other solvers on that
-matrix. apxchol leads on linear programs and most social graphs, and is close to
+Each dot is one of 27 matrices on ETH Euler, once for the AMD EPYC CPU and once
+for the RTX 4090: how much faster apxchol's setup + solve is than the fastest
+other solver on that matrix and device. apxchol leads on linear programs and most social graphs, and is close to
 algebraic multigrid on grids and meshes. [Performance](docs/performance.md) has
 per-solver results, other platforms and the method.
 
