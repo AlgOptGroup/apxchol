@@ -701,8 +701,8 @@ factorization factorize_impl(const Eliminator& elim,
     // Resolve unset options to this factorization route's defaults.
     const factor_options opts = [&] {
         factor_options o = opts_in;
-        if (!o.partition.degree_quantile)
-            o.partition.degree_quantile = gpu_owned_setup_route
+        if (!o.experimental.partition.degree_quantile)
+            o.experimental.partition.degree_quantile = gpu_owned_setup_route
                                               ? detail::degree_quantile_device_default
                                               : detail::degree_quantile_host_default;
         // The device route does not implement the host trace-cycle core rules.
@@ -730,7 +730,7 @@ factorization factorize_impl(const Eliminator& elim,
 
     // Record diagonal excess to select the full factor dimension. Excess in
     // one component does not prove every component positive definite.
-    // make_graph suppresses row-sum noise before applying regularization.
+    // make_graph has already suppressed row-sum noise.
     if (!initial_csc) for (node_index v = 0; v < n; ++v) {
         if (work.excess(v) > 0.0) { result.sddm = true; break; }
     }
@@ -771,14 +771,13 @@ factorization factorize_impl(const Eliminator& elim,
                 throw std::invalid_argument("GPU setup requires a supported CSC operator");
             std::unique_ptr<detail::gpu_block_frontend> gpu_frontend;
             result.sddm = gpu_round_shadow.initialize_owned_csc(
-                detail::gpu_owned_csc_host_buffers(*initial_csc), gpu_frontend,
-                opts.regularization);
+                detail::gpu_owned_csc_host_buffers(*initial_csc), gpu_frontend);
             if (cp) (*cp)("gpu_csc_initialize");
             bool sparsification_attempted = false;
             peak_graph_bytes = std::max(peak_graph_bytes, work.memory_bytes());
             while (!active.empty()) {
-                const auto prep = gpu_frontend->prepare(active, opts.partition,
-                    opts.seed, ws.round_index, opts.experimental.degree_tiebreak);
+                const auto prep = gpu_frontend->prepare(active, opts.experimental.partition,
+                    opts.seed, ws.round_index);
                 auto part = gpu_frontend->select_block_greedy();
                 if (part.data.empty())
                     throw std::runtime_error("GPU-owned factorization selection made no progress");
@@ -910,10 +909,9 @@ factorization factorize_impl(const Eliminator& elim,
         last_avg_degree = 0.0;
         last_candidate_count = act.size();
         partition_context pctx{
-            .options = opts.partition,
+            .options = opts.experimental.partition,
             .seed = opts.seed,
             .omp_threshold = opts.experimental.omp_threshold,
-            .degree_tiebreak = opts.experimental.degree_tiebreak,
             .degrees = {},
         };
         if (cp) { cp->descend("find_partition"); cp->tick(); }
@@ -997,13 +995,13 @@ factorization factorize_impl(const Eliminator& elim,
                     incremental_dead_incidence = 0;
                 }
             }
-            const double q = *opts.partition.degree_quantile;
+            const double q = *opts.experimental.partition.degree_quantile;
             const double thr = q > 0.0 && q < 1.0
                                    && act.size() > opts.experimental.omp_threshold
                 ? static_cast<double>(parallel_degree_quantile(
                       pre_degrees, act.size(), q, pre_histograms))
                 : candidate_degree_cap(pre_degrees, act.size(), avg_deg,
-                                       opts.partition, pre_scratch);
+                                       opts.experimental.partition, pre_scratch);
             previous_degree_threshold = thr;
             if (live_degrees.size() < static_cast<size_t>(g.n()))
                 live_degrees.resize(g.n());
@@ -1442,13 +1440,12 @@ inline tree_elimination make_tree_elim(const factor_options& opts,
     const std::size_t exact_core = opts.experimental.exact_core_max_h.value_or(
         route == detail::setup_route::gpu ? 0u : detail::exact_core_host_default);
     return tree_elimination{
-        .exact_clique_max_degree = opts.experimental.exact_clique_max_degree,
         .exact_core_max_h = exact_core,
         .double_cycle_min_h = opts.experimental.double_cycle_min_h,
-        .sampler = opts.sampler};
+        .sampler = opts.experimental.sampler};
 }
 
-// Factorize on the CPU with the built-in partitioner opts.partitioner names.
+// Factorize on the CPU with the built-in partitioner opts.experimental.partitioner names.
 template<typename Eliminator>
 factorization factorize_with_named_partitioner(const Eliminator& elim, graph G,
                                                const factor_options& opts,
@@ -1456,7 +1453,7 @@ factorization factorize_with_named_partitioner(const Eliminator& elim, graph G,
     auto run = [&](auto partitioner) {
         return factorize_impl(elim, partitioner, std::move(G), opts, cp);
     };
-    switch (opts.partitioner) {
+    switch (opts.experimental.partitioner) {
     case partitioner_kind::block_greedy:    return run(block_greedy_partitioner{});
     case partitioner_kind::priority_greedy: return run(priority_greedy_partitioner{});
     case partitioner_kind::baumann_kyng:    return run(baumann_kyng_partitioner{});

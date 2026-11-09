@@ -13,8 +13,8 @@ foreach(case IN LISTS cases)
         set(backend cpu)
     elseif (case STREQUAL "explicit_options")
         set(backend cpu)
-        set(options --factor-storage float32 --cpu-schedule levels --factor-drop 0
-            --regularization 0 --lump-max-mass 0 --degree-quantile 0.3 --profile)
+        set(options --factor-storage float32 --cpu-schedule levels --drop-tolerance 0
+            --positive-offdiag-tolerance 0 --degree-quantile 0.3 --profile)
     elseif (case STREQUAL "auto_host_only")
         set(config "greedy+tree[vec_pool_aos]")
     endif()
@@ -58,8 +58,8 @@ if (status STREQUAL "0" OR NOT stderr MATCHES "--v1-backend must be auto\\|cpu\\
     message(FATAL_ERROR "Invalid complete route was not rejected before IO: ${status}: ${stderr}")
 endif()
 
-foreach(case IN ITEMS "factor-storage;float64" "cpu-schedule;invalid" "factor-drop;-1"
-        "regularization;nan" "lump-max-mass;2" "degree-quantile;2")
+foreach(case IN ITEMS "factor-storage;float64" "cpu-schedule;invalid" "drop-tolerance;-1"
+        "positive-offdiag-tolerance;2" "degree-quantile;2")
     list(GET case 0 option)
     list(GET case 1 value)
     execute_process(

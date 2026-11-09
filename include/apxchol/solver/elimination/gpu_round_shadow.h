@@ -184,12 +184,12 @@ struct gpu_owned_csc_test_result {
     bool sddm = false;
 };
 gpu_owned_csc_test_result gpu_initial_owned_csc_buffers_for_test(
-    const gpu_owned_csc_buffers& input, double reg_eps);
+    const gpu_owned_csc_buffers& input);
 #if !defined(__CUDACC__)
 inline gpu_owned_csc_test_result gpu_initial_owned_csc_for_test(
-        csc_ref<double> A, double reg_eps = 0.0) {
+        csc_ref<double> A) {
     if (!gpu_owned_csc_supported(A)) return {};
-    return gpu_initial_owned_csc_buffers_for_test(gpu_owned_csc_host_buffers(A), reg_eps);
+    return gpu_initial_owned_csc_buffers_for_test(gpu_owned_csc_host_buffers(A));
 }
 #endif
 #endif
@@ -219,7 +219,16 @@ struct gpu_round_shadow_factor_column {
     factor_value_t diag = 0;
     std::uint64_t entry_begin = 0;
     std::uint32_t entry_count = 0;
+    // Named tail padding. Kernels store columns field by field and the host
+    // downloads whole structs, so every byte must be a written member.
+    std::uint32_t padding = 0;
 };
+#if !defined(APXCHOL_64BIT_NODE_INDICES)  // the CUDA owner needs 32-bit nodes
+static_assert(sizeof(gpu_round_shadow_factor_column) ==
+              sizeof(node_index) + sizeof(factor_value_t) + sizeof(std::uint64_t) +
+              2 * sizeof(std::uint32_t),
+              "factor-column downloads must not copy implicit padding");
+#endif
 
 // Complete owning logs already carry their raw off-diagonal prefix offsets.
 // Preserve the existing coverage checks while optionally constructing the
@@ -1352,7 +1361,7 @@ private:
     gpu_owned_sparsify_stats sparsify_owned_residual(
         gpu_block_frontend& frontend, std::uint64_t seed);
     std::unique_ptr<gpu_block_frontend> initialize_owned_csc(
-        const gpu_owned_csc_buffers& input, double reg_eps, bool& sddm);
+        const gpu_owned_csc_buffers& input, bool& sddm);
     gpu_round_shadow_report compute_owned_prefix(
         gpu_device_selection selected, std::uint64_t run_seed);
     std::vector<gpu_round_shadow_factor_column> download_owned_factor_columns(
@@ -1360,7 +1369,7 @@ private:
         std::vector<factor_entry>* entries = nullptr);
 #if defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
     friend gpu_owned_csc_test_result gpu_initial_owned_csc_buffers_for_test(
-        const gpu_owned_csc_buffers&, double);
+        const gpu_owned_csc_buffers&);
     gpu_owned_prefix_handback download_owned_prefix();
 #endif
     void reset() noexcept;
@@ -1399,13 +1408,12 @@ public:
     // Internal dispatch has checked gpu_owned_csc_supported on the same matrix
     // before its host adapter produces these trusted, synchronously borrowed buffers.
     bool initialize_owned_csc(const gpu_owned_csc_buffers& input,
-                              std::unique_ptr<gpu_block_frontend>& frontend, double regularization = 0) {
-        validate_regularization(regularization);
+                              std::unique_ptr<gpu_block_frontend>& frontend) {
         if (!active_ || owned_initialized_ || owned_rounds_ || frontend)
             throw std::logic_error("GPU CSC initialization is outside a fresh owning session");
         bool sddm = false;
         frontend = device_state_->initialize_owned_csc(
-            input, regularization, sddm);
+            input, sddm);
         owned_initialized_ = true;
         return sddm;
     }
@@ -1591,7 +1599,7 @@ gpu_round_shadow_session make_gpu_round_shadow_session(
         (void)eliminator;
         throw std::invalid_argument("GPU factorization requires the built-in eliminator");
     } else {
-        if (eliminator.exact_clique_max_degree != 0 || eliminator.exact_core_max_h != 0 ||
+        if (eliminator.exact_core_max_h != 0 ||
             eliminator.double_cycle_min_h != 0)
             throw std::invalid_argument("GPU factorization requires a bounded built-in sampler");
         if (!gpu_round_shadow_runtime_available())

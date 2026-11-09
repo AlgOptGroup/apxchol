@@ -5,7 +5,7 @@ execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env OMP_NUM_THREADS=2
         "${BENCHMARK}" --graph grid --n 64 --report-fill
         --solver apxchol_v1 --v1-configs "bg+tree[vec_pool_aos]" --v1-backend gpu
-        --factor-drop 0.01 --threads 2 --repeat 2 --tol 1e-8 --maxiter 1000 --csv
+        --drop-tolerance 0.01 --threads 2 --repeat 2 --tol 1e-8 --maxiter 1000 --csv
     RESULT_VARIABLE status OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr)
 if (NOT status STREQUAL "0" AND stderr MATCHES "Metal backend is unavailable")
     message("SKIP: no usable Metal device: ${stderr}")
@@ -14,7 +14,7 @@ endif()
 if (NOT status STREQUAL "0")
     message(FATAL_ERROR "Metal benchmark route failed: ${status}: ${stderr}")
 endif()
-if (NOT stdout MATCHES "original-v1,[^,]+,[^,]+,metal\n")
+if (NOT stdout MATCHES "original-v1,[^,]+,[^,]+,metal,apxchol-wall-v2\n")
     message(FATAL_ERROR "CSV lacks the Metal route receipt: ${stdout}")
 endif()
 string(REGEX MATCHALL "BENCH_REPEAT[^\n]*execution_route=metal" repeats "${stderr}")

@@ -69,15 +69,10 @@ and execution failures use `apxchol:error` (see
 |---|---|
 | `num_threads` | CPU thread ceiling; `0` inherits the caller's OpenMP setting |
 | `seed` | Sampling seed |
-| `partitioner` | `block_greedy` (default), `priority_greedy` or `baumann_kyng` |
-| `sampler` | Clique sampler: `gks` (default) or `trace_cycle` (CPU and CUDA only) |
 | `factor_storage` | `auto`, `float16` or `float32`; affects triangular-solve storage |
-| `degree_quantile` | Degree cutoff quantile in `[0, 1)`; `0` selects the multiplier-based cutoff (Metal requires `(0, 1)`); omitted uses the default |
-| `degree_multiplier` | Positive degree multiplier, used only when `degree_quantile` is `0` |
 | `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
-| `regularization` | Minimum diagonal excess of the preconditioner, as a fraction of each diagonal after lumping; excess below 1e-12 of the diagonal counts as zero first; `A` is not modified; `0` disables it |
-| `lump_max_mass` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
-| `verbose` | Logical flag for setup diagnostics; off by default |
+| `positive_offdiag_tolerance` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
+| `verbose` | Logical flag for setup and solve diagnostics; off by default. The output format is not stable |
 
 See [precision](../docs/precision.md) and the [native option reference](../docs/reference/cpp.md)
 for storage behavior and the meaning of each control.
@@ -91,14 +86,14 @@ the solves actually use, together:
 s = apxchol_solver(A);
 s.save('system.apxchol');
 restored = apxchol_solver.load('system.apxchol');
-res = restored.solve(B);  % scalar/matrix RHS and warm starts work as usual
+res = restored.solve(B);  % scalar/matrix RHS and initial guesses work as usual
 ```
 
 The path must be a character row vector. Saving replaces an existing file,
 writing to `<path>.tmp` first and renaming it into place. Loading accepts the
 same optional options struct as the constructor. The file fixes the factor
 storage and dropping, so `factor_storage` and `drop_tolerance` have no effect;
-`num_threads` and `lump_max_mass` apply. A loaded solver can be saved again.
+`num_threads` and `positive_offdiag_tolerance` apply. A loaded solver can be saved again.
 
 Archives use the shared [portable file format](../docs/serialization.md).
 Loading prepares the saved factor without factorizing the matrix again.

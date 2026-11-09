@@ -27,9 +27,11 @@ def gpu_solver(operator_matrix):
                                    factor_storage=np.float32)
     except (ValueError, RuntimeError) as exc:
         unavailable = (
-            "GPU route requested but GPU support is not built",
+            "apxchol: GPU route requested but GPU support is not built. "
+            "Request the CPU backend, or install a CUDA or Metal build.",
             "GPU factorization requires an available CUDA device",
-            "apxchol: the Metal backend is unavailable: no Metal device",
+            "apxchol: the Metal backend is unavailable (no Metal device found). "
+            "Request the CPU backend.",
             "GPU route requires 32-bit nodes, block_greedy, vec_pool_aos, "
             "natural residual peeling and supported sampler options; request CPU explicitly",
         )

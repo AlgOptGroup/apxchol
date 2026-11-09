@@ -119,9 +119,11 @@ def gpu_solver(storage):
                                         factor_storage=storage)
     except (ValueError, RuntimeError) as exc:
         unavailable = (
-            "GPU route requested but GPU support is not built",
+            "apxchol: GPU route requested but GPU support is not built. "
+            "Request the CPU backend, or install a CUDA or Metal build.",
             "GPU factorization requires an available CUDA device",
-            "apxchol: the Metal backend is unavailable: no Metal device",
+            "apxchol: the Metal backend is unavailable (no Metal device found). "
+            "Request the CPU backend.",
         )
         if os.environ.get("APXCHOL_TEST_REQUIRE_GPU") == "1" or str(exc) not in unavailable:
             raise

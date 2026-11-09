@@ -51,13 +51,11 @@ class SolveResult:
     solve_seconds: float
 
 
-def _solver_options(*, backend="auto", num_threads=0, seed=None, partitioner=None,
+def _solver_options(*, backend="auto", num_threads=0, seed=None,
                     factor_storage="auto", **advanced):
     options = dict(backend=backend, num_threads=index(num_threads))
     if seed is not None:
         options["seed"] = index(seed)
-    if partitioner is not None:
-        options["partitioner"] = partitioner
     options.update(advanced)
     if not (isinstance(factor_storage, str) and factor_storage == "auto"):
         try:
@@ -192,9 +190,9 @@ class Solver:
         dropping come from the file, so ``factor_storage`` and
         ``drop_tolerance`` have no effect. ``backend`` and ``num_threads``
         apply; ``backend="auto"`` uses CPU, ``"gpu"`` requests upload.
-        ``lump_max_mass`` still bounds the archived operator, so pass it again
+        ``positive_offdiag_tolerance`` still bounds the archived operator, so pass it again
         if the solver was built with a non-default value. Tolerance, iteration
-        budget and warm starts remain solve arguments.
+        budget and initial guess remain solve arguments.
         """
         options = _solver_options(**opts)
         self = cls.__new__(cls)
@@ -282,7 +280,7 @@ class Solver:
         batched solver and return one convergence result per column. Omitted
         ``rtol`` and ``maxiter`` use the compiled native defaults.
 
-        ``x0`` is an initial solution estimate with the RHS shape; an
+        ``x0`` is an initial guess with the RHS shape; an
         already-converged guess takes zero iterations. ``out`` must have
         that shape and be writable, C- or F-contiguous float64. It is returned
         as :attr:`SolveResult.x`.
@@ -340,8 +338,8 @@ class Solver:
 
         The result is a float64 ``scipy.sparse.csc_matrix`` in permuted order
         with ``M[p][:, p] ≈ G @ G.T``, where ``p = np.argsort(self.P)`` and
-        ``M`` is the operator the solver factorized: ``A`` after any lumping
-        or regularization. It is the installed factor after dropping and
+        ``M`` is the operator the solver factorized: ``A`` after any lumping.
+        It is the installed factor after dropping and
         storage rounding; with float16 storage, G = L S holds each binary16
         off-diagonal times its column scale. A GPU-backed solver downloads it
         on the first export and caches it.
@@ -363,7 +361,7 @@ class Solver:
         return int(self._impl.factor_nnz())
 
 
-def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
+def factorize(A, *, backend="auto", num_threads=0, seed=None,
               factor_storage="auto", **advanced) -> Solver:
     """Build the reusable approximate-Cholesky factor of A.
 
@@ -379,7 +377,7 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
         Laplacian RHS must sum to zero within each connected component.
 
         Positive off-diagonal pairs are lumped onto the diagonal for
-        preconditioning, subject to `lump_max_mass` (see :attr:`Solver.lumped_offdiag`).
+        preconditioning, subject to `positive_offdiag_tolerance` (see :attr:`Solver.lumped_offdiag`).
         PCG and residual checks still use the original `A`.
     backend : {"auto", "cpu", "gpu"}
         Auto may prefer CPU for small systems when it supports the requested storage;
@@ -392,11 +390,7 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
         workloads may use fewer threads. Each operation restores the setting.
     seed : int or None
         RNG seed for the randomized clique sampling (factorization is
-        deterministic per seed at one thread only). None uses the C++ default.
-    partitioner : str or None
-        Independent-set selector: "block_greedy", "priority_greedy", or
-        "baumann_kyng". None uses the C++ default. Unknown names raise
-        ``ValueError``.
+        deterministic per seed on a single thread only). None uses the C++ default.
     factor_storage : {"auto", "float16", "float32"} or numpy dtype
         Triangular-solve storage; ``np.float16`` and ``np.float32`` also
         work. ``"auto"`` uses the backend default: FP32 on CPU/Metal, FP16
@@ -407,25 +401,15 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None, partitioner=None,
         stays FP64. Unsupported FP16 requests fail; FP64 storage is unavailable.
     **advanced
         Passed straight through to the core options:
-        `sampler` ("gks" | "trace_cycle"; default "gks"),
-        `degree_quantile` (in [0, 1); None uses the backend default),
-        `degree_multiplier` (positive),
         `drop_tolerance` (in [0, 1]; 0 disables dropping),
-        `regularization` (minimum diagonal excess of the preconditioner, as a
-        fraction of each diagonal after lumping; excess below 1e-12 of the
-        diagonal counts as zero first; 0 disables),
-        `lump_max_mass` (fraction in [0, 1]; 0 rejects positive off-diagonals),
+        `positive_offdiag_tolerance` (fraction in [0, 1]; 0 rejects positive off-diagonals)
         and `verbose` (default False).
 
     Notes
     -----
     Unknown option keys raise ``ValueError``.
-
-    ``degree_multiplier`` only takes effect when ``degree_quantile=0``.
-    Omitting the quantile uses the backend's default. Metal requires a
-    quantile in ``(0, 1)`` and includes all vertices tied at its degree cutoff.
     """
-    return Solver(A, backend=backend, num_threads=num_threads, seed=seed, partitioner=partitioner,
+    return Solver(A, backend=backend, num_threads=num_threads, seed=seed,
                   factor_storage=factor_storage, **advanced)
 
 

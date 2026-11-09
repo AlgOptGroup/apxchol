@@ -24,7 +24,7 @@ selects available conversion and SIMD instructions at runtime.
 
 The GPU operator may use FP32 storage when the original values are exactly
 representable; this is separate from narrowing a preconditioner.
-CUDA rescales extreme RHS and warm-start vectors by a common power of two and
+CUDA rescales extreme RHS and initial-guess vectors by a common power of two and
 restores the solution scale on return. Intermediate triangular-solve values
 must still fit FP32.
 
@@ -96,7 +96,6 @@ Metal rejects inputs outside these ranges:
 - Nonzero operator values and unscaled factor diagonals: magnitude in [2^-100, 2^100].
 - Factor off-diagonals: finite values.
 - Factor/operator offsets: signed 32-bit integers; the operator must have fewer than 2^30 stored entries.
-- Positive regularization: in [2^-100, 2^100], with normal positive FP32 products when multiplied by the operator diagonal.
 
 ## Accuracy and configuration choice
 

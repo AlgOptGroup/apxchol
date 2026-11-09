@@ -35,7 +35,7 @@
 ///   * parabolic_fem (33% of entries, 0.00016% of the mass): 44 -> 42.
 ///   * bcsstk13 (44% of entries, 39.7% of the mass) is DESTROYED: unrepaired
 ///     it runs 500 iterations to a residual of NaN. Lumped (past the default
-///     ceiling, so this needs a larger lump_max_mass) it stagnates at 29.4 instead
+///     ceiling, so this needs a larger positive_offdiag_tolerance) it stagnates at 29.4 instead
 ///     -- finite, still useless. That is the ceiling's whole point.
 ///
 /// Lumping restores the class before the preconditioner is built. For every
@@ -155,7 +155,7 @@ operator_scan scan_operator(csc_ref<double> A);
 ///
 /// Diagonal dominance is reported in the census but never enforced.
 operator_scan require_operator(csc_ref<double> A,
-                               double lump_max_mass = kDefaultLumpMassCeiling);
+                               double positive_offdiag_tolerance = kDefaultPositiveOffdiagTolerance);
 
 /// The error require_operator reports for a rows x cols matrix that is not square.
 [[noreturn]] void throw_operator_not_square(std::int64_t rows, std::int64_t cols);
@@ -184,7 +184,7 @@ csc_matrix<double> lump_positive_offdiagonals(csc_ref<double> A, std::int64_t& r
 class operator_view {
 public:
     explicit operator_view(csc_ref<double> A,
-                           double lump_max_mass = kDefaultLumpMassCeiling);
+                           double positive_offdiag_tolerance = kDefaultPositiveOffdiagTolerance);
 
     /// The lumped copy, or the caller's own matrix when nothing was lumped.
     csc_ref<double> matrix() const {

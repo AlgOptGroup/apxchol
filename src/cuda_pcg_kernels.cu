@@ -286,15 +286,27 @@ void finish(cudaStream_t stream, std::int64_t n, workspace v,
 template void initialize<1>(cudaStream_t, std::int64_t, workspace, std::array<double, 1>);
 template void initialize<2>(cudaStream_t, std::int64_t, workspace, std::array<double, 2>);
 template void initialize<4>(cudaStream_t, std::int64_t, workspace, std::array<double, 4>);
+template void initialize<8>(cudaStream_t, std::int64_t, workspace, std::array<double, 8>);
+template void initialize<16>(cudaStream_t, std::int64_t, workspace, std::array<double, 16>);
+template void initialize<32>(cudaStream_t, std::int64_t, workspace, std::array<double, 32>);
 template void step<1>(cudaStream_t, operation, std::int64_t, workspace, const operator_csr&, int);
 template void step<2>(cudaStream_t, operation, std::int64_t, workspace, const operator_csr&, int);
 template void step<4>(cudaStream_t, operation, std::int64_t, workspace, const operator_csr&, int);
+template void step<8>(cudaStream_t, operation, std::int64_t, workspace, const operator_csr&, int);
+template void step<16>(cudaStream_t, operation, std::int64_t, workspace, const operator_csr&, int);
+template void step<32>(cudaStream_t, operation, std::int64_t, workspace, const operator_csr&, int);
 template void finalize<1>(cudaStream_t, const double*, int, solve_state*, unsigned, unsigned, std::array<double, 1>);
 template void finalize<2>(cudaStream_t, const double*, int, solve_state*, unsigned, unsigned, std::array<double, 2>);
 template void finalize<4>(cudaStream_t, const double*, int, solve_state*, unsigned, unsigned, std::array<double, 4>);
+template void finalize<8>(cudaStream_t, const double*, int, solve_state*, unsigned, unsigned, std::array<double, 8>);
+template void finalize<16>(cudaStream_t, const double*, int, solve_state*, unsigned, unsigned, std::array<double, 16>);
+template void finalize<32>(cudaStream_t, const double*, int, solve_state*, unsigned, unsigned, std::array<double, 32>);
 template void finish<1>(cudaStream_t, std::int64_t, workspace, const operator_csr&, int, bool, std::array<double, 1>, std::array<double, 1>);
 template void finish<2>(cudaStream_t, std::int64_t, workspace, const operator_csr&, int, bool, std::array<double, 2>, std::array<double, 2>);
 template void finish<4>(cudaStream_t, std::int64_t, workspace, const operator_csr&, int, bool, std::array<double, 4>, std::array<double, 4>);
+template void finish<8>(cudaStream_t, std::int64_t, workspace, const operator_csr&, int, bool, std::array<double, 8>, std::array<double, 8>);
+template void finish<16>(cudaStream_t, std::int64_t, workspace, const operator_csr&, int, bool, std::array<double, 16>, std::array<double, 16>);
+template void finish<32>(cudaStream_t, std::int64_t, workspace, const operator_csr&, int, bool, std::array<double, 32>, std::array<double, 32>);
 
 namespace {
 

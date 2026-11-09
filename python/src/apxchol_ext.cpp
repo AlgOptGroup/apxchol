@@ -97,9 +97,8 @@ py::tuple csc_to_numpy(const apxchol::detail::csc_matrix<double>& A) {
 // ── options dict -> solve_options ────────────────────────────────────────────
 // Every key the binding understands, in the order reported by the error message.
 const char* const kValidKeys[] = {
-    "backend", "num_threads", "seed", "partitioner", "sampler",
-    "factor_storage", "degree_quantile", "degree_multiplier", "drop_tolerance",
-    "regularization", "lump_max_mass", "verbose",
+    "backend", "num_threads", "seed", "factor_storage", "drop_tolerance",
+    "positive_offdiag_tolerance", "verbose",
 };
 
 std::string join(const char* const* items, std::size_t count) {
@@ -129,22 +128,11 @@ apxchol::solve_options parse_options(const py::dict& d) {
         else if (key == "num_threads")       so.num_threads = v.cast<int>();
         // factor_options
         else if (key == "seed")               so.factor_opts.seed = v.cast<unsigned>();
-        else if (key == "partitioner")
-            so.factor_opts.partitioner = apxchol::detail::parse_option_name(
-                apxchol::detail::partitioner_names, v.cast<std::string>(), key);
-        else if (key == "sampler")
-            so.factor_opts.sampler = apxchol::detail::parse_option_name(
-                apxchol::detail::clique_sampler_names, v.cast<std::string>(), key);
-        else if (key == "degree_quantile") {
-            if (!v.is_none()) so.factor_opts.partition.degree_quantile = v.cast<double>();
-        }
-        else if (key == "degree_multiplier")  so.factor_opts.partition.degree_multiplier = v.cast<double>();
         else if (key == "factor_storage")
             so.factor_opts.factor_storage = apxchol::detail::parse_factor_storage(v.cast<std::string>());
         else if (key == "drop_tolerance")     so.factor_opts.drop_tolerance = v.cast<double>();
-        else if (key == "regularization")     so.factor_opts.regularization = v.cast<double>();
-        else if (key == "lump_max_mass")       so.factor_opts.lump_max_mass = v.cast<double>();
-        else if (key == "verbose")             so.factor_opts.verbose = v.cast<bool>();
+        else if (key == "positive_offdiag_tolerance") so.factor_opts.positive_offdiag_tolerance = v.cast<double>();
+        else if (key == "verbose")            so.factor_opts.verbose = v.cast<bool>();
         else
             throw std::invalid_argument(
                 "unknown option '" + key + "'; valid keys: " +
@@ -400,7 +388,8 @@ private:
 PYBIND11_MODULE(_apxchol, m) {
 #ifdef APXCHOL_REQUIRE_X86_64_V2
     if (!__builtin_cpu_supports("x86-64-v2")) {
-        throw py::import_error("apxchol requires an x86-64-v2 CPU.");
+        throw py::import_error("apxchol: this CPU lacks x86-64-v2 support, which apxchol requires. "
+                               "Run it on a newer x86-64 CPU.");
     }
 #endif
     m.doc() = "apxchol approximate-Cholesky preconditioner (pybind11 binding)";

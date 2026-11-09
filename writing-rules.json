@@ -1,0 +1,39 @@
+{
+  "include": [
+    "README.md",
+    "docs/*.md",
+    "python/README.md",
+    "octave/README.md",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "src/*.cpp",
+    "src/*.h",
+    "src/*.cu",
+    "src/*.mm",
+    "include/*.h",
+    "include/*.hpp",
+    "python/src/*.cpp",
+    "python/apxchol/*.py"
+  ],
+  "source": {
+    "cpp": {
+      "all_strings_in": [
+        "src/config.cpp",
+        "src/main.cpp"
+      ]
+    },
+    "python": {
+      "calls": [
+        "ValueError",
+        "TypeError",
+        "RuntimeError"
+      ],
+      "keywords": [
+        "help",
+        "description"
+      ],
+      "docstrings": "public"
+    }
+  }
+}

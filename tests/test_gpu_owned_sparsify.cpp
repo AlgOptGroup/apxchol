@@ -415,7 +415,7 @@ TEST(GpuOwnedSparsify, AutomaticRoundZeroControllerUsesOneDeviceAttempt) {
     options.factor_opts.verbose = true;
     options.factor_opts.experimental.parallel_residual_threshold = 1;
     options.factor_opts.experimental.omp_threshold = 0;
-    options.factor_opts.partition.degree_quantile = .8;
+    options.factor_opts.experimental.partition.degree_quantile = .8;
     ASSERT_DOUBLE_EQ(options.factor_opts.experimental.min_is_fraction, .05);
     auto occurrences = [](const std::string& text, const std::string& needle) {
         std::size_t count = 0, at = 0;

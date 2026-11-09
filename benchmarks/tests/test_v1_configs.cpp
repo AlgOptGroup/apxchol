@@ -28,18 +28,33 @@ int main() {
         std::vector<apxchol::node_index> scratch;
         for (std::optional<double> quantile : {std::optional<double>{}, {0.0}, {0.8}}) {
             apxchol::factor_options requested;
-            requested.partition.degree_quantile = quantile;
-            requested.partition.degree_multiplier = 3;
+            requested.experimental.partition.degree_quantile = quantile;
+            requested.experimental.partition.degree_multiplier = 3;
             const auto opts = v1_factor_options(capped, requested);
-            require(opts.partition.degree_quantile == 0, "cap4 did not disable quantile selection");
-            require(opts.partition.degree_multiplier == 4, "cap4 did not set multiplier 4");
+            require(opts.experimental.partition.degree_quantile == 0, "cap4 did not disable quantile selection");
+            require(opts.experimental.partition.degree_multiplier == 4, "cap4 did not set multiplier 4");
             require(apxchol::detail::candidate_degree_cap(degrees, degrees.size(), average,
-                        opts.partition, scratch) == 4 * average,
+                        opts.experimental.partition, scratch) == 4 * average,
                     "cap4 did not apply the advertised average-degree threshold");
             const auto unchanged = v1_factor_options(standard, requested);
-            require(unchanged.partition.degree_quantile == quantile &&
-                        unchanged.partition.degree_multiplier == 3,
+            require(unchanged.experimental.partition.degree_quantile == quantile &&
+                        unchanged.experimental.partition.degree_multiplier == 3,
                     "default tree preset changed requested degree controls");
+        }
+        Eigen::SparseMatrix<double> matrix(3, 3);
+        matrix.setIdentity();
+        Eigen::VectorXd rhs = Eigen::VectorXd::Ones(3);
+        apxchol::solve_options options;
+        options.backend = apxchol::solve_backend::cpu;
+        g_laplacian_mode = false;
+        for (bool profile : {false, true}) {
+            const auto measured = run_apxchol_v1(matrix, rhs, "clock", "clock",
+                options, 1e-8, 100, profile, false);
+            require(measured.setup_time > 0.0, "setup must use the owner's complete interval");
+            require(measured.solve_time >= 0.0 &&
+                    std::abs(measured.setup_time + measured.solve_time - measured.total_time) < 1e-12,
+                    "setup and solve must partition the outer wall interval");
+            require(measured.phase_contract == "apxchol-wall-v2", "missing phase contract");
         }
         std::cout << "v1 preset contract passed\n";
         return 0;

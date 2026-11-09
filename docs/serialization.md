@@ -31,9 +31,9 @@ The file stores the factor after dropping and storage rounding, with its storage
 
 - `backend`: automatic adoption selects CPU; `apxchol::solve_backend::gpu` uploads to the compiled GPU backend.
 - `num_threads` and `cpu_schedule`.
-- `lump_max_mass`: an operator admitted with a larger value still needs it when loading.
+- `positive_offdiag_tolerance`: an operator admitted with a larger value still needs it when loading.
 
-`factor_storage` and `drop_tolerance` have no effect: the file fixes both. Construction options such as the seed, partitioner, regularization and lumping are already represented in the saved factor.
+`factor_storage` and `drop_tolerance` have no effect: the file fixes both. Construction options such as the seed, partitioner and lumping are already represented in the saved factor.
 
 A loaded solver is as precise and as fast as the one that saved it: it solves in the same number of iterations and in the same time. On CPU and CUDA it gives bit-identical solves at the same thread count. On Metal, setup orders each forward-solve row by thread timing, so a reloaded solver agrees with the original to FP32 rounding: preconditioner applications agree to 3e-7 relative on large grids, ecology2, G3_circuit and com-Youtube, and solutions to 5e-10. CPU, CUDA and Metal use one stored form, so a file saved by one backend loads on another; their kernels round differently, so solutions agree to the solve tolerance rather than bit for bit.
 

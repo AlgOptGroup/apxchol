@@ -144,9 +144,9 @@ __device__ bool any_neighbor(node_index v, selector_owned_view view, Predicate p
 // Keep one strict (degree, phase/seed hash, vertex) order through at most
 // four snapshot passes. The selected set is independent, not necessarily maximal.
 __device__ bool bounded_priority_precedes(node_index a, node_index b,
-        selector_owned_view view, bool degree_tiebreak,
+        selector_owned_view view,
         std::uint64_t seed, std::uint64_t phase) {
-    if (degree_tiebreak && view.degree(a) != view.degree(b))
+    if (view.degree(a) != view.degree(b))
         return view.degree(a) < view.degree(b);
     const std::uint64_t key = seed ^ (phase * 0xD6E8FEB86659FD93ULL);
     const auto ha = gpu_device_selection_mix(key ^ a);
@@ -156,7 +156,7 @@ __device__ bool bounded_priority_precedes(node_index a, node_index b,
 
 __global__ void bounded_decide(const node_index* candidates, std::size_t count,
         selector_owned_view view, const int* status, unsigned char* winners,
-        bool degree_tiebreak, std::uint64_t seed, std::uint64_t phase) {
+        std::uint64_t seed, std::uint64_t phase) {
     const std::size_t index =
         (blockIdx.x * std::size_t(blockDim.x) + threadIdx.x) / 32;
     const unsigned lane = threadIdx.x & 31U;
@@ -164,7 +164,7 @@ __global__ void bounded_decide(const node_index* candidates, std::size_t count,
     const node_index v = candidates[index];
     const bool wins = !any_neighbor(v, view, [&](node_index u) {
         return status[u] == 0 &&
-            bounded_priority_precedes(u, v, view, degree_tiebreak, seed, phase);
+            bounded_priority_precedes(u, v, view, seed, phase);
     });
     if (lane == 0) winners[index] = wins;
 }
@@ -511,7 +511,7 @@ struct gpu_block_frontend::impl {
                 throw std::overflow_error("bounded selector launch size overflow");
             const int blocks = blocks_for(count * std::size_t{32});
             bounded_decide<<<blocks, kBlock>>>(current, count, owned_view,
-                status.get(), pick.get(), degree_tiebreak,
+                status.get(), pick.get(),
                 bounded_seed, bounded_phase);
             cuda_check(cudaGetLastError(), "decide bounded independent set");
             bounded_commit<<<blocks, kBlock>>>(current, count, owned_view,
@@ -626,7 +626,6 @@ struct gpu_block_frontend::impl {
     mutable bool host_candidate_ids_valid = false;
     partition_result result;
     partition_options current_options;
-    bool degree_tiebreak = true;
     std::uint64_t bounded_seed = 42, bounded_phase = 0;
     unsigned bounded_passes = 0;
     std::uint64_t bounded_candidate_visits = 0;
@@ -722,12 +721,10 @@ gpu_block_frontend::operator=(gpu_block_frontend && other) noexcept {
 gpu_block_frontend::prepare_result
 gpu_block_frontend::prepare(std::span<const node_index> active,
                            const partition_options &options,
-                           std::uint64_t seed, std::uint64_t phase,
-                           bool degree_tiebreak) {
+                           std::uint64_t seed, std::uint64_t phase) {
     return p_->checked_operation([&] {
         p_->invalidate_selection();
         p_->current_options = options;
-        p_->degree_tiebreak = degree_tiebreak;
         p_->bounded_seed = seed;
         p_->bounded_phase = phase;
         return p_->prepare(active, options);

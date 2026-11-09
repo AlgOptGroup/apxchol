@@ -41,7 +41,15 @@ APXCHOL_SPARTA_PYTHON=/path/to/sparta-env/bin/python python3 benchmarks/sweep_fa
 
 The worker checks the installed VCS revision and explicit Metal route, records
 the native binary digest, and uses the shared exported operator and RHS.
-It pins only singular components and leaves nonsingular components unshifted.
+It receives the same declared matrix class used by the exporter. Declared
+Laplacians use the benchmark's row-sum validation and pin every component,
+including floating-point assembly roundoff. Inputs declared `sddm` retain their
+equations, except for exact constant-null components, connected or disconnected.
+Symmetry is checked for every input. Assembled operators retain positive
+off-diagonal entries; SPARTA's symmetric LDLT route supports them directly.
+Exact zero sums establish a constant null vector even with signed edges; the
+adapter makes no claim about positive definiteness or nullity beyond that.
+No diagonal shift or M-matrix lumping is applied by this adapter.
 Setup includes component handling, conversion, analysis and numeric factors.
 A tiny untimed Metal solve initializes the device before measured repetitions;
 its cost is recorded as `sparta_init_s`. Input parsing is outside timing.
@@ -73,7 +81,7 @@ Machine-local paths belong in ignored `paths_local.py`/`paths_local.cmake`;
 [runner_common.py](runner_common.py) defines defaults. `--dump-mtx` and
 `--dump-rhs` export the shared operator/RHS in separate driver invocations.
 
-The C++ benchmark accepts `--factor-storage auto|float16|float32`, `--cpu-schedule auto|levels`, `--factor-drop`, `--regularization`, `--lump-max-mass` and `--degree-quantile` for apxchol v1. These pass directly to the library's options; named configurations retain their sampler/partitioner choices. `--profile` prints its timing breakdown. Timing collection remains enabled so Setup and Solve retain their measured boundaries; ambient `APXCHOL_*` solver overrides are not read.
+The C++ benchmark accepts `--factor-storage auto|float16|float32`, `--cpu-schedule auto|levels`, `--drop-tolerance`, `--positive-offdiag-tolerance` and `--degree-quantile` for apxchol v1. These pass directly to the library's options. `--factor-storage`, `--drop-tolerance` and `--positive-offdiag-tolerance` set stable options. `--cpu-schedule` and `--degree-quantile` set `factor_options::experimental` controls, which can change in minor releases. Named configurations retain their sampler/partitioner choices. `--profile` prints its timing breakdown. Timing collection remains enabled so Setup and Solve retain their measured boundaries; ambient `APXCHOL_*` solver overrides are not read.
 
 ## Measurement contract
 
@@ -161,6 +169,13 @@ comments, Pages or README measurements.
 - Setup includes required conversion, grounding, ordering, uploads, factor/hierarchy
   construction and triangular analysis. Solve includes RHS work, iterations,
   transfers and returning the solution. Total is setup + solve.
+  apxchol's owner and setup profile use one complete enclosing interval, including
+  input validation and temporary storage release. Detailed stage labels are
+  exclusive; `unattributed` accounts for work between them, so the setup subtree
+  sums to the owner's construction time used by the benchmark. Component discovery
+  and, for split runs, component slicing are charged separately to benchmark Setup.
+  The owner also measures setup when detailed profiling is disabled. Normal benchmark runs omit optional stage
+  instrumentation; `--profile` enables it for diagnosis.
 - Common parsing/assembly and independent grading are excluded. Process-wide CUDA
   initialization is separately reported; solver-specific allocations/module loading
   remain charged. Hypre initialization is charged once per row, and so are
@@ -361,7 +376,11 @@ exported operator A and RHS b as the other external solvers. One MATLAB process
 per cell runs [cmg/bench_cmg_common.m](cmg/bench_cmg_common.m): one warmup and
 `--repeat` retained repetitions, each building the hierarchy with
 `cmg_precondition` and solving with MATLAB `pcg` (tol 1e-8, at most 500
-iterations) under `-singleCompThread`, pinned to one CPU. A disconnected
+iterations) within the sweep's requested computational-thread limit and CPU
+affinity. MATLAB can use its supported numerical threading; the CMG MEX is
+unchanged. Receipts record `matlab_thread_limit`, the configured limit rather
+than observed worker usage. `--threads 1` retains an explicit single-core
+comparison. A disconnected
 Laplacian gets one grounded coordinate per Laplacian component
 ([cmg/component_gauge.h](cmg/component_gauge.h)); coefficients and RHS values
 are kept unchanged, with no shift or RHS projection. Setup covers the component
@@ -371,8 +390,9 @@ PCG call on the same hierarchy, within one total iteration budget and at most
 eight calls. Numerical breakdown stops retries. Every repetition is independently
 graded by `||Ax-b||/||b||` on the original A and b, and the cell follows the
 same status and per-solve cap rules as the other competitors. The
-`shared-timed-original-v1` provenance marker distinguishes these cells from
-older CMG timings that excluded the stopping check. An empty hierarchy,
+`shared-timed-original-thread-budget-v2` provenance marker prevents reuse of
+older CMG timings that excluded stopping checks or forced MATLAB onto one core.
+An empty hierarchy,
 which CMG returns for operators it does not support such as positive
 off-diagonals, is recorded as `n/a`.
 
@@ -449,3 +469,18 @@ PYTHONPATH=benchmarks python3 benchmarks/thread_scaling.py --render-only --compa
 
 Compact plots show absolute times and log-log speedups; no complete T1 means no
 speedup. The fair-sweep renderers live in the research archive.
+
+### apxchol phase accounting
+
+The `apxchol-wall-v2` phase contract measures Setup from the start of input
+validation through solver construction, including factorization, operator
+preparation and workspace allocation. Solve is the remaining outer wall
+interval, including original-system verification. NVML reads are excluded.
+The earlier `apxchol-wall-v1` contract retained stage instrumentation in normal
+runs; those receipts are not reused under the current contract. Older records
+derived Setup from checkpoint subtotals and charged omitted
+setup work to Solve. This accounting defect does not alter their one-RHS
+totals. Other historical measurement-contract limitations still apply. Their
+separate phase times cannot establish setup cost, solve cost or factor-reuse
+estimates.
+Fresh phase measurements require the new marker.

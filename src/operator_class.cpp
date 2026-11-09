@@ -287,8 +287,8 @@ void throw_operator_not_square(std::int64_t rows, std::int64_t cols) {
         std::to_string(rows) + " rows, " + std::to_string(cols) + " columns.");
 }
 
-operator_scan require_operator(csc_ref<double> A, double lump_max_mass) {
-    detail::validate_lump_max_mass(lump_max_mass);
+operator_scan require_operator(csc_ref<double> A, double positive_offdiag_tolerance) {
+    detail::validate_positive_offdiag_tolerance(positive_offdiag_tolerance);
     const operator_scan s = scan_operator(A);
 
     if (s.nonfinite > 0)
@@ -317,13 +317,13 @@ operator_scan require_operator(csc_ref<double> A, double lump_max_mass) {
     // delete more of the operator than it preserves.
     if (s.offdiag_pos > 0) {
         const double rho = s.positive_mass_fraction();
-        if (lump_max_mass == 0 || rho > lump_max_mass)
+        if (positive_offdiag_tolerance == 0 || rho > positive_offdiag_tolerance)
             throw std::invalid_argument(
                 std::string(kContract) + "Condition FAILED: non-positive off-diagonals. " +
                 count_of(s.offdiag_pos, s.offdiag_nnz, "off-diagonal entries") +
                 " are positive, carrying " + num(100.0 * rho) +
-                "% of the off-diagonal mass; lump_max_mass permits at most " +
-                num(100.0 * lump_max_mass) + "%." + adjacency_hint(s));
+                "% of the off-diagonal mass; positive_offdiag_tolerance permits at most " +
+                num(100.0 * positive_offdiag_tolerance) + "%." + adjacency_hint(s));
     }
 
     return s;
@@ -406,8 +406,8 @@ csc_matrix<double> lump_positive_offdiagonals(csc_ref<double> A, std::int64_t& r
     return out;
 }
 
-operator_view::operator_view(csc_ref<double> A, double lump_max_mass)
-    : src_(A), scan_(require_operator(A, lump_max_mass)) {
+operator_view::operator_view(csc_ref<double> A, double positive_offdiag_tolerance)
+    : src_(A), scan_(require_operator(A, positive_offdiag_tolerance)) {
     if (scan_.offdiag_pos > 0) {
         // Only here does a copy happen: a Laplacian or SDDM operator (nothing
         // positive off the diagonal) is handed straight through.

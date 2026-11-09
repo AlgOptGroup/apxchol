@@ -46,8 +46,7 @@ csc_matrix<double> laplacian(const G& g) {
 /// IPM operators. Pass false whenever that proof is not at hand; the result is
 /// identical either way, only the work differs.
 inline graph make_graph_from_operator(csc_ref<double> L,
-                           bool triangles_bit_identical, double regularization = 0) {
-    validate_regularization(regularization);
+                           bool triangles_bit_identical) {
     const node_index n = L.n;
     const node_index outer = L.n;
     graph g(n);
@@ -250,8 +249,6 @@ inline graph make_graph_from_operator(csc_ref<double> L,
     // The relative 1e-12 tolerance absorbs fp accumulation-order ulps
     // (column-sum order vs. the ingestion order that built diag[]).
     //
-    // Optional diagonal regularization makes the preconditioner full-rank;
-    // the solve still applies the caller's original operator.
     // Each column's sum stays serial, so the work-balanced split cannot
     // change the result.
     bool invalid_excess = false;
@@ -265,15 +262,12 @@ inline graph make_graph_from_operator(csc_ref<double> L,
                     wdeg -= L.val[p];
             double excess = diag[k] - wdeg;
             excess = excess > diag[k] * 1e-12 ? excess : 0.0;
-            if (regularization > 0.0)
-                excess = std::max(excess, regularization * diag[k]);
-            invalid_excess |= !std::isfinite(excess) ||
-                (regularization > 0.0 && diag[k] > 0.0 && excess == 0.0);
+            invalid_excess |= !std::isfinite(excess);
             g.excess(k) = excess;
         }
     }
     if (invalid_excess)
-        throw std::range_error("regularization produces an unrepresentable diagonal excess");
+        throw std::range_error("unrepresentable diagonal excess");
     return g;
 }
 

@@ -39,17 +39,6 @@ endif()
 # External solver dependencies (all fetched at configure time)
 # ══════════════════════════════════════════════════════
 
-# ── Optional: CHOLMOD (SuiteSparse, system) ──────────
-find_library(CHOLMOD_LIB cholmod)
-find_path(CHOLMOD_INCLUDE cholmod.h PATH_SUFFIXES suitesparse)
-if (CHOLMOD_LIB AND CHOLMOD_INCLUDE)
-    set(HAVE_CHOLMOD TRUE)
-    message(STATUS "Found CHOLMOD: ${CHOLMOD_LIB}")
-else()
-    set(HAVE_CHOLMOD FALSE)
-    message(STATUS "CHOLMOD not found — CHOLMOD solver disabled")
-endif()
-
 # ── Optional: MKL ────────────────────────────────────
 # MKL backs RCHOL's own PCG (their util/pcg.cpp, compiled into rchol_lib below) and the
 # ParAC CPU driver. Without it RCHOL uses the explicitly labelled portable PCG below;
@@ -626,11 +615,6 @@ if (BENCH_AMGX)
     target_link_libraries(benchmark PRIVATE bench_amgx)
     target_include_directories(benchmark PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
     target_compile_definitions(benchmark PRIVATE HAVE_AMGX)
-endif()
-if (HAVE_CHOLMOD)
-    target_compile_definitions(benchmark PRIVATE HAVE_CHOLMOD)
-    target_include_directories(benchmark PRIVATE ${CHOLMOD_INCLUDE})
-    target_link_libraries(benchmark PRIVATE ${CHOLMOD_LIB})
 endif()
 if (HAVE_METIS)
     target_compile_definitions(benchmark PRIVATE HAVE_METIS)

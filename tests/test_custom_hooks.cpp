@@ -100,7 +100,7 @@ TEST(CustomEliminator, LambdaViaAsEliminator) {
     EXPECT_LT(res.residual, 1e-8);
 }
 
-// The eliminator overload honours opts.partitioner: each kind selects the
+// The eliminator overload honours opts.experimental.partitioner: each kind selects the
 // same first round as passing that built-in partitioner explicitly.
 TEST(CustomEliminator, HonoursOptionsPartitioner) {
     const auto L = grid_laplacian(30, 30);
@@ -113,7 +113,7 @@ TEST(CustomEliminator, HonoursOptionsPartitioner) {
     };
     auto by_option = [&](apxchol::partitioner_kind kind) {
         apxchol::factor_options opts;
-        opts.partitioner = kind;
+        opts.experimental.partitioner = kind;
         return first_round(apxchol::factorize(csc(L), exact_clique_eliminator{}, opts));
     };
     auto by_instance = [&](auto partitioner) {

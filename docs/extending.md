@@ -82,9 +82,9 @@ span is empty. The rule then owns any degree estimation or cap application.
 See the header for optional `sample_bounded` and
 `residual_handoff_threshold` traits.
 
-`ctx.options` contains selection settings, `ctx.seed` supplies randomness,
-`ctx.omp_threshold` gates parallel work, and `ctx.degree_tiebreak` asks the rule
-to prefer lower-degree vertices in conflicts.
+`ctx.options` contains selection settings, `ctx.seed` supplies randomness and
+`ctx.omp_threshold` gates parallel work. The built-in rules prefer
+lower-degree vertices in conflicts.
 The rule is called once per round and may parallelize internally. This is the
 opposite of the eliminator, whose individual calls are already parallelized.
 
@@ -106,7 +106,7 @@ for the duration of the partitioner call. Finish all query workers before
 returning.
 
 Pass a partitioner instance to `factorize`, alone or with an eliminator; it is
-taken by value and replaces `factor_options::partitioner`. Callable adapters
+taken by value and replaces `factor_options::experimental.partitioner`. Callable adapters
 are `as_partitioner` and `as_prepass_partitioner`.
 [custom_order.cpp](../examples/custom_order.cpp) shows complete integration.
 

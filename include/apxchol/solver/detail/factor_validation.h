@@ -11,10 +11,10 @@ namespace apxchol::detail {
 
 // Operator checks shared by adoption and portable archive creation.
 inline void validate_adopted_operator(csc_ref<double> A,
-                                      const factorization& F, double lump_max_mass) {
+                                      const factorization& F, double positive_offdiag_tolerance) {
     if (A.n == 0 || F.L.rows() != A.n)
         throw std::invalid_argument("apxchol: factor dimension does not match the operator");
-    require_operator(A, lump_max_mass);
+    require_operator(A, positive_offdiag_tolerance);
     if (!F.sddm) {
         for (node_index col = 0; col < A.n; ++col) {
             double diagonal = 0, positive = 0, degree = 0;
