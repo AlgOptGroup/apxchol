@@ -77,7 +77,7 @@ and execution failures use `apxchol:error` (see
 | `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
 | `regularization` | Minimum diagonal excess of the preconditioner, as a fraction of each diagonal after lumping; excess below 1e-12 of the diagonal counts as zero first; `A` is not modified; `0` disables it |
 | `lump_max_mass` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
-| `verbose` | Logical flag for setup diagnostics; off by default |
+| `verbose` | Logical flag for setup and solve diagnostics; off by default |
 
 See [precision](../docs/precision.md) and the [native option reference](../docs/reference/cpp.md)
 for storage behavior and the meaning of each control.
@@ -91,7 +91,7 @@ the solves actually use, together:
 s = apxchol_solver(A);
 s.save('system.apxchol');
 restored = apxchol_solver.load('system.apxchol');
-res = restored.solve(B);  % scalar/matrix RHS and warm starts work as usual
+res = restored.solve(B);  % scalar/matrix RHS and initial guesses work as usual
 ```
 
 The path must be a character row vector. Saving replaces an existing file,

@@ -24,6 +24,10 @@ class TextExtraction(unittest.TestCase):
         cfg = {"terms": [{"use": "k-mer", "not": ["kmer"]}]}
         self.assertIn("R8", [r for r, _ in RULES.check_text("kmer", cfg, {})])
 
+    def test_r7_checks_timing_words_not_modals(self):
+        self.assertIn("R7", [r for r, _ in RULES.check_text("The build finishes soon.", {}, {})])
+        self.assertEqual(RULES.check_text("Small workloads may use fewer threads.", {}, {}), [])
+
     def test_jargon_needs_prose(self):
         cfg, scope = {"jargon": ["re:\\b[a-z]+_[a-z_]+\\b"]}, {"jargon": True}
         self.assertEqual(RULES.check_text("min_kmers", cfg, scope), [])
@@ -56,6 +60,51 @@ class TextExtraction(unittest.TestCase):
                 mock.patch.object(Path, "read_text", return_value='logger->warn("Oops");\n'):
             results = RULES.scan(Path("/unused"), cfg)
         self.assertEqual(results["include/apxchol/detail/call_guard.h"][0][1], "R4")
+
+
+class PublicDocstrings(unittest.TestCase):
+    SRC = '''"""Module text; one."""
+
+
+def solve(b, x0=None):
+    """Solve a system.
+
+    Parameters
+    ----------
+    b : array
+        Right side; two.
+    x0 : array
+        Initial guess; three.
+    """
+
+
+def _private():
+    """Hidden; skip."""
+
+
+class Solver:
+    def apply(self):
+        """Apply it; four."""
+'''
+
+    def units(self, src=None):
+        return RULES.python_units(src or self.SRC, {"python_public_docstrings": True})
+
+    def test_public_docstrings_keep_their_lines(self):
+        units = self.units()
+        self.assertEqual([ln for ln, t in units if ";" in t], [1, 9, 11, 22])
+        self.assertFalse(any("Hidden" in t for _, t in units))
+
+    def test_fields_are_separate_items(self):
+        src = 'def f():\n    """Do it.\n\n    :param a: First; one.\n    :param b: Second; two.\n    """\n'
+        self.assertEqual([ln for ln, t in self.units(src) if ";" in t], [4, 5])
+
+    def test_doctests_are_code(self):
+        src = 'def f():\n    """Do it.\n\n    >>> retry; now()\n    a; b\n\n    Text; here.\n    """\n'
+        self.assertEqual([ln for ln, t in self.units(src) if ";" in t], [7])
+
+    def test_docstrings_are_off_by_default(self):
+        self.assertEqual(RULES.python_units(self.SRC, {}), [])
 
 
 class AllowComment(unittest.TestCase):

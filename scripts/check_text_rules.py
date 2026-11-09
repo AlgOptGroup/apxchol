@@ -120,7 +120,7 @@ def markdown_units(src, rst=False):
 
 
 def python_units(src, cfg):
-    """Strings passed to the calls and keywords named in the config."""
+    """Strings passed to the calls and keywords named in the config, and public docstrings when enabled."""
     try:
         tree = ast.parse(src)
     except SyntaxError:
@@ -185,6 +185,51 @@ def python_units(src, cfg):
                     base = node.body[0].lineno
                     for off, para in _paragraphs(doc):
                         out.append((base + off, para))
+    if cfg.get("python_public_docstrings"):
+        out += _public_docstrings(tree)
+    return out
+
+
+def _public_docstrings(tree):
+    """Docstrings of the module and its public classes, functions and methods, read as reST."""
+    nodes = [tree]
+    for node in tree.body:
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and not node.name.startswith("_"):
+            nodes.append(node)
+            if isinstance(node, ast.ClassDef):
+                nodes += [m for m in node.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+                          and not m.name.startswith("_")]
+    out = []
+    for node in nodes:
+        body = node.body
+        if not (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            continue
+        lines = body[0].value.value.split("\n")
+        rest = [l for l in lines[1:] if l.strip()]
+        indent = min((len(l) - len(l.lstrip()) for l in rest), default=0)
+        lines = [lines[0].strip()] + [l[indent:] for l in lines[1:]]
+        # Doctest examples and their output are code. Blank them and keep the line numbers.
+        in_doctest = False
+        for i, l in enumerate(lines):
+            if l.lstrip().startswith(">>>"):
+                in_doctest = True
+            elif not l.strip():
+                in_doctest = False
+            if in_doctest:
+                lines[i] = ""
+        # A dedent or a field such as `:param x:` starts a new item: scan each item on its own.
+        chunks, prev = [[0, []]], 0
+        for i, l in enumerate(lines):
+            cur = len(l) - len(l.lstrip())
+            if l.strip():
+                if cur < prev or (re.match(r":[\w ]+:(\s|$)", l.lstrip()) and chunks[-1][1]):
+                    chunks.append([i, []])
+                prev = cur
+            chunks[-1][1].append(l)
+        base = body[0].lineno
+        for first, chunk in chunks:
+            out += [(base + first + ln - 1, text) for ln, text in markdown_units("\n".join(chunk), rst=True)]
     return out
 
 
@@ -297,7 +342,7 @@ def check_text(t, cfg, scope):
             hits.append(("R2", f"{n} words: {s}"))
     if re.search(r"\b(sorry|oops|whoops|something went wrong|an error occurred|unknown error)\b", t, re.I):
         hits.append(("R4", t))
-    if re.search(r"\b(may|might|soon|shortly|a while|eventually)\b", re.sub(r"\bMay\s+\d", "", t)):
+    if re.search(r"\b(soon|shortly|a while|eventually)\b", t):
         hits.append(("R7", t))
     elif re.search(r"\b(two|three|four|five|six|seven|eight|nine|ten|twelve|twenty|thirty|sixty)\s+(seconds?|minutes?|hours?|days?|weeks?|months?|times|threads?|files?|steps?|results?|GB|MB|TB)\b", t, re.I):
         hits.append(("R7", t))

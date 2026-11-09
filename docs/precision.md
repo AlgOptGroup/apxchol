@@ -24,7 +24,7 @@ selects available conversion and SIMD instructions at runtime.
 
 The GPU operator may use FP32 storage when the original values are exactly
 representable; this is separate from narrowing a preconditioner.
-CUDA rescales extreme RHS and warm-start vectors by a common power of two and
+CUDA rescales extreme RHS and initial-guess vectors by a common power of two and
 restores the solution scale on return. Intermediate triangular-solve values
 must still fit FP32.
 

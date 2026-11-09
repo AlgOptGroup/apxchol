@@ -180,7 +180,7 @@ context* make_context() {
         try {
             // Command-line tools need CoreGraphics linked for this to find the GPU.
             id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-            if (device == nil) throw std::runtime_error("no Metal device");
+            if (device == nil) throw std::runtime_error("no Metal device found");
             ctx->device = device;
             st.name = [[device name] UTF8String];
             const auto compiled = compile_library(device, kKernelSource);

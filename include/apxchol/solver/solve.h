@@ -109,7 +109,7 @@ public:
                        std::optional<int> max_iter = std::nullopt,
                        std::span<const double> x0 = {});
     /// Independent RHS columns, with bounded panel workspace. The output range
-    /// must be disjoint from the RHS and warm-start ranges, including any
+    /// must be disjoint from the RHS and initial-guess ranges, including any
     /// padding between columns. tol/max_iter apply to each column.
     /// X0.data == nullptr starts every column from zero.
     batch_solve_result solve(const_matrix_view B, matrix_view X,
