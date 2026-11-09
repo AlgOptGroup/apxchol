@@ -9,13 +9,13 @@
     "Writing.R1": 1
   },
   "CHANGELOG.md": {
-    "Writing.R1": 49
+    "Writing.R1": 47
   },
   "CONTRIBUTING.md": {
     "Writing.R1": 10
   },
   "docs/api.md": {
-    "Writing.R1": 3
+    "Writing.R1": 2
   },
   "docs/batching.md": {
     "Writing.R1": 4
@@ -48,7 +48,7 @@
     "Writing.R1": 1
   },
   "docs/reference/cpp.md": {
-    "Writing.R1": 10
+    "Writing.R1": 9
   },
   "docs/sdk.md": {
     "Writing.R1": 5
@@ -57,25 +57,25 @@
     "Writing.R1": 19
   },
   "docs/usage.md": {
-    "Writing.R1": 19
+    "Writing.R1": 18
   },
   "include/apxchol/solver/pcg_cuda.h": {
     "Writing.R1": 2
   },
   "octave/README.md": {
-    "Writing.R1": 13
+    "Writing.R1": 8
   },
   "python/README.md": {
-    "Writing.R1": 31
+    "Writing.R1": 25
   },
   "python/apxchol/__init__.py": {
-    "Writing.R1": 24
+    "Writing.R1": 22
   },
   "python/src/apxchol_ext.cpp": {
     "Writing.R1": 1
   },
   "src/config.cpp": {
-    "Writing.R1": 6
+    "Writing.R1": 3
   },
   "src/factorization.cpp": {
     "Writing.R1": 1
