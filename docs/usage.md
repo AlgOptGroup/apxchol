@@ -117,9 +117,10 @@ is `auto`, `float16` or `float32` in the CLI, Python and MATLAB/Octave (Python
 also accepts a NumPy dtype), and `factor_storage_type::automatic`, `fp16` or
 `fp32` in C++. Python's `rtol` and `maxiter` follow SciPy's `cg`, and the CLI's
 `--threads` is the usual command-line spelling. The research controls in `factor_options::experimental` are
-available only from C++; see the [API policy](api.md). They include the
+set from C++; see the [API policy](api.md). They include the
 partitioner, the clique sampler, the degree cutoff, regularization and
-setup diagnostics. The CLI's `--verbose` turns on the diagnostics.
+setup diagnostics. The one exception is the CLI's `--verbose`, which turns on
+the diagnostics.
 
 ## Reuse, batches and initial guesses
 

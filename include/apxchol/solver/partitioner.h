@@ -147,7 +147,7 @@ private:
 /// Read-only services the orchestrator hands to a partitioner call.
 /// Everything except `degrees` is constant for the whole factorize() run.
 struct partition_context {
-    /// The user's selection preferences (factor_options::partition), always
+    /// The user's selection preferences (factor_options::experimental.partition), always
     /// populated. Who acts on the cap knobs (degree_quantile /
     /// degree_multiplier) depends on the degree_prepass trait: with the
     /// pre-pass the orchestrator has already applied them when building the
