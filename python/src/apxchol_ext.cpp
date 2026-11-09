@@ -387,7 +387,8 @@ private:
 PYBIND11_MODULE(_apxchol, m) {
 #ifdef APXCHOL_REQUIRE_X86_64_V2
     if (!__builtin_cpu_supports("x86-64-v2")) {
-        throw py::import_error("apxchol requires an x86-64-v2 CPU.");
+        throw py::import_error("apxchol: this CPU lacks x86-64-v2 support, which apxchol requires. "
+                               "Run it on a newer x86-64 CPU.");
     }
 #endif
     m.doc() = "apxchol approximate-Cholesky preconditioner (pybind11 binding)";

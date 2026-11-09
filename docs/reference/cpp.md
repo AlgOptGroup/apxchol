@@ -40,7 +40,7 @@ CPU use, set `opts.backend` to `solve_backend::cpu`.
 
 `solve` checks the returned solution against the original matrix and RHS.
 Inspect `converged`; reaching the iteration limit is not an exception.
-A warm start is an initial solution estimate supplied through `x0`.
+`x0` supplies an initial guess.
 
 ```{doxygenclass} apxchol::solver
 :members: solver, solve, apply, factor, rows, operator_nnz, backend, factor_storage, setup_seconds, save, load

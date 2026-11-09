@@ -85,7 +85,7 @@ the solves actually use, together:
 s = apxchol_solver(A);
 s.save('system.apxchol');
 restored = apxchol_solver.load('system.apxchol');
-res = restored.solve(B);  % scalar/matrix RHS and warm starts work as usual
+res = restored.solve(B);  % scalar/matrix RHS and initial guesses work as usual
 ```
 
 The path must be a character row vector. Saving replaces an existing file,

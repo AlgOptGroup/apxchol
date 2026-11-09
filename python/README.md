@@ -95,7 +95,7 @@ Over `k` separate one-RHS calls each costs `setup_seconds / k + solve_seconds`
 on average, and one batched call of `k` columns costs
 `(setup_seconds + solve_seconds) / k` per RHS; see [judging whether reuse pays off](https://algoptgroup.github.io/apxchol/docs/usage.html#judging-whether-reuse-pays-off).
 
-A *warm start* supplies an initial solution estimate:
+An initial guess `x0` starts the solve from a known estimate:
 
 ```python
 result = solver.solve(b2, x0=first.x)

@@ -1,0 +1,3 @@
+[submodule "docs/writing"]
+	path = docs/writing
+	url = https://github.com/ratschlab/writing-rules.git

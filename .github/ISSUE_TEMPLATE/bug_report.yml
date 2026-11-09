@@ -1,0 +1,36 @@
+name: Bug report
+description: A wrong result, a crash, an unclear error or a build failure.
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The command or call you ran and the output or error you saw. Paste the full error message.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce it
+      description: >-
+        The smallest command, script or matrix that shows the problem.
+        Attach a small Matrix Market file or say how to generate the input.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Version and platform
+      description: >-
+        The output of `apxchol -V` or `python -c "import apxchol; print(apxchol.__version__)"`,
+        the interface (CLI, C++, Python or MATLAB/Octave), the backend (CPU, CUDA or Metal),
+        and how you installed or built apxchol.
+    validations:
+      required: true

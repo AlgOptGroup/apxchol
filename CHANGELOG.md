@@ -23,7 +23,7 @@
 - Setup profiles include unlabelled work and agree with `solver::setup_seconds()`. Normal benchmark runs omit optional stage profiling; `--profile` retains the detailed breakdown.
 - Breaking: Eigen types leave the C++ API. `solver`, `factorize` and the one-shot `solve` take a borrowed CSC matrix, `csc_view` (32-bit indices) or `csc_view64` (64-bit), from the new header `apxchol/views.h`; rows must be sorted and unique within each column, and an invalid view throws `std::invalid_argument`. Vectors are `std::span`s and matrices `const_matrix_view` / `matrix_view` (column-major).
 - apxchol no longer depends on Eigen. The installed CMake package, SDK archives, Python wheels, CLI archives and the MATLAB/Octave build neither bundle nor require it, and their notices drop Eigen's MPL-2.0 terms; only the benchmark harness still uses Eigen, for its competitors and input reading.
-- Breaking: the initial guess is a `std::span` that is empty by default instead of a `const Eigen::VectorXd*`, and the batch warm start is a `const_matrix_view` whose null `data` means none.
+- Breaking: the initial guess is a `std::span` that is empty by default instead of a `const Eigen::VectorXd*`, and the batch initial guess is a `const_matrix_view` whose null `data` means none.
 - Breaking: `solve_result::x` and the vector `solver::apply` return `std::vector<double>`; `solve_result::iterations`, `factorization::lumped_offdiag`, `solver::rows()` and `solver::operator_nnz()` are `std::int64_t`.
 - Breaking: the C++ one-shot `solve(A, b, tol, max_iter, x0, opts)` takes an optional initial guess before the options, like the reusable solver, Python and MATLAB/Octave; the CLI reads one with `--x0 FILE`, shaped like the right-hand side.
 - Breaking: runtime environment variables are replaced by explicit solver options.
@@ -105,6 +105,7 @@
 - The website separates user and developer guides, adds installation, quick start, examples, changelog and citing pages, and marks development pages with a banner.
 - The precision guide states when results are reproducible and that a release may change results, within the documented precision, for measured speed or memory gains.
 - Clearer messages for a solver used by 2 threads at once, an archive from a newer version, and positive off-diagonal input entries.
+- Errors for an invalid tolerance, iteration budget, thread count or backend, an unsupported GPU request and a missing Metal device start with `apxchol:` and name the next step.
 - A new Input formats page shows how to pass matrices from Eigen, SuiteSparse/CHOLMOD, SciPy, MATLAB/Octave, raw CSR/CSC arrays and Matrix Market files; CI builds and runs its examples.
 
 ### Fixes
