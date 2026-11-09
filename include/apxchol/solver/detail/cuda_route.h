@@ -7,12 +7,14 @@
 #include "apxchol/detail/dense.h"
 #include "apxchol/solver/cuda_context.h"
 #include "apxchol/solver/pcg_cuda.h"
+#include "apxchol/solver/detail/device_memory_error.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"
 #include "apxchol/solver/detail/pcg_reduction.h"
 #include <array>
 #include <chrono>
 #include <cstdio>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -25,7 +27,7 @@ namespace apxchol::detail {
 class cuda_route {
 public:
     // Panel widths solve_columns and apply_columns accept, widest first.
-    static constexpr std::array<int, 3> solve_widths{4, 2, 1};
+    static constexpr std::array<int, 6> solve_widths{32, 16, 8, 4, 2, 1};
     static constexpr std::array<int, 1> apply_widths{1};
 
     /// Factorizes A on the device, or uploads the host factor F when it is
@@ -68,6 +70,16 @@ public:
     void solve_columns(const_matrix_ref B, matrix_ref X, const const_matrix_ref* X0,
                        std::span<solve_result> results, checkpoint* timings,
                        double tol, int max_iter) {
+        if (const std::int64_t width = fitting_width(B.cols()); width < B.cols()) {
+            for (std::int64_t first = 0; first < B.cols(); first += width) {
+                std::optional<const_matrix_ref> initial;
+                if (X0) initial.emplace(X0->middle_cols(first, width));
+                solve_columns(B.middle_cols(first, width), X.middle_cols(first, width),
+                              initial ? &*initial : nullptr, results.subspan(first, width),
+                              timings, tol, max_iter);
+            }
+            return;
+        }
         if (timings) { timings->descend("pcg"); timings->tick(); }
         const auto run = [&]<unsigned Columns>() {
             std::array<int, Columns> iterations{};
@@ -80,7 +92,10 @@ public:
                 results[q].converged = residuals[q] < tol;
             }
         };
-        if (B.cols() == 4) run.template operator()<4>();
+        if (B.cols() == 32) run.template operator()<32>();
+        else if (B.cols() == 16) run.template operator()<16>();
+        else if (B.cols() == 8) run.template operator()<8>();
+        else if (B.cols() == 4) run.template operator()<4>();
         else if (B.cols() == 2) run.template operator()<2>();
         else run.template operator()<1>();
         if (timings) { (*timings)("gpu_pcg_loop"); timings->ascend(); }
@@ -149,6 +164,31 @@ public:
     csc_matrix<double> original_operator() const;
 
 private:
+    // Reserves device workspace for the widest panel, halving from columns,
+    // that the device can hold and the packed 32-bit indices can address,
+    // before any solving starts. Both reservations keep the previous
+    // workspace on failure. Panels of four or fewer columns are never narrowed.
+    std::int64_t fitting_width(std::int64_t columns) {
+        std::int64_t width = columns;
+        for (; width > 4; width /= 2) {
+            bool trsv_reserved = false;
+            try {
+                trsv_.reserve_panel(static_cast<unsigned>(width));
+                trsv_reserved = true;
+                gpcg_.reserve_panel(static_cast<unsigned>(width));
+                break;
+            } catch (const device_memory_error&) {
+                (void)cudaGetLastError();
+            } catch (const std::overflow_error&) {
+            }
+            // A triangular-solve workspace reserved before PCG failed would
+            // otherwise hold memory the narrower panel needs. A failed
+            // triangular-solve reservation keeps its previous workspace.
+            if (trsv_reserved) trsv_.release_panel();
+        }
+        return width;
+    }
+
     void factorize(factorization& F, csc_ref<double> A, checkpoint* cp) {
         [[maybe_unused]] const auto factorize_install_begin =
             gpu_setup_diagnostic_clock::now(opts_.verbose);

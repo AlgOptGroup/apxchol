@@ -1585,6 +1585,212 @@ TEST(Solver, CpuApplyRejectsNonFiniteInputs) {
     check_nonfinite_apply(apxchol::solver(test::csc(matrix), cpu_options()));
 }
 
+#if defined(APXCHOL_USE_CUDA) && !defined(APXCHOL_64BIT_NODE_INDICES)
+namespace {
+bool cuda_device_present() {
+    int devices = 0;
+    const auto status = cudaGetDeviceCount(&devices);
+    if (status == cudaErrorNoDevice || status == cudaErrorInsufficientDriver) return false;
+    EXPECT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
+    return status == cudaSuccess && devices > 0;
+}
+
+// The first width columns of D.
+apxchol::const_matrix_view left_columns(const Dense& D, std::int64_t width) {
+    return {D.data.data(), D.rows, width, D.rows};
+}
+}  // namespace
+
+TEST(Solver, CudaWidePanelsPreserveStoppedColumnsAndScalarReuse) {
+    if (!cuda_device_present()) GTEST_SKIP() << "No CUDA devices";
+    const scoped_omp_threads threads(2);
+    const Sparse matrix = operator_matrix(129);
+    Dense exact(matrix.rows, 33), rhs(matrix.rows, 33), guess(matrix.rows, 33);
+    for (int q = 0; q < exact.cols; ++q)
+        for (int i = 0; i < exact.rows; ++i)
+            exact(i, q) = q == 1 ? 0.0 : std::sin((i + 1) * (q + 1) * 0.13) + 0.25;
+    for (int q = 0; q < exact.cols; ++q) {
+        set_col(rhs, q, test::multiply(matrix, exact.col(q)));
+        if (q % 2 == 0) set_col(guess, q, exact.col(q));
+    }
+    for (const auto storage : {apxchol::factor_storage_type::fp16,
+                               apxchol::factor_storage_type::fp32}) {
+        auto options = cpu_options();
+        options.backend = apxchol::solve_backend::gpu;
+        options.factor_opts.factor_storage = storage;
+        apxchol::solver owner(test::csc(matrix), options);
+        const auto before = owner.solve(rhs.col(0), 1e-8, 400);
+        ASSERT_TRUE(before.converged);
+        for (const int width : {7, 8, 9, 15, 16, 17, 31, 32, 33}) {
+            for (const bool warm : {false, true}) {
+                for (const int budget : {0, 1, 3, 400}) {
+                    SCOPED_TRACE(::testing::Message() << int(storage) << ' ' << width
+                        << ' ' << warm << ' ' << budget);
+                    Dense output(matrix.rows, width);
+                    const auto result = owner.solve(left_columns(rhs, width), output.view(), 1e-8,
+                        budget, warm ? left_columns(guess, width) : apxchol::const_matrix_view{});
+                    ASSERT_EQ(result.columns.size(), static_cast<std::size_t>(width));
+                    bool any_iterated = false;
+                    for (int q = 0; q < width; ++q) {
+                        const auto& column = result.columns[q];
+                        ASSERT_TRUE(test::all_finite(output.col(q)));
+                        EXPECT_LE(column.iterations, budget);
+                        any_iterated |= column.iterations > 0;
+                        const auto b = rhs.col(q);
+                        const double residual =
+                            stable_norm(b) ? stable_residual(matrix, output.col(q), b) : 0;
+                        EXPECT_NEAR(column.residual, residual, 1e-12 * (1 + residual));
+                        if (column.converged) {
+                            EXPECT_LT(residual, 1e-8);
+                        }
+                        if (budget == 400) {
+                            EXPECT_TRUE(column.converged);
+                        }
+                        if (q == 1) {
+                            EXPECT_EQ(column.iterations, 0);
+                            EXPECT_TRUE(is_zero(output.col(q)));
+                        } else if (warm && q % 2 == 0) {
+                            EXPECT_EQ(column.iterations, 0);
+                            EXPECT_TRUE(column.converged);
+                            EXPECT_TRUE(std::ranges::equal(output.col(q), exact.col(q)));
+                        } else if (budget == 0) {
+                            EXPECT_FALSE(column.converged);
+                        }
+                    }
+                    if (budget == 400) {
+                        EXPECT_TRUE(any_iterated);
+                    }
+                }
+            }
+        }
+        const auto after = owner.solve(rhs.col(0), 1e-8, 400);
+        ASSERT_TRUE(after.converged);
+        EXPECT_EQ(before.iterations, after.iterations);
+        EXPECT_EQ(before.x, after.x);
+    }
+}
+
+TEST(Solver, CudaWidePanelsNarrowWhenDeviceMemoryIsShort) {
+    if (!cuda_device_present()) GTEST_SKIP() << "No CUDA devices";
+    const scoped_omp_threads threads(2);
+    const Sparse matrix = operator_matrix(1 << 18);
+    const auto rows = static_cast<std::size_t>(matrix.rows);
+    Dense exact(matrix.rows, 32), rhs(matrix.rows, 32);
+    for (int q = 0; q < exact.cols; ++q) {
+        for (int i = 0; i < exact.rows; ++i) exact(i, q) = std::sin((i + 1) * (q + 1) * 0.13);
+        set_col(rhs, q, test::multiply(matrix, exact.col(q)));
+    }
+    auto options = cpu_options();
+    options.backend = apxchol::solve_backend::gpu;
+    // Per column, PCG needs 48 bytes per row and the triangular solve about 8.
+    // 768 bytes per row hold a 16-column panel's PCG vectors but not its
+    // triangular-solve workspace as well: the panel narrows to eight columns.
+    // 352 bytes per row hold a 32-column triangular-solve workspace but not
+    // that and four PCG columns: four columns fit once the wider workspace
+    // is released.
+    for (const std::size_t room_per_row : {768, 352}) {
+        SCOPED_TRACE(room_per_row);
+        apxchol::solver owner(test::csc(matrix), options);
+        // Fill the device, then free the room.
+        constexpr std::size_t chunk = std::size_t(8) << 20;
+        struct device_blockers {
+            std::vector<void*> chunks;
+            ~device_blockers() { for (void* p : chunks) (void)cudaFree(p); }
+        } held;
+        auto& blockers = held.chunks;
+        for (void* p = nullptr; cudaMalloc(&p, chunk) == cudaSuccess;) blockers.push_back(p);
+        (void)cudaGetLastError();
+        for (std::size_t freed = 0; freed < room_per_row * rows && !blockers.empty(); freed += chunk) {
+            ASSERT_EQ(cudaFree(blockers.back()), cudaSuccess);
+            blockers.pop_back();
+        }
+        Dense output(matrix.rows, 32);
+        apxchol::batch_solve_result result;
+        EXPECT_NO_THROW(result = owner.solve(std::as_const(rhs).view(), output.view(), 1e-8, 400));
+        for (void* p : blockers) ASSERT_EQ(cudaFree(p), cudaSuccess);
+        blockers.clear();
+        ASSERT_EQ(result.columns.size(), 32u);
+        for (int q = 0; q < 32; ++q) {
+            SCOPED_TRACE(q);
+            EXPECT_TRUE(result.columns[q].converged);
+            EXPECT_LT(stable_residual(matrix, output.col(q), rhs.col(q)), 1e-8);
+        }
+    }
+}
+
+TEST(Solver, CudaWidePanelsCenterLaplacianColumns) {
+    if (!cuda_device_present()) GTEST_SKIP() << "No CUDA devices";
+    const scoped_omp_threads threads(2);
+    constexpr int n = 128;
+    // Connected Laplacian, then two disconnected Laplacian components.
+    for (const int components : {1, 2}) {
+        const int size = n / components;
+        std::vector<test::triplet> entries;
+        for (int i = 0; i < n; ++i) {
+            entries.push_back({i, i, 4.0});
+            for (const int offset : {1, 7}) {
+                const int j = i / size * size + (i + offset) % size;
+                entries.push_back({i, j, -1.0});
+                entries.push_back({j, i, -1.0});
+            }
+        }
+        const Sparse matrix = test::from_triplets(n, n, entries);
+        Dense exact(n, 33), rhs(n, 33), guess(n, 33), incompatible(n, 33);
+        for (int q = 0; q < exact.cols; ++q) {
+            for (int i = 0; i < n; ++i) exact(i, q) = std::sin((i + 1) * (q + 1) * 0.13);
+            subtract_mean(exact.col(q));
+            set_col(rhs, q, test::multiply(matrix, exact.col(q)));
+            // A constant offset is outside the range of every component.
+            set_col(incompatible, q, affine(1.0, rhs.col(q), 1.0));
+            // Even columns start from the solution plus a constant null-space shift.
+            if (q % 2 == 0) set_col(guess, q, affine(1.0, exact.col(q), 8.0 + q));
+        }
+        for (const auto storage : {apxchol::factor_storage_type::fp16,
+                                   apxchol::factor_storage_type::fp32}) {
+            auto options = cpu_options();
+            options.backend = apxchol::solve_backend::gpu;
+            options.factor_opts.factor_storage = storage;
+            apxchol::solver owner(test::csc(matrix), options);
+            for (const int width : {8, 9, 16, 17, 32, 33}) {
+                const auto initial = left_columns(guess, width);
+                for (const bool warm : {false, true}) {
+                    SCOPED_TRACE(::testing::Message() << components << ' ' << int(storage)
+                        << ' ' << width << ' ' << warm);
+                    Dense output(n, width);
+                    const auto result = owner.solve(left_columns(rhs, width), output.view(), 1e-8,
+                        400, warm ? initial : apxchol::const_matrix_view{});
+                    ASSERT_EQ(result.columns.size(), static_cast<std::size_t>(width));
+                    for (int q = 0; q < width; ++q) {
+                        const auto& column = result.columns[q];
+                        ASSERT_TRUE(test::all_finite(output.col(q)));
+                        EXPECT_TRUE(column.converged);
+                        const double residual = stable_residual(matrix, output.col(q), rhs.col(q));
+                        EXPECT_NEAR(column.residual, residual, 1e-12 * (1 + residual));
+                        EXPECT_LT(residual, 1e-8);
+                        EXPECT_NEAR(test::mean(output.col(q)), 0.0, 1e-12);
+                        if (warm && q % 2 == 0) {
+                            EXPECT_EQ(column.iterations, 0);
+                            EXPECT_LT(stable_norm(test::difference(output.col(q), exact.col(q))),
+                                      1e-12 * stable_norm(exact.col(q)));
+                        }
+                    }
+                }
+                Dense output(n, width);
+                const auto result = owner.solve(left_columns(incompatible, width), output.view(),
+                                                1e-8, 0, initial);
+                for (int q = 0; q < width; q += 2) {
+                    SCOPED_TRACE(::testing::Message() << components << ' ' << int(storage)
+                        << ' ' << width << " incompatible " << q);
+                    EXPECT_FALSE(result.columns[q].converged);
+                    EXPECT_NEAR(result.columns[q].residual,
+                                std::sqrt(double(n)) / stable_norm(incompatible.col(q)), 1e-12);
+                }
+            }
+        }
+    }
+}
+#endif
+
 TEST(Solver, GpuApplyRejectsNonFiniteInputs) {
 #if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_64BIT_NODE_INDICES)
     GTEST_SKIP() << "32-bit-node CUDA owner required";

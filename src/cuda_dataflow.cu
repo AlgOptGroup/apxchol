@@ -151,6 +151,9 @@ void dataflow_solve(cudaStream_t stream, int m, bool reverse, const int *ptr, co
 template void dataflow_solve<1, 1>(cudaStream_t, int, bool, const int*, const int*, const void*, const float*, const double*, const unsigned*, const detail::gpu_dataflow::segment*, unsigned, unsigned*, unsigned, unsigned*, int, const float*, float*, const unsigned*, const double*, double*, unsigned);
 template void dataflow_solve<2, 1>(cudaStream_t, int, bool, const int*, const int*, const void*, const float*, const double*, const unsigned*, const detail::gpu_dataflow::segment*, unsigned, unsigned*, unsigned, unsigned*, int, const float*, float*, const unsigned*, const double*, double*, unsigned);
 template void dataflow_solve<4, 4>(cudaStream_t, int, bool, const int*, const int*, const void*, const float*, const double*, const unsigned*, const detail::gpu_dataflow::segment*, unsigned, unsigned*, unsigned, unsigned*, int, const float*, float*, const unsigned*, const double*, double*, unsigned);
+template void dataflow_solve<8, 4>(cudaStream_t, int, bool, const int*, const int*, const void*, const float*, const double*, const unsigned*, const detail::gpu_dataflow::segment*, unsigned, unsigned*, unsigned, unsigned*, int, const float*, float*, const unsigned*, const double*, double*, unsigned);
+template void dataflow_solve<16, 4>(cudaStream_t, int, bool, const int*, const int*, const void*, const float*, const double*, const unsigned*, const detail::gpu_dataflow::segment*, unsigned, unsigned*, unsigned, unsigned*, int, const float*, float*, const unsigned*, const double*, double*, unsigned);
+template void dataflow_solve<32, 4>(cudaStream_t, int, bool, const int*, const int*, const void*, const float*, const double*, const unsigned*, const detail::gpu_dataflow::segment*, unsigned, unsigned*, unsigned, unsigned*, int, const float*, float*, const unsigned*, const double*, double*, unsigned);
 } // namespace apxchol::detail
 
 namespace apxchol::detail {

@@ -765,10 +765,12 @@ public:
     template<unsigned Columns>
     void solve_LLt_dev(const double* d_in, double* d_out, const unsigned* active = nullptr,
                        unsigned active_stride = 1, cudaStream_t stream = nullptr) const {
-        static_assert(Columns == 1 || Columns == 2 || Columns == 4);
+        static_assert(Columns == 1 || Columns == 2 || Columns == 4 ||
+                      Columns == 8 || Columns == 16 || Columns == 32);
         require_ready();
-        constexpr unsigned RhsLanes = Columns == 4 ? 4 : 1;
-        if constexpr (Columns > 1) reserve_panel_workspace<Columns>();
+        // Panels of four or more columns use four RHS lanes per sparse lane.
+        constexpr unsigned RhsLanes = Columns >= 4 ? 4 : 1;
+        if constexpr (Columns > 1) reserve_panel_workspace(Columns);
         solve_LLt_dev_impl<Columns, RhsLanes>(stream, active, d_in, d_out, active_stride);
     }
 
@@ -947,17 +949,36 @@ private:
         ws_.h_stage.resize(rows);
     }
 
-    template<unsigned Columns>
-    void reserve_panel_workspace() const {
-        if (Columns <= ws_.panel_capacity) return;
+public:
+    /// Grows this copy's panel workspace to hold this many columns. On
+    /// device_memory_error or overflow_error the previous workspace stays in use.
+    void reserve_panel(unsigned columns) const {
+        require_ready();
+        const detail::cuda_device_scope device(data_->cuda_device, detail::cuda_device_scope::checked{});
+        reserve_panel_workspace(columns);
+    }
+
+    /// Frees this copy's panel workspace. The next panel solve reserves it again.
+    void release_panel() const noexcept {
+        const detail::cuda_device_scope device(ws_.device, ws_.device >= 0);
+        if (ws_.d_panel_y) (void)cudaFree(ws_.d_panel_y);
+        if (ws_.d_df_panel_tag) (void)cudaFree(ws_.d_df_panel_tag);
+        ws_.d_panel_y = nullptr;
+        ws_.d_df_panel_tag = nullptr;
+        ws_.panel_capacity = 0;
+    }
+
+private:
+    void reserve_panel_workspace(unsigned columns) const {
+        if (columns <= ws_.panel_capacity) return;
         const std::size_t tags = static_cast<std::size_t>(data_->m) + data_->df_slots;
-        if (tags > std::numeric_limits<unsigned>::max() / Columns)
+        if (tags > std::numeric_limits<unsigned>::max() / columns)
             throw std::overflow_error("GPU RHS panel exceeds packed tag range");
         sptrsv_value_t* next_y = nullptr;
         unsigned* next_tags = nullptr;
         try {
-            APXCHOL_CUDA_CHECK(cudaMalloc(&next_y, Columns * data_->m * sizeof(sptrsv_value_t)));
-            APXCHOL_CUDA_CHECK(cudaMalloc(&next_tags, Columns * tags * sizeof(unsigned)));
+            APXCHOL_CUDA_CHECK(cudaMalloc(&next_y, columns * data_->m * sizeof(sptrsv_value_t)));
+            APXCHOL_CUDA_CHECK(cudaMalloc(&next_tags, columns * tags * sizeof(unsigned)));
         } catch (...) {
             if (next_y) (void)cudaFree(next_y);
             if (next_tags) (void)cudaFree(next_tags);
@@ -969,7 +990,7 @@ private:
         if (ws_.d_df_panel_tag) (void)cudaFree(ws_.d_df_panel_tag);
         ws_.d_panel_y = next_y;
         ws_.d_df_panel_tag = next_tags;
-        ws_.panel_capacity = Columns;
+        ws_.panel_capacity = columns;
     }
 
     // The four-column panels' plan, built with the factor so the shared state
