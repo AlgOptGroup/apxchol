@@ -219,7 +219,16 @@ struct gpu_round_shadow_factor_column {
     factor_value_t diag = 0;
     std::uint64_t entry_begin = 0;
     std::uint32_t entry_count = 0;
+    // Named tail padding. Kernels store columns field by field and the host
+    // downloads whole structs, so every byte must be a written member.
+    std::uint32_t padding = 0;
 };
+#if !defined(APXCHOL_64BIT_NODE_INDICES)  // the CUDA owner needs 32-bit nodes
+static_assert(sizeof(gpu_round_shadow_factor_column) ==
+              sizeof(node_index) + sizeof(factor_value_t) + sizeof(std::uint64_t) +
+              2 * sizeof(std::uint32_t),
+              "factor-column downloads must not copy implicit padding");
+#endif
 
 // Complete owning logs already carry their raw off-diagonal prefix offsets.
 // Preserve the existing coverage checks while optionally constructing the

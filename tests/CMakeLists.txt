@@ -115,8 +115,17 @@ if (APXCHOL_DEVICE STREQUAL "CUDA")
         set_tests_properties(gpu_factor_finalize_leak_check PROPERTIES
                 TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=4"
                 SKIP_REGULAR_EXPRESSION "APXCHOL_GPU_FINALIZER_LEAK_CHECK_SKIPPED")
+        # Factor setup downloads device-written structs. Reject unwritten bytes.
+        add_test(NAME gpu_factor_setup_initcheck
+                COMMAND "${CMAKE_COMMAND}"
+                "-DSANITIZER=${APXCHOL_COMPUTE_SANITIZER}"
+                "-DUNIT_TESTS=$<TARGET_FILE:unit_tests>"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/run_gpu_factor_setup_initcheck.cmake")
+        set_tests_properties(gpu_factor_setup_initcheck PROPERTIES
+                TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=4"
+                SKIP_REGULAR_EXPRESSION "APXCHOL_GPU_FACTOR_SETUP_INITCHECK_SKIPPED")
     else()
-        message(STATUS "Compute Sanitizer not found: GPU finalizer leak check is not registered")
+        message(STATUS "Compute Sanitizer not found: GPU sanitizer checks are not registered")
     endif()
 endif()
 
