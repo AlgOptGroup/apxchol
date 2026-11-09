@@ -2,8 +2,9 @@
 
 ETH Euler `eu-g6` node: 2 × AMD EPYC 9554 (64 cores each) and 8 × NVIDIA
 RTX 4090 (24 GB). CPU series use 64 threads on one socket. CMG is serial.
-The campaign planned 810 results (27 matrices × 30 solver configurations), and
-all of them ran: 563 met the 1e-8 tolerance on the original system.
+The campaign planned 810 results (27 matrices × 30 solver configurations).
+149 are inputs a solver does not accept, and 563 met the 1e-8 tolerance on the
+original system.
 
 Competitors are capped at 20 times apxchol's fastest setup + solve time on the
 same matrix and device, and at least 30 s. A run over the cap is shown as

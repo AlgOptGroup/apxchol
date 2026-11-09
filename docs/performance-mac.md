@@ -11,15 +11,17 @@ solvers, including Apple's Accelerate sparse Cholesky.
 
 ## CPU
 
-Competitors ran on the 21 matrices that fit comfortably in 32 GB. On the other
-six, `n/a` means they were not run. apxchol ran on all 27. Competitors are
-capped at 20 times apxchol's setup + solve time on the same matrix, and at
-least 30 s.
+Competitors ran on the 21 matrices that fit comfortably in 32 GB, and their
+cells on the other six are `n/a`. On the 21, `n/a` means the solver does not
+accept that input. apxchol ran on all 27. Competitors are capped at 20 times the
+fastest complete apxchol setup + solve time on the same matrix, and at least
+30 s.
 
 ![Apple M1 Max CPU: speedup of apxchol over each solver family](performance/mac-families.svg)
 
 On this CPU, AMGCL is faster than apxchol on 11 of 21 matrices, including
-every grid, and the fastest other solver ties apxchol on linear programs.
+every grid. On linear programs, AMGCL is 1.6× faster on iter0010, and
+BoomerAMG is within 7% of apxchol on the other three.
 apxchol is ahead on most social graphs.
 
 ![Apple M1 Max CPU: apxchol against the fastest other solver on each matrix](performance/mac-best-other.svg)

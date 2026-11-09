@@ -1,8 +1,8 @@
 # Performance
 
 These results compare apxchol with other Laplacian and SDDM solvers on 27
-matrices, using the same matrix, right-hand side and stopping rule for every
-solver. Times are setup + solve for one right-hand side. Each platform page
+matrices. Every solver gets the same matrix, right-hand side and stopping rule,
+except the ParAC runs each platform page marks. Times are setup + solve for one right-hand side. Each platform page
 lists every measured result, including failures.
 
 ```{toctree}
@@ -29,9 +29,8 @@ AMGCL, 1.4× faster than BoomerAMG and 1.3× faster than AMGX.
 
 Each small dot is one matrix: the setup + solve time of the family's fastest
 variant on that matrix, divided by apxchol's. The large dot is the median and
-the band covers the middle half. A run that failed, ran out of memory or
-exceeded its time cap counts as an apxchol win. The labels say how many there
-were. apxchol runs its default configuration.
+the band covers the middle half. A family with no finished variant on a matrix
+counts as an apxchol win there. The labels say how many there were. apxchol runs its default configuration.
 
 ## Where apxchol wins
 
