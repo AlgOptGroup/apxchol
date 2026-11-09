@@ -1240,11 +1240,13 @@ static Args parse_args(int argc, char** argv) {
                         std::exit(2);
                     }
                 }
+#ifdef HAVE_APXCHOL_V1
                 if (std::none_of(std::begin(v1_combos), std::end(v1_combos),
                                  [&](const V1Combo& c) { return tok == c.name; })) {
                     std::cerr << "Unknown --v1-configs entry '" << tok << "'.\n";
                     std::exit(2);
                 }
+#endif
                 a.v1_configs.insert(tok);
             }
         }
