@@ -88,7 +88,7 @@ the house profile below. In a fresh clone, first run `git submodule update --ini
 - Text that teaches how the method works: read `docs/writing/guides/TEACHING.md`.
 
 `docs/writing/` is a submodule of [ratschlab/writing-rules](https://github.com/ratschlab/writing-rules), pinned to one
-revision. Move the pin in a reviewed change of its own.
+revision. The text check installs its linter from the same checkout. Move the pin in a reviewed change of its own.
 
 The guides and the house profile apply to everything a person reads in this repository:
 
@@ -115,7 +115,7 @@ apxchol follows the shared writing guides with these differences. P refers to `d
   and backend errors have such a fix.
 - Check R7, narrowed: no "soon", "shortly", "a while" or "eventually", and digits for numbers with units. "May" and
   "might" stay allowed. Reason: P4 keeps real uncertainty, and a word list can't tell it from hedging.
-- Check R8, on: the terms live in `scripts/text-rules.json`. A new term goes into it in the same commit. Reason: one
+- Check R8, on: the terms live in `styles/Apxchol/R8.yml`. A new term goes into it in the same commit. Reason: one
   term per thing across all interfaces.
 - ENGINEERING "Commit titles and bodies", stricter: the subject has 72 characters or fewer. A performance change gives
   before and after numbers with the machine and command. Reason: performance evidence must stay in the history.
@@ -124,19 +124,32 @@ apxchol follows the shared writing guides with these differences. P refers to `d
 - ENGINEERING "Reviews and review replies", added: one finding per comment, starting with the severity Must, Should or
   Nit. Reason: ENGINEERING asks to use the project's severity scale, and this is apxchol's.
 
-`python3 scripts/check_text_rules.py` compares the files in `scripts/text-rules.json` with
-`scripts/text-rules-baseline.json`. It fails only when a file gains one of these hits:
+The text check runs the shared writing-rules linter. It needs Vale 3.26.0 on `PATH` and the linter from
+`docs/writing`:
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install ./docs/writing
+mkdir -p .writing && .venv/bin/writing-rules export-package .writing/WritingRules.zip && vale sync --no-global
+.venv/bin/writing-rules check
+```
+
+`writing-rules.json` lists the files in scope, and `writing-rules-baseline.json` holds their known hits. The check
+fails only when a file gains one of these hits:
 
 - R1: a semicolon in prose.
-- R4: "sorry", "oops", "something went wrong", "an error occurred" or "unknown error".
+- R4: "sorry", "oops", "whoops", "something went wrong", "an error occurred" or "unknown error".
 - R7: "soon", "shortly", "a while", "eventually", or a number in words before a unit.
-- R8: a banned term from the term list.
+- R8: a banned term from `styles/Apxchol/R8.yml`.
 
-It reports R2 (sentences over 30 words) and R6 (passive voice) with `--report` and never fails on them. The rest of
-the house profile is for the reviewer. Text outside these files, such as commit messages and PR
-descriptions, is not linted.
+`.vale.ini` turns these on. `styles/Apxchol/R7.yml` replaces the shared R7, which also flags "may" and "might". The
+check also lists R2 (sentences over 30 words) and R6 (passive voice) as suggestions, and they never fail. The rest of
+the house profile is for the reviewer. Text outside the scope, such as commit messages and PR descriptions, is not
+linted.
 
-A file with fewer hits than its baseline passes with a note. Lower its baseline with `--update-baseline`, which
-refuses increases. A deliberate exception takes a comment on that line or the line before: `text-rules-allow: <rule>
-<term> <reason>`, such as `text-rules-allow: R8 kmer the flag name`. The term must occur in the text.
+The check counts every match, so a paragraph with 2 semicolons has 2 R1 hits. A file with fewer hits than its
+baseline passes and the output lists it under `reductions`. Lower the baseline with `writing-rules check
+--update-baseline`, which refuses increases. A deliberate exception takes a comment on that line or the line before:
+`text-rules-allow: <rule> <term> <reason>`, such as `text-rules-allow: R8 kmer the flag name`. The reason is
+required, and the exception covers only that term.
 

@@ -297,7 +297,7 @@ Each copy gets its own workspace and its own CUDA stream or Metal command queue.
 Copies on 1 GPU solve concurrently without storing the factor again. They share
 that GPU's compute and memory bandwidth.
 
-To solve many right-hand sides from one thread, pass them to `solve(B)` as the
+To solve many right-hand sides from a single thread, pass them to `solve(B)` as the
 columns of one matrix; the batched solver shares work between columns.
 
 Python releases the GIL during factorization, `solve` and `apply`, but holds it

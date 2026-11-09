@@ -390,7 +390,7 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None,
         workloads may use fewer threads. Each operation restores the setting.
     seed : int or None
         RNG seed for the randomized clique sampling (factorization is
-        deterministic per seed at one thread only). None uses the C++ default.
+        deterministic per seed on a single thread only). None uses the C++ default.
     factor_storage : {"auto", "float16", "float32"} or numpy dtype
         Triangular-solve storage; ``np.float16`` and ``np.float32`` also
         work. ``"auto"`` uses the backend default: FP32 on CPU/Metal, FP16
