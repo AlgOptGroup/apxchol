@@ -75,7 +75,7 @@ struct experimental_options {
     /// Clique-sampling algorithm for factor construction.
     clique_sampler sampler = clique_sampler::gks;
     /// Minimum diagonal excess of the preconditioner, as a fraction of each
-    /// diagonal after lump_max_mass lumping. Excess below 1e-12 of the diagonal
+    /// diagonal after lumping. Excess below 1e-12 of the diagonal
     /// counts as zero first, as row-sum rounding noise. The operator is not
     /// modified. Zero disables it.
     double regularization = 0;
@@ -116,7 +116,7 @@ struct factor_options {
     unsigned seed = 42;
     /// Allowed positive off-diagonal mass fraction in [0, 1]. Zero rejects it.
     /// Accepted positive entries are moved to the preconditioner's diagonal.
-    double lump_max_mass = kDefaultLumpMassCeiling;
+    double positive_offdiag_tolerance = kDefaultPositiveOffdiagTolerance;
     /// Triangular-solve storage; construction arithmetic and exports are unchanged.
     /// automatic uses the backend default (CPU/Metal fp32, CUDA fp16).
     factor_storage_type factor_storage = factor_storage_type::automatic;
@@ -135,7 +135,7 @@ inline void validate_drop_tolerance(double value) {
 inline void validate_factor_options(const factor_options& options) {
     const auto& experimental = options.experimental;
     validate_regularization(experimental.regularization);
-    validate_lump_max_mass(options.lump_max_mass);
+    validate_positive_offdiag_tolerance(options.positive_offdiag_tolerance);
     validate_drop_tolerance(options.drop_tolerance);
     if (const auto quantile = experimental.partition.degree_quantile;
         quantile && !(*quantile >= 0 && *quantile < 1))

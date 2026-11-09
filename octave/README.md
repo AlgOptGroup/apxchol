@@ -71,7 +71,7 @@ and execution failures use `apxchol:error` (see
 | `seed` | Sampling seed |
 | `factor_storage` | `auto`, `float16` or `float32`; affects triangular-solve storage |
 | `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
-| `lump_max_mass` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
+| `positive_offdiag_tolerance` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
 
 See [precision](../docs/precision.md) and the [native option reference](../docs/reference/cpp.md)
 for storage behavior and the meaning of each control.
@@ -92,7 +92,7 @@ The path must be a character row vector. Saving replaces an existing file,
 writing to `<path>.tmp` first and renaming it into place. Loading accepts the
 same optional options struct as the constructor. The file fixes the factor
 storage and dropping, so `factor_storage` and `drop_tolerance` have no effect;
-`num_threads` and `lump_max_mass` apply. A loaded solver can be saved again.
+`num_threads` and `positive_offdiag_tolerance` apply. A loaded solver can be saved again.
 
 Archives use the shared [portable file format](../docs/serialization.md).
 Loading prepares the saved factor without factorizing the matrix again.

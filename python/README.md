@@ -139,7 +139,7 @@ same backend and thread count.
 
 `backend="auto"` adopts on CPU; `backend="gpu"` uploads to a compatible GPU.
 The file fixes the storage dtype and dropping, so `factor_storage` and
-`drop_tolerance` have no effect when loading. Pass `lump_max_mass` again if the
+`drop_tolerance` have no effect when loading. Pass `positive_offdiag_tolerance` again if the
 saved operator requires positive-entry lumping.
 
 ## Setup options
@@ -169,7 +169,7 @@ controls in the C++ `factor_options::experimental` are not available from Python
 | Keyword | Meaning |
 |---|---|
 | `drop_tolerance` | Relative factor-entry threshold in `[0, 1]`; `0` disables dropping |
-| `lump_max_mass` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
+| `positive_offdiag_tolerance` | Allowed positive off-diagonal mass fraction in `[0, 1]`; `0` rejects such entries |
 
 Unknown keywords raise `ValueError`, like other invalid input or options;
 execution failures raise `RuntimeError` (see

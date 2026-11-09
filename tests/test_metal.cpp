@@ -1193,9 +1193,9 @@ TEST_F(MetalDevice, PerSolverPreparationOptionsAreIndependent) {
     EXPECT_FALSE(apxchol::solver(apxchol::test::csc(A), gpu_options(options)).factor().sddm);
 
     const sparse_matrix near = with_entry(with_entry(grid(7, 9, 0.25), 0, 1, 1e-6), 1, 0, 1e-6);
-    options.factor_opts.lump_max_mass = 0;
+    options.factor_opts.positive_offdiag_tolerance = 0;
     EXPECT_THROW(apxchol::solver(apxchol::test::csc(near), gpu_options(options)), std::invalid_argument);
-    options.factor_opts.lump_max_mass = 0.25;
+    options.factor_opts.positive_offdiag_tolerance = 0.25;
     EXPECT_EQ(apxchol::solver(apxchol::test::csc(near), gpu_options(options)).factor().lumped_offdiag, 2);
     options.factor_opts.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
     EXPECT_THROW(apxchol::solver(apxchol::test::csc(A), gpu_options(options)), std::invalid_argument);

@@ -31,7 +31,7 @@
 //                      a Metal build reports its gpu route as execution_route=metal
 //   --factor-storage <s> auto | float16 | float32; apxchol v1 only
 //   --cpu-schedule <s> auto | levels; apxchol v1 only
-//   --factor-drop <x>, --regularization <x>, --lump-max-mass <x>,
+//   --drop-tolerance <x>, --regularization <x>, --positive-offdiag-tolerance <x>,
 //   --degree-quantile <q> explicit apxchol v1 factor options
 //   --profile, --report-fill print apxchol v1 timing / factor details
 
@@ -1215,9 +1215,9 @@ static Args parse_args(int argc, char** argv) {
             a.v1_options.factor_opts.factor_storage = apxchol::detail::parse_factor_storage(next());
         else if (arg == "--cpu-schedule")
             a.v1_options.factor_opts.experimental.cpu_schedule = apxchol::detail::parse_cpu_schedule(next());
-        else if (arg == "--factor-drop") a.v1_options.factor_opts.drop_tolerance = std::stod(next());
+        else if (arg == "--drop-tolerance") a.v1_options.factor_opts.drop_tolerance = std::stod(next());
         else if (arg == "--regularization") a.v1_options.factor_opts.experimental.regularization = std::stod(next());
-        else if (arg == "--lump-max-mass") a.v1_options.factor_opts.lump_max_mass = std::stod(next());
+        else if (arg == "--positive-offdiag-tolerance") a.v1_options.factor_opts.positive_offdiag_tolerance = std::stod(next());
         else if (arg == "--degree-quantile") a.v1_options.factor_opts.experimental.partition.degree_quantile = std::stod(next());
         else if (arg == "--v1-backend") {
             const auto backend = next();
@@ -3166,9 +3166,9 @@ int main(int argc, char** argv) try {
             op_scan = apxchol::detail::require_operator(
                 apxchol::detail::csc_input(apxchol_view(L)),
 #ifdef HAVE_APXCHOL_V1
-                args.v1_options.factor_opts.lump_max_mass
+                args.v1_options.factor_opts.positive_offdiag_tolerance
 #else
-                apxchol::kDefaultLumpMassCeiling
+                apxchol::kDefaultPositiveOffdiagTolerance
 #endif
             );
         } catch (const std::exception& e) {
@@ -3287,7 +3287,7 @@ int main(int argc, char** argv) try {
                           << " positive off-diagonal entries carrying "
                           << 100.0 * op_scan.positive_mass_fraction()
                           << "% of the off-diagonal mass (apxchol's default lumping ceiling is "
-                          << 100.0 * apxchol::kDefaultLumpMassCeiling
+                          << 100.0 * apxchol::kDefaultPositiveOffdiagTolerance
                           << "%; each solver handles them on its own terms — the "
                              "operator handed to all of them is the published one)";
             std::cerr << "\n";

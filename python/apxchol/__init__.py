@@ -190,7 +190,7 @@ class Solver:
         dropping come from the file, so ``factor_storage`` and
         ``drop_tolerance`` have no effect. ``backend`` and ``num_threads``
         apply; ``backend="auto"`` uses CPU, ``"gpu"`` requests upload.
-        ``lump_max_mass`` still bounds the archived operator, so pass it again
+        ``positive_offdiag_tolerance`` still bounds the archived operator, so pass it again
         if the solver was built with a non-default value. Tolerance, iteration
         budget and initial guess remain solve arguments.
         """
@@ -377,7 +377,7 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None,
         Laplacian RHS must sum to zero within each connected component.
 
         Positive off-diagonal pairs are lumped onto the diagonal for
-        preconditioning, subject to `lump_max_mass` (see :attr:`Solver.lumped_offdiag`).
+        preconditioning, subject to `positive_offdiag_tolerance` (see :attr:`Solver.lumped_offdiag`).
         PCG and residual checks still use the original `A`.
     backend : {"auto", "cpu", "gpu"}
         Auto may prefer CPU for small systems when it supports the requested storage;
@@ -402,7 +402,7 @@ def factorize(A, *, backend="auto", num_threads=0, seed=None,
     **advanced
         Passed straight through to the core options:
         `drop_tolerance` (in [0, 1]; 0 disables dropping) and
-        `lump_max_mass` (fraction in [0, 1]; 0 rejects positive off-diagonals).
+        `positive_offdiag_tolerance` (fraction in [0, 1]; 0 rejects positive off-diagonals).
 
     Notes
     -----

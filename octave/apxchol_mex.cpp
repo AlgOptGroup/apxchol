@@ -108,7 +108,7 @@ apxchol::solve_options setup_options(const mxArray* options) {
             else if (name == "factor_storage")
                 result.factor_opts.factor_storage = apxchol::detail::parse_factor_storage(string_option(value, name.c_str()));
             else if (name == "drop_tolerance") result.factor_opts.drop_tolerance = scalar_option(value, name.c_str());
-            else if (name == "lump_max_mass") result.factor_opts.lump_max_mass = scalar_option(value, name.c_str());
+            else if (name == "positive_offdiag_tolerance") result.factor_opts.positive_offdiag_tolerance = scalar_option(value, name.c_str());
             else fail("apxchol:badInput", "unknown option '" + name + "'");
         }
     }

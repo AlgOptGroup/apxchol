@@ -120,7 +120,7 @@ run_config parse_args(int argc, char* argv[]) {
     app.add_option("--drop-tolerance", cfg.solve_opts.factor_opts.drop_tolerance,
                    "Relative factor-entry dropping threshold in [0, 1] (0 disables dropping)")
         ->capture_default_str();
-    app.add_option("--lump-max-mass", cfg.solve_opts.factor_opts.lump_max_mass,
+    app.add_option("--positive-offdiag-tolerance", cfg.solve_opts.factor_opts.positive_offdiag_tolerance,
                    "Maximum positive off-diagonal mass fraction allowed for lumping")
         ->capture_default_str();
     app.option_defaults()->group("Solve");

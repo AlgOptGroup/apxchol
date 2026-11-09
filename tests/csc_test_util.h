@@ -426,11 +426,11 @@ inline detail::operator_scan scan_operator(const sparse_matrix& A) {
     return detail::scan_operator(input.ref());
 }
 inline detail::operator_scan require_operator(const sparse_matrix& A,
-                                              double lump_max_mass = kDefaultLumpMassCeiling) {
-    detail::validate_lump_max_mass(lump_max_mass);
+                                              double positive_offdiag_tolerance = kDefaultPositiveOffdiagTolerance) {
+    detail::validate_positive_offdiag_tolerance(positive_offdiag_tolerance);
     const internal_csc input(A);
     if (!input.square()) detail::throw_operator_not_square(A.rows, A.cols);
-    return detail::require_operator(input.ref(), lump_max_mass);
+    return detail::require_operator(input.ref(), positive_offdiag_tolerance);
 }
 inline bool is_graph_adjacency(const sparse_matrix& M) {
     const internal_csc input(M);

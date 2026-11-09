@@ -1192,7 +1192,7 @@ struct solver::impl {
         const detail::thread_budget threads(opts.num_threads);
         if (A.n == 0) throw std::invalid_argument("apxchol: empty operator");
         if (F) {
-            detail::validate_adopted_operator(A, *F, opts.factor_opts.lump_max_mass);
+            detail::validate_adopted_operator(A, *F, opts.factor_opts.positive_offdiag_tolerance);
             detail::validate_adopted_factor(*F);
         }
         if (cp) { cp->descend("setup"); cp->tick(); }

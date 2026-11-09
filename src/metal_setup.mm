@@ -119,12 +119,12 @@ void prepare_round_plans(id<MTLDevice> device, const factorization& factor,
 
 std::optional<resident_factor> prepare_input_operator(id<MTLDevice> device,
     csc_ref<double> A, const std::vector<node_index>& perm,
-    double lump_max_mass) {
+    double positive_offdiag_tolerance) {
     @autoreleasepool {
         std::size_t offdiagonals = 0;
         if (!gpu_owned_csc_layout_supported(A, offdiagonals) || !gpu_owned_csc_paired(A))
             return std::nullopt;
-        const operator_view validated(A, lump_max_mass);
+        const operator_view validated(A, positive_offdiag_tolerance);
         const auto input = upload(device, A);
         const unsigned n = unsigned(A.n);
         resident_factor out;
@@ -159,7 +159,7 @@ resident_factor factorize(id<MTLDevice> device, csc_ref<double> A,
                 "Metal device setup requires compressed, sorted, unique and paired 32-bit CSC storage");
         if (!input_prechecked && !metal_setup_regularization_supported(options.factor_opts.experimental.regularization, &A))
             throw std::invalid_argument(metal_regularization_error);
-        const operator_view validated(A, options.factor_opts.lump_max_mass);
+        const operator_view validated(A, options.factor_opts.positive_offdiag_tolerance);
         if (cp)
             (*cp)("operator_prepare");
         const bool unchanged = validated.lumped() == 0;

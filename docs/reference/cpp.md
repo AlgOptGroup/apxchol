@@ -97,7 +97,7 @@ argument of `factorize`. Storage precision is separate from construction
 precision and exported values; see the [precision guide](../precision.md).
 
 ```{doxygenstruct} apxchol::factor_options
-:members: seed, lump_max_mass, factor_storage, drop_tolerance, experimental
+:members: seed, positive_offdiag_tolerance, factor_storage, drop_tolerance, experimental
 :undoc-members:
 ```
 

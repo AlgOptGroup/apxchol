@@ -109,11 +109,11 @@ template<typename Build>
 factorization factorize_operator(csc_ref<double> L,
                                  const factor_options& options, Build&& build) {
     validate_factor_options(options);
-    const operator_view op(L, options.lump_max_mass);
+    const operator_view op(L, options.positive_offdiag_tolerance);
     // The graph builder applies these matrix-only options.
     auto graph_options = options;
     graph_options.experimental.regularization = 0;
-    graph_options.lump_max_mass = kDefaultLumpMassCeiling;
+    graph_options.positive_offdiag_tolerance = kDefaultPositiveOffdiagTolerance;
     // The scan's bit-identical-triangles proof holds for L, i.e. only when
     // nothing was lumped.
     factorization F = build(make_graph_from_operator(op.matrix(),

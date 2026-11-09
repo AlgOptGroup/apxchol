@@ -248,7 +248,7 @@ factorization detail::factorize_for_solver(csc_ref<double> L,
     // Keep the phase visible rather than hiding it inside make_graph.
     detail::validate_factor_options(opts_in);
     if (cp) { cp->descend("setup"); cp->tick(); }
-    const operator_view op(L, opts_in.lump_max_mass);
+    const operator_view op(L, opts_in.positive_offdiag_tolerance);
     if (cp) (*cp)("operator_prepare");
 
     // Include operator validation and graph construction in setup timing.

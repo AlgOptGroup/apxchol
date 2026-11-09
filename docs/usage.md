@@ -110,7 +110,7 @@ zero and the others take the
 | `factor_options::seed` | `--seed` | `seed` | `seed` |
 | `factor_options::factor_storage` | `--factor-storage` | `factor_storage` | `factor_storage` |
 | `factor_options::drop_tolerance` | `--drop-tolerance` | `drop_tolerance` | `drop_tolerance` |
-| `factor_options::lump_max_mass` | `--lump-max-mass` | `lump_max_mass` | `lump_max_mass` |
+| `factor_options::positive_offdiag_tolerance` | `--positive-offdiag-tolerance` | `positive_offdiag_tolerance` | `positive_offdiag_tolerance` |
 
 Factor storage
 is `auto`, `float16` or `float32` in the CLI, Python and MATLAB/Octave (Python

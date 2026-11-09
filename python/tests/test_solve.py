@@ -703,7 +703,7 @@ def test_factor_settings_match_native_options(construct, options):
 def test_explicit_factor_settings(drop_tolerance):
     A = grid2d_sddm(6)
     solver = apxchol.factorize(A, backend="cpu", num_threads=1, seed=7,
-                               drop_tolerance=drop_tolerance, lump_max_mass=0.25)
+                               drop_tolerance=drop_tolerance, positive_offdiag_tolerance=0.25)
     b = np.ones(A.shape[0])
     result = solver.solve(b)
     assert result.converged
@@ -711,7 +711,7 @@ def test_explicit_factor_settings(drop_tolerance):
 
 
 @pytest.mark.parametrize("option,value", [("cpu_schedule", "auto"), ("residual_peel", "natural"),
-                                         ("lump_max_mass", -0.1), ("lump_max_mass", 1.1)] +
+                                         ("positive_offdiag_tolerance", -0.1), ("positive_offdiag_tolerance", 1.1)] +
                          [("drop_tolerance", value) for value in
                           [-1, np.nextafter(1.0, np.inf), 2, np.nan, np.inf, -np.inf]])
 def test_invalid_factor_settings_rejected(option, value):

@@ -647,7 +647,7 @@ void detail::metal_route::device_state::setup(detail::csc_ref<double> A, checkpo
         if (installed)
             with_pool([&] {
                 device_operator = detail::metal_setup::prepare_input_operator(
-                    shared().device, A, F.perm, opts.factor_opts.lump_max_mass);
+                    shared().device, A, F.perm, opts.factor_opts.positive_offdiag_tolerance);
             });
         if (device_operator) adopt_device_operator(*device_operator);
         else {

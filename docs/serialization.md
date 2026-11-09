@@ -31,7 +31,7 @@ The file stores the factor after dropping and storage rounding, with its storage
 
 - `backend`: automatic adoption selects CPU; `apxchol::solve_backend::gpu` uploads to the compiled GPU backend.
 - `num_threads` and `cpu_schedule`.
-- `lump_max_mass`: an operator admitted with a larger value still needs it when loading.
+- `positive_offdiag_tolerance`: an operator admitted with a larger value still needs it when loading.
 
 `factor_storage` and `drop_tolerance` have no effect: the file fixes both. Construction options such as the seed, partitioner, regularization and lumping are already represented in the saved factor.
 
