@@ -1674,6 +1674,7 @@ TEST(Solver, CudaWidePanelsNarrowWhenDeviceMemoryIsShort) {
     if (!cuda_device_present()) GTEST_SKIP() << "No CUDA devices";
     const scoped_omp_threads threads(2);
     const Sparse matrix = operator_matrix(1 << 18);
+    const auto rows = static_cast<std::size_t>(matrix.rows);
     Dense exact(matrix.rows, 32), rhs(matrix.rows, 32);
     for (int q = 0; q < exact.cols; ++q) {
         for (int i = 0; i < exact.rows; ++i) exact(i, q) = std::sin((i + 1) * (q + 1) * 0.13);
@@ -1681,33 +1682,39 @@ TEST(Solver, CudaWidePanelsNarrowWhenDeviceMemoryIsShort) {
     }
     auto options = cpu_options();
     options.backend = apxchol::solve_backend::gpu;
-    apxchol::solver owner(test::csc(matrix), options);
-    // Fill the device, then free room for a 16-column panel's PCG vectors
-    // only. With its triangular-solve workspace a 16-column panel exceeds
-    // that room, eight columns fit.
-    constexpr std::size_t chunk = std::size_t(8) << 20;
-    struct device_blockers {
-        std::vector<void*> chunks;
-        ~device_blockers() { for (void* p : chunks) (void)cudaFree(p); }
-    } held;
-    auto& blockers = held.chunks;
-    for (void* p = nullptr; cudaMalloc(&p, chunk) == cudaSuccess;) blockers.push_back(p);
-    (void)cudaGetLastError();
-    const std::size_t room = 16 * 6 * sizeof(double) * static_cast<std::size_t>(matrix.rows);
-    for (std::size_t freed = 0; freed < room && !blockers.empty(); freed += chunk) {
-        ASSERT_EQ(cudaFree(blockers.back()), cudaSuccess);
-        blockers.pop_back();
-    }
-    Dense output(matrix.rows, 32);
-    apxchol::batch_solve_result result;
-    EXPECT_NO_THROW(result = owner.solve(std::as_const(rhs).view(), output.view(), 1e-8, 400));
-    for (void* p : blockers) ASSERT_EQ(cudaFree(p), cudaSuccess);
-    blockers.clear();
-    ASSERT_EQ(result.columns.size(), 32u);
-    for (int q = 0; q < 32; ++q) {
-        SCOPED_TRACE(q);
-        EXPECT_TRUE(result.columns[q].converged);
-        EXPECT_LT(stable_residual(matrix, output.col(q), rhs.col(q)), 1e-8);
+    // Per column, PCG needs 48 bytes per row and the triangular solve about 8.
+    // 768 bytes per row hold a 16-column panel's PCG vectors but not its
+    // triangular-solve workspace as well: the panel narrows to eight columns.
+    // 352 bytes per row hold a 32-column triangular-solve workspace but not
+    // that and four PCG columns: four columns fit once the wider workspace
+    // is released.
+    for (const std::size_t room_per_row : {768, 352}) {
+        SCOPED_TRACE(room_per_row);
+        apxchol::solver owner(test::csc(matrix), options);
+        // Fill the device, then free the room.
+        constexpr std::size_t chunk = std::size_t(8) << 20;
+        struct device_blockers {
+            std::vector<void*> chunks;
+            ~device_blockers() { for (void* p : chunks) (void)cudaFree(p); }
+        } held;
+        auto& blockers = held.chunks;
+        for (void* p = nullptr; cudaMalloc(&p, chunk) == cudaSuccess;) blockers.push_back(p);
+        (void)cudaGetLastError();
+        for (std::size_t freed = 0; freed < room_per_row * rows && !blockers.empty(); freed += chunk) {
+            ASSERT_EQ(cudaFree(blockers.back()), cudaSuccess);
+            blockers.pop_back();
+        }
+        Dense output(matrix.rows, 32);
+        apxchol::batch_solve_result result;
+        EXPECT_NO_THROW(result = owner.solve(std::as_const(rhs).view(), output.view(), 1e-8, 400));
+        for (void* p : blockers) ASSERT_EQ(cudaFree(p), cudaSuccess);
+        blockers.clear();
+        ASSERT_EQ(result.columns.size(), 32u);
+        for (int q = 0; q < 32; ++q) {
+            SCOPED_TRACE(q);
+            EXPECT_TRUE(result.columns[q].converged);
+            EXPECT_LT(stable_residual(matrix, output.col(q), rhs.col(q)), 1e-8);
+        }
     }
 }
 

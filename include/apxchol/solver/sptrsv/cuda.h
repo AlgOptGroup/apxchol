@@ -958,6 +958,16 @@ public:
         reserve_panel_workspace(columns);
     }
 
+    /// Frees this copy's panel workspace. The next panel solve reserves it again.
+    void release_panel() const noexcept {
+        const detail::cuda_device_scope device(ws_.device, ws_.device >= 0);
+        if (ws_.d_panel_y) (void)cudaFree(ws_.d_panel_y);
+        if (ws_.d_df_panel_tag) (void)cudaFree(ws_.d_df_panel_tag);
+        ws_.d_panel_y = nullptr;
+        ws_.d_df_panel_tag = nullptr;
+        ws_.panel_capacity = 0;
+    }
+
 private:
     void reserve_panel_workspace(unsigned columns) const {
         if (columns <= ws_.panel_capacity) return;

@@ -172,8 +172,6 @@ private:
         std::int64_t width = columns;
         for (; width > 4; width /= 2) {
             try {
-                // The triangular-solve workspace is about a seventh of the
-                // PCG workspace; reserving it first strands less when PCG fails.
                 trsv_.reserve_panel(static_cast<unsigned>(width));
                 gpcg_.reserve_panel(static_cast<unsigned>(width));
                 break;
@@ -181,6 +179,9 @@ private:
                 (void)cudaGetLastError();
             } catch (const std::overflow_error&) {
             }
+            // A triangular-solve workspace grown before PCG failed would
+            // otherwise hold memory the narrower panel needs.
+            trsv_.release_panel();
         }
         return width;
     }
