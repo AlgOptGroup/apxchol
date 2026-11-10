@@ -80,6 +80,55 @@ step_kernel(std::int64_t n, workspace v, const int* ptr = nullptr,
     }
 }
 
+// Vector updates with one thread per panel element. The panel is interleaved
+// (row * Columns + q), so consecutive threads touch consecutive elements and a
+// warp's loads stay contiguous at every width. The block, the grid stride and
+// the warp are multiples of Columns, so a thread keeps one column throughout.
+template<operation Op, unsigned Columns>
+__global__ void __launch_bounds__(kBlockThreads)
+vector_kernel(std::int64_t n, workspace v) {
+    static_assert(Op != operation::multiply);
+    static_assert(Columns <= 32 && (Columns & (Columns - 1)) == 0);
+    if (!any_active<Columns>(v.state)) return;
+    const pcg_math<> math{};
+    const unsigned q = threadIdx.x % Columns;
+    const auto state = v.state[q];
+    double sum = 0;
+    if (state.active) {
+        const std::int64_t elements = n * static_cast<std::int64_t>(Columns);
+        const std::int64_t stride = static_cast<std::int64_t>(gridDim.x) * kBlockThreads;
+        for (std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * kBlockThreads + threadIdx.x;
+             i < elements; i += stride) {
+            if constexpr (Op == operation::residual) {
+                v.x[i] = math.update_solution(v.x[i], state.alpha, v.p[i]);
+                const double value = math.subtract_product(v.r[i], v.ap[i], state.alpha);
+                v.r[i] = value;
+                sum = math.add_product(sum, value, value);
+            } else if constexpr (Op == operation::dot) {
+                sum = math.add_product(sum, v.r[i], math.preconditioned(v.z[i]));
+            } else {
+                const double z = math.preconditioned(v.z[i]);
+                v.p[i] = state.beta == 0 ? z : math.direction(z, v.p[i], state.beta);
+            }
+        }
+    }
+    if constexpr (Op != operation::direction) {
+        // Fixed tree per column: lanes of one column within the warp, then
+        // the warps in order.
+        __shared__ double scratch[Columns][kWarps];
+        for (unsigned offset = 16; offset >= Columns; offset /= 2)
+            sum += __shfl_down_sync(0xffffffffu, sum, offset, 32);
+        const unsigned lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+        if (lane < Columns) scratch[lane][warp] = sum;
+        __syncthreads();
+        if (threadIdx.x < Columns) {
+            double total = 0;
+            for (int w = 0; w < kWarps; ++w) total += scratch[threadIdx.x][w];
+            v.partial[blockIdx.x * Columns + threadIdx.x] = total;
+        }
+    }
+}
+
 struct recurrence_math {
     double bnorm;
     __device__ bool positive(double x) const { return x > 0 && isfinite(x); }
@@ -236,20 +285,20 @@ void initialize(cudaStream_t stream, std::int64_t n, workspace v,
 template<unsigned Columns>
 void step(cudaStream_t stream, operation op, std::int64_t n, workspace v,
           const operator_csr& matrix, int lanes) {
-    const int grid = pcg_blocks(n);
+    const int grid = pcg_blocks(n * static_cast<std::int64_t>(Columns));
     switch (op) {
         case operation::multiply:
             if (matrix.fp32) multiply<Columns>(stream, n, v, matrix, matrix.values_f32, lanes);
             else multiply<Columns>(stream, n, v, matrix, matrix.values_f64, lanes);
             break;
         case operation::residual:
-            step_kernel<operation::residual, 1, Columns><<<grid, kBlockThreads, 0, stream>>>(n, v);
+            vector_kernel<operation::residual, Columns><<<grid, kBlockThreads, 0, stream>>>(n, v);
             break;
         case operation::dot:
-            step_kernel<operation::dot, 1, Columns><<<grid, kBlockThreads, 0, stream>>>(n, v);
+            vector_kernel<operation::dot, Columns><<<grid, kBlockThreads, 0, stream>>>(n, v);
             break;
         case operation::direction:
-            step_kernel<operation::direction, 1, Columns><<<grid, kBlockThreads, 0, stream>>>(n, v);
+            vector_kernel<operation::direction, Columns><<<grid, kBlockThreads, 0, stream>>>(n, v);
             break;
     }
 }

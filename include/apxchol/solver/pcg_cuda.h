@@ -305,7 +305,8 @@ private:
                 s.stream_);
         }
         void finalize(unsigned mode, unsigned it) const {
-            const int lanes = mode == detail::gpu_pcg::kFinalizeAlpha ? s.spmv_lanes_ : 1;
+            // Vector kernels run one thread per panel element.
+            const int lanes = mode == detail::gpu_pcg::kFinalizeAlpha ? s.spmv_lanes_ : static_cast<int>(Columns);
             const int blocks = cuda_pcg_kernels::pcg_blocks(s.n_ * lanes);
             cuda_pcg_kernels::finalize<Columns>(s.stream_, s.vectors_.partial, blocks, s.vectors_.state, mode, it, bnorm);
         }
