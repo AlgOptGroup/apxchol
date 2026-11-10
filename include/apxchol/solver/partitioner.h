@@ -144,7 +144,7 @@ private:
     explicit partition_graph(detail::graph& g,
                              std::atomic<bool>* touched = nullptr)
         : g_(&g), touched_(touched) {}
-    // Built-in partitioners reach the mutable graph through
+    // The built-in scan rules read the graph through
     // partition_graph_access::graph_of. A set flag asks the orchestrator to
     // drop v's dead incidences after the selection; it is only a hint.
     detail::graph* g_;

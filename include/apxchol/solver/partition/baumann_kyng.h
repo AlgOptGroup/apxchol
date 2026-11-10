@@ -51,9 +51,8 @@ struct baumann_kyng_partitioner {
     /// extra residual-graph traversal.
     size_t selected_degree_work() const { return selected_degree_work_; }
 
-    void find_partition(const partition_graph& view, std::span<const node_index> active,
+    void find_partition(const partition_graph& G, std::span<const node_index> active,
                         const partition_context& ctx, selection& out) {
-        graph& G = partition_graph_access::graph_of(view);
         selected_degree_work_ = 0;
         if (active.empty()) return;
 
@@ -62,7 +61,7 @@ struct baumann_kyng_partitioner {
         // a caller-supplied seed, or 2·m/n for round 0 on a pristine graph (see
         // est_avg_degree).  Updated after each round from sampled vertices.
         if (round == 0 && est_avg_degree <= 0.0)
-            est_avg_degree = 2.0 * G.m() / double(active.size());
+            est_avg_degree = 2.0 * partition_graph_access::graph_of(G).m() / double(active.size());
         double d_est = std::max(est_avg_degree, 1.0);
         double degree_threshold = ctx.options.degree_multiplier * d_est;
         double p = std::min(1.0 / (c * d_est), 1.0);
@@ -102,7 +101,7 @@ struct baumann_kyng_partitioner {
             for (size_t i = bs; i < be; ++i) {
                 auto v = active[i];
                 if (prio(v) > hash_thresh) continue;
-                node_index deg = G.prune_and_degree(v);
+                node_index deg = G.degree(v);
                 deg_by_vertex_[v] = deg;
                 sample_degree_sum += deg; ++sample_count;
                 my_s.push_back(v);
@@ -142,7 +141,7 @@ struct baumann_kyng_partitioner {
                 if (static_cast<double>(deg_by_vertex_[v]) > degree_threshold) continue;
                 const uint64_t pv = prio2(v);
                 bool ok = true;
-                G.prune_and_visit(v, [&](node_index u) {
+                G.for_each_neighbor(v, [&](node_index u) {
                     if (ok && prio(u) <= hash_thresh && prio2(u) < pv) ok = false;
                 });
                 if (ok) {
