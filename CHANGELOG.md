@@ -90,7 +90,7 @@
 - Breaking: unset `degree_quantile`, `parallel_residual_threshold` and `exact_core_max_h` are `std::nullopt` instead of -1 or `SIZE_MAX`, and the sentinel constants and resolvers such as `exact_core_by_route` and `degree_quantile_or_host_default` are removed.
 - Breaking: CLI `--is` is removed, `--factor-drop` and `--maxiter` are renamed `--drop-tolerance` and `--max-iter`, and `--factor-storage` accepts names only.
 - Python and MATLAB/Octave accept the same stable setup options.
-- New `solve_options::num_threads` (CLI `--threads`, `num_threads` in Python and MATLAB/Octave) caps the CPU threads of a solver's setup and solves; zero uses the caller's OpenMP setting.
+- New `solve_options::num_threads` (CLI `--threads`, `num_threads` in Python and MATLAB/Octave) caps the CPU threads of a solver's setup and solves. Zero uses the caller's OpenMP setting.
 - Python wheels for CPython 3.11+ and PyPy 3.11 on Linux and macOS arm64 (GPU wheels select the backend at runtime), standalone CLI archives, and MATLAB/Octave batched solves with save/load.
 - Wheels declare a `License-Expression` that matches their contents (BSD-3-Clause and Apache-2.0 WITH LLVM-exception; Linux CUDA wheels add the NVIDIA CUDA EULA and ship its text) and take the root LICENSE at build time; minimum scikit-build-core is 0.12.
 - Relicensed from BSD-4-Clause to BSD-3-Clause.
