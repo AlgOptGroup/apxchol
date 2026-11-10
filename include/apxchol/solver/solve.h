@@ -82,7 +82,7 @@ class solver {
 public:
     explicit solver(csc_view A, const solve_options& opts = {});
     explicit solver(csc_view64 A, const solve_options& opts = {});
-    /// Adopt F without rebuilding or regularizing it. lump_max_mass still bounds
+    /// Adopt F without rebuilding it. positive_offdiag_tolerance still bounds
     /// operator validation, and backend and num_threads apply. Factor storage and
     /// dropping apply to a construction factor from factorize(); an installed
     /// factor from factor() is adopted exactly (factorization.h).
@@ -109,7 +109,7 @@ public:
                        std::optional<int> max_iter = std::nullopt,
                        std::span<const double> x0 = {});
     /// Independent RHS columns, with bounded panel workspace. The output range
-    /// must be disjoint from the RHS and warm-start ranges, including any
+    /// must be disjoint from the RHS and initial-guess ranges, including any
     /// padding between columns. tol/max_iter apply to each column.
     /// X0.data == nullptr starts every column from zero.
     batch_solve_result solve(const_matrix_view B, matrix_view X,
@@ -144,7 +144,7 @@ public:
     /// renames it onto path, so an existing file is replaced atomically.
     void save(const std::filesystem::path& path) const;
     /// Restore a saved solver without factorizing again. Storage and dropping
-    /// come from the file; backend, threads and lump_max_mass apply as with
+    /// come from the file; backend, threads and positive_offdiag_tolerance apply as with
     /// solver(A, F, opts). Automatic adoption uses CPU.
     static solver load(const std::filesystem::path& path, const solve_options& opts = {});
 

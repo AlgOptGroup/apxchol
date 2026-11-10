@@ -147,7 +147,7 @@ private:
 /// Read-only services the orchestrator hands to a partitioner call.
 /// Everything except `degrees` is constant for the whole factorize() run.
 struct partition_context {
-    /// The user's selection preferences (factor_options::partition), always
+    /// The user's selection preferences (factor_options::experimental.partition), always
     /// populated. Who acts on the cap knobs (degree_quantile /
     /// degree_multiplier) depends on the degree_prepass trait: with the
     /// pre-pass the orchestrator has already applied them when building the
@@ -160,10 +160,6 @@ struct partition_context {
     /// because draws from a shared stream would depend on thread scheduling.
     unsigned seed = 42;
     std::size_t omp_threshold = 2000;  ///< min work size before OpenMP engages
-    /// Prefer the lower-degree vertex when adjacent candidates compete
-    /// (factor_options::experimental.degree_tiebreak). Never applied by the
-    /// orchestrator — honoring it is always the rule's job.
-    bool degree_tiebreak = true;
     /// Degree counts indexed by vertex ID, valid for every active vertex.
     /// Audited prune skipping may supply conservative counts; otherwise they
     /// are exact. Non-empty when this partitioner declares degree_prepass.

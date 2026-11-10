@@ -115,8 +115,17 @@ if (APXCHOL_DEVICE STREQUAL "CUDA")
         set_tests_properties(gpu_factor_finalize_leak_check PROPERTIES
                 TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=4"
                 SKIP_REGULAR_EXPRESSION "APXCHOL_GPU_FINALIZER_LEAK_CHECK_SKIPPED")
+        # Factor setup downloads device-written structs. Reject unwritten bytes.
+        add_test(NAME gpu_factor_setup_initcheck
+                COMMAND "${CMAKE_COMMAND}"
+                "-DSANITIZER=${APXCHOL_COMPUTE_SANITIZER}"
+                "-DUNIT_TESTS=$<TARGET_FILE:unit_tests>"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/run_gpu_factor_setup_initcheck.cmake")
+        set_tests_properties(gpu_factor_setup_initcheck PROPERTIES
+                TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=4"
+                SKIP_REGULAR_EXPRESSION "APXCHOL_GPU_FACTOR_SETUP_INITCHECK_SKIPPED")
     else()
-        message(STATUS "Compute Sanitizer not found: GPU finalizer leak check is not registered")
+        message(STATUS "Compute Sanitizer not found: GPU sanitizer checks are not registered")
     endif()
 endif()
 
@@ -167,16 +176,14 @@ if (APXCHOL_BUILD_CLI)
     endif()
     apxchol_cli_test(cli_numeric_backend_is_rejected path5_sddm 105 "not in" --backend 0)
     apxchol_cli_test(cli_invalid_backend_is_rejected path5_sddm 105 "not in" --backend hybrid)
-    apxchol_cli_test(cli_numeric_sampler_is_rejected path5_sddm 105 "not in" --sampler 1)
     apxchol_cli_test(cli_numeric_factor_storage_is_rejected path5_sddm 105 "not in"
         --factor-storage 1)
-    apxchol_cli_test(cli_numeric_partitioner_is_rejected path5_sddm 105 "not in"
-        --partitioner 0)
     apxchol_cli_test(cli_stable_factor_options path5_sddm 0 "backend: +cpu" --backend cpu
-        --partitioner priority_greedy --sampler trace_cycle --factor-storage float32
-        --drop-tolerance 0 --degree-quantile 0 --degree-multiplier 3)
-    apxchol_cli_test(cli_degree_quantile_range path5_sddm 2 "degree_quantile must be in"
-        --degree-quantile 1)
+        --factor-storage float32 --drop-tolerance 0 --positive-offdiag-tolerance 0.25)
+    # Research controls are C++-only factor_options::experimental members.
+    foreach(flag sampler partitioner regularization degree-quantile degree-multiplier)
+        apxchol_cli_test(cli_${flag}_is_removed path5_sddm 109 "--${flag}" --${flag} 1)
+    endforeach()
     if (APXCHOL_DEVICE STREQUAL "CPU")
         apxchol_cli_test(cli_unavailable_gpu_backend_is_rejected path5_sddm 2
             "GPU route requested but GPU support is not built" --backend gpu)

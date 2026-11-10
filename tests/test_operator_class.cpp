@@ -34,7 +34,7 @@
 #include "apxchol/solver/solve.h"
 #include "apxchol/solver/detail/cpu_route.h"
 
-using apxchol::kDefaultLumpMassCeiling;
+using apxchol::kDefaultPositiveOffdiagTolerance;
 using apxchol::detail::operator_scan;
 using apxchol::detail::operator_view;
 using apxchol::detail::require_operator;
@@ -432,7 +432,7 @@ TEST(OperatorContract, PositiveOffDiagonalsAreLumpedNotRejected) {
     const Sparse A = nearly_sddm(6, 6, 5);
     const operator_scan s = require_operator(A);
     EXPECT_EQ(s.offdiag_pos, 10);
-    EXPECT_LT(s.positive_mass_fraction(), kDefaultLumpMassCeiling);
+    EXPECT_LT(s.positive_mass_fraction(), kDefaultPositiveOffdiagTolerance);
 
     const auto input = to_csc(A);
     const operator_view op(input);
@@ -442,7 +442,7 @@ TEST(OperatorContract, PositiveOffDiagonalsAreLumpedNotRejected) {
     EXPECT_EQ(scan_operator(A).offdiag_pos, 10);
 }
 
-TEST(OperatorContract, RefusesPastTheLumpMassCeiling) {
+TEST(OperatorContract, RefusesPastThePositiveOffdiagTolerance) {
     // Every off-diagonal positive: lumping would leave a purely diagonal
     // matrix, i.e. a Jacobi preconditioner bought at the price of a full
     // approximate-Cholesky setup.
@@ -450,7 +450,7 @@ TEST(OperatorContract, RefusesPastTheLumpMassCeiling) {
     for (std::int64_t k = 0; k < A.cols; ++k)
         for (auto p = A.col_ptr[k]; p < A.col_ptr[k + 1]; ++p)
             if (A.row_idx[p] != k) A.values[p] = -A.values[p];
-    ASSERT_GT(scan_operator(A).positive_mass_fraction(), kDefaultLumpMassCeiling);
+    ASSERT_GT(scan_operator(A).positive_mass_fraction(), kDefaultPositiveOffdiagTolerance);
 
     try {
         (void)require_operator(A);
@@ -460,7 +460,7 @@ TEST(OperatorContract, RefusesPastTheLumpMassCeiling) {
         EXPECT_NE(msg.find("Condition FAILED: non-positive off-diagonals"),
                   std::string::npos) << msg;
         EXPECT_NE(msg.find("of the off-diagonal mass"), std::string::npos) << msg;
-        EXPECT_NE(msg.find("lump_max_mass"), std::string::npos) << msg;
+        EXPECT_NE(msg.find("positive_offdiag_tolerance"), std::string::npos) << msg;
     }
 }
 
@@ -472,21 +472,10 @@ TEST(OperatorContract, LumpingCeilingIsExplicitPerCall) {
     EXPECT_THROW(operator_view(input, 0), std::invalid_argument);
 
     apxchol::factor_options options;
-    options.lump_max_mass = 0;
+    options.positive_offdiag_tolerance = 0;
     EXPECT_THROW(apxchol::factorize(apxchol::test::csc(A), options), std::invalid_argument);
-    options.lump_max_mass = 0.25;
+    options.positive_offdiag_tolerance = 0.25;
     EXPECT_EQ(apxchol::factorize(apxchol::test::csc(A), options).lumped_offdiag, 2);
-}
-
-TEST(OperatorContract, RegularizationIsExplicitPerFactorization) {
-    const auto A = grid_laplacian(6, 6);
-    apxchol::factor_options options;
-    EXPECT_FALSE(apxchol::factorize(apxchol::test::csc(A), options).sddm);
-    options.regularization = 1e-8;
-    EXPECT_TRUE(apxchol::factorize(apxchol::test::csc(A), options).sddm);
-    EXPECT_TRUE(apxchol::factorize(apxchol::test::csc(A), apxchol::detail::block_greedy_partitioner{}, options).sddm);
-    options.regularization = 0;
-    EXPECT_FALSE(apxchol::factorize(apxchol::test::csc(A), options).sddm);
 }
 
 TEST(OperatorContract, NumericalOptionsRejectInvalidValues) {
@@ -496,10 +485,7 @@ TEST(OperatorContract, NumericalOptionsRejectInvalidValues) {
                          std::numeric_limits<double>::quiet_NaN()}) {
         SCOPED_TRACE(value);
         apxchol::factor_options options;
-        options.regularization = value;
-        EXPECT_THROW(apxchol::factorize(apxchol::test::csc(empty), options), std::invalid_argument);
-        options = {};
-        options.lump_max_mass = value;
+        options.positive_offdiag_tolerance = value;
         EXPECT_THROW(apxchol::factorize(apxchol::test::csc(empty), options), std::invalid_argument);
         EXPECT_THROW(operator_view(empty_csc, value), std::invalid_argument);
     }

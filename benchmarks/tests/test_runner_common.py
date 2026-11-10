@@ -250,7 +250,7 @@ class GpuMemoryTest(unittest.TestCase):
         lines = ["BENCH_REPEAT phase=warmup index=1 execution_route=gpu",
                  "BENCH_REPEAT phase=retained index=1 execution_route=gpu",
                  "BENCH_REPEAT phase=retained index=2 execution_route=gpu"]
-        metrics = {"execution_route": "gpu"}
+        metrics = {"execution_route": "gpu", "phase_contract": rc.APXCHOL_PHASE_CONTRACT}
         self.assertIsNone(rc.v1_route_error(metrics, "\n".join(lines), "gpu", 2, 1))
         for bad in (lines[:-1], lines + [lines[-1]],
                     [line.replace("route=gpu", "route=cpu") for line in lines],
@@ -335,16 +335,35 @@ class CellReuseTest(unittest.TestCase):
         record = {"cell": {"solver": "apxchol_v1", "device": "cpu", "matrix_id": "grid"},
                   "status": "complete",
                   "metrics": {"stop_contract": "original-v1", "total_s": 1.0,
-                              "execution_route": "cpu"},
+                              "execution_route": "cpu", "phase_contract": rc.APXCHOL_PHASE_CONTRACT},
                   "provenance": {"git_sha": self.SHA}}
         record.update(overrides)
         return record
+
+    def test_old_apxchol_phase_boundary_is_rejected(self):
+        old = self.cell()
+        old["metrics"].pop("phase_contract")
+        self.assertFalse(rc.cell_meets_contract(old))
+        self.assertFalse(rc.cell_is_current(old, self.SHA))
+
+    def test_always_profiled_phase_boundary_is_rejected(self):
+        old = self.cell()
+        old["metrics"]["phase_contract"] = "apxchol-wall-v1"
+        self.assertFalse(rc.cell_meets_contract(old))
+        self.assertFalse(rc.cell_is_current(old, self.SHA))
+
+    def test_phase_marker_survives_csv(self):
+        row = rc.parse_csv("v1,m,4,12,1,2,3,7,1e-9,1,2,3,-1,-1,3,2,9e-9,original-v1,2,0.25,cpu,apxchol-wall-v2\n")
+        self.assertEqual(row["phase_contract"], rc.APXCHOL_PHASE_CONTRACT)
+        self.assertEqual(row["execution_route"], "cpu")
 
     def test_current_cell_is_reused(self):
         self.assertTrue(rc.cell_is_current(self.cell(), self.SHA))
 
     def test_cmg_cells_follow_the_competitor_contract(self):
         cell = self.cell(cell={"solver": "cmg", "device": "cpu", "matrix_id": "grid"})
+        self.assertFalse(rc.cell_is_current(cell, self.SHA))
+        cell["provenance"]["cmg_contract"] = "shared-timed-original-v1"
         self.assertFalse(rc.cell_is_current(cell, self.SHA))
         cell["provenance"]["cmg_contract"] = rc.CMG_CONTRACT
         self.assertTrue(rc.cell_is_current(cell, self.SHA))
@@ -371,7 +390,8 @@ class CellReuseTest(unittest.TestCase):
         identity = {"solver": "apxchol_v1", "device": "metal", "matrix_id": "grid"}
         for route, ok in (("metal", True), ("gpu", False), ("cpu", False)):
             cell = self.cell(cell=identity, metrics={"stop_contract": "original-v1",
-                                                     "total_s": 1.0, "execution_route": route})
+                                                     "total_s": 1.0, "execution_route": route,
+                                                     "phase_contract": rc.APXCHOL_PHASE_CONTRACT})
             self.assertEqual(rc.cell_meets_contract(cell), ok)
 
     def test_missing_route_cannot_hide_behind_missing_total(self):

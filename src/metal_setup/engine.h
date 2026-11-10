@@ -73,7 +73,7 @@ class Engine {
         require(queue != nil, "Metal setup command queue creation failed");
     }
     Factor run(unsigned n, unsigned entries, unsigned graph_entries, unsigned seed, id<MTLBuffer> input_ptr,
-               id<MTLBuffer> input_idx, id<MTLBuffer> input_values, float regularization,
+               id<MTLBuffer> input_idx, id<MTLBuffer> input_values,
                unsigned triangles_identical, const factor_options& options, std::size_t residual_threshold) {
         @autoreleasepool {
             const unsigned input_capacity = std::max(entries, 1u);
@@ -97,7 +97,7 @@ class Engine {
             s.state->active = n;
             s.state->seed = seed;
             s.state->prune_gap = s.state->prune_enabled = 1;
-            s.state->degree_quantile = float(metal_degree_quantile(options.partition.degree_quantile));
+            s.state->degree_quantile = float(metal_degree_quantile(options.experimental.partition.degree_quantile));
             NSMutableArray *scratch = [NSMutableArray new];
             for (unsigned count = n + 1;;) {
                 count = (count + 255) / 256;
@@ -186,8 +186,6 @@ class Engine {
                 [enc setBuffer:input_ptr offset:0 atIndex:3];
                 [enc setBuffer:input_idx offset:0 atIndex:4];
                 [enc setBuffer:input_values offset:0 atIndex:5];
-                if (!phase)
-                    [enc setBytes:&regularization length:sizeof regularization atIndex:6];
                 [enc setBytes:&triangles_identical length:sizeof triangles_identical atIndex:7];
                 [enc dispatchThreads:MTLSizeMake(n + 1, 1, 1)
                     threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];

@@ -40,7 +40,7 @@ CPU use, set `opts.backend` to `solve_backend::cpu`.
 
 `solve` checks the returned solution against the original matrix and RHS.
 Inspect `converged`; reaching the iteration limit is not an exception.
-A warm start is an initial solution estimate supplied through `x0`.
+`x0` supplies an initial guess.
 
 ```{doxygenclass} apxchol::solver
 :members: solver, solve, apply, factor, rows, operator_nnz, backend, factor_storage, setup_seconds, save, load
@@ -97,43 +97,40 @@ argument of `factorize`. Storage precision is separate from construction
 precision and exported values; see the [precision guide](../precision.md).
 
 ```{doxygenstruct} apxchol::factor_options
-:members: seed, regularization, lump_max_mass, factor_storage, drop_tolerance, partition, partitioner, sampler, verbose, experimental
+:members: seed, positive_offdiag_tolerance, factor_storage, drop_tolerance, verbose, experimental
 :undoc-members:
 ```
 
 ```{doxygenenum} apxchol::factor_storage_type
 ```
 
-```{doxygenenum} apxchol::clique_sampler
+### Experimental controls
+
+`factor_options::experimental` holds research controls: the partitioner and
+its degree cutoff, the clique sampler,
+scheduling, how factorization finishes the remaining graph, and sampling
+rules. They are
+outside the [1.x compatibility promise](../api.md) and may change in any
+release. Keep their defaults unless comparing a specific alternative.
+GPU routes require the defaults of `partitioner`, `cpu_schedule`,
+`exact_core_max_h` and `double_cycle_min_h`. Metal
+also requires the default `sampler`. See [backend selection](../usage.md).
+
+```{doxygenstruct} apxchol::experimental_options
+:members: partitioner, partition, sampler, cpu_schedule, min_is_fraction, omp_threshold, parallel_residual_threshold, exact_core_max_h, double_cycle_min_h
+```
+
+```{doxygenenum} apxchol::cpu_sptrsv_schedule
 ```
 
 ```{doxygenenum} apxchol::partitioner_kind
 ```
 
-### Candidate selection
-
-The partitioner chooses independent vertices for elimination. Its degree
-controls live in `factor_options::partition`.
-
 ```{doxygenstruct} apxchol::partition_options
 :members: degree_quantile, degree_multiplier
 ```
 
-### Experimental controls
-
-`factor_options::experimental` holds research controls for scheduling, how
-factorization finishes the remaining graph, and sampling rules. They are
-outside the [1.x compatibility promise](../api.md) and may change in any
-release. Keep their defaults unless comparing a specific alternative.
-GPU routes require the defaults of `cpu_schedule`, `exact_clique_max_degree`,
-`exact_core_max_h` and `double_cycle_min_h`; Metal also requires
-`degree_tiebreak`. See [backend selection](../usage.md).
-
-```{doxygenstruct} apxchol::experimental_options
-:members: cpu_schedule, degree_tiebreak, min_is_fraction, omp_threshold, parallel_residual_threshold, exact_clique_max_degree, exact_core_max_h, double_cycle_min_h
-```
-
-```{doxygenenum} apxchol::cpu_sptrsv_schedule
+```{doxygenenum} apxchol::clique_sampler
 ```
 
 ## Constructing and reusing a factor

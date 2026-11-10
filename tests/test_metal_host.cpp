@@ -22,7 +22,7 @@ TEST(MetalHost, DegreeQuantileOptions) {
     for (double quantile : {0.1, 0.2, 0.3, 0.5, 0.8,
                             double(float(0.2)), std::nextafter(0.0, 1.0), std::nextafter(1.0, 0.0)}) {
         SCOPED_TRACE(quantile);
-        options.partition.degree_quantile = quantile;
+        options.experimental.partition.degree_quantile = quantile;
         EXPECT_EQ(apxchol::detail::metal_degree_quantile(quantile), quantile);
         EXPECT_EQ(apxchol::detail::metal_setup_options_supported(options), defaults);
     }
@@ -31,7 +31,7 @@ TEST(MetalHost, DegreeQuantileOptions) {
                             std::numeric_limits<double>::infinity(),
                             std::numeric_limits<double>::quiet_NaN()}) {
         SCOPED_TRACE(quantile);
-        options.partition.degree_quantile = quantile;
+        options.experimental.partition.degree_quantile = quantile;
         EXPECT_FALSE(apxchol::detail::metal_setup_options_supported(options));
     }
     EXPECT_EQ(apxchol::detail::degree_quantile_device_default, 0.5);

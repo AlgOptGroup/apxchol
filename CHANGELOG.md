@@ -3,14 +3,15 @@
 ## Unreleased (since v0.2.2)
 
 ### Solver and factorization
-- New trace-cycle clique sampler (`--sampler trace_cycle`) on CPU and GPU; GKS stays the default.
+- New experimental trace-cycle clique sampler (`factor_options::experimental.sampler`) on CPU and CUDA. GKS stays the default.
 - Faster setup: one AoS graph throughout factorization, incremental degrees, and parallel residual sparsification.
 - Inputs are validated by operator class; nearly-SDDM inputs are repaired by M-matrix lumping.
-- Batched solves take any number of right-hand sides on CPU, CUDA and Metal, processed in panels of up to eight columns on CPU and four on GPU.
+- Batched solves take any number of right-hand sides on CPU, CUDA and Metal, processed in panels of up to eight columns on CPU, 32 on CUDA and four on Metal.
 - `apxchol::solver` owns a reusable factorization for repeated solves and can be saved to and loaded from portable archives.
 - Any 1.x release reads the solver archives written by earlier 1.x releases. A minor release may add a format version and keeps reading older ones; an older apxchol given a newer archive fails with an upgrade message.
 
 ### GPU backends
+- Metal PCG uses full 32-thread SIMD groups for reductions and long-row multiplication.
 - CUDA setup, factorization and PCG run entirely on the device, with a sync-free dataflow triangular solve and optional fp16 factor storage.
 - New Apple Metal backend: setup, factorization and PCG run on the device, for single and batched solves.
 - Metal backend and macOS support contributed by Samuel Talkington (@samtalki).
@@ -19,9 +20,10 @@
 - CUDA and Metal solvers can be copied: copies share the device factor and operator, and solve concurrently on their own streams or command queues and workspace.
 
 ### API and CLI changes
+- Setup profiles include unlabelled work and agree with `solver::setup_seconds()`. Normal benchmark runs omit optional stage profiling; `--profile` retains the detailed breakdown.
 - Breaking: Eigen types leave the C++ API. `solver`, `factorize` and the one-shot `solve` take a borrowed CSC matrix, `csc_view` (32-bit indices) or `csc_view64` (64-bit), from the new header `apxchol/views.h`; rows must be sorted and unique within each column, and an invalid view throws `std::invalid_argument`. Vectors are `std::span`s and matrices `const_matrix_view` / `matrix_view` (column-major).
 - apxchol no longer depends on Eigen. The installed CMake package, SDK archives, Python wheels, CLI archives and the MATLAB/Octave build neither bundle nor require it, and their notices drop Eigen's MPL-2.0 terms; only the benchmark harness still uses Eigen, for its competitors and input reading.
-- Breaking: the initial guess is a `std::span` that is empty by default instead of a `const Eigen::VectorXd*`, and the batch warm start is a `const_matrix_view` whose null `data` means none.
+- Breaking: the initial guess is a `std::span` that is empty by default instead of a `const Eigen::VectorXd*`, and the batch initial guess is a `const_matrix_view` whose null `data` means none.
 - Breaking: `solve_result::x` and the vector `solver::apply` return `std::vector<double>`; `solve_result::iterations`, `factorization::lumped_offdiag`, `solver::rows()` and `solver::operator_nnz()` are `std::int64_t`.
 - Breaking: the C++ one-shot `solve(A, b, tol, max_iter, x0, opts)` takes an optional initial guess before the options, like the reusable solver, Python and MATLAB/Octave; the CLI reads one with `--x0 FILE`, shaped like the right-hand side.
 - Breaking: runtime environment variables are replaced by explicit solver options.
@@ -70,7 +72,7 @@
 - Breaking: the raw MATLAB/Octave `apxchol_mex` entry point moves to `octave/private/`; use the `apxchol_*` wrappers.
 - Breaking: custom partitioners receive a read-only `apxchol::partition_graph` (`n`, `is_active`, `for_each_neighbor`, `degree`) instead of the mutable graph; `graph`, `make_graph` and `laplacian` move to `apxchol::detail`.
 - Breaking: partitioners no longer declare a `name`, and `partitioner_list.h` with `dispatch_partitioner` is removed; pass a custom partitioner as an instance to `factorize`.
-- Breaking: `factorize(A, eliminator, opts)` no longer takes a partitioner template argument, and now uses the partitioner `opts.partitioner` names instead of always `block_greedy`; pass an instance to use another partitioner.
+- Breaking: `factorize(A, eliminator, opts)` no longer takes a partitioner template argument, and now uses the partitioner `opts.experimental.partitioner` names instead of always `block_greedy`; pass an instance to use another partitioner.
 - Breaking: `tree_elimination` moves to `apxchol::detail`; configure the built-in rule through `factor_options`.
 - Breaking: `sparse_csc::kEdgeMax` is removed; use `std::numeric_limits<apxchol::edge_index>::max()`.
 - New `apxchol.as_operator(M)`, `apxchol_as_operator(M)` and CLI `--convert-input`: a finite symmetric matrix with at least one off-diagonal entry, all of them positive, becomes its graph Laplacian `L = D - M` (self-loops cancel), any other finite symmetric matrix is used as given and checked by the solver, and asymmetric or non-finite input is an error.
@@ -78,12 +80,16 @@
 - The v1 API compatibility scope is documented.
 - Breaking: from 1.0, the installed CMake package accepts equal or older version requests within the same major version (0.x stays minor-scoped), and the shared core library's soname now carries `major.minor` (`libapxchol_core.so.1.0` at 1.0).
 - The partitioner and eliminator extension interfaces are experimental in 1.x and may change in minor releases.
-- Breaking: research controls (`omp_threshold`, `min_is_fraction`, `parallel_residual_threshold`, `exact_clique_max_degree`, `exact_core_max_h`, `double_cycle_min_h`, `degree_tiebreak`, `cpu_schedule`) move to `factor_options::experimental`, outside the 1.x compatibility promise, and leave the CLI, Python and MATLAB/Octave.
+- Breaking: research controls (`omp_threshold`, `min_is_fraction`, `parallel_residual_threshold`, `exact_core_max_h`, `double_cycle_min_h`, `cpu_schedule`) move to `factor_options::experimental`, outside the 1.x compatibility promise, and leave the CLI, Python and MATLAB/Octave.
+- Breaking: `partitioner`, `partition` (`degree_quantile`, `degree_multiplier`) and `sampler` move to `factor_options::experimental`, outside the 1.x compatibility promise. The stable factorization options are now `seed`, `factor_storage`, `drop_tolerance`, `positive_offdiag_tolerance` and `verbose`.
+- Breaking: the `exact_clique_max_degree`, `degree_tiebreak` and `regularization` factor options are removed. The built-in partitioners always prefer lower-degree vertices in conflicts.
+- Breaking: CLI `--partitioner`, `--sampler`, `--regularization`, `--degree-quantile` and `--degree-multiplier` are removed. `-v` still prints setup diagnostics and the timing tree.
+- Breaking: Python `factorize` and `solve` drop the `partitioner`, `sampler`, `degree_quantile`, `degree_multiplier` and `regularization` keywords, and MATLAB/Octave drops the same option fields. Passing one raises the unknown-option error.
 - Breaking: the `residual_peel` option and its `min_degree` and `bk_serial` strategies are removed; the serial tail always uses the natural order.
-- Breaking: `factor_options::is_select` (a string) is replaced by `partitioner`, a `partitioner_kind` enum that option validation checks.
+- Breaking: `factor_options::is_select` (a string) is replaced by `experimental.partitioner`, a `partitioner_kind` enum that option validation checks.
 - Breaking: unset `degree_quantile`, `parallel_residual_threshold` and `exact_core_max_h` are `std::nullopt` instead of -1 or `SIZE_MAX`, and the sentinel constants and resolvers such as `exact_core_by_route` and `degree_quantile_or_host_default` are removed.
-- Breaking: CLI `--is`, `--factor-drop` and `--maxiter` are renamed `--partitioner`, `--drop-tolerance` and `--max-iter`; `--sampler`, `--factor-storage` and `--partitioner` accept names only.
-- Python and MATLAB/Octave accept the same stable setup options, adding `sampler` to Python and `partitioner`, `sampler`, `degree_quantile` and `degree_multiplier` to MATLAB/Octave.
+- Breaking: CLI `--is` is removed, `--factor-drop` and `--maxiter` are renamed `--drop-tolerance` and `--max-iter`, and `--factor-storage` accepts names only.
+- Python and MATLAB/Octave accept the same stable setup options.
 - Python wheels for CPython 3.11+ on Linux and macOS arm64 (GPU wheels select the backend at runtime), standalone CLI archives, and MATLAB/Octave batched solves with save/load.
 - Wheels declare a `License-Expression` that matches their contents (BSD-3-Clause and Apache-2.0 WITH LLVM-exception; Linux CUDA wheels add the NVIDIA CUDA EULA and ship its text) and take the root LICENSE at build time; minimum scikit-build-core is 0.12.
 - Relicensed from BSD-4-Clause to BSD-3-Clause.
@@ -100,6 +106,7 @@
 - The website separates user and developer guides, adds installation, quick start, examples, changelog and citing pages, and marks development pages with a banner.
 - The precision guide states when results are reproducible and that a release may change results, within the documented precision, for measured speed or memory gains.
 - Clearer messages for a solver used by 2 threads at once, an archive from a newer version, and positive off-diagonal input entries.
+- Errors for an invalid tolerance, iteration budget, thread count or backend, an unsupported GPU request and a missing Metal device start with `apxchol:` and name the next step.
 - A new Input formats page shows how to pass matrices from Eigen, SuiteSparse/CHOLMOD, SciPy, MATLAB/Octave, raw CSR/CSC arrays and Matrix Market files; CI builds and runs its examples.
 
 ### Fixes

@@ -844,18 +844,17 @@ TEST_F(SolverArchive, CpuAndGpuFactorsCrossAdopt) {
     RecordProperty("adopted_resaves", resaves); RecordProperty("independent_rhs", checked_rhs);
 }
 
-TEST_F(SolverArchive, PreservesLumpingAndRegularizationWithoutReapplyingThem) {
+TEST_F(SolverArchive, PreservesLumpingWithoutReapplyingIt) {
     const std::vector<test::triplet> entries{{0, 0, 2}, {1, 1, 2}, {0, 1, 0.1}, {1, 0, 0.1}};
     const Sparse positive = test::from_triplets(2, 2, entries);
     auto construction = options();
-    construction.factor_opts.lump_max_mass = 1.0;
-    construction.factor_opts.regularization = 0.25;
+    construction.factor_opts.positive_offdiag_tolerance = 1.0;
     solver before(csc(positive), construction);
     ASSERT_EQ(before.factor().lumped_offdiag, 2);
     const auto path = directory / "positive.apxchol";
     before.save(path);
     EXPECT_THROW(solver::load(path), std::invalid_argument);
-    auto admission = options(); admission.factor_opts.lump_max_mass = 1.0;
+    auto admission = options(); admission.factor_opts.positive_offdiag_tolerance = 1.0;
     auto restored = solver::load(path, admission);
     EXPECT_EQ(restored.factor().lumped_offdiag, 2);
     EXPECT_EQ(restored.operator_nnz(), 4);

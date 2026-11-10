@@ -3,6 +3,8 @@
 #include <chrono>
 #include <iomanip>
 #include <map>
+#include <limits>
+#include <stdexcept>
 #include <ostream>
 #include <sstream>
 #include <string>
@@ -26,15 +28,16 @@ namespace apxchol::detail {
 ///   cp("eliminate");              // records under setup.eliminate
 ///   cp.ascend();
 struct checkpoint {
-    using Clock = std::chrono::high_resolution_clock;
+    using Clock = std::chrono::steady_clock;
+    using now_function = Clock::time_point (*)();
 
     struct node {
         double time = 0.0;
         std::map<std::string, node> children;
     };
 
-    checkpoint() : last_(Clock::now()) {}
-    checkpoint(const checkpoint& other) : last_(other.last_), root_(other.root_) {
+    explicit checkpoint(now_function now = &Clock::now) : now_(now), last_(now_()) {}
+    checkpoint(const checkpoint& other) : now_(other.now_), last_(other.last_), root_(other.root_) {
         for (const auto scope : other.scopes_) descend(scope->first);
     }
     checkpoint& operator=(const checkpoint& other) {
@@ -45,7 +48,7 @@ struct checkpoint {
 
     /// Record elapsed time since last call under `label` at the current scope.
     void operator()(const std::string& label) {
-        auto now = Clock::now();
+        auto now = now_();
         current().children[label].time +=
             std::chrono::duration<double>(now - last_).count();
         last_ = now;
@@ -62,7 +65,70 @@ struct checkpoint {
     }
 
     /// Reset the clock without recording.
-    void tick() { last_ = Clock::now(); }
+    void tick() { last_ = now_(); }
+
+
+    /// One complete wall interval, with exclusive stage labels and an explicit
+    /// remainder. Paths are relative to the current grouping scope, like labels.
+    /// Nested intervals and reused trees count only newly recorded
+    /// work. The returned wall duration also serves callers without a tree.
+    class interval {
+    public:
+        interval(checkpoint* cp, const std::string& path,
+                 Clock::time_point started)
+            : cp_(cp), started_(started), depth_(cp ? cp->scopes_.size() : 0) {
+            if (cp_) {
+                node_ = &cp_->current();
+                std::string_view remaining(path);
+                while (!remaining.empty()) {
+                    const auto dot = remaining.find('.');
+                    node_ = &node_->children[std::string(remaining.substr(0, dot))];
+                    if (dot == std::string_view::npos) break;
+                    remaining.remove_prefix(dot + 1);
+                }
+                before_ = subtotal(*node_);
+                cp_->last_ = started;
+            }
+        }
+        interval(checkpoint* cp, const std::string& path)
+            : interval(cp, path, cp ? cp->now_() : Clock::now()) {}
+        interval(const interval&) = delete;
+        interval& operator=(const interval&) = delete;
+        ~interval() {
+            // A failed construction has no completed setup duration. Restore
+            // the cursor so a caught exception cannot corrupt a later profile.
+            if (cp_ && !finished_) {
+                cp_->scopes_.resize(depth_);
+                cp_->last_ = cp_->now_();
+            }
+        }
+        double finish() {
+            if (finished_) return elapsed_;
+            const auto ended = cp_ ? cp_->now_() : Clock::now();
+            elapsed_ = std::chrono::duration<double>(ended - started_).count();
+            if (cp_) {
+                const double after = subtotal(*node_);
+                const double recorded = after - before_;
+                const double remainder = elapsed_ - recorded;
+                const double rounding = 64 * std::numeric_limits<double>::epsilon()
+                    * std::max({1.0, elapsed_, recorded, before_, after});
+                if (remainder < -rounding)
+                    throw std::logic_error("apxchol: checkpoint stages overlap their enclosing interval");
+                node_->children["unattributed"].time += std::max(0.0, remainder);
+                cp_->scopes_.resize(depth_);
+                cp_->last_ = ended;
+            }
+            finished_ = true;
+            return elapsed_;
+        }
+    private:
+        checkpoint* cp_;
+        node* node_ = nullptr;
+        Clock::time_point started_;
+        std::size_t depth_;
+        double before_ = 0.0, elapsed_ = 0.0;
+        bool finished_ = false;
+    };
 
     /// Sum of all times in the subtree rooted at the given dotted path.
     double total(const std::string& path) const {
@@ -139,6 +205,7 @@ private:
         return n;
     }
 
+    now_function now_;
     Clock::time_point last_;
     node root_;
     // Map element iterators survive moves; no cursor points into this object.

@@ -63,8 +63,7 @@ TEST(GpuBlockFrontend, OwnedBoundedSelectionMakesIndependentProgress) {
         const auto fixture = make_fixture(n);
         const auto matrix = owned_matrix(fixture);
         ASSERT_TRUE(apxchol::detail::gpu_owned_csc_supported(apxchol::test::internal_csc(matrix)));
-        for (const bool degree_tiebreak : {false, true}) {
-            SCOPED_TRACE(degree_tiebreak);
+        {
             // Destruction is ordered: the borrowing frontend dies before its
             // numerical owner; both die before the input matrix's outer scope.
             apxchol::detail::gpu_round_shadow_session owner(true);
@@ -74,7 +73,7 @@ TEST(GpuBlockFrontend, OwnedBoundedSelectionMakesIndependentProgress) {
             apxchol::partition_options options;
             options.degree_quantile = 0.0;
             options.degree_multiplier = static_cast<double>(n);
-            const auto prepared = gpu->prepare(fixture.active, options, 42, 0, degree_tiebreak);
+            const auto prepared = gpu->prepare(fixture.active, options, 42, 0);
             ASSERT_EQ(prepared.candidate_count, fixture.active.size());
             const auto candidates = gpu->host_candidates();
             EXPECT_EQ(std::vector<node_index>(candidates.begin(), candidates.end()), fixture.active);
@@ -94,8 +93,7 @@ TEST(GpuBlockFrontend, OwnedBoundedSelectionMakesIndependentProgress) {
             EXPECT_EQ(gpu->selected_degree_work(), work);
             std::string receipt = "work=" + std::to_string(work);
             for (auto v : selected) receipt += ":" + std::to_string(v);
-            RecordProperty("owned_bounded_progress_" + std::to_string(n) + "_" +
-                std::to_string(degree_tiebreak), receipt);
+            RecordProperty("owned_bounded_progress_" + std::to_string(n), receipt);
             EXPECT_EQ(gpu->transfers().owned_residual_binds, 1u);
         }
     }

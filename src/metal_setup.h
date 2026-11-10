@@ -43,7 +43,7 @@ void prepare_round_plans(id<MTLDevice> device, const factorization& factor,
 /// the operator fields of the result are set.
 std::optional<resident_factor> prepare_input_operator(id<MTLDevice> device,
     csc_ref<double> A, const std::vector<node_index>& perm,
-    double lump_max_mass);
+    double positive_offdiag_tolerance);
 
 resident_factor factorize(id<MTLDevice> device, csc_ref<double> A,
                           const solve_options &options, checkpoint *cp,

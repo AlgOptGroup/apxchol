@@ -51,17 +51,20 @@ bool backend_available(solve_backend backend) noexcept {
 
 void detail::validate_solve_parameters(double tol, int max_iter) {
     if (!(tol > 0) || !std::isfinite(tol))
-        throw std::invalid_argument("solve tolerance must be finite and positive");
+        throw std::invalid_argument("apxchol: the solve tolerance must be finite and positive. "
+                                    "Pass a value such as 1e-8, or omit it for the default.");
     if (max_iter < 0)
-        throw std::invalid_argument("max_iter must be nonnegative");
+        throw std::invalid_argument("apxchol: max_iter, the iteration budget, must be 0 or more. "
+                                    "Pass a nonnegative value, or omit it for the default.");
 }
 
 void detail::validate_solve_options(const solve_options& opts) {
     if (opts.num_threads < 0)
-        throw std::invalid_argument("num_threads must be nonnegative");
+        throw std::invalid_argument("apxchol: num_threads must be nonnegative. "
+                                    "Pass 0 to inherit the OpenMP thread setting.");
     if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::cpu &&
         opts.backend != solve_backend::gpu)
-        throw std::invalid_argument("invalid solve backend");
+        throw std::invalid_argument("apxchol: invalid solve backend. Use automatic, cpu or gpu.");
     validate_factor_options(opts.factor_opts);
 }
 
@@ -82,7 +85,7 @@ void check_matrix_views(const_matrix_ref B, matrix_ref X, std::int64_t rows,
                         const const_matrix_ref* X0 = nullptr) {
     if (B.rows() != rows || X.rows() != rows || X.cols() != B.cols() ||
         (X0 && (X0->rows() != rows || X0->cols() != B.cols())))
-        throw std::invalid_argument("apxchol: RHS, output and warm-start shapes must match");
+        throw std::invalid_argument("apxchol: RHS, output and initial-guess shapes must match");
     const auto extent = [](const auto &value) {
         if (!value.size())
             return std::pair<std::uintptr_t, std::uintptr_t>{0, 0};
@@ -101,7 +104,7 @@ void check_matrix_views(const_matrix_ref B, matrix_ref X, std::int64_t rows,
         return output_extent.first < hi && lo < output_extent.second;
     };
     if (overlaps(B) || (X0 && overlaps(*X0)))
-        throw std::invalid_argument("apxchol: output must not overlap RHS or warm start");
+        throw std::invalid_argument("apxchol: output must not overlap RHS or initial guess");
 }
 
 template<solve_backend Route>
@@ -457,8 +460,8 @@ void panel_update_p(double *p, const double *z, const std::array<double, C> &bet
 } // namespace
 
 // ── cpu_route: factor + operator built once, PCG-solve many b ───────────────────
-// Checkpoint placement here defines the setup/solve timing split used by the
-// benchmark suite; keep the operation order and checkpoint labels stable.
+// Stage checkpoints explain the complete enclosing setup interval; they do
+// not define its boundary. Keep numerical operation order unchanged.
 
 detail::cpu_route::cpu_route(csc_ref<double> A,
                              const solve_options& opts, checkpoint* cp, factorization* F)
@@ -468,13 +471,14 @@ detail::cpu_route::cpu_route(csc_ref<double> A,
     } else {
         const bool _pcg_trace = opts_.factor_opts.verbose;
         const auto _t_compute_start = std::chrono::high_resolution_clock::now();
+        const double stages_before = cp ? cp->total("setup") : 0.0;
         install_factor(detail::factorize_for_solver(A, opts_.factor_opts, cp, setup_route::cpu), cp);
         if (_pcg_trace) {
             const double dt = std::chrono::duration<double>(
                 std::chrono::high_resolution_clock::now() - _t_compute_start).count();
-            const double dt_factorize = cp ? cp->total("setup") : 0.0;
-            std::fprintf(stderr, "[pcg] precond.compute wall=%.0f ms (factorize=%.0f ms, sptrsv-setup+misc=%.0f ms)\n",
-                         dt*1000, dt_factorize*1000, (dt - dt_factorize)*1000);
+            const double stages = cp ? cp->total("setup") - stages_before : 0.0;
+            std::fprintf(stderr, "[pcg] precond.compute wall=%.0f ms (recorded stages=%.0f ms, other=%.0f ms)\n",
+                         dt*1000, stages*1000, (dt - stages)*1000);
         }
     }
     print_sptrsv_banner<solve_backend::cpu>(trsv().fp16(), opts_.factor_opts.verbose);
@@ -482,13 +486,12 @@ detail::cpu_route::cpu_route(csc_ref<double> A,
 }
 
 void detail::cpu_route::install_factor(factorization F, checkpoint* cp) {
+    if (cp) { cp->descend("setup"); cp->tick(); }
     auto next = std::make_shared<installed>();
     next->F = std::move(F);
     auto& factor = next->F;
     auto& trsv = next->trsv;
-    // SpTRSV setup is setup work: record it under "setup" so the setup/solve
-    // split stays complete.
-    if (cp) { cp->descend("setup"); cp->tick(); }
+    if (cp) (*cp)("factor_install");
     // Laplacians leave the grounded last row/column unused.
     const node_index factor_dim = static_cast<node_index>(factor.sddm ? n_ : n_ - 1);
     // Round-as-level: hand the SpTRSV the per-round IS-column boundaries so it
@@ -519,7 +522,7 @@ void detail::cpu_route::install_factor(factorization F, checkpoint* cp) {
     else
         trsv.install_exact(factor.L, factor_dim, factor.storage == factor_storage_type::fp16,
                            factor.scale.data(), opts_.factor_opts);
-    if (cp) { (*cp)("sptrsv_setup"); cp->ascend(); }
+    if (cp) (*cp)("sptrsv_setup");
     // The PCG loop only uses trsv, never F.L. Release whatever row/value
     // arrays setup_consuming left (idempotent); column pointers remain.
     detail::sparse_csc_access::release_values(factor.L);
@@ -528,6 +531,7 @@ void detail::cpu_route::install_factor(factorization F, checkpoint* cp) {
     scratch2_.resize(n_);
     installed_ = std::move(next);
     barrier_ = installed_->trsv.make_workspace();
+    if (cp) { (*cp)("workspace"); cp->ascend(); }
 }
 
 void detail::cpu_route::build_operator(csc_ref<double> L, checkpoint* cp) {
@@ -536,6 +540,7 @@ void detail::cpu_route::build_operator(csc_ref<double> L, checkpoint* cp) {
     // arrays already have the CSR layout. Other stored patterns take the
     // general selfadjoint(Lower) reconstruction below.
     const bool pcg_trace_outer = opts_.factor_opts.verbose;
+    if (cp) { cp->descend("setup"); cp->tick(); }
     auto next = std::make_shared<pcg_operator>();
     auto& op = *next;
     {
@@ -547,11 +552,9 @@ void detail::cpu_route::build_operator(csc_ref<double> L, checkpoint* cp) {
         // transient fp64 Lrm merely to cast it.
         op.fp32 = storage.fp32_exact;
 
-        // Lrm conversion is one-time SETUP work for the parallel SpMV;
-        // checkpoint it under "setup" so bench's setup_time/solve_time
-        // split is accurate.
+        if (cp) (*cp)("operator_scan");
+        // Conversion includes the fallback scalar cast and transient release.
         const auto t0 = std::chrono::high_resolution_clock::now();
-        if (cp) { cp->descend("setup"); cp->tick(); }
         const bool copied = op.fp32
             ? copy_symmetric_csc_as_owned_csr(L, op.Lrm_f, storage.inner_indices_sorted)
             : copy_symmetric_csc_as_owned_csr(L, op.Lrm, storage.inner_indices_sorted);
@@ -575,21 +578,19 @@ void detail::cpu_route::build_operator(csc_ref<double> L, checkpoint* cp) {
             fallback_needs_fp32_cast = op.fp32;
         }
 
-        if (cp) { (*cp)("spmv_lrm_build"); cp->ascend(); }
+        if (fallback_needs_fp32_cast) {
+            op.Lrm_f = csc_cast<float>(op.Lrm.ref());
+            op.Lrm.clear();
+        }
+        if (cp) (*cp)("spmv_lrm_build");
         if (pcg_trace_outer) {
             const auto dt = std::chrono::duration<double>(
                 std::chrono::high_resolution_clock::now() - t0).count();
             std::fprintf(stderr, "[pcg] Lrm conversion: %.0f ms\n", dt*1000);
         }
-        // Preserve the historical checkpoint/trace boundary on the uncommon
-        // fallback: its fp32 cast was never part of spmv_lrm_build. The direct
-        // path has no cast or transient fp64 matrix at all.
-        if (fallback_needs_fp32_cast) {
-            op.Lrm_f = csc_cast<float>(op.Lrm.ref());
-            op.Lrm.clear();
-        }
     }
     op_ = std::move(next);
+    if (cp) { (*cp)("operator_install"); cp->ascend(); }
 }
 
 detail::cpu_route::cpu_route(const cpu_route& other)
@@ -1091,7 +1092,7 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
                                           const csc_ref<double>* A) {
     if (opts.backend == solve_backend::cpu) return solve_backend::cpu;
     if (opts.backend != solve_backend::automatic && opts.backend != solve_backend::gpu)
-        throw std::invalid_argument("invalid solve backend");
+        throw std::invalid_argument("apxchol: invalid solve backend. Use automatic, cpu or gpu.");
     // Keep small solves on CPU unless it cannot honor the requested storage.
 #if defined(APXCHOL_USE_METAL)
     constexpr node_index cpu_limit = 32 * 1024;
@@ -1105,9 +1106,8 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
     }
 #if defined(APXCHOL_USE_CUDA)
     bool compatible = sizeof(node_index) == sizeof(std::uint32_t) &&
-        opts.factor_opts.partitioner == partitioner_kind::block_greedy &&
+        opts.factor_opts.experimental.partitioner == partitioner_kind::block_greedy &&
         opts.factor_opts.experimental.cpu_schedule == cpu_sptrsv_schedule::automatic &&
-        opts.factor_opts.experimental.exact_clique_max_degree == 0 &&
         opts.factor_opts.experimental.exact_core_max_h.value_or(0) == 0 &&
         opts.factor_opts.experimental.double_cycle_min_h == 0;
     if (compatible && opts.backend == solve_backend::automatic && A) {
@@ -1122,8 +1122,8 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
                        backend_available(solve_backend::gpu)))
         return solve_backend::gpu;
     if (opts.backend == solve_backend::gpu)
-        throw std::invalid_argument("GPU setup does not support the requested factor options "
-            "or node-index width; request CPU explicitly");
+        throw std::invalid_argument("apxchol: GPU setup does not support the requested factor options "
+            "or node-index width. Request the CPU backend.");
     return solve_backend::cpu;
 #elif defined(APXCHOL_USE_METAL)
     bool compatible = detail::metal_setup_options_supported(opts.factor_opts);
@@ -1133,19 +1133,15 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
     }
     if (!compatible) {
         if (opts.backend == solve_backend::gpu)
-            throw std::invalid_argument("Metal GPU setup requires supported GKS options and compressed, sorted, paired CSC input");
-        return solve_backend::cpu;
-    }
-    if (!detail::metal_setup_regularization_supported(opts.factor_opts.regularization,
-            opts.backend == solve_backend::automatic ? A : nullptr)) {
-        if (opts.backend == solve_backend::gpu)
-            throw std::invalid_argument(detail::metal_regularization_error);
+            throw std::invalid_argument("apxchol: Metal GPU setup supports only the default factor options "
+                "and compressed, sorted, paired CSC input. Request the CPU backend.");
         return solve_backend::cpu;
     }
     return solve_backend::gpu;
 #else
     if (opts.backend == solve_backend::gpu)
-        throw std::invalid_argument("GPU route requested but GPU support is not built");
+        throw std::invalid_argument("apxchol: GPU route requested but GPU support is not built. "
+            "Request the CPU backend, or install a CUDA or Metal build.");
     return solve_backend::cpu;
 #endif
 }
@@ -1189,7 +1185,7 @@ struct solver::impl {
         const detail::thread_budget threads(opts.num_threads);
         if (A.n == 0) throw std::invalid_argument("apxchol: empty operator");
         if (F) {
-            detail::validate_adopted_operator(A, *F, opts.factor_opts.lump_max_mass);
+            detail::validate_adopted_operator(A, *F, opts.factor_opts.positive_offdiag_tolerance);
             detail::validate_adopted_factor(*F);
         }
         if (cp) { cp->descend("setup"); cp->tick(); }
@@ -1207,9 +1203,11 @@ struct solver::impl {
         if (route == solve_backend::gpu) {
             const auto& device = detail::metal::status();
             if (!device.ok)
-                throw std::runtime_error("apxchol: the Metal backend is unavailable: " + device.error);
+                throw std::runtime_error("apxchol: the Metal backend is unavailable (" + device.error +
+                                         "). Request the CPU backend.");
             if (F && opts.factor_opts.experimental.cpu_schedule != cpu_sptrsv_schedule::automatic)
-                throw std::invalid_argument("Metal cannot use a CPU triangular-solve schedule");
+                throw std::invalid_argument("apxchol: Metal cannot use a CPU triangular-solve schedule. "
+                    "Leave experimental.cpu_schedule at automatic, or request the CPU backend.");
             return detail::solver_route(std::in_place_type<detail::metal_route>, A, opts, cp, F);
         }
 #else
@@ -1292,11 +1290,17 @@ void detail::solver_access::save(const std::filesystem::path& path, const solver
 
 solver detail::solver_access::make(csc_ref<double> A, const solve_options& opts,
                                    checkpoint* timings) {
-    return solver(A, nullptr, opts, timings);
+    checkpoint::interval setup(timings, "setup");
+    solver owner(A, nullptr, opts, timings);
+    owner.impl_->setup_seconds = setup.finish();
+    return owner;
 }
 
 solver detail::solver_access::make(csc_ref<double> A, factorization F, const solve_options& opts) {
-    return solver(A, &F, opts, nullptr);
+    checkpoint::interval setup(nullptr, "setup");
+    solver owner(A, &F, opts, nullptr);
+    owner.impl_->setup_seconds = setup.finish();
+    return owner;
 }
 
 void detail::solver_access::finish_load(solver& owner, std::int64_t entries,
@@ -1344,37 +1348,32 @@ detail::csc_matrix<double> detail::cuda_route::original_operator() const {
 }
 #endif
 
-namespace {
-
-// A solver for a public view; setup_seconds includes checking the view.
 template<class Index>
-solver from_view(basic_csc_view<Index> A, factorization* F, const solve_options& opts) {
-    const auto start = std::chrono::steady_clock::now();
-    // Options first, and the thread ceiling also bounds checking the view.
-    detail::validate_solve_options(opts);
-    const detail::thread_budget threads(opts.num_threads);
-    const detail::csc_input input(A);
-    solver owner = F ? detail::solver_access::make(input, std::move(*F), opts)
-                     : detail::solver_access::make(input, opts);
-    detail::solver_access::set_setup_start(owner, start);
+solver detail::solver_access::make_view(basic_csc_view<Index> A, factorization* F,
+        const solve_options& opts, checkpoint* timings, checkpoint::Clock::time_point started) {
+    checkpoint::interval setup(timings, "setup", started);
+    solver owner = [&] {
+        // Options first; the thread ceiling also bounds checking the view.
+        detail::validate_solve_options(opts);
+        const detail::thread_budget threads(opts.num_threads);
+        const detail::csc_input input(A);
+        return solver(input, F, opts, timings);
+    }(); // Include releasing any converted input storage and thread scope.
+    owner.impl_->setup_seconds = setup.finish();
     return owner;
 }
 
-} // namespace
-
-solver::solver(csc_view A, const solve_options& opts) : solver(from_view(A, nullptr, opts)) {}
-solver::solver(csc_view64 A, const solve_options& opts) : solver(from_view(A, nullptr, opts)) {}
+solver::solver(csc_view A, const solve_options& opts)
+    : solver(detail::solver_access::make_view(A, nullptr, opts)) {}
+solver::solver(csc_view64 A, const solve_options& opts)
+    : solver(detail::solver_access::make_view(A, nullptr, opts)) {}
 solver::solver(csc_view A, factorization F, const solve_options& opts)
-    : solver(from_view(A, &F, opts)) {}
+    : solver(detail::solver_access::make_view(A, &F, opts)) {}
 solver::solver(csc_view64 A, factorization F, const solve_options& opts)
-    : solver(from_view(A, &F, opts)) {}
+    : solver(detail::solver_access::make_view(A, &F, opts)) {}
 solver::solver(const detail::csc_ref<double>& A, factorization* F,
-               const solve_options& opts, detail::checkpoint* timings) {
-    const auto start = std::chrono::steady_clock::now();
-    impl_ = std::make_unique<impl>(A, opts, timings, F);
-    impl_->setup_seconds =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-}
+               const solve_options& opts, detail::checkpoint* timings)
+    : impl_(std::make_unique<impl>(A, opts, timings, F)) {}
 solver::~solver() = default;
 solver::solver(solver&&) noexcept = default;
 solver& solver::operator=(solver&&) noexcept = default;

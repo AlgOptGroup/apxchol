@@ -1,8 +1,8 @@
 name: Text rules
 
-# Checks user-facing text against the writing rules. Existing hits are allowed by
-# scripts/text-rules-baseline.json. A new hit, or a fixed hit without a lowered
-# baseline, fails. See scripts/text-rules.json for the files in scope.
+# Checks user-facing text with the shared writing-rules linter. writing-rules.json lists
+# the files in scope. writing-rules-baseline.json allows existing hits. A new hit fails.
+# The linter comes from the docs/writing submodule, the same revision as the guides.
 
 on:
   push:
@@ -19,8 +19,26 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+      - name: Check out the writing-rules submodule
+        run: git submodule update --init -- docs/writing
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python3 scripts/check_text_rules.py
-      - run: python3 -m unittest discover -s scripts/tests -p test_text_rules.py
+      - name: Install pinned Vale and the shared linter
+        shell: bash
+        run: |
+          curl --fail --location --retry 2 \
+            https://github.com/vale-cli/vale/releases/download/v3.26.0/vale_3.26.0_Linux_64-bit.tar.gz \
+            --output "$RUNNER_TEMP/vale.tar.gz"
+          printf '22aa69a556558e4a9dfc63c17030777383d8d3c48dcdfad655fa98e839d666ed  %s\n' "$RUNNER_TEMP/vale.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/vale-bin"
+          tar -xzf "$RUNNER_TEMP/vale.tar.gz" -C "$RUNNER_TEMP/vale-bin" vale
+          printf '%s\n' "$RUNNER_TEMP/vale-bin" >> "$GITHUB_PATH"
+          python -m pip install ./docs/writing
+      - name: Install the shared style package
+        run: |
+          mkdir -p .writing
+          writing-rules export-package .writing/WritingRules.zip
+          vale sync --no-global
+      - name: Check user-facing text
+        run: writing-rules check

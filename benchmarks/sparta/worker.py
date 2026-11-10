@@ -15,7 +15,7 @@ from scipy import io, sparse
 from scipy.sparse.csgraph import connected_components
 
 REVISION = "7d82cdca257e1136c49e0cf84fe0cfc01c38ec4b"
-CONTRACT = "sparta-metal-original-correction-v2"
+CONTRACT = "sparta-metal-original-correction-v3"
 
 
 class Unavailable(RuntimeError):
@@ -46,16 +46,13 @@ def runtime(sparta):
 
 
 def ground(A, matrix_class):
-    """Use the exporter's class, then the benchmark's mixed-component rule."""
+    """Use the exported class or an exact constant-null component gauge."""
     if matrix_class not in ("laplacian", "sddm"):
         raise ValueError("missing canonical exported matrix class")
     if A.shape[0] != A.shape[1] or not np.isfinite(A.data).all():
         raise ValueError("expected a finite square operator")
     if (A != A.T).nnz:
         raise Unavailable("SPARTA benchmark requires a symmetric operator")
-    entries = A.tocoo()
-    if np.any(entries.data[entries.row != entries.col] > 0):
-        raise Unavailable("SPARTA benchmark requires nonpositive off-diagonal entries")
     count, labels = connected_components(A, directed=False)
     if matrix_class == "laplacian":
         # Match scan_operator's declaration check, not a new rank tolerance.
@@ -70,16 +67,14 @@ def ground(A, matrix_class):
             raise Unavailable("declared Laplacian contradicts the exported operator")
         singular = np.ones(count, dtype=bool)
     else:
-        # As in prepare_components, an assembled SDDM declaration retains its
-        # equations except for exact constant-null blocks in a mixed operator.
-        # Dominance is a census, not an acceptance condition for this route.
-        singular = np.full(count, count > 1, dtype=bool)
-        if count > 1:
-            R = A.tocsr()
-            # fsum preserves tiny diagonal excess that a sparse reduction can cancel.
-            excess = np.array([math.fsum(R.data[R.indptr[i]:R.indptr[i + 1]])
-                               for i in range(A.shape[0])])
-            np.logical_and.at(singular, labels, excess == 0)
+        # Exact zero column sums prove a constant null vector for a symmetric
+        # component, regardless of entry signs. This does not assert PSD or
+        # nullity one; factorization and original-system verification still apply.
+        singular = np.ones(count, dtype=bool)
+        for col in range(A.shape[0]):
+            component = labels[col]
+            if singular[component] and math.fsum(A.data[A.indptr[col]:A.indptr[col + 1]]) != 0:
+                singular[component] = False
     first = np.full(count, A.shape[0])
     np.minimum.at(first, labels, np.arange(A.shape[0]))
     pins = first[singular]

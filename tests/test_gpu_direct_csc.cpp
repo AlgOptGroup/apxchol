@@ -71,11 +71,8 @@ matrix make_matrix(int n, const std::vector<weighted_edge>& edges, double shift 
     return make_matrix(132, edges); // Includes disconnected components and isolates.
 }
 
-[[maybe_unused]] gpu_round_shadow_input host_snapshot(const matrix& A, double reg_eps = 0.0) {
+[[maybe_unused]] gpu_round_shadow_input host_snapshot(const matrix& A) {
     auto graph = apxchol::detail::make_graph(apxchol::test::internal_csc(A));
-    if (reg_eps > 0.0)
-        for (node_index v = 0; v < graph.n(); ++v)
-            graph.excess(v) = std::max(graph.excess(v), reg_eps * A.coeff(v, v));
     return apxchol::detail::make_gpu_round_shadow_input(
         graph, std::span<const node_index>{}, 0);
 }
@@ -267,7 +264,7 @@ TEST(GpuDirectCsc, InitialArraysMatchHostBuilderIncludingRoundingAndSignedZero) 
 #endif
 }
 
-TEST(GpuDirectCsc, ExcessUsesOriginalOrderedDoublesAndStrictThresholdBeforeRegularization) {
+TEST(GpuDirectCsc, ExcessUsesOriginalOrderedDoublesAndStrictThreshold) {
 #if !defined(APXCHOL_USE_CUDA) || !defined(APXCHOL_GPU_ROUND_SHADOW_TEST_FAULTS)
     GTEST_SKIP() << "CUDA direct CSC experiment and test hooks required";
 #else
@@ -282,11 +279,10 @@ TEST(GpuDirectCsc, ExcessUsesOriginalOrderedDoublesAndStrictThresholdBeforeRegul
     const auto expected = host_snapshot(A);
     EXPECT_EQ(expected.excess[0], 0.0); EXPECT_EQ(expected.excess[2], 0.0);
     EXPECT_GT(expected.excess[4], 1.0);
-    for (double reg : {0.0, 0.5e-12, 2e-12}) {
-        SCOPED_TRACE(reg);
-        const auto got = apxchol::detail::gpu_initial_owned_csc_for_test(apxchol::test::internal_csc(A), reg);
+    {
+        const auto got = apxchol::detail::gpu_initial_owned_csc_for_test(apxchol::test::internal_csc(A));
         ASSERT_TRUE(got.eligible);
-        expect_same_snapshot(got.initial, host_snapshot(A, reg));
+        expect_same_snapshot(got.initial, host_snapshot(A));
         EXPECT_TRUE(got.sddm);
     }
     // Deliberate non-associative degree: retaining CSC row encounter order is
@@ -306,15 +302,14 @@ TEST(GpuDirectCsc, InvalidNumericalInputsFailWithoutPublishingAnInitialSnapshot)
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
     scoped_omp_threads serial(1);
     const auto valid = make_matrix(2, {{0,1,1.0}}, 1.0);
-    for (int fault = 0; fault < 4; ++fault) {
+    for (int fault = 0; fault < 3; ++fault) {
         auto A = valid;
         if (fault == 0) set_entry(A, 0,1, std::numeric_limits<double>::quiet_NaN());
         if (fault == 1) set_entry(A, 0,0, std::numeric_limits<double>::infinity());
         if (fault == 2) set_entry(A, 1,0, 1.0); // Negative canonical graph weight.
         SCOPED_TRACE(fault);
         ASSERT_TRUE(gpu_owned_csc_supported(A));
-        const double reg = fault == 3 ? std::numeric_limits<double>::infinity() : 0.0;
-        EXPECT_THROW((void)apxchol::detail::gpu_initial_owned_csc_for_test(apxchol::test::internal_csc(A), reg), std::invalid_argument);
+        EXPECT_THROW((void)apxchol::detail::gpu_initial_owned_csc_for_test(apxchol::test::internal_csc(A)), std::invalid_argument);
     }
     const double overflow = 2.0 * static_cast<double>(std::numeric_limits<float>::max());
     auto A = make_matrix(2, {{0,1,overflow}});
@@ -332,15 +327,14 @@ TEST(GpuDirectCsc, FirstSelectorHasCorrectCandidatesAndIndependentProgress) {
     const auto graph = apxchol::detail::make_graph(apxchol::test::internal_csc(A));
     ASSERT_TRUE(gpu_owned_csc_supported(A));
     std::vector<node_index> active(graph.n()); std::iota(active.begin(),active.end(),node_index{0});
-    for (bool ties : {false, true}) for (double quantile : {0.0, 0.3, 0.8}) {
-        SCOPED_TRACE(ties);
+    for (double quantile : {0.0, 0.3, 0.8}) {
         SCOPED_TRACE(quantile);
         apxchol::detail::gpu_round_shadow_session owner(true);
         std::unique_ptr<apxchol::detail::gpu_block_frontend> direct;
         owner.initialize_owned_csc(apxchol::detail::gpu_owned_csc_host_buffers(apxchol::test::internal_csc(A)), direct);
         apxchol::partition_options options;
         options.degree_quantile = quantile;
-        const auto got = direct->prepare(active, options, 42, 0, ties);
+        const auto got = direct->prepare(active, options, 42, 0);
         const auto degrees = direct->host_active_degrees();
         std::size_t degree_sum = 0;
         for (node_index v : active) degree_sum += graph.adj_count(v);
@@ -366,7 +360,7 @@ TEST(GpuDirectCsc, FirstSelectorHasCorrectCandidatesAndIndependentProgress) {
         // priority/snapshot contract is checked by GpuBoundedSelection.
         std::string receipt = std::to_string(direct->selected_degree_work());
         for (const auto vertex : selected) receipt += ":" + std::to_string(vertex);
-        RecordProperty(std::string("direct_selection_") + std::to_string(ties) + "_" + std::to_string(quantile), receipt);
+        RecordProperty(std::string("direct_selection_") + std::to_string(quantile), receipt);
         std::vector<bool> picked(graph.n(),false);
         std::size_t degree_work = 0;
         for (node_index v : selected) {
