@@ -212,6 +212,8 @@ private:
         // perm is a bijection, so rows write disjoint panel entries. A maximum
         // does not depend on the order in which the team folds it.
         const int workers = detail::cpu_solve_threads(static_cast<std::size_t>(n_) * Columns);
+        // One slot per requested worker: the team is never larger.
+        std::vector<std::array<double, Columns>> part_b(workers), part_x0(workers);
         #pragma omp parallel if(workers > 1) num_threads(workers)
         {
             std::array<double, Columns> local_b{}, local_x0{};
@@ -224,12 +226,14 @@ private:
                     if (x0) local_x0[q] = std::max(local_x0[q], std::abs((*x0)(v, q)));
                 }
             }
-            #pragma omp critical(apxchol_cuda_panel_pack)
-            for (unsigned q = 0; q < Columns; ++q) {
-                max_b[q] = std::max(max_b[q], local_b[q]);
-                max_x0[q] = std::max(max_x0[q], local_x0[q]);
-            }
+            part_b[omp_get_thread_num()] = local_b;
+            part_x0[omp_get_thread_num()] = local_x0;
         }
+        for (int t = 0; t < workers; ++t)
+            for (unsigned q = 0; q < Columns; ++q) {
+                max_b[q] = std::max(max_b[q], part_b[t][q]);
+                max_x0[q] = std::max(max_x0[q], part_x0[t][q]);
+            }
         for (double maximum : max_b) any_active |= maximum != 0;
         if (!any_active) {
             for (int64_t q = 0; q < x_host.cols(); ++q)
