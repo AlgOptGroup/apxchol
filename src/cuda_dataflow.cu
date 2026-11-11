@@ -98,15 +98,25 @@ template <class Value, unsigned Columns = 1, unsigned RhsLanes = 1> struct dataf
 };
 
 template <class Memory> __global__ void initialize(Memory m, unsigned count) {
-    bool active = false;
-    for (unsigned q = 0; q < Memory::columns; ++q) active |= m.enabled(q);
-    if (!active) return;
-    const unsigned row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row == 0)
-        *m.ticket = 0;
-    if (row >= count)
+    // One thread per panel element: the panel is interleaved, so consecutive
+    // threads then touch consecutive words at every width.
+    const std::uint64_t element = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const unsigned row = static_cast<unsigned>(element / Memory::columns);
+    const unsigned q = static_cast<unsigned>(element % Memory::columns);
+    if (element == 0) {
+        // The ticket restarts only when some column solves, as before.
+        bool active = false;
+        for (unsigned c = 0; c < Memory::columns; ++c) active |= m.enabled(c);
+        if (active) *m.ticket = 0;
+    }
+    if (row >= count || !m.enabled(q))
         return;
-    dataflow_initialize<Memory::columns>(m, row);
+    if (row < m.n && m.ptr[row + 1] - m.ptr[row] == 1) {
+        float rhs, diagonal;
+        m.prepare(row, q, rhs, diagonal);
+        m.publish(row, q, m.finish(rhs, diagonal, 0));
+    } else
+        m.reset(row, q);
 }
 
 template <class Memory> __global__ void __launch_bounds__(kDataflowBlock) solve_dataflow(Memory m) {
@@ -117,7 +127,8 @@ template <class Value, unsigned Columns, unsigned RhsLanes>
 void launch(cudaStream_t stream, dataflow_memory<Value, Columns, RhsLanes> memory, unsigned count, int grid) {
     if (!memory.n)
         return;
-    initialize<<<(count + 255) / 256, 256, 0, stream>>>(memory, count);
+    const std::uint64_t elements = static_cast<std::uint64_t>(count) * Columns;
+    initialize<<<static_cast<unsigned>((elements + 255) / 256), 256, 0, stream>>>(memory, count);
     if (memory.batches)
         solve_dataflow<<<std::min(unsigned(grid), (memory.batches + 31) / 32), kDataflowBlock, 0, stream>>>(
             memory);
