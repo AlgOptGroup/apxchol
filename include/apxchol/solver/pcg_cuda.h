@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "apxchol/solver/pcg_cuda_kernels.h"
+#include "apxchol/solver/detail/cpu_parallel.h"
 #include "apxchol/solver/detail/gpu_pcg.h"
 #include "apxchol/solver/detail/pcg_restart.h"
 #include "apxchol/solver/detail/gpu_scaling.h"
@@ -208,14 +209,31 @@ private:
         std::array<double, Columns> scales{}, bnorm{}, max_b{}, max_x0{};
         bool any_active = false, any_warm = false;
         std::fill_n(h_state_, Columns, cuda_pcg_kernels::solve_state{});
-        for (int64_t v = 0; v < n_; ++v) {
-            for (unsigned q = 0; q < Columns; ++q) {
-                const double rhs = b_host(v, q);
-                packed[perm[v] * Columns + q] = rhs;
-                max_b[q] = std::max(max_b[q], std::abs(rhs));
-                if (x0) max_x0[q] = std::max(max_x0[q], std::abs((*x0)(v, q)));
+        // perm is a bijection, so rows write disjoint panel entries. A maximum
+        // does not depend on the order in which the team folds it.
+        const int workers = detail::cpu_solve_threads(static_cast<std::size_t>(n_) * Columns);
+        // One slot per requested worker: the team is never larger.
+        std::vector<std::array<double, Columns>> part_b(workers), part_x0(workers);
+        #pragma omp parallel if(workers > 1) num_threads(workers)
+        {
+            std::array<double, Columns> local_b{}, local_x0{};
+            #pragma omp for schedule(static) nowait
+            for (int64_t v = 0; v < n_; ++v) {
+                for (unsigned q = 0; q < Columns; ++q) {
+                    const double rhs = b_host(v, q);
+                    packed[perm[v] * Columns + q] = rhs;
+                    local_b[q] = std::max(local_b[q], std::abs(rhs));
+                    if (x0) local_x0[q] = std::max(local_x0[q], std::abs((*x0)(v, q)));
+                }
             }
+            part_b[omp_get_thread_num()] = local_b;
+            part_x0[omp_get_thread_num()] = local_x0;
         }
+        for (int t = 0; t < workers; ++t)
+            for (unsigned q = 0; q < Columns; ++q) {
+                max_b[q] = std::max(max_b[q], part_b[t][q]);
+                max_x0[q] = std::max(max_x0[q], part_x0[t][q]);
+            }
         for (double maximum : max_b) any_active |= maximum != 0;
         if (!any_active) {
             for (int64_t q = 0; q < x_host.cols(); ++q)
@@ -231,9 +249,9 @@ private:
             bnorm[q] = 1; // Inactive zero columns never divide by a zero norm.
             if (max_b[q] == 0) continue;
             scales[q] = detail::gpu_scaling::fp32_scale(std::max(max_b[q], max_x0[q]));
-            // packed stays unchanged until the stream syncs: the upload above
-            // may still read it. Fold the scaled column's norm contiguously.
-            bnorm[q] = detail::gpu_scaling::scaled_norm(lane(packed, q), scales[q]);
+            // The norm does not depend on the row order, so fold the caller's
+            // contiguous column instead of a strided lane of the panel.
+            bnorm[q] = detail::gpu_scaling::scaled_norm(b_host.col(q), scales[q]);
             if (!std::isnormal(bnorm[q] * bnorm[q]))
                 throw std::invalid_argument("CUDA solve: RHS and initial guess exceed the common scaling range");
             auto& st = h_state_[q];
@@ -280,6 +298,7 @@ private:
             if (h_state_[q].active & cuda_pcg_kernels::kSolutionUnderflow)
                 throw std::underflow_error("CUDA solve: solution underflows to zero");
         }
+        #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
         for (int64_t v = 0; v < n_; ++v)
             for (unsigned q = 0; q < Columns; ++q)
                 x_host(v, q) = packed[perm[v] * Columns + q];
