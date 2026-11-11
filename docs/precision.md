@@ -38,6 +38,11 @@ the current solution within the remaining iteration budget. Numerical breakdown
 does not restart. Check the returned `converged` flag. CUDA retains one extra
 FP64 RHS vector per allocated panel column for verification.
 
+CUDA adds each column's sums in a fixed order that depends on the panel width.
+A right-hand side solved alone and the same one solved in a panel both reach
+the tolerance, but the solutions can differ in the last digits and the
+iteration counts by one.
+
 ## Scaled FP16 contract
 
 `drop_tolerance` must be in [0, 1]; zero disables threshold dropping. For each
