@@ -11,7 +11,7 @@
 - Any 1.x release reads the solver archives written by earlier 1.x releases. A minor release may add a format version and keeps reading older ones; an older apxchol given a newer archive fails with an upgrade message.
 
 ### GPU backends
-- CUDA batched solves are faster on sparse operators: the vector updates of a panel read memory contiguously at every panel width. On 5- and 7-point grids of 3 to 4 million rows, a 32-column panel takes 15 to 21% less time on an RTX 4090 and 26 to 36% less on an A100. Single right-hand-side solves are unchanged.
+- CUDA batched solves are faster on sparse operators: the vector updates of a panel read memory contiguously at every panel width. On 5- and 7-point grids of 3 to 4 million rows, a 32-column panel takes 15 to 21% less time on an RTX 4090 and 26 to 36% less on an A100. Single right-hand-side solves take the same time as before. CUDA sums are added in a different order, so solutions can differ from earlier versions in the last digits and an iteration count can change by one.
 - Metal PCG uses full 32-thread SIMD groups for reductions and long-row multiplication.
 - CUDA setup, factorization and PCG run entirely on the device, with a sync-free dataflow triangular solve and optional fp16 factor storage.
 - New Apple Metal backend: setup, factorization and PCG run on the device, for single and batched solves.

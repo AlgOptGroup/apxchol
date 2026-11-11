@@ -70,7 +70,8 @@ void initialize(cudaStream_t stream, std::int64_t n, workspace vectors,
                 std::array<double, Columns> scales);
 
 // Launch one shared vector operation; only multiply reads the operator.
-// Partials use pcg_blocks(n * lanes) for multiply, pcg_blocks(n) otherwise.
+// Partials use pcg_blocks(n * lanes) for multiply and pcg_blocks(n * Columns)
+// otherwise, where the vector kernels run one thread per panel element.
 template<unsigned Columns = 1>
 void step(cudaStream_t stream, detail::gpu_pcg::operation op, std::int64_t n,
           workspace vectors, const operator_csr& matrix, int lanes);

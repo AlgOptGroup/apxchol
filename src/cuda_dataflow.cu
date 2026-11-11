@@ -98,16 +98,17 @@ template <class Value, unsigned Columns = 1, unsigned RhsLanes = 1> struct dataf
 };
 
 template <class Memory> __global__ void initialize(Memory m, unsigned count) {
-    bool active = false;
-    for (unsigned q = 0; q < Memory::columns; ++q) active |= m.enabled(q);
-    if (!active) return;
     // One thread per panel element: the panel is interleaved, so consecutive
     // threads then touch consecutive words at every width.
     const std::uint64_t element = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const unsigned row = static_cast<unsigned>(element / Memory::columns);
     const unsigned q = static_cast<unsigned>(element % Memory::columns);
-    if (element == 0)
-        *m.ticket = 0;
+    if (element == 0) {
+        // The ticket restarts only when some column solves, as before.
+        bool active = false;
+        for (unsigned c = 0; c < Memory::columns; ++c) active |= m.enabled(c);
+        if (active) *m.ticket = 0;
+    }
     if (row >= count || !m.enabled(q))
         return;
     if (row < m.n && m.ptr[row + 1] - m.ptr[row] == 1) {
