@@ -1575,43 +1575,6 @@ TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
     }
 }
 
-// The residual loop constructs a fresh baumann_kyng_partitioner partway through
-// an elimination and seeds it with the measured average degree. BK must honour
-// a caller-supplied est_avg_degree on round 0; this pins that seam, whose only
-// visible effect is which vertices round 0 samples.
-TEST(BaumannKyngSeeding, Round0UsesTheSeed) {
-    const auto L = grid_laplacian(30, 30);          // 900 vertices, avg degree < 4
-    apxchol::partition_context ctx{
-        .options = {},
-        .seed = 42,
-        .omp_threshold = 2000,
-       
-        .degrees = {},
-    };
-    std::vector<apxchol::node_index> active(900);
-    std::iota(active.begin(), active.end(), apxchol::node_index{0});
-
-    auto is_size = [&](double seed) {
-        auto G = apxchol::detail::make_graph(apxchol::test::internal_csc(L).ref());
-        apxchol::detail::baumann_kyng_partitioner bk;
-        bk.est_avg_degree = seed;                   // 0 = sample every vertex
-        apxchol::selection sel;
-        apxchol::detail::selection_access::reset(sel, G.n());
-        bk.find_partition(partition_view(G), std::span<const apxchol::node_index>(active),
-                          ctx, sel);
-        return apxchol::detail::selection_access::finalize(sel).data.size();
-    };
-
-    // Seeding a huge average degree drives p = 1/(c·d) down, so round 0 samples
-    // almost nothing; the unseeded call samples every vertex.
-    const auto unseeded = is_size(0.0);
-    const auto inflated = is_size(4000.0);
-    EXPECT_GT(unseeded, 0u);
-    EXPECT_LT(inflated, unseeded)
-        << "round 0 ignored the caller's est_avg_degree seed (unseeded="
-        << unseeded << ", seeded 4000 => " << inflated << ")";
-}
-
 TEST(BaumannKyngWorkHint, MatchesSelectedLiveDegreeSum) {
     const auto L = grid_laplacian(30, 30);
     auto G = apxchol::detail::make_graph(apxchol::test::internal_csc(L).ref());

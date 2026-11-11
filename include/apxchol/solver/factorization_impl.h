@@ -1330,13 +1330,8 @@ factorization factorize_impl(const Eliminator& elim,
         // decays smoothly near the threshold, whiffed rounds are nearly free,
         // and every column moved to the peel costs both fill and time.
         size_t bk_consecutive_empty = 0;
-        // Unseeded, BK samples every vertex in its first round. Here the main
-        // loop has already measured the average degree, so hand that over and
-        // let BK sample at 1/(c*d) from the start (every partitioner that
-        // declares residual_handoff_threshold also declares degree_prepass, so
-        // this is populated whenever the loop can be reached).
-        if (last_avg_degree > 0.0)
-            bk.est_avg_degree = last_avg_degree;
+        // BK starts unseeded, as a custom partitioner would: its first round
+        // samples every vertex and measures the average degree.
         while (active.size() > residual_thresh) {
             ws.reset_for_round();
             const auto& bk_part = run_partitioner(bk, work, active);

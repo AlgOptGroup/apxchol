@@ -31,9 +31,7 @@ struct baumann_kyng_partitioner {
     /// Average degree the sampling probability is derived from. Left at 0,
     /// round 0 samples every active vertex and measures it. Sampling everything
     /// first needed fewer PCG iterations than starting from an estimate on
-    /// graphs with average degree above 10, at the same setup time. A caller
-    /// that starts BK partway through an elimination (the residual loop in
-    /// factorization_impl.h) seeds this with its measured average instead.
+    /// graphs with average degree above 10, at the same setup time.
     double   est_avg_degree = 0.0;
     // Scratch for the quantile-cap + degree-aware-priority path (two-pass round).
     std::vector<node_index>                 deg_by_vertex_;   // sampled v -> deg (this round)
