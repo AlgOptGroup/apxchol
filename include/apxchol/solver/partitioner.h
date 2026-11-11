@@ -134,6 +134,14 @@ public:
         if (touched_) touched_[v].store(true, std::memory_order_relaxed);
         return g_->visit_live(v, std::forward<F>(f));
     }
+    /// True if pred(u) holds for some live neighbor u of v. Visits neighbors
+    /// in stored order and stops at the first hit, so it can cost less than
+    /// for_each_neighbor. Same concurrency rules.
+    template<typename Pred>
+    bool any_neighbor(node_index v, Pred&& pred) const {
+        if (touched_) touched_[v].store(true, std::memory_order_relaxed);
+        return g_->any_live(v, std::forward<Pred>(pred));
+    }
     /// Live degree of v: the count for_each_neighbor returns, at the same cost.
     node_index degree(node_index v) const {
         return for_each_neighbor(v, [](node_index) {});
@@ -144,9 +152,8 @@ private:
     explicit partition_graph(detail::graph& g,
                              std::atomic<bool>* touched = nullptr)
         : g_(&g), touched_(touched) {}
-    // The built-in scan rules read the graph through
-    // partition_graph_access::graph_of. A set flag asks the orchestrator to
-    // drop v's dead incidences after the selection; it is only a hint.
+    // A set flag asks the orchestrator to drop v's dead incidences after
+    // the selection; it is only a hint.
     detail::graph* g_;
     std::atomic<bool>* touched_;
 };
@@ -226,13 +233,12 @@ struct selection_access {
     static const partition_result& finalize(selection& s) { return s.finalize(); }
 };
 
-/// Orchestrator and built-in side of `partition_graph`.
+/// Orchestrator side of `partition_graph`: the built-in rules get the same view.
 struct partition_graph_access {
     static partition_graph view(graph& g) { return partition_graph(g); }
     static partition_graph deferred_view(graph& g, std::atomic<bool>* touched) {
         return partition_graph(g, touched);
     }
-    static graph& graph_of(const partition_graph& G) { return *G.g_; }
 };
 
 // ── Trait queries (with defaults) ──

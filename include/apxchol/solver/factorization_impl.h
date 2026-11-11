@@ -1330,14 +1330,11 @@ factorization factorize_impl(const Eliminator& elim,
         // decays smoothly near the threshold, whiffed rounds are nearly free,
         // and every column moved to the peel costs both fill and time.
         size_t bk_consecutive_empty = 0;
-        // BK's own round-0 seed is 2*m/|active|, and graph::m() is monotone —
-        // it still counts every edge the main loop's eliminations consumed — so
-        // starting BK here reads a badly inflated average degree, samples at
-        // 1/(c*d) against it and under-fills its first round. Hand it the main
-        // loop's last measured average instead (every partitioner that declares
-        // residual_handoff_threshold also declares degree_prepass, so this is
-        // populated whenever the loop can be reached; the 2*m fallback stays for
-        // a hand-set parallel_residual_threshold under a prepass-less rule).
+        // Unseeded, BK samples every vertex in its first round. Here the main
+        // loop has already measured the average degree, so hand that over and
+        // let BK sample at 1/(c*d) from the start (every partitioner that
+        // declares residual_handoff_threshold also declares degree_prepass, so
+        // this is populated whenever the loop can be reached).
         if (last_avg_degree > 0.0)
             bk.est_avg_degree = last_avg_degree;
         while (active.size() > residual_thresh) {

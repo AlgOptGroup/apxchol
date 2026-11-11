@@ -28,14 +28,12 @@ struct baumann_kyng_partitioner {
     double sampling_constant = 0.1;
 
     uint64_t round = 0;
-    /// Average degree the sampling probability is derived from. Left at 0 it is
-    /// seeded on round 0 from 2·m/|active| — correct only on a PRISTINE graph.
-    /// A caller that starts BK partway through an elimination (the residual loop
-    /// in factorization_impl.h) must pre-seed this with a measured average
-    /// instead: `graph::m()` is monotone — it counts every edge ever added and
-    /// is never decremented when elimination prunes one — so 2·m/|active| on a
-    /// half-eliminated graph is inflated by the whole eliminated prefix and
-    /// under-samples round 0 by that factor.
+    /// Average degree the sampling probability is derived from. Left at 0,
+    /// round 0 samples every active vertex and measures it. Sampling everything
+    /// first needed fewer PCG iterations than starting from an estimate on
+    /// graphs with average degree above 10, at the same setup time. A caller
+    /// that starts BK partway through an elimination (the residual loop in
+    /// factorization_impl.h) seeds this with its measured average instead.
     double   est_avg_degree = 0.0;
     // Scratch for the quantile-cap + degree-aware-priority path (two-pass round).
     std::vector<node_index>                 deg_by_vertex_;   // sampled v -> deg (this round)
@@ -57,11 +55,9 @@ struct baumann_kyng_partitioner {
         if (active.empty()) return;
 
         const double c = sampling_constant;
-        // Degree estimate: previous round's sample-based estimate (unbiased),
-        // a caller-supplied seed, or 2·m/n for round 0 on a pristine graph (see
-        // est_avg_degree).  Updated after each round from sampled vertices.
-        if (round == 0 && est_avg_degree <= 0.0)
-            est_avg_degree = 2.0 * partition_graph_access::graph_of(G).m() / double(active.size());
+        // Degree estimate: the previous round's sample-based estimate
+        // (unbiased) or a caller-supplied seed. With neither, d_est is 1 and
+        // the round samples every vertex (see est_avg_degree).
         double d_est = std::max(est_avg_degree, 1.0);
         double degree_threshold = ctx.options.degree_multiplier * d_est;
         double p = std::min(1.0 / (c * d_est), 1.0);

@@ -207,6 +207,15 @@ public:
         return count;
     }
 
+    /// True if pred(u) holds for some active neighbor u of v. Stops at the
+    /// first hit. A pure read, safe alongside other reads.
+    template<typename Pred>
+    bool any_live(node_index v, Pred&& pred) const {
+        for (const auto& idx : adj_[v])
+            if (is_active(idx.to) && pred(idx.to)) return true;
+        return false;
+    }
+
     // ── active-aware queries ──
 
     bool is_active(node_index v) const {

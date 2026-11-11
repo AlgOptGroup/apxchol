@@ -99,10 +99,12 @@ context, and team size; dynamic arrival order must not choose the result.
 `G` is a read-only view of the residual graph. `G.n()` is the vertex count,
 including eliminated vertices, and `G.is_active(v)` tells whether `v` is still
 live. `G.for_each_neighbor(v, f)` calls `f(u)` for each live neighbor `u`,
-once per parallel edge, and returns that count; `G.degree(v)` returns the
-count alone. Queries only read the graph, so any threads can query any
-vertices concurrently, including from inside `f`. Each query walks `v`'s stored
-list. The view is valid only for the duration of the partitioner call. Finish
+once per parallel edge, and returns that count. `G.degree(v)` returns the
+count alone. `G.any_neighbor(v, pred)` tells whether `pred(u)` holds for some
+live neighbor and stops at the first hit. Queries only read the graph, so any
+threads can query any vertices concurrently, including from inside a callback.
+`for_each_neighbor` and `degree` walk `v`'s whole stored list. The built-in
+partitioners use this same view. The view is valid only for the duration of the partitioner call. Finish
 all query workers before returning.
 
 Pass a partitioner instance to `factorize`, alone or with an eliminator; it is
