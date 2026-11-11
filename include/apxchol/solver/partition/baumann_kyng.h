@@ -28,14 +28,10 @@ struct baumann_kyng_partitioner {
     double sampling_constant = 0.1;
 
     uint64_t round = 0;
-    /// Average degree the sampling probability is derived from. Left at 0 it is
-    /// seeded on round 0 from 2·m/|active| — correct only on a PRISTINE graph.
-    /// A caller that starts BK partway through an elimination (the residual loop
-    /// in factorization_impl.h) must pre-seed this with a measured average
-    /// instead: `graph::m()` is monotone — it counts every edge ever added and
-    /// is never decremented when elimination prunes one — so 2·m/|active| on a
-    /// half-eliminated graph is inflated by the whole eliminated prefix and
-    /// under-samples round 0 by that factor.
+    /// Average degree the sampling probability is derived from. Left at 0,
+    /// round 0 samples every active vertex and measures it. Sampling everything
+    /// first needed fewer PCG iterations than starting from an estimate on
+    /// graphs with average degree above 10, at the same setup time.
     double   est_avg_degree = 0.0;
     // Scratch for the quantile-cap + degree-aware-priority path (two-pass round).
     std::vector<node_index>                 deg_by_vertex_;   // sampled v -> deg (this round)
@@ -51,18 +47,15 @@ struct baumann_kyng_partitioner {
     /// extra residual-graph traversal.
     size_t selected_degree_work() const { return selected_degree_work_; }
 
-    void find_partition(const partition_graph& view, std::span<const node_index> active,
+    void find_partition(const partition_graph& G, std::span<const node_index> active,
                         const partition_context& ctx, selection& out) {
-        graph& G = partition_graph_access::graph_of(view);
         selected_degree_work_ = 0;
         if (active.empty()) return;
 
         const double c = sampling_constant;
-        // Degree estimate: previous round's sample-based estimate (unbiased),
-        // a caller-supplied seed, or 2·m/n for round 0 on a pristine graph (see
-        // est_avg_degree).  Updated after each round from sampled vertices.
-        if (round == 0 && est_avg_degree <= 0.0)
-            est_avg_degree = 2.0 * G.m() / double(active.size());
+        // Degree estimate: the previous round's sample-based estimate
+        // (unbiased) or a caller-supplied seed. With neither, d_est is 1 and
+        // the round samples every vertex (see est_avg_degree).
         double d_est = std::max(est_avg_degree, 1.0);
         double degree_threshold = ctx.options.degree_multiplier * d_est;
         double p = std::min(1.0 / (c * d_est), 1.0);
@@ -102,7 +95,7 @@ struct baumann_kyng_partitioner {
             for (size_t i = bs; i < be; ++i) {
                 auto v = active[i];
                 if (prio(v) > hash_thresh) continue;
-                node_index deg = G.prune_and_degree(v);
+                node_index deg = G.degree(v);
                 deg_by_vertex_[v] = deg;
                 sample_degree_sum += deg; ++sample_count;
                 my_s.push_back(v);
@@ -142,7 +135,7 @@ struct baumann_kyng_partitioner {
                 if (static_cast<double>(deg_by_vertex_[v]) > degree_threshold) continue;
                 const uint64_t pv = prio2(v);
                 bool ok = true;
-                G.prune_and_visit(v, [&](node_index u) {
+                G.for_each_neighbor(v, [&](node_index u) {
                     if (ok && prio(u) <= hash_thresh && prio2(u) < pv) ok = false;
                 });
                 if (ok) {

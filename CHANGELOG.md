@@ -22,6 +22,8 @@
 - CUDA and Metal solvers can be copied: copies share the device factor and operator, and solve concurrently on their own streams or command queues and workspace.
 
 ### API and CLI changes
+- Custom partitioners can query any graph vertex concurrently and from inside neighbor callbacks. The view remains valid only during the partitioner call.
+- The built-in partitioners select through the same `partition_graph` view that custom partitioners receive. `baumann_kyng` as the main partitioner now samples every vertex in its first round, which changes its factors on graphs with average degree above 10. The Baumann–Kyng continuation of the default and `priority_greedy` partitioners starts the same way, which changes their factors on graphs where that continuation runs.
 - Setup profiles include unlabelled work and agree with `solver::setup_seconds()`. Normal benchmark runs omit optional stage profiling; `--profile` retains the detailed breakdown.
 - Breaking: Eigen types leave the C++ API. `solver`, `factorize` and the one-shot `solve` take a borrowed CSC matrix, `csc_view` (32-bit indices) or `csc_view64` (64-bit), from the new header `apxchol/views.h`; rows must be sorted and unique within each column, and an invalid view throws `std::invalid_argument`. Vectors are `std::span`s and matrices `const_matrix_view` / `matrix_view` (column-major).
 - apxchol no longer depends on Eigen. The installed CMake package, SDK archives, Python wheels, CLI archives and the MATLAB/Octave build neither bundle nor require it, and their notices drop Eigen's MPL-2.0 terms; only the benchmark harness still uses Eigen, for its competitors and input reading.
@@ -72,7 +74,7 @@
 - Breaking: the CMake helpers `apxchol_openmp_runtime()`, `apxchol_configure_core()`, `apxchol_install_core()` and the `APXCHOL_ARCH_FLAG` variable are internal (`_apxchol_*` and `_APXCHOL_ARCH_FLAG`); `find_package(apxchol)` and `apxchol_add_core()` are the supported entry points.
 - Breaking: Python `Solver.L`, `Solver.D` and `Solver.fill_ratio` are removed (use `chol()`, `P` and `factor_nnz`), `Solver.lumped` is renamed `lumped_offdiag`, and `apxchol.DEFAULT_TOL`/`DEFAULT_MAXITER` are no longer public.
 - Breaking: the raw MATLAB/Octave `apxchol_mex` entry point moves to `octave/private/`; use the `apxchol_*` wrappers.
-- Breaking: custom partitioners receive a read-only `apxchol::partition_graph` (`n`, `is_active`, `for_each_neighbor`, `degree`) instead of the mutable graph; `graph`, `make_graph` and `laplacian` move to `apxchol::detail`.
+- Breaking: custom partitioners receive a read-only `apxchol::partition_graph` (`n`, `is_active`, `for_each_neighbor`, `any_neighbor`, `degree`) instead of the mutable graph; `graph`, `make_graph` and `laplacian` move to `apxchol::detail`.
 - Breaking: partitioners no longer declare a `name`, and `partitioner_list.h` with `dispatch_partitioner` is removed; pass a custom partitioner as an instance to `factorize`.
 - Breaking: `factorize(A, eliminator, opts)` no longer takes a partitioner template argument, and now uses the partitioner `opts.experimental.partitioner` names instead of always `block_greedy`; pass an instance to use another partitioner.
 - Breaking: `tree_elimination` moves to `apxchol::detail`; configure the built-in rule through `factor_options`.

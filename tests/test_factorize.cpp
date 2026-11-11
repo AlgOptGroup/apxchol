@@ -1,3 +1,6 @@
+#include <barrier>
+#include <thread>
+#include <stdexcept>
 #include <gtest/gtest.h>
 #include "csc_test_util.h"
 #include "grid_laplacian.h"
@@ -1572,44 +1575,6 @@ TEST(BkResidualLoop, DrivesTheResidualToTheThresholdAndStaysDeterministic) {
     }
 }
 
-// The residual loop constructs a fresh baumann_kyng_partitioner partway through
-// an elimination, where graph::m() is monotone and 2*m/|active| is inflated by
-// every edge the eliminated prefix consumed. BK must honour a caller-supplied
-// est_avg_degree on round 0 rather than recomputing one; this pins that seam,
-// whose only visible effect is which vertices round 0 samples.
-TEST(BaumannKyngSeeding, Round0UsesTheSeedInsteadOfTwoMOverActive) {
-    const auto L = grid_laplacian(30, 30);          // 900 vertices, avg degree < 4
-    apxchol::partition_context ctx{
-        .options = {},
-        .seed = 42,
-        .omp_threshold = 2000,
-       
-        .degrees = {},
-    };
-    std::vector<apxchol::node_index> active(900);
-    std::iota(active.begin(), active.end(), apxchol::node_index{0});
-
-    auto is_size = [&](double seed) {
-        auto G = apxchol::detail::make_graph(apxchol::test::internal_csc(L).ref());
-        apxchol::detail::baumann_kyng_partitioner bk;
-        bk.est_avg_degree = seed;                   // 0 = "work it out yourself"
-        apxchol::selection sel;
-        apxchol::detail::selection_access::reset(sel, G.n());
-        bk.find_partition(partition_view(G), std::span<const apxchol::node_index>(active),
-                          ctx, sel);
-        return apxchol::detail::selection_access::finalize(sel).data.size();
-    };
-
-    // Seeding a huge average degree drives p = 1/(c·d) down, so round 0 samples
-    // almost nothing; the unseeded call measures the real ~4 and samples freely.
-    const auto unseeded = is_size(0.0);
-    const auto inflated = is_size(4000.0);
-    EXPECT_GT(unseeded, 0u);
-    EXPECT_LT(inflated, unseeded)
-        << "round 0 ignored the caller's est_avg_degree seed (unseeded="
-        << unseeded << ", seeded 4000 => " << inflated << ")";
-}
-
 TEST(BaumannKyngWorkHint, MatchesSelectedLiveDegreeSum) {
     const auto L = grid_laplacian(30, 30);
     auto G = apxchol::detail::make_graph(apxchol::test::internal_csc(L).ref());
@@ -1638,6 +1603,23 @@ TEST(BaumannKyngWorkHint, MatchesSelectedLiveDegreeSum) {
     bk.find_partition(partition_view(G), std::span<const apxchol::node_index>{},
                       ctx, selected);
     EXPECT_EQ(bk.selected_degree_work(), 0u);
+}
+
+TEST(PartitionGraphView, QueriesSkipEliminatedNeighborsWithoutPruning) {
+    const auto L = grid_laplacian(5, 5);
+    auto G = apxchol::detail::make_graph(apxchol::test::internal_csc(L).ref());
+    G.set_inactive_unchecked(6);  // a neighbor of 7 on the 5x5 grid
+    G.bulk_decrement_active(1);
+    const auto view = partition_view(G);
+    const auto stored = G.adj_count(7);
+    ASSERT_EQ(stored, 4);
+    std::vector<apxchol::node_index> seen;
+    EXPECT_EQ(view.for_each_neighbor(7, [&](auto u) { seen.push_back(u); }), 3);
+    EXPECT_EQ(view.degree(7), 3);
+    EXPECT_EQ(seen, (std::vector<apxchol::node_index>{2, 8, 12}));  // stored order
+    EXPECT_EQ(G.adj_count(7), stored);  // the view never prunes
+    EXPECT_EQ(G.prune_and_degree(7), 3);
+    EXPECT_EQ(G.adj_count(7), 3);
 }
 
 TEST(EliminationTeamSizing, DenseSmallRoundsUseFineSchedulingChunks) {
@@ -2085,3 +2067,54 @@ TEST(GpuBoundedSelection, ConsumingSolveChecksOriginalOperatorResidual) {
 }
 
 #endif
+
+TEST(PartitionGraphView, QueriesAreReentrantAndMarkRowsForCleanup) {
+    const auto L = grid_laplacian(5, 5);
+    auto G = apxchol::detail::make_graph(apxchol::test::internal_csc(L).ref());
+    std::vector<std::atomic<bool>> touched(G.n());
+    G.set_inactive_unchecked(6);
+    G.bulk_decrement_active(1);
+    const auto view = apxchol::detail::partition_graph_access::deferred_view(G, touched.data());
+    EXPECT_FALSE(touched[7].load());
+    EXPECT_THROW(view.for_each_neighbor(7, [](auto) { throw std::runtime_error("visitor"); }),
+                 std::runtime_error);
+    EXPECT_TRUE(touched[7].load());
+    EXPECT_EQ(view.degree(7), 3);
+    apxchol::node_index calls = 0;
+    EXPECT_EQ(view.for_each_neighbor(7, [&](auto) { ++calls; return false; }), 3);
+    EXPECT_EQ(calls, 3); // bool results keep their existing ignored semantics.
+    touched[7].store(false);
+    std::vector<apxchol::node_index> first_two;
+    EXPECT_TRUE(view.any_neighbor(7, [&](auto u) {
+        first_two.push_back(u);
+        return first_two.size() == 2;
+    }));
+    EXPECT_TRUE(touched[7].load());
+    EXPECT_FALSE(view.any_neighbor(7, [](auto u) { return u == 6; }));  // 6 is eliminated
+    std::vector<apxchol::node_index> expected;
+    view.for_each_neighbor(7, [&](auto u) { expected.push_back(u); });
+    // any_neighbor stops at the first hit, in for_each_neighbor's order.
+    EXPECT_EQ(first_two, std::vector<apxchol::node_index>(expected.begin(), expected.begin() + 2));
+    std::barrier start(4);
+    std::array<std::thread, 4> threads;
+    std::atomic<bool> correct{true};
+    for (int t = 0; t < 4; ++t) threads[t] = std::thread([&, t] {
+        start.arrive_and_wait();
+        for (int r = 0; r < 100; ++r) {
+            const apxchol::node_index v = 7 + (t % 2);
+            const auto degree = view.degree(v);
+            std::vector<apxchol::node_index> order;
+            view.for_each_neighbor(v, [&](auto u) {
+                if (view.degree(v) != degree || view.degree(u) < 1) correct = false;
+                order.push_back(u);
+            });
+            if (order.size() != degree || (v == 7 && order != expected)) correct = false;
+        }
+    });
+    for (auto& thread : threads) thread.join();
+    EXPECT_TRUE(correct.load());
+    EXPECT_EQ(G.adj_count(7), 4);  // queries never change a list
+    G.set_inactive_unchecked(8);
+    G.bulk_decrement_active(1);
+    EXPECT_EQ(view.degree(7), 2);
+}

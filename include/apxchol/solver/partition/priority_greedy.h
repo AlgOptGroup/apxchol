@@ -25,7 +25,7 @@ struct priority_greedy_partitioner {
 
     void find_partition(const partition_graph& G, std::span<const node_index> candidates,
                         const partition_context& ctx, selection& out) {
-        select_into_chosen_k0(partition_graph_access::graph_of(G), candidates, out, ctx);
+        select_into_chosen_k0(G, candidates, out, ctx);
         ++round;
     }
 
@@ -37,7 +37,7 @@ private:
     std::vector<char>       pick_;     // pass-1 output (separate buffer; avoids the
                                        // read/write race on status_ within a pass)
 
-    void select_into_chosen_k0(const graph& G,
+    void select_into_chosen_k0(const partition_graph& G,
                                std::span<const node_index> candidates,
                                selection& out,
                                const partition_context& ctx) {
@@ -77,15 +77,10 @@ private:
             #pragma omp parallel for schedule(static) if(cand_.size() > ctx.omp_threshold)
             for (size_t i = 0; i < cand_.size(); ++i) {
                 auto v = cand_[i];
-                bool lmin = true;
-                for (auto idx : G.adj(v)) {
-                    auto u = idx.to;
-                    if (G.is_active(u) && status_[u] == 0 && precedes(u, v)) {
-                        lmin = false;
-                        break;
-                    }
-                }
-                pick_[v] = lmin ? 1 : 0;
+                const bool beaten = G.any_neighbor(v, [&](node_index u) {
+                    return status_[u] == 0 && precedes(u, v);
+                });
+                pick_[v] = beaten ? 0 : 1;
             }
             // Pass 2: picks are mutually non-adjacent and cannot neighbor a pick
             // from an earlier pass, which already excluded its neighbors. Only
@@ -96,11 +91,10 @@ private:
                 auto v = cand_[i];
                 if (!pick_[v]) continue;
                 status_[v] = 1;
-                for (auto idx : G.adj(v)) {
-                    auto u = idx.to;
-                    if (u != v && G.is_active(u))
+                G.for_each_neighbor(v, [&](node_index u) {
+                    if (u != v)
                         std::atomic_ref<char>(status_[u]).store(2, std::memory_order_relaxed);
-                }
+                });
             }
             // Compact the working list to the still-undecided survivors.
             size_t w = 0;
@@ -118,10 +112,9 @@ private:
             for (auto v : cand_) {
                 if (status_[v] != 0) continue;
                 status_[v] = 1;
-                for (auto idx : G.adj(v)) {
-                    const auto u = idx.to;
-                    if (G.is_active(u) && status_[u] == 0) status_[u] = 2;
-                }
+                G.for_each_neighbor(v, [&](node_index u) {
+                    if (status_[u] == 0) status_[u] = 2;
+                });
             }
         }
 

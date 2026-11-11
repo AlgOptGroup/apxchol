@@ -24,10 +24,10 @@
 ///     the eligible vertex list. ctx.degrees[v] is exact after pruning or a
 ///     cache update, and may be conservative during audited prune skipping.
 ///     The scan rules (block_greedy, priority_greedy) use this.
-///   * false — no O(active + edges) pre-pass runs: `candidates` is the raw
-///     active list (ascending original-index order) and ctx.degrees is
-///     empty. baumann_kyng works this way — it estimates degrees from its
-///     hash sample and applies the cap to that estimate.
+///   * false — no degree pre-pass runs: `candidates` is the raw active list
+///     (ascending original-index order) and ctx.degrees is empty.
+///     baumann_kyng works this way — it estimates degrees from its hash
+///     sample and applies the cap to that estimate.
 ///
 /// Degrees are indexed by vertex ID so rules can compare neighboring vertices.
 /// Incidence-list sizes may include eliminated neighbors. The orchestrator
@@ -102,6 +102,7 @@
 #include "apxchol/solver/factor_options.h"
 #include "apxchol/solver/partition.h"
 #include <limits>
+#include <atomic>
 #include <type_traits>
 #include <span>
 #include <utility>
@@ -125,23 +126,36 @@ public:
     /// True while v has not been eliminated.
     bool is_active(node_index v) const { return g_->is_active(v); }
     /// Calls f(u) for each live neighbor u of v, repeating u once per
-    /// parallel edge, and returns that count. The call drops v's stored
-    /// incidences of eliminated vertices, so concurrent calls need distinct v,
-    /// and f must not query v itself.
+    /// parallel edge, in stored order, and returns that count. Queries only
+    /// read the graph: any threads may query any vertices concurrently,
+    /// including from f. The call walks v's whole stored list.
     template<typename F>
     node_index for_each_neighbor(node_index v, F&& f) const {
-        return g_->prune_and_visit(v, std::forward<F>(f));
+        if (touched_) touched_[v].store(true, std::memory_order_relaxed);
+        return g_->visit_live(v, std::forward<F>(f));
     }
-    /// Live degree of v: the count for_each_neighbor returns, with the same
-    /// concurrency rule.
-    node_index degree(node_index v) const { return g_->prune_and_degree(v); }
+    /// True if pred(u) holds for some live neighbor u of v. Visits neighbors
+    /// in stored order and stops at the first hit, so it can cost less than
+    /// for_each_neighbor. Same concurrency rules.
+    template<typename Pred>
+    bool any_neighbor(node_index v, Pred&& pred) const {
+        if (touched_) touched_[v].store(true, std::memory_order_relaxed);
+        return g_->any_live(v, std::forward<Pred>(pred));
+    }
+    /// Live degree of v: the count for_each_neighbor returns, at the same cost.
+    node_index degree(node_index v) const {
+        return for_each_neighbor(v, [](node_index) {});
+    }
 
 private:
     friend struct detail::partition_graph_access;
-    explicit partition_graph(detail::graph& g) : g_(&g) {}
-    // Visiting drops incidences of eliminated vertices from v's list, which
-    // leaves the represented graph unchanged.
+    explicit partition_graph(detail::graph& g,
+                             std::atomic<bool>* touched = nullptr)
+        : g_(&g), touched_(touched) {}
+    // A set flag asks the orchestrator to drop v's dead incidences after
+    // the selection; it is only a hint.
     detail::graph* g_;
+    std::atomic<bool>* touched_;
 };
 
 /// Read-only services the orchestrator hands to a partitioner call.
@@ -219,10 +233,12 @@ struct selection_access {
     static const partition_result& finalize(selection& s) { return s.finalize(); }
 };
 
-/// Orchestrator and built-in side of `partition_graph`.
+/// Orchestrator side of `partition_graph`: the built-in rules get the same view.
 struct partition_graph_access {
     static partition_graph view(graph& g) { return partition_graph(g); }
-    static graph& graph_of(const partition_graph& G) { return *G.g_; }
+    static partition_graph deferred_view(graph& g, std::atomic<bool>* touched) {
+        return partition_graph(g, touched);
+    }
 };
 
 // ── Trait queries (with defaults) ──
