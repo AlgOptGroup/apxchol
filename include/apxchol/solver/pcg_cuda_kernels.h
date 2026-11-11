@@ -6,7 +6,8 @@
 
 // CUDA launch boundary for the common PCG kernels. Both operator storage
 // precisions accumulate in FP64. Reductions use a fixed grid and tree, without
-// floating-point atomics; launch geometry depends only on the input size.
+// floating-point atomics; launch geometry depends only on the input size and
+// the panel width.
 namespace apxchol::detail::cuda_pcg_kernels {
 
 using solve_state = detail::gpu_pcg::solve_state<double, double>;
@@ -46,8 +47,8 @@ bool try_build_permuted_operator_csr(
 inline constexpr int kBlockThreads = 256;
 inline constexpr int kMaxBlocks    = 2048;
 
-/// The fixed grid for `units` work items (n elements of a vector kernel, n *
-/// LANES for the SpMV): min(ceil(units / kBlockThreads), kMaxBlocks), at
+/// The fixed grid for `units` work items (n * Columns panel elements of a
+/// vector kernel, n * LANES for the SpMV): min(ceil(units / kBlockThreads), kMaxBlocks), at
 /// least 1. A pure function of its argument -- this is what makes the
 /// per-block partials, and hence every reduction, deterministic.
 inline int pcg_blocks(std::int64_t units) {
@@ -69,7 +70,8 @@ void initialize(cudaStream_t stream, std::int64_t n, workspace vectors,
                 std::array<double, Columns> scales);
 
 // Launch one shared vector operation; only multiply reads the operator.
-// Partials use pcg_blocks(n * lanes) for multiply, pcg_blocks(n) otherwise.
+// Partials use pcg_blocks(n * lanes) for multiply and pcg_blocks(n * Columns)
+// otherwise, where the vector kernels run one thread per panel element.
 template<unsigned Columns = 1>
 void step(cudaStream_t stream, detail::gpu_pcg::operation op, std::int64_t n,
           workspace vectors, const operator_csr& matrix, int lanes);
