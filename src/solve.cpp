@@ -736,7 +736,13 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
             (void)panel_spmv<C>(op_->Lrm, x, Ap, part);
     }
     panel_init_residual<C>(r, b, any_warm ? Ap : nullptr, n, part, rr, rs);
-    if (!any_warm) std::fill_n(x, n * C, 0.0);
+    if (!any_warm) {
+        // The split the update loops use, so their threads touch x's pages first.
+        const int workers = detail::cpu_solve_threads(n);
+#pragma omp parallel for schedule(static) if (workers > 1) num_threads(workers)
+        for (std::int64_t i = 0; i < n; i++)
+            for (int c = 0; c < C; c++) x[i * C + c] = 0.0;
+    }
     for (int c = 0; c < C; c++)
         norm[c] = warm[c] ? std::sqrt(vec::squared_norm(column(b, c))) : std::sqrt(rr[c]);
     // Only exceptional columns need scaling; ordinary panels reuse their workspace.
@@ -812,12 +818,10 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
     }
     apply_count_ = 0;
     rz = apply_fused<C>(r, rs, z, timings);
-    if constexpr (C == 1) {
+    {
         // The split panel_update_p uses, so its threads touch p's pages first.
         const int workers = detail::cpu_solve_threads(n);
 #pragma omp parallel for schedule(static) if (workers > 1) num_threads(workers)
-        for (std::int64_t i = 0; i < n; i++) p[i] = z[i];
-    } else {
         for (std::int64_t i = 0; i < n; i++)
             for (int c = 0; c < C; c++)
                 p[i * C + c] = active[c] ? z[i * C + c] : 0;
