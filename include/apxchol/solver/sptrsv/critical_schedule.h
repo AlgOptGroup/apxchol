@@ -304,10 +304,44 @@ inline critical_schedule_plan flatten_critical_schedule(
     return out;
 }
 
+// First row of the terminal run: the longest suffix of rows that share the
+// (processor, step) slot of the last row. One lane executes it in row order
+// while, typically, every other lane has nothing left, and on hub-heavy
+// factors it holds a large share of the forward tail (long rows whose columns
+// are mostly earlier rows). Being a suffix, it depends only on earlier rows
+// and on itself, so a caller may take it out of the lanes and run it after
+// them. Returns `rows` for an empty range.
+inline node_index critical_terminal_run(
+        const critical_assignments& schedule, node_index rows,
+        node_index first_row = 0) {
+    if (rows == first_row) return rows;
+    node_index begin = rows - 1;
+    const unsigned processor = schedule.processor[begin - first_row];
+    const std::size_t step = schedule.step[begin - first_row];
+    while (begin > first_row &&
+           schedule.processor[begin - 1 - first_row] == processor &&
+           schedule.step[begin - 1 - first_row] == step)
+        --begin;
+    return begin;
+}
+
+// Supersteps used by rows [first_row, rows_end) alone. Assignment visits rows
+// in order, so dropping a suffix leaves the earlier rows' slots unchanged.
+inline std::size_t critical_steps_before(
+        const critical_assignments& schedule, node_index rows_end,
+        node_index first_row = 0) {
+    std::size_t steps = 0;
+    for (node_index v = first_row; v < rows_end; ++v)
+        steps = std::max(steps, schedule.step[v - first_row] + 1);
+    return steps;
+}
+
+// With `terminal_run_begin`, the plan covers [first_row, *terminal_run_begin)
+// and the caller executes the terminal run [*terminal_run_begin, rows) itself.
 inline critical_schedule_plan build_critical_schedule(
         node_index rows, const edge_index* csr_ptr,
         const node_index* csr_idx, unsigned processors,
-        node_index first_row = 0) {
+        node_index first_row = 0, node_index* terminal_run_begin = nullptr) {
     auto assignments =
         assign_critical_schedule(rows, csr_ptr, csr_idx, processors, first_row);
 #ifndef NDEBUG
@@ -315,7 +349,14 @@ inline critical_schedule_plan build_critical_schedule(
             assignments, rows, csr_ptr, csr_idx, first_row))
         throw std::logic_error("critical SpTRSV schedule violates a dependency");
 #endif
-    return flatten_critical_schedule(assignments, rows, processors, first_row);
+    node_index rows_end = rows;
+    if (terminal_run_begin) {
+        rows_end = critical_terminal_run(assignments, rows, first_row);
+        *terminal_run_begin = rows_end;
+        assignments.steps =
+            critical_steps_before(assignments, rows_end, first_row);
+    }
+    return flatten_critical_schedule(assignments, rows_end, processors, first_row);
 }
 
 }  // namespace apxchol::detail

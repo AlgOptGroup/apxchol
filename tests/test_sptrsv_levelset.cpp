@@ -23,6 +23,7 @@
 #include <cstring>
 #include <random>
 #include <string>
+#include <utility>
 #include <vector>
 #include <omp.h>
 
@@ -169,6 +170,15 @@ pair_out solve_pair(apxchol::detail::omp_sptrsv& t, const std::vector<double>& x
     t.transpose_solve(o.w.data(), o.w.data());
     return o;
 }
+// Tail steps of the hybrid schedule: the supersteps of the lanes, which cover
+// the tail up to the terminal run, plus the terminal run itself.
+std::size_t hybrid_tail_steps(const apxchol::detail::critical_assignments& assignment,
+                              node_index rows, node_index first_tail_row) {
+    const node_index terminal =
+        apxchol::detail::critical_terminal_run(assignment, rows, first_tail_row);
+    return apxchol::detail::critical_steps_before(assignment, terminal, first_tail_row) + 1;
+}
+
 // setup() records a four-lane critical plan. Entering solve from an outer team
 // while max_active_levels==1 forces its explicitly requested inner team to one
 // lane, exercising the real team-mismatch fallback instead of merely changing
@@ -509,8 +519,9 @@ TEST(CriticalSchedule, HybridRunsFatPrefixAndCriticalThinTailByteIdentically) {
         hybrid.csr_col_idx().data(), first_tail_row));
     EXPECT_EQ(levels.num_barriers(true), 5u);
     EXPECT_EQ(levels.num_barriers(false), 5u);
-    EXPECT_EQ(hybrid.num_barriers(true), assignment.steps + 4);
-    EXPECT_EQ(hybrid.num_barriers(false), assignment.steps + 4);
+    const std::size_t tail_steps = hybrid_tail_steps(assignment, L.rows(), first_tail_row);
+    EXPECT_EQ(hybrid.num_barriers(true), tail_steps + 4);
+    EXPECT_EQ(hybrid.num_barriers(false), tail_steps + 4);
     const pair_out reference = solve_pair(levels, x);
     expect_same_bytes(reference, solve_pair(hybrid, x), "hybrid vs levels");
     for (int threads : {1, 2, 4}) {
@@ -524,6 +535,112 @@ TEST(CriticalSchedule, HybridRunsFatPrefixAndCriticalThinTailByteIdentically) {
     expect_same_bytes(reference,
                       solve_pair_with_forced_team_mismatch(hybrid, x),
                       "hybrid after forced runtime team mismatch");
+}
+
+// Panel solves sum the ready prefix of every tail row ahead of the row's own
+// phase and resume the sum there. The tail here has both kinds of row: lane
+// rows over bulk and earlier tail columns, and a terminal run whose rows
+// gather bulk columns, lane rows and their predecessors in the run.
+TEST(CriticalSchedule, HybridPanelsSumReadyPrefixesAhead) {
+    const int saved_threads = omp_get_max_threads();
+    const node_index fat_rounds = 3, fat_width = 4096, tail_rows = 900, run_rows = 300;
+    std::vector<node_index> bounds(static_cast<std::size_t>(fat_rounds) + 1);
+    for (node_index r = 0; r <= fat_rounds; ++r) bounds[r] = r * fat_width;
+    const node_index first_tail_row = bounds.back();
+    for (node_index i = 0; i < tail_rows; ++i) bounds.push_back(first_tail_row + i + 1);
+    const node_index m = bounds.back();
+    std::mt19937 rng(571);
+    std::uniform_int_distribution<int> ulen(0, 24);
+    std::vector<std::vector<node_index>> col_rows(m);
+    for (node_index j = 0; j < m; ++j) col_rows[j].push_back(j);
+    const auto add = [&](node_index col, node_index row) {
+        if (col_rows[col].back() != row) col_rows[col].push_back(row);   // rows arrive ascending
+    };
+    for (node_index r = 1; r < fat_rounds; ++r) {
+        std::uniform_int_distribution<node_index> ucol(0, bounds[r] - 1);
+        for (node_index i = bounds[r]; i < bounds[r + 1]; ++i)
+            for (int t = ulen(rng); t > 0; --t) add(ucol(rng), i);
+    }
+    for (node_index i = first_tail_row; i < m; ++i) {
+        std::uniform_int_distribution<node_index> bulk(0, first_tail_row - 1);
+        for (int t = ulen(rng) + 4; t > 0; --t) add(bulk(rng), i);
+        if (i > first_tail_row) {
+            std::uniform_int_distribution<node_index> tail(first_tail_row, i - 1);
+            for (int t = ulen(rng) / 4; t > 0; --t) add(tail(rng), i);
+        }
+        if (i >= m - run_rows)
+            for (node_index back = 1; back <= 3; ++back) add(i - back, i);
+    }
+    for (auto& rows : col_rows) {
+        std::sort(rows.begin() + 1, rows.end());
+        rows.erase(std::unique(rows.begin() + 1, rows.end()), rows.end());
+    }
+    const sparse_csc L = from_cols(m, col_rows, rng);
+
+    for (const bool fp16 : {false, true}) {
+        if (fp16 && !apxchol::detail::omp_sptrsv::fp16_supported()) continue;
+        SCOPED_TRACE(fp16 ? "float16" : "float32");
+        apxchol::factor_options options{.drop_tolerance = 0};
+        options.factor_storage = fp16
+            ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32;
+        set_threads(4);
+        apxchol::detail::omp_sptrsv levels, hybrid;
+        options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::levels;
+        levels.set_round_bounds(bounds);
+        levels.setup(L, m, options);
+        options.experimental.cpu_schedule = apxchol::cpu_sptrsv_schedule::automatic;
+        hybrid.set_round_bounds(bounds);
+        hybrid.setup(L, m, options);
+        ASSERT_TRUE(hybrid.uses_hybrid_schedule());
+        const auto assignment = apxchol::detail::assign_critical_schedule(
+            m, hybrid.csr_row_ptr().data(), hybrid.csr_col_idx().data(), 4, first_tail_row);
+        const node_index terminal =
+            apxchol::detail::critical_terminal_run(assignment, m, first_tail_row);
+        ASSERT_LT(terminal, m - 16);   // a real run, not just the last row
+        ASSERT_GT(terminal, first_tail_row);
+
+        const auto solve_panel = [&]<int Columns>(apxchol::detail::omp_sptrsv& t) {
+            std::mt19937 values(572);
+            std::uniform_real_distribution<double> ux(-1.0, 1.0);
+            std::vector<double> x(static_cast<std::size_t>(m) * Columns);
+            for (auto& v : x) v = ux(values);
+            pair_out o;
+            o.y.resize(x.size()); o.z.resize(x.size()); o.w = x;
+            t.template forward_solve<Columns>(x.data(), o.y.data());
+            t.template transpose_solve<Columns>(o.y.data(), o.z.data());
+            t.template forward_solve<Columns>(o.w.data(), o.w.data());
+            t.template transpose_solve<Columns>(o.w.data(), o.w.data());
+            return o;
+        };
+        // The split must not change what a row adds or in which order, but
+        // the compiler may contract the multiply-adds of differently shaped
+        // loops differently, so against the serial level-set reference the
+        // comparison is to roundoff. Repeated hybrid solves must agree to
+        // the byte: a row that read an unfinished value would not.
+        const auto check = [&]<int Columns>() {
+            set_threads(1);
+            const pair_out reference = solve_panel.template operator()<Columns>(levels);
+            set_threads(4);
+            const pair_out first = solve_panel.template operator()<Columns>(hybrid);
+            for (const auto& [got, want] : {std::pair{&first.y, &reference.y},
+                                            std::pair{&first.z, &reference.z},
+                                            std::pair{&first.w, &reference.w}}) {
+                double scale = 0, error = 0;
+                for (std::size_t i = 0; i < want->size(); ++i) {
+                    scale = std::max(scale, std::fabs((*want)[i]));
+                    error = std::max(error, std::fabs((*got)[i] - (*want)[i]));
+                }
+                EXPECT_LE(error, 1e-11 * scale) << "width " << Columns << " error " << error << " scale " << scale;
+            }
+            for (int repeat = 0; repeat < 3; ++repeat)
+                expect_same_bytes(first, solve_panel.template operator()<Columns>(hybrid),
+                                  "repeated panel hybrid solve");
+        };
+        check.template operator()<8>();
+        check.template operator()<4>();   // a narrower panel reuses the wider one's workspace
+        check.template operator()<2>();
+    }
+    set_threads(saved_threads);
 }
 
 TEST(CriticalSchedule, HybridPreservesFp16Arithmetic) {
@@ -609,7 +726,7 @@ TEST(CriticalSchedule, HybridLimitsArePureLevelsAndPureCritical) {
         EXPECT_EQ(levels.num_barriers(true), 1u);
         const auto assignment = apxchol::detail::assign_critical_schedule(
             L.rows(), hybrid.csr_row_ptr().data(), hybrid.csr_col_idx().data(), 4, 0);
-        EXPECT_EQ(hybrid.num_barriers(true), assignment.steps);
+        EXPECT_EQ(hybrid.num_barriers(true), hybrid_tail_steps(assignment, L.rows(), 0));
         expect_same_bytes(solve_pair(levels, x), solve_pair(hybrid, x),
                           "all-thin hybrid limit");
     }
@@ -736,7 +853,8 @@ TEST(CriticalSchedule, HybridGroupsInteriorThinRounds) {
         L.rows(), hybrid.csr_row_ptr().data(), hybrid.csr_col_idx().data(), 4, bounds[5]);
     for (const bool forward : {true, false}) {
         EXPECT_EQ(levels.num_barriers(forward), 4u);
-        EXPECT_EQ(hybrid.num_barriers(forward), assignment.steps + 3);
+        EXPECT_EQ(hybrid.num_barriers(forward),
+                  hybrid_tail_steps(assignment, L.rows(), bounds[5]) + 3);
     }
     set_threads(1);
     const pair_out reference = solve_pair(levels, x);
