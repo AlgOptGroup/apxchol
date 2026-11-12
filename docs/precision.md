@@ -10,7 +10,7 @@ the outer iteration each have their own precision.
 | CPU triangular solves | FP32 storage by default; optional scaled FP16 off-diagonals | FP16 requires efficient conversion; CPU arithmetic remains FP64 |
 | CUDA triangular solves | Scaled FP16 off-diagonals by default; FP32 alternative | Reduced value traffic; GPU triangular-solve arithmetic is FP32 |
 | FP16 scales and diagonals | FP32 | Retain scale range and diagonal quality |
-| Outer CPU/CUDA PCG | FP64 vectors and reductions | Preserve the original-system iteration and residual accuracy |
+| Outer CPU/CUDA PCG | FP64 vectors and reductions; CUDA keeps the preconditioned residual in the FP32 its triangular solve produces | Preserve the original-system iteration and residual accuracy; widening that vector would not change a value |
 | Metal triangular solves | FP32 storage by default; optional scaled FP16 | Shared CUDA/Metal dataflow worker; FP32 arithmetic |
 | Metal PCG | Mixed FP32 and double-float; host FP64 exit residual | Metal has no native FP64 arithmetic; see below |
 

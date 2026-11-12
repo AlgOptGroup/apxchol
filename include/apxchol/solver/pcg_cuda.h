@@ -263,9 +263,13 @@ private:
         APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(vectors_.state, h_state_, Columns * sizeof(*vectors_.state), cudaMemcpyHostToDevice, stream_));
         // Width changes reinterpret the reused storage; clear every grounded
         // coordinate on entry rather than inheriting a prior width's contents.
+        constexpr bool narrow = iteration<Precond, Columns>::narrow_z;
+        use_preconditioned(narrow);
         if (laplacian && n_) {
-            APXCHOL_PCG_CUDA_CHECK(cudaMemsetAsync(vectors_.z + (n_ - 1) * Columns, 0, Columns * sizeof(double), stream_));
-            APXCHOL_PCG_CUDA_CHECK(cudaMemsetAsync(vectors_.preconditioned + (n_ - 1) * Columns, 0, Columns * sizeof(float), stream_));
+            if (narrow)
+                APXCHOL_PCG_CUDA_CHECK(cudaMemsetAsync(vectors_.preconditioned + (n_ - 1) * Columns, 0, Columns * sizeof(float), stream_));
+            else
+                APXCHOL_PCG_CUDA_CHECK(cudaMemsetAsync(vectors_.z + (n_ - 1) * Columns, 0, Columns * sizeof(double), stream_));
         }
         iteration<Precond, Columns> commands{*this, precond, bnorm};
         buffer<double> warm;
@@ -342,9 +346,7 @@ private:
             cuda_pcg_kernels::finalize<Columns>(s.stream_, s.vectors_.partial, blocks, s.vectors_.state, mode, it, bnorm);
         }
         void step(detail::gpu_pcg::operation op) const {
-            auto vectors = s.vectors_;
-            if constexpr (!narrow_z) vectors.preconditioned = nullptr;
-            cuda_pcg_kernels::step<Columns>(s.stream_, op, s.n_, vectors, s.op_->matrix, s.spmv_lanes_);
+            cuda_pcg_kernels::step<Columns>(s.stream_, op, s.n_, s.vectors_, s.op_->matrix, s.spmv_lanes_);
         }
         template<class Record>
         bool submit(bool, Record&& record) const {
@@ -370,9 +372,13 @@ private:
         cuda_pcg_kernels::workspace next{};
         cuda_pcg_kernels::solve_state* next_host = nullptr;
         try {
-            for (double** pointer : {&next.x, &next.r, &next.p, &next.z, &next.ap, &next.rhs})
+            for (double** pointer : {&next.x, &next.r, &next.p, &next.ap, &next.rhs})
                 APXCHOL_PCG_CUDA_CHECK(cudaMalloc(pointer, columns * n_ * sizeof(double)));
-            APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.preconditioned, columns * n_ * sizeof(float)));
+            // One preconditioned-residual vector, in the precision in use.
+            if (narrow_)
+                APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.preconditioned, columns * n_ * sizeof(float)));
+            else
+                APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.z, columns * n_ * sizeof(double)));
             APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.partial, columns * cuda_pcg_kernels::kMaxBlocks * sizeof(double)));
             APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.state, columns * sizeof(cuda_pcg_kernels::solve_state)));
             APXCHOL_PCG_CUDA_CHECK(cudaHostAlloc(reinterpret_cast<void**>(&next_host),
@@ -387,6 +393,27 @@ private:
         vectors_ = next;
         h_state_ = next_host;
         capacity_ = columns;
+    }
+
+    // Keeps the preconditioned residual in FP32 when the triangular solve
+    // leaves its result unwidened, and in FP64 otherwise. A workspace is
+    // reserved in FP64 until the first solve, so switching to FP32 frees
+    // memory first and cannot run short of what was reserved.
+    void use_preconditioned(bool narrow) {
+        if (narrow == narrow_ && (narrow ? vectors_.preconditioned != nullptr : vectors_.z != nullptr)) return;
+        if (narrow) {
+            (void)cudaFree(vectors_.z);
+            vectors_.z = nullptr;
+            narrow_ = true;
+            APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&vectors_.preconditioned, capacity_ * n_ * sizeof(float)));
+        } else {
+            double* wide = nullptr;
+            APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&wide, capacity_ * n_ * sizeof(double)));
+            (void)cudaFree(vectors_.preconditioned);
+            vectors_.preconditioned = nullptr;
+            vectors_.z = wide;
+            narrow_ = false;
+        }
     }
 
     void destroy() noexcept {
@@ -424,6 +451,7 @@ private:
     int device_ = -1;
     bool ready_ = false;
     unsigned capacity_ = 0;
+    bool narrow_ = false; // The workspace holds the FP32 preconditioned residual.
     std::shared_ptr<const operator_storage> op_;
     // Per-copy: the solve stream, vectors and host-visible exit state.
     cudaStream_t stream_ = nullptr;
