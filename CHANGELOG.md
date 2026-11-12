@@ -7,6 +7,7 @@
 - Faster setup: one AoS graph throughout factorization, incremental degrees, and parallel residual sparsification.
 - Inputs are validated by operator class; nearly-SDDM inputs are repaired by M-matrix lumping.
 - Batched solves take any number of right-hand sides on CPU, CUDA and Metal, processed in panels of up to eight columns on CPU, 32 on CUDA and four on Metal.
+- CPU batched solves place the solution and direction panels on the memory of the threads that update them. On a 128-core EPYC 7742 node, solving 32 right-hand sides on 5- and 7-point grids of 3 to 4 million rows takes 20 to 23% less time with 16 threads on four memory domains and 40 to 51% less with all cores. Runs confined to one memory domain are unchanged.
 - `apxchol::solver` owns a reusable factorization for repeated solves and can be saved to and loaded from portable archives.
 - Any 1.x release reads the solver archives written by earlier 1.x releases. A minor release may add a format version and keeps reading older ones; an older apxchol given a newer archive fails with an upgrade message.
 
