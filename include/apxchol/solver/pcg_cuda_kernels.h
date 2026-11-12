@@ -13,6 +13,9 @@ namespace apxchol::detail::cuda_pcg_kernels {
 using solve_state = detail::gpu_pcg::solve_state<double, double>;
 struct workspace : detail::gpu_pcg::workspace<double, double> {
     double* rhs = nullptr;
+    // The preconditioned residual as the FP32 triangular solve produced it.
+    // When it is nullptr the dot and direction steps read the FP64 vector z.
+    float* preconditioned = nullptr;
 };
 enum exit_flag : unsigned {
     kVerifySolution = 1, kSolutionOverflow = 2, kSolutionUnderflow = 4

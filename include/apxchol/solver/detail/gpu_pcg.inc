@@ -83,8 +83,10 @@ APXCHOL_GPU_FUNCTION bool any_active(APXCHOL_GPU_BUFFER(const State) state) {
 // RHS entries are adjacent; the factor/operator traversal is shared while
 // each column keeps its own recurrence state and reduction order.
 // row_map maps stored operator rows to vector rows during multiplication.
-template<int Lanes, unsigned Columns, class Math, class Index, class Entry, class Offset>
-APXCHOL_GPU_FUNCTION column_sums<typename Math::wide, Columns> step_columns(
+// Multiplication handles the columns [First, First + Group) of the panel, so
+// a caller can cover a wide panel in several narrower passes.
+template<int Lanes, unsigned Columns, unsigned Group, unsigned First, class Math, class Index, class Entry, class Offset>
+APXCHOL_GPU_FUNCTION column_sums<typename Math::wide, Columns> step_columns_group(
     operation op, Math math, workspace<typename Math::wide, typename Math::scalar> v,
     APXCHOL_GPU_BUFFER(const Offset) ptr, APXCHOL_GPU_BUFFER(const Offset) col,
     APXCHOL_GPU_BUFFER(const Entry) hi, APXCHOL_GPU_BUFFER(const Entry) lo,
@@ -102,12 +104,12 @@ APXCHOL_GPU_FUNCTION column_sums<typename Math::wide, Columns> step_columns(
                 const auto end = ptr[row + 1];
                 for (; e < end; e += Lanes) {
                     const auto position = col[e] * Columns;
-                    for (unsigned q = 0; q < Columns; ++q)
+                    for (unsigned q = First; q < First + Group; ++q)
                         if (v.state[q].active)
                             sum[q] = math.add_entry(sum[q], hi, lo, e, v.p[position + q]);
                 }
             }
-            for (unsigned q = 0; q < Columns; ++q) {
+            for (unsigned q = First; q < First + Group; ++q) {
                 sum[q] = math.sum_row(sum[q]);
                 if (row < work.limit && lane == 0 && v.state[q].active) {
                     const auto output = (row_map ? row_map[row] : row) * Columns + q;
@@ -135,6 +137,15 @@ APXCHOL_GPU_FUNCTION column_sums<typename Math::wide, Columns> step_columns(
         }
     }
     return total;
+}
+
+template<int Lanes, unsigned Columns, class Math, class Index, class Entry, class Offset>
+APXCHOL_GPU_FUNCTION column_sums<typename Math::wide, Columns> step_columns(
+    operation op, Math math, workspace<typename Math::wide, typename Math::scalar> v,
+    APXCHOL_GPU_BUFFER(const Offset) ptr, APXCHOL_GPU_BUFFER(const Offset) col,
+    APXCHOL_GPU_BUFFER(const Entry) hi, APXCHOL_GPU_BUFFER(const Entry) lo,
+    pcg_work<Index> work, unsigned lane, APXCHOL_GPU_BUFFER(const Offset) row_map = nullptr) {
+    return step_columns_group<Lanes, Columns, Columns, 0>(op, math, v, ptr, col, hi, lo, work, lane, row_map);
 }
 
 template<unsigned Columns, class Math, class Index>

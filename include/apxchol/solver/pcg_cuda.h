@@ -263,8 +263,10 @@ private:
         APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(vectors_.state, h_state_, Columns * sizeof(*vectors_.state), cudaMemcpyHostToDevice, stream_));
         // Width changes reinterpret the reused storage; clear every grounded
         // coordinate on entry rather than inheriting a prior width's contents.
-        if (laplacian && n_)
+        if (laplacian && n_) {
             APXCHOL_PCG_CUDA_CHECK(cudaMemsetAsync(vectors_.z + (n_ - 1) * Columns, 0, Columns * sizeof(double), stream_));
+            APXCHOL_PCG_CUDA_CHECK(cudaMemsetAsync(vectors_.preconditioned + (n_ - 1) * Columns, 0, Columns * sizeof(float), stream_));
+        }
         iteration<Precond, Columns> commands{*this, precond, bnorm};
         buffer<double> warm;
         if (any_warm) {
@@ -317,11 +319,21 @@ private:
         cuda_pcg& s;
         const Precond& precond;
         std::array<double, Columns> bnorm;
+        // The triangular solve leaves its FP32 result unwidened when it can.
+        static constexpr bool narrow_z = requires(const Precond& m, const double* input, float* output,
+                                                  const unsigned* active, cudaStream_t stream) {
+            m.trsv().template solve_LLt_dev_narrow<Columns>(input, output, active, 1u, stream);
+        };
         void precondition() const {
             static_assert(sizeof(cuda_pcg_kernels::solve_state) % sizeof(unsigned) == 0);
-            precond.trsv().template solve_LLt_dev<Columns>(s.vectors_.r, s.vectors_.z,
-                &s.vectors_.state->active, sizeof(cuda_pcg_kernels::solve_state) / sizeof(unsigned),
-                s.stream_);
+            if constexpr (narrow_z)
+                precond.trsv().template solve_LLt_dev_narrow<Columns>(s.vectors_.r, s.vectors_.preconditioned,
+                    &s.vectors_.state->active, sizeof(cuda_pcg_kernels::solve_state) / sizeof(unsigned),
+                    s.stream_);
+            else
+                precond.trsv().template solve_LLt_dev<Columns>(s.vectors_.r, s.vectors_.z,
+                    &s.vectors_.state->active, sizeof(cuda_pcg_kernels::solve_state) / sizeof(unsigned),
+                    s.stream_);
         }
         void finalize(unsigned mode, unsigned it) const {
             // Vector kernels run one thread per panel element.
@@ -330,7 +342,9 @@ private:
             cuda_pcg_kernels::finalize<Columns>(s.stream_, s.vectors_.partial, blocks, s.vectors_.state, mode, it, bnorm);
         }
         void step(detail::gpu_pcg::operation op) const {
-            cuda_pcg_kernels::step<Columns>(s.stream_, op, s.n_, s.vectors_, s.op_->matrix, s.spmv_lanes_);
+            auto vectors = s.vectors_;
+            if constexpr (!narrow_z) vectors.preconditioned = nullptr;
+            cuda_pcg_kernels::step<Columns>(s.stream_, op, s.n_, vectors, s.op_->matrix, s.spmv_lanes_);
         }
         template<class Record>
         bool submit(bool, Record&& record) const {
@@ -345,7 +359,7 @@ private:
 
     static void release_workspace(cuda_pcg_kernels::workspace& vectors, cuda_pcg_kernels::solve_state*& host) noexcept {
         for (void* pointer : std::initializer_list<void*>{vectors.x, vectors.r, vectors.ap,
-                vectors.p, vectors.z, vectors.rhs, vectors.partial, vectors.state})
+                vectors.p, vectors.z, vectors.rhs, vectors.preconditioned, vectors.partial, vectors.state})
             if (pointer) (void)cudaFree(pointer);
         vectors = {};
         if (host) { (void)cudaFreeHost(host); host = nullptr; }
@@ -358,6 +372,7 @@ private:
         try {
             for (double** pointer : {&next.x, &next.r, &next.p, &next.z, &next.ap, &next.rhs})
                 APXCHOL_PCG_CUDA_CHECK(cudaMalloc(pointer, columns * n_ * sizeof(double)));
+            APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.preconditioned, columns * n_ * sizeof(float)));
             APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.partial, columns * cuda_pcg_kernels::kMaxBlocks * sizeof(double)));
             APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.state, columns * sizeof(cuda_pcg_kernels::solve_state)));
             APXCHOL_PCG_CUDA_CHECK(cudaHostAlloc(reinterpret_cast<void**>(&next_host),

@@ -774,6 +774,18 @@ public:
         solve_LLt_dev_impl<Columns, RhsLanes>(stream, active, d_in, d_out, active_stride);
     }
 
+    /// As solve_LLt_dev, but leaves the FP32 result in d_out without widening it.
+    template<unsigned Columns>
+    void solve_LLt_dev_narrow(const double* d_in, float* d_out, const unsigned* active = nullptr,
+                              unsigned active_stride = 1, cudaStream_t stream = nullptr) const {
+        static_assert(Columns == 1 || Columns == 2 || Columns == 4 ||
+                      Columns == 8 || Columns == 16 || Columns == 32);
+        require_ready();
+        constexpr unsigned RhsLanes = Columns >= 4 ? 4 : 1;
+        if constexpr (Columns > 1) reserve_panel_workspace(Columns);
+        solve_LLt_dev_impl<Columns, RhsLanes>(stream, active, d_in, nullptr, active_stride, d_out);
+    }
+
     bool ready() const { return data_ && data_->ready; }
     void require_ready() const {
         if (!ready()) throw std::logic_error("CUDA triangular solve has no installed factor");
@@ -977,7 +989,10 @@ private:
         sptrsv_value_t* next_y = nullptr;
         unsigned* next_tags = nullptr;
         try {
-            APXCHOL_CUDA_CHECK(cudaMalloc(&next_y, columns * data_->m * sizeof(sptrsv_value_t)));
+            // The forward sweep's ready words double as its result, so this
+            // buffer is a second tag array rather than a plain vector.
+            static_assert(sizeof(sptrsv_value_t) == sizeof(unsigned));
+            APXCHOL_CUDA_CHECK(cudaMalloc(&next_y, columns * tags * sizeof(unsigned)));
             APXCHOL_CUDA_CHECK(cudaMalloc(&next_tags, columns * tags * sizeof(unsigned)));
         } catch (...) {
             if (next_y) (void)cudaFree(next_y);
@@ -1022,22 +1037,27 @@ private:
     template<unsigned Columns = 1, unsigned RhsLanes = 1>
     void solve_LLt_dev_impl(cudaStream_t stream, const unsigned* active = nullptr,
                             const double* rhs64 = nullptr, double* out64 = nullptr,
-                            unsigned active_stride = 1) const {
+                            unsigned active_stride = 1, float* out32 = nullptr) const {
         // Initialize roots, then solve each direction with the shared dataflow worker.
         const int m = static_cast<int>(data_->m);
         const unsigned tag_count = unsigned(data_->m) + unsigned(data_->df_slots);
         auto* const y = Columns == 1 ? ws_.d_y : ws_.d_panel_y;
         auto* const tags = Columns == 1 ? ws_.d_df_tag : ws_.d_df_panel_tag;
+        // Panels: the forward sweep publishes into y used as its tag array and
+        // the backward sweep reads those words as its right-hand side, so the
+        // forward result is written once. A published word is the fp32 value.
+        auto* const forward_tags = Columns == 1 ? tags : reinterpret_cast<unsigned*>(y);
+        auto* const forward_out = Columns == 1 ? y : nullptr;
         dataflow_solve<Columns, RhsLanes>(stream, m, false, data_->L_row_ptr, data_->L_col_idx, data_->L_values, data_->diag, nullptr,
                        RhsLanes == 1 ? data_->d_fwd_words : data_->lane_plans[0].words,
                        RhsLanes == 1 ? data_->d_fwd_segments : data_->lane_plans[0].segments,
                        RhsLanes == 1 ? data_->fwd_batches : data_->lane_plans[0].n_batches,
-                       tags, tag_count, ws_.d_df_ticket, data_->df_grid, ws_.d_x, y, active, rhs64, nullptr, active_stride);
+                       forward_tags, tag_count, ws_.d_df_ticket, data_->df_grid, ws_.d_x, forward_out, active, rhs64, nullptr, active_stride);
         dataflow_solve<Columns, RhsLanes>(stream, m, true, data_->LT_row_ptr, data_->LT_col_idx, data_->LT_values, data_->diag, data_->inv_scale2,
                        RhsLanes == 1 ? data_->d_bck_words : data_->lane_plans[1].words,
                        RhsLanes == 1 ? data_->d_bck_segments : data_->lane_plans[1].segments,
                        RhsLanes == 1 ? data_->bck_batches : data_->lane_plans[1].n_batches,
-                       tags, tag_count, ws_.d_df_ticket, data_->df_grid, y, ws_.d_x, active, nullptr, out64, active_stride);
+                       tags, tag_count, ws_.d_df_ticket, data_->df_grid, y, out32 ? out32 : ws_.d_x, active, nullptr, out64, active_stride);
     }
 
     void destroy() noexcept {
