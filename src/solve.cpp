@@ -728,15 +728,25 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
             warm[c] = !vec::is_zero(column(x0, c));
     }
     const bool any_warm = std::any_of(warm.begin(), warm.end(), [](bool v) { return v; });
+    // The split the update loops use, so their threads touch x's pages first.
+    const int touch_workers = detail::cpu_solve_threads(n);
     if (any_warm) {
-        if (x0 != x) std::copy_n(x0, n * C, x);
+        if (x0 != x) {
+#pragma omp parallel for schedule(static) if (touch_workers > 1) num_threads(touch_workers)
+            for (std::int64_t i = 0; i < n; i++)
+                for (int c = 0; c < C; c++) x[i * C + c] = x0[i * C + c];
+        }
         if (op_->fp32)
             (void)panel_spmv<C>(op_->Lrm_f, x, Ap, part);
         else
             (void)panel_spmv<C>(op_->Lrm, x, Ap, part);
     }
     panel_init_residual<C>(r, b, any_warm ? Ap : nullptr, n, part, rr, rs);
-    if (!any_warm) std::fill_n(x, n * C, 0.0);
+    if (!any_warm) {
+#pragma omp parallel for schedule(static) if (touch_workers > 1) num_threads(touch_workers)
+        for (std::int64_t i = 0; i < n; i++)
+            for (int c = 0; c < C; c++) x[i * C + c] = 0.0;
+    }
     for (int c = 0; c < C; c++)
         norm[c] = warm[c] ? std::sqrt(vec::squared_norm(column(b, c))) : std::sqrt(rr[c]);
     // Only exceptional columns need scaling; ordinary panels reuse their workspace.
@@ -812,12 +822,10 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
     }
     apply_count_ = 0;
     rz = apply_fused<C>(r, rs, z, timings);
-    if constexpr (C == 1) {
+    {
         // The split panel_update_p uses, so its threads touch p's pages first.
         const int workers = detail::cpu_solve_threads(n);
 #pragma omp parallel for schedule(static) if (workers > 1) num_threads(workers)
-        for (std::int64_t i = 0; i < n; i++) p[i] = z[i];
-    } else {
         for (std::int64_t i = 0; i < n; i++)
             for (int c = 0; c < C; c++)
                 p[i * C + c] = active[c] ? z[i * C + c] : 0;

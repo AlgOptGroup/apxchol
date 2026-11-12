@@ -24,6 +24,7 @@ namespace {
 using namespace apxchol::detail::gpu_pcg;
 
 constexpr int kWarps = kBlockThreads / 32;
+constexpr unsigned kMultiplyColumns = 8;
 
 template<int Lanes = 1>
 struct pcg_math {
@@ -57,7 +58,8 @@ __device__ __forceinline__ double block_reduce_sum(double v, double* sh, Math ma
     return warp == 0 ? sum_lanes<32>(math, lane < kWarps ? sh[lane] : 0.0) : 0.0;
 }
 
-template<operation Op, int Lanes = 1, unsigned Columns = 1, class Value = double>
+template<operation Op, int Lanes = 1, unsigned Columns = 1, class Value = double, unsigned Group = Columns,
+         unsigned First = 0>
 __global__ void __launch_bounds__(kBlockThreads)
 step_kernel(std::int64_t n, workspace v, const int* ptr = nullptr,
             const int* col = nullptr, const Value* val = nullptr,
@@ -68,14 +70,64 @@ step_kernel(std::int64_t n, workspace v, const int* ptr = nullptr,
     constexpr int rows = kBlockThreads / Lanes;
     const pcg_work<std::int64_t> work{static_cast<std::int64_t>(blockIdx.x) * rows, n,
         static_cast<std::int64_t>(gridDim.x) * rows, threadIdx.x / Lanes, n};
-    const auto sums = detail::gpu_pcg::step_columns<Lanes, Columns>(
+    const auto sums = detail::gpu_pcg::step_columns_group<Lanes, Columns, Group, First>(
         Op, pcg_math<Lanes>{}, v, ptr, col, val, static_cast<const Value*>(nullptr),
         work, threadIdx.x % Lanes, row_map);
     if constexpr (Op != operation::direction) {
         __shared__ double scratch[Columns][kWarps];
-        for (unsigned q = 0; q < Columns; ++q) {
+        for (unsigned q = First; q < First + Group; ++q) {
             const double total = block_reduce_sum(sums.values[q], scratch[q]);
             if (threadIdx.x == 0) v.partial[blockIdx.x * Columns + q] = total;
+        }
+    }
+}
+
+// Vector updates with one thread per panel element. The panel is interleaved
+// (row * Columns + q), so consecutive threads touch consecutive elements and a
+// warp's loads stay contiguous at every width. The block, the grid stride and
+// the warp are multiples of Columns, so a thread keeps one column throughout.
+template<operation Op, unsigned Columns>
+__global__ void __launch_bounds__(kBlockThreads)
+vector_kernel(std::int64_t n, workspace v) {
+    static_assert(Op != operation::multiply);
+    static_assert(Columns <= 32 && (Columns & (Columns - 1)) == 0);
+    if (!any_active<Columns>(v.state)) return;
+    const pcg_math<> math{};
+    const unsigned q = threadIdx.x % Columns;
+    const auto state = v.state[q];
+    double sum = 0;
+    if (state.active) {
+        const std::int64_t elements = n * static_cast<std::int64_t>(Columns);
+        const std::int64_t stride = static_cast<std::int64_t>(gridDim.x) * kBlockThreads;
+        for (std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * kBlockThreads + threadIdx.x;
+             i < elements; i += stride) {
+            if constexpr (Op == operation::residual) {
+                v.x[i] = math.update_solution(v.x[i], state.alpha, v.p[i]);
+                const double value = math.subtract_product(v.r[i], v.ap[i], state.alpha);
+                v.r[i] = value;
+                sum = math.add_product(sum, value, value);
+            } else if constexpr (Op == operation::dot) {
+                sum = math.add_product(sum, v.r[i], math.preconditioned(
+                    v.preconditioned ? double(v.preconditioned[i]) : v.z[i]));
+            } else {
+                const double z = math.preconditioned(v.preconditioned ? double(v.preconditioned[i]) : v.z[i]);
+                v.p[i] = state.beta == 0 ? z : math.direction(z, v.p[i], state.beta);
+            }
+        }
+    }
+    if constexpr (Op != operation::direction) {
+        // Fixed tree per column: lanes of one column within the warp, then
+        // the warps in order.
+        __shared__ double scratch[Columns][kWarps];
+        for (unsigned offset = 16; offset >= Columns; offset /= 2)
+            sum += __shfl_down_sync(0xffffffffu, sum, offset, 32);
+        const unsigned lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+        if (lane < Columns) scratch[lane][warp] = sum;
+        __syncthreads();
+        if (threadIdx.x < Columns) {
+            double total = 0;
+            for (int w = 0; w < kWarps; ++w) total += scratch[threadIdx.x][w];
+            v.partial[blockIdx.x * Columns + threadIdx.x] = total;
         }
     }
 }
@@ -111,9 +163,17 @@ template<unsigned Columns, class Value>
 void multiply(cudaStream_t stream, std::int64_t n, workspace v,
               const operator_csr& a, const Value* values, int lanes) {
     const int grid = pcg_blocks(n * lanes);
+    // The widest panel is multiplied in groups of kMultiplyColumns columns:
+    // each pass gathers from a slice of the direction panel small enough to
+    // stay in the device cache, at the cost of reading the operator once per
+    // pass. Narrower panels fit in one pass.
+    constexpr unsigned group = Columns > 2 * kMultiplyColumns ? kMultiplyColumns : Columns;
     auto launch = [&]<int Lanes>() {
-        step_kernel<operation::multiply, Lanes, Columns><<<grid, kBlockThreads, 0, stream>>>(
-            n, v, a.row_ptr, a.col_idx, values, a.row_map);
+        // One kernel per group position, so every column bound is a constant.
+        [&]<std::size_t... Pass>(std::index_sequence<Pass...>) {
+            (step_kernel<operation::multiply, Lanes, Columns, Value, group, static_cast<unsigned>(Pass) * group><<<
+                grid, kBlockThreads, 0, stream>>>(n, v, a.row_ptr, a.col_idx, values, a.row_map), ...);
+        }(std::make_index_sequence<Columns / group>{});
     };
     switch (lanes) {
         case 1: launch.template operator()<1>(); break;
@@ -236,20 +296,20 @@ void initialize(cudaStream_t stream, std::int64_t n, workspace v,
 template<unsigned Columns>
 void step(cudaStream_t stream, operation op, std::int64_t n, workspace v,
           const operator_csr& matrix, int lanes) {
-    const int grid = pcg_blocks(n);
+    const int grid = pcg_blocks(n * static_cast<std::int64_t>(Columns));
     switch (op) {
         case operation::multiply:
             if (matrix.fp32) multiply<Columns>(stream, n, v, matrix, matrix.values_f32, lanes);
             else multiply<Columns>(stream, n, v, matrix, matrix.values_f64, lanes);
             break;
         case operation::residual:
-            step_kernel<operation::residual, 1, Columns><<<grid, kBlockThreads, 0, stream>>>(n, v);
+            vector_kernel<operation::residual, Columns><<<grid, kBlockThreads, 0, stream>>>(n, v);
             break;
         case operation::dot:
-            step_kernel<operation::dot, 1, Columns><<<grid, kBlockThreads, 0, stream>>>(n, v);
+            vector_kernel<operation::dot, Columns><<<grid, kBlockThreads, 0, stream>>>(n, v);
             break;
         case operation::direction:
-            step_kernel<operation::direction, 1, Columns><<<grid, kBlockThreads, 0, stream>>>(n, v);
+            vector_kernel<operation::direction, Columns><<<grid, kBlockThreads, 0, stream>>>(n, v);
             break;
     }
 }

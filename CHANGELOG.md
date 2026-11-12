@@ -7,10 +7,14 @@
 - Faster setup: one AoS graph throughout factorization, incremental degrees, and parallel residual sparsification.
 - Inputs are validated by operator class; nearly-SDDM inputs are repaired by M-matrix lumping.
 - Batched solves take any number of right-hand sides on CPU, CUDA and Metal, processed in panels of up to eight columns on CPU, 32 on CUDA and four on Metal.
+- CPU batched solves place the solution and direction panels on the memory of the threads that update them. On a 128-core EPYC 7742 node, solving 32 right-hand sides on 5- and 7-point grids of 3 to 4 million rows takes 21 to 24% less time with 16 threads on four memory domains and 38 to 50% less with all cores. Runs confined to one memory domain are unchanged.
 - `apxchol::solver` owns a reusable factorization for repeated solves and can be saved to and loaded from portable archives.
 - Any 1.x release reads the solver archives written by earlier 1.x releases. A minor release may add a format version and keeps reading older ones; an older apxchol given a newer archive fails with an upgrade message.
 
 ### GPU backends
+- CUDA batched solves move less memory per iteration: 32-column panels are multiplied eight columns at a time, the preconditioned residual stays in the FP32 the triangular solve produces, and the forward triangular sweep writes its result once. A 32-column panel of a dense operator (271 entries per row) takes 30% less time on an RTX 4090, and panels of 5- and 7-point grids take up to 5% less on an RTX 4090 and up to 7% less on an RTX PRO 6000. Results are unchanged.
+- CUDA batched solves copy right-hand sides and solutions between the caller and the device panel in parallel on the host when the panel is large enough. On grids of 3 to 4 million rows a 32-column panel takes about 19% less time on an RTX 4090 and 25% less on an A100.
+- CUDA batched solves are faster on sparse operators: the vector updates of a panel read memory contiguously at every panel width. On 5- and 7-point grids of 3 to 4 million rows, a 32-column panel takes 15 to 21% less time on an RTX 4090 and 26 to 36% less on an A100. Single right-hand-side solves take the same time as before. CUDA sums are added in a different order, so solutions can differ from earlier versions in the last digits and an iteration count can change by one.
 - Metal PCG uses full 32-thread SIMD groups for reductions and long-row multiplication.
 - CUDA setup, factorization and PCG run entirely on the device, with a sync-free dataflow triangular solve and optional fp16 factor storage.
 - New Apple Metal backend: setup, factorization and PCG run on the device, for single and batched solves.
@@ -20,6 +24,8 @@
 - CUDA and Metal solvers can be copied: copies share the device factor and operator, and solve concurrently on their own streams or command queues and workspace.
 
 ### API and CLI changes
+- Custom partitioners can query any graph vertex concurrently and from inside neighbor callbacks. The view remains valid only during the partitioner call.
+- The built-in partitioners select through the same `partition_graph` view that custom partitioners receive. `baumann_kyng` as the main partitioner now samples every vertex in its first round, which changes its factors on graphs with average degree above 10. The Baumann–Kyng continuation of the default and `priority_greedy` partitioners starts the same way, which changes their factors on graphs where that continuation runs.
 - Setup profiles include unlabelled work and agree with `solver::setup_seconds()`. Normal benchmark runs omit optional stage profiling; `--profile` retains the detailed breakdown.
 - Breaking: Eigen types leave the C++ API. `solver`, `factorize` and the one-shot `solve` take a borrowed CSC matrix, `csc_view` (32-bit indices) or `csc_view64` (64-bit), from the new header `apxchol/views.h`; rows must be sorted and unique within each column, and an invalid view throws `std::invalid_argument`. Vectors are `std::span`s and matrices `const_matrix_view` / `matrix_view` (column-major).
 - apxchol no longer depends on Eigen. The installed CMake package, SDK archives, Python wheels, CLI archives and the MATLAB/Octave build neither bundle nor require it, and their notices drop Eigen's MPL-2.0 terms; only the benchmark harness still uses Eigen, for its competitors and input reading.
@@ -70,7 +76,7 @@
 - Breaking: the CMake helpers `apxchol_openmp_runtime()`, `apxchol_configure_core()`, `apxchol_install_core()` and the `APXCHOL_ARCH_FLAG` variable are internal (`_apxchol_*` and `_APXCHOL_ARCH_FLAG`); `find_package(apxchol)` and `apxchol_add_core()` are the supported entry points.
 - Breaking: Python `Solver.L`, `Solver.D` and `Solver.fill_ratio` are removed (use `chol()`, `P` and `factor_nnz`), `Solver.lumped` is renamed `lumped_offdiag`, and `apxchol.DEFAULT_TOL`/`DEFAULT_MAXITER` are no longer public.
 - Breaking: the raw MATLAB/Octave `apxchol_mex` entry point moves to `octave/private/`; use the `apxchol_*` wrappers.
-- Breaking: custom partitioners receive a read-only `apxchol::partition_graph` (`n`, `is_active`, `for_each_neighbor`, `degree`) instead of the mutable graph; `graph`, `make_graph` and `laplacian` move to `apxchol::detail`.
+- Breaking: custom partitioners receive a read-only `apxchol::partition_graph` (`n`, `is_active`, `for_each_neighbor`, `any_neighbor`, `degree`) instead of the mutable graph; `graph`, `make_graph` and `laplacian` move to `apxchol::detail`.
 - Breaking: partitioners no longer declare a `name`, and `partitioner_list.h` with `dispatch_partitioner` is removed; pass a custom partitioner as an instance to `factorize`.
 - Breaking: `factorize(A, eliminator, opts)` no longer takes a partitioner template argument, and now uses the partitioner `opts.experimental.partitioner` names instead of always `block_greedy`; pass an instance to use another partitioner.
 - Breaking: `tree_elimination` moves to `apxchol::detail`; configure the built-in rule through `factor_options`.

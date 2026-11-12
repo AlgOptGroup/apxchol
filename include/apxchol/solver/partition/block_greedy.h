@@ -31,7 +31,7 @@ struct block_greedy_partitioner {
 
     void find_partition(const partition_graph& G, std::span<const node_index> candidates,
                         const partition_context& ctx, selection& out) {
-        select_into_chosen(partition_graph_access::graph_of(G), candidates, out, ctx);
+        select_into_chosen(G, candidates, out, ctx);
     }
 
 private:
@@ -69,7 +69,7 @@ private:
     // freed, so the repair is skipped without an extra barrier.
     size_t total_drop_ = 0;
 
-    void select_into_chosen(const graph& G,
+    void select_into_chosen(const partition_graph& G,
                             std::span<const node_index> candidates,
                             selection& out,
                             const partition_context& ctx) {
@@ -136,16 +136,14 @@ private:
                     auto v = candidates[i];
                     bool ok = true;
                     bool boundary = false;
-                    for (auto idx : G.adj(v)) {
-                        auto u = idx.to;
-                        if (!G.is_active(u)) continue;
+                    G.any_neighbor(v, [&](node_index u) {
                         if (block_of[u] == tid) {
                             if (ok && out.contains(u)) ok = false;
                         } else {
                             boundary = true;
                         }
-                        if (!ok && boundary) break;
-                    }
+                        return !ok && boundary;
+                    });
                     if (ok) {
                         out.add(v);
                         if (boundary) my_boundary.push_back(v);
@@ -183,13 +181,10 @@ private:
                 for (size_t bi = 0; bi < my_boundary.size(); ++bi) {
                     const node_index v = my_boundary[bi];
                     const int mb = block_of[v];
-                    for (auto idx : G.adj(v)) {
-                        auto u = idx.to;
-                        if (G.is_active(u) && out.contains(u) && u_beats_v(u, v) && block_of[u] != mb) {
-                            my_boundary[ndrop++] = v;   // ndrop <= bi: never clobbers unread entries
-                            break;
-                        }
-                    }
+                    if (G.any_neighbor(v, [&](node_index u) {
+                            return out.contains(u) && u_beats_v(u, v) && block_of[u] != mb;
+                        }))
+                        my_boundary[ndrop++] = v;   // ndrop <= bi: never clobbers unread entries
                 }
 
                 #pragma omp atomic
@@ -257,16 +252,15 @@ private:
                     for (size_t i = 0; i < ndrop; ++i) {
                         const node_index d = my_boundary[i];
                         if (!mark_[d]) { mark_[d] = 1; front.push_back(d); }
-                        for (auto idx : G.adj(d)) {
-                            const auto u = idx.to;
-                            if (!G.is_active(u) || cand_stamp_[u] != round_stamp_) continue;
+                        G.for_each_neighbor(d, [&](node_index u) {
+                            if (cand_stamp_[u] != round_stamp_) return;
                             const int ow = block_of[u];
                             if (ow == tid) {
                                 if (!mark_[u]) { mark_[u] = 1; front.push_back(u); }
                             } else {
                                 mailbox_[size_t(tid) * team_stride_ + size_t(ow)].push_back(u);
                             }
-                        }
+                        });
                     }
 
                     #pragma omp barrier  // mailboxes filled; every removal applied
@@ -283,11 +277,8 @@ private:
                         size_t k = 0;
                         for (const node_index v : front) {
                             if (out.contains(v)) { mark_[v] = 0; continue; }
-                            bool free_v = true;
-                            for (auto idx : G.adj(v)) {
-                                const auto u = idx.to;
-                                if (G.is_active(u) && out.contains(u)) { free_v = false; break; }
-                            }
+                            const bool free_v = !G.any_neighbor(
+                                v, [&](node_index u) { return out.contains(u); });
                             if (free_v) { mark_[v] = 2; front[k++] = v; }
                             else        { mark_[v] = 0; }
                         }
@@ -298,13 +289,9 @@ private:
                         next.clear();
                         size_t nadd = 0;
                         for (const node_index v : front) {
-                            bool win = true;
-                            for (auto idx : G.adj(v)) {
-                                const auto u = idx.to;
-                                if (G.is_active(u) && mark_[u] == 2 && u_beats_v(u, v)) {
-                                    win = false; break;
-                                }
-                            }
+                            const bool win = !G.any_neighbor(v, [&](node_index u) {
+                                return mark_[u] == 2 && u_beats_v(u, v);
+                            });
                             if (win) front[nadd++] = v;   // nadd <= read cursor
                             else     next.push_back(v);
                         }
@@ -339,12 +326,8 @@ private:
             // repair: a candidate goes unpicked only when a neighbor is chosen,
             // and no pick is ever taken back, so this IS is already maximal.
             for (auto v : candidates) {
-                bool ok = true;
-                for (auto idx : G.adj(v)) {
-                    auto u = idx.to;
-                    if (G.is_active(u) && out.contains(u)) { ok = false; break; }
-                }
-                if (ok) out.add(v);
+                if (!G.any_neighbor(v, [&](node_index u) { return out.contains(u); }))
+                    out.add(v);
             }
         }
     }

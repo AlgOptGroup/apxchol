@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "apxchol/solver/pcg_cuda_kernels.h"
+#include "apxchol/solver/detail/cpu_parallel.h"
 #include "apxchol/solver/detail/gpu_pcg.h"
 #include "apxchol/solver/detail/pcg_restart.h"
 #include "apxchol/solver/detail/gpu_scaling.h"
@@ -43,7 +44,7 @@ public:
     /// Shares the device operator, which is read-only after setup, and
     /// allocates its own vectors and stream, so copies solve concurrently.
     cuda_pcg(const cuda_pcg& other)
-        : n_(other.n_), op_(other.op_), spmv_lanes_(other.spmv_lanes_) {
+        : n_(other.n_), narrow_(other.narrow_), op_(other.op_), spmv_lanes_(other.spmv_lanes_) {
         if (!other.ready_) return;
         device_ = other.device_;
         const detail::cuda_device_scope device(device_, detail::cuda_device_scope::checked{});
@@ -208,14 +209,31 @@ private:
         std::array<double, Columns> scales{}, bnorm{}, max_b{}, max_x0{};
         bool any_active = false, any_warm = false;
         std::fill_n(h_state_, Columns, cuda_pcg_kernels::solve_state{});
-        for (int64_t v = 0; v < n_; ++v) {
-            for (unsigned q = 0; q < Columns; ++q) {
-                const double rhs = b_host(v, q);
-                packed[perm[v] * Columns + q] = rhs;
-                max_b[q] = std::max(max_b[q], std::abs(rhs));
-                if (x0) max_x0[q] = std::max(max_x0[q], std::abs((*x0)(v, q)));
+        // perm is a bijection, so rows write disjoint panel entries. A maximum
+        // does not depend on the order in which the team folds it.
+        const int workers = detail::cpu_solve_threads(static_cast<std::size_t>(n_) * Columns);
+        // One slot per requested worker: the team is never larger.
+        std::vector<std::array<double, Columns>> part_b(workers), part_x0(workers);
+        #pragma omp parallel if(workers > 1) num_threads(workers)
+        {
+            std::array<double, Columns> local_b{}, local_x0{};
+            #pragma omp for schedule(static) nowait
+            for (int64_t v = 0; v < n_; ++v) {
+                for (unsigned q = 0; q < Columns; ++q) {
+                    const double rhs = b_host(v, q);
+                    packed[perm[v] * Columns + q] = rhs;
+                    local_b[q] = std::max(local_b[q], std::abs(rhs));
+                    if (x0) local_x0[q] = std::max(local_x0[q], std::abs((*x0)(v, q)));
+                }
             }
+            part_b[omp_get_thread_num()] = local_b;
+            part_x0[omp_get_thread_num()] = local_x0;
         }
+        for (int t = 0; t < workers; ++t)
+            for (unsigned q = 0; q < Columns; ++q) {
+                max_b[q] = std::max(max_b[q], part_b[t][q]);
+                max_x0[q] = std::max(max_x0[q], part_x0[t][q]);
+            }
         for (double maximum : max_b) any_active |= maximum != 0;
         if (!any_active) {
             for (int64_t q = 0; q < x_host.cols(); ++q)
@@ -231,9 +249,9 @@ private:
             bnorm[q] = 1; // Inactive zero columns never divide by a zero norm.
             if (max_b[q] == 0) continue;
             scales[q] = detail::gpu_scaling::fp32_scale(std::max(max_b[q], max_x0[q]));
-            // packed stays unchanged until the stream syncs: the upload above
-            // may still read it. Fold the scaled column's norm contiguously.
-            bnorm[q] = detail::gpu_scaling::scaled_norm(lane(packed, q), scales[q]);
+            // The norm does not depend on the row order, so fold the caller's
+            // contiguous column instead of a strided lane of the panel.
+            bnorm[q] = detail::gpu_scaling::scaled_norm(b_host.col(q), scales[q]);
             if (!std::isnormal(bnorm[q] * bnorm[q]))
                 throw std::invalid_argument("CUDA solve: RHS and initial guess exceed the common scaling range");
             auto& st = h_state_[q];
@@ -245,8 +263,14 @@ private:
         APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(vectors_.state, h_state_, Columns * sizeof(*vectors_.state), cudaMemcpyHostToDevice, stream_));
         // Width changes reinterpret the reused storage; clear every grounded
         // coordinate on entry rather than inheriting a prior width's contents.
-        if (laplacian && n_)
-            APXCHOL_PCG_CUDA_CHECK(cudaMemsetAsync(vectors_.z + (n_ - 1) * Columns, 0, Columns * sizeof(double), stream_));
+        constexpr bool narrow = iteration<Precond, Columns>::narrow_z;
+        use_preconditioned(narrow);
+        if (laplacian && n_) {
+            if (narrow)
+                APXCHOL_PCG_CUDA_CHECK(cudaMemsetAsync(vectors_.preconditioned + (n_ - 1) * Columns, 0, Columns * sizeof(float), stream_));
+            else
+                APXCHOL_PCG_CUDA_CHECK(cudaMemsetAsync(vectors_.z + (n_ - 1) * Columns, 0, Columns * sizeof(double), stream_));
+        }
         iteration<Precond, Columns> commands{*this, precond, bnorm};
         buffer<double> warm;
         if (any_warm) {
@@ -280,6 +304,7 @@ private:
             if (h_state_[q].active & cuda_pcg_kernels::kSolutionUnderflow)
                 throw std::underflow_error("CUDA solve: solution underflows to zero");
         }
+        #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
         for (int64_t v = 0; v < n_; ++v)
             for (unsigned q = 0; q < Columns; ++q)
                 x_host(v, q) = packed[perm[v] * Columns + q];
@@ -298,14 +323,25 @@ private:
         cuda_pcg& s;
         const Precond& precond;
         std::array<double, Columns> bnorm;
+        // The triangular solve leaves its FP32 result unwidened when it can.
+        static constexpr bool narrow_z = requires(const Precond& m, const double* input, float* output,
+                                                  const unsigned* active, cudaStream_t stream) {
+            m.trsv().template solve_LLt_dev_narrow<Columns>(input, output, active, 1u, stream);
+        };
         void precondition() const {
             static_assert(sizeof(cuda_pcg_kernels::solve_state) % sizeof(unsigned) == 0);
-            precond.trsv().template solve_LLt_dev<Columns>(s.vectors_.r, s.vectors_.z,
-                &s.vectors_.state->active, sizeof(cuda_pcg_kernels::solve_state) / sizeof(unsigned),
-                s.stream_);
+            if constexpr (narrow_z)
+                precond.trsv().template solve_LLt_dev_narrow<Columns>(s.vectors_.r, s.vectors_.preconditioned,
+                    &s.vectors_.state->active, sizeof(cuda_pcg_kernels::solve_state) / sizeof(unsigned),
+                    s.stream_);
+            else
+                precond.trsv().template solve_LLt_dev<Columns>(s.vectors_.r, s.vectors_.z,
+                    &s.vectors_.state->active, sizeof(cuda_pcg_kernels::solve_state) / sizeof(unsigned),
+                    s.stream_);
         }
         void finalize(unsigned mode, unsigned it) const {
-            const int lanes = mode == detail::gpu_pcg::kFinalizeAlpha ? s.spmv_lanes_ : 1;
+            // Vector kernels run one thread per panel element.
+            const int lanes = mode == detail::gpu_pcg::kFinalizeAlpha ? s.spmv_lanes_ : static_cast<int>(Columns);
             const int blocks = cuda_pcg_kernels::pcg_blocks(s.n_ * lanes);
             cuda_pcg_kernels::finalize<Columns>(s.stream_, s.vectors_.partial, blocks, s.vectors_.state, mode, it, bnorm);
         }
@@ -325,7 +361,7 @@ private:
 
     static void release_workspace(cuda_pcg_kernels::workspace& vectors, cuda_pcg_kernels::solve_state*& host) noexcept {
         for (void* pointer : std::initializer_list<void*>{vectors.x, vectors.r, vectors.ap,
-                vectors.p, vectors.z, vectors.rhs, vectors.partial, vectors.state})
+                vectors.p, vectors.z, vectors.rhs, vectors.preconditioned, vectors.partial, vectors.state})
             if (pointer) (void)cudaFree(pointer);
         vectors = {};
         if (host) { (void)cudaFreeHost(host); host = nullptr; }
@@ -336,8 +372,13 @@ private:
         cuda_pcg_kernels::workspace next{};
         cuda_pcg_kernels::solve_state* next_host = nullptr;
         try {
-            for (double** pointer : {&next.x, &next.r, &next.p, &next.z, &next.ap, &next.rhs})
+            for (double** pointer : {&next.x, &next.r, &next.p, &next.ap, &next.rhs})
                 APXCHOL_PCG_CUDA_CHECK(cudaMalloc(pointer, columns * n_ * sizeof(double)));
+            // One preconditioned-residual vector, in the precision in use.
+            if (narrow_)
+                APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.preconditioned, columns * n_ * sizeof(float)));
+            else
+                APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.z, columns * n_ * sizeof(double)));
             APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.partial, columns * cuda_pcg_kernels::kMaxBlocks * sizeof(double)));
             APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.state, columns * sizeof(cuda_pcg_kernels::solve_state)));
             APXCHOL_PCG_CUDA_CHECK(cudaHostAlloc(reinterpret_cast<void**>(&next_host),
@@ -352,6 +393,27 @@ private:
         vectors_ = next;
         h_state_ = next_host;
         capacity_ = columns;
+    }
+
+    // Keeps the preconditioned residual in FP32 when the triangular solve
+    // leaves its result unwidened, and in FP64 otherwise. A workspace is
+    // reserved in FP64 until the first solve, so switching to FP32 frees
+    // memory first and cannot run short of what was reserved.
+    void use_preconditioned(bool narrow) {
+        if (narrow == narrow_ && (narrow ? vectors_.preconditioned != nullptr : vectors_.z != nullptr)) return;
+        if (narrow) {
+            (void)cudaFree(vectors_.z);
+            vectors_.z = nullptr;
+            narrow_ = true;
+            APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&vectors_.preconditioned, capacity_ * n_ * sizeof(float)));
+        } else {
+            double* wide = nullptr;
+            APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&wide, capacity_ * n_ * sizeof(double)));
+            (void)cudaFree(vectors_.preconditioned);
+            vectors_.preconditioned = nullptr;
+            vectors_.z = wide;
+            narrow_ = false;
+        }
     }
 
     void destroy() noexcept {
@@ -389,6 +451,7 @@ private:
     int device_ = -1;
     bool ready_ = false;
     unsigned capacity_ = 0;
+    bool narrow_ = false; // The workspace holds the FP32 preconditioned residual.
     std::shared_ptr<const operator_storage> op_;
     // Per-copy: the solve stream, vectors and host-visible exit state.
     cudaStream_t stream_ = nullptr;

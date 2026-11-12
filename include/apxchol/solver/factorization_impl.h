@@ -859,6 +859,7 @@ factorization factorize_impl(const Eliminator& elim,
     std::vector<std::array<size_t, 256>> pre_histograms;
     std::vector<size_t> pre_filter_offsets;
     std::vector<node_index> live_degrees;   // vertex-indexed, for ctx.degrees
+    std::unique_ptr<std::atomic<bool>[]> query_touched;   // lists public queries walked
     // Keep exact degrees when their sparse updates cost less than a full walk.
     const bool incremental_degree_capable =
         std::is_same_v<Partitioner, block_greedy_partitioner> &&
@@ -1028,7 +1029,12 @@ factorization factorize_impl(const Eliminator& elim,
                                  pre_eligible.data(), eligible_count),
                              pctx, sel);
         } else {
-            p.find_partition(partition_graph_access::view(g), act, pctx, sel);
+            // Queries mark the lists they walk; the round epilogue and an
+            // empty retry clean them.
+            if (!query_touched)
+                query_touched = std::make_unique<std::atomic<bool>[]>(g.n());
+            p.find_partition(partition_graph_access::deferred_view(
+                                 g, query_touched.get()), act, pctx, sel);
         }
         if (cp) (*cp)("select");
         const partition_result& part = selection_access::finalize(sel);
@@ -1050,17 +1056,44 @@ factorization factorize_impl(const Eliminator& elim,
         ++ws.round_index;              // keep retry rounds distinguishable
         return false;
     };
+    // Public queries only read, so dead incidences are dropped here from the
+    // lists a selection queried. Each vertex has one writer, and a repeated
+    // call finds its flag cleared. The flags outlive a handoff to the built-in
+    // continuation, whose rounds then clean the remaining lists.
+    auto clean_if_queried = [&](node_index v, bool live) {
+        if (query_touched[v].load(std::memory_order_relaxed)) {
+            query_touched[v].store(false, std::memory_order_relaxed);
+            if (live) work.prune_and_degree(v);
+        }
+    };
+    // An empty selection eliminates nothing, so every active vertex is live.
+    auto clean_after_empty_selection = [&] {
+        if (!query_touched) return;
+        const auto count = static_cast<std::int64_t>(active.size());
+        #pragma omp parallel for schedule(static) if(active.size() > opts.experimental.omp_threshold)
+        for (std::int64_t i = 0; i < count; ++i)
+            clean_if_queried(active[static_cast<size_t>(i)], true);
+    };
     // Shared round epilogue: peak graph memory, the stable active filter and
     // the round index.
     auto finish_round = [&] {
         peak_graph_bytes = std::max(peak_graph_bytes, work.memory_bytes());
-        if (active.size() > opts.experimental.omp_threshold) {
-            parallel_stable_active_filter(
-                active, active_scratch, pre_filter_offsets,
-                [&](node_index v) { return work.is_active(v); });
+        auto filter_active = [&](auto&& keep) {
+            if (active.size() > opts.experimental.omp_threshold) {
+                parallel_stable_active_filter(active, active_scratch, pre_filter_offsets, keep);
+            } else {
+                std::erase_if(active, [&](node_index v) { return !keep(v); });
+            }
+        };
+        // The flag array exists once a rule without the degree prepass has run.
+        if (query_touched) {
+            filter_active([&](node_index v) {
+                const bool live = work.is_active(v);
+                clean_if_queried(v, live);
+                return live;
+            });
         } else {
-            std::erase_if(active,
-                          [&](node_index v) { return !work.is_active(v); });
+            filter_active([&](node_index v) { return work.is_active(v); });
         }
         ++ws.round_index;
     };
@@ -1115,6 +1148,7 @@ factorization factorize_impl(const Eliminator& elim,
             if (part.data.size() == 0) {
                 if (retry_budget_spent(consecutive_empty))
                     break;                     // hand the residual to the peel
+                clean_after_empty_selection();
                 continue;                      // whiffed sample round: retry
             }
             consecutive_empty = 0;
@@ -1296,22 +1330,15 @@ factorization factorize_impl(const Eliminator& elim,
         // decays smoothly near the threshold, whiffed rounds are nearly free,
         // and every column moved to the peel costs both fill and time.
         size_t bk_consecutive_empty = 0;
-        // BK's own round-0 seed is 2*m/|active|, and graph::m() is monotone —
-        // it still counts every edge the main loop's eliminations consumed — so
-        // starting BK here reads a badly inflated average degree, samples at
-        // 1/(c*d) against it and under-fills its first round. Hand it the main
-        // loop's last measured average instead (every partitioner that declares
-        // residual_handoff_threshold also declares degree_prepass, so this is
-        // populated whenever the loop can be reached; the 2*m fallback stays for
-        // a hand-set parallel_residual_threshold under a prepass-less rule).
-        if (last_avg_degree > 0.0)
-            bk.est_avg_degree = last_avg_degree;
+        // BK starts unseeded, as a custom partitioner would: its first round
+        // samples every vertex and measures the average degree.
         while (active.size() > residual_thresh) {
             ws.reset_for_round();
             const auto& bk_part = run_partitioner(bk, work, active);
             if (bk_part.data.size() == 0) {
                 if (retry_budget_spent(bk_consecutive_empty))
                     break;                     // hand the residual to the peel
+                clean_after_empty_selection();
                 continue;                      // whiffed sample round: retry
             }
             bk_consecutive_empty = 0;
