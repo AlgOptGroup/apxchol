@@ -44,7 +44,7 @@ public:
     /// Shares the device operator, which is read-only after setup, and
     /// allocates its own vectors and stream, so copies solve concurrently.
     cuda_pcg(const cuda_pcg& other)
-        : n_(other.n_), op_(other.op_), spmv_lanes_(other.spmv_lanes_) {
+        : n_(other.n_), narrow_(other.narrow_), op_(other.op_), spmv_lanes_(other.spmv_lanes_) {
         if (!other.ready_) return;
         device_ = other.device_;
         const detail::cuda_device_scope device(device_, detail::cuda_device_scope::checked{});
