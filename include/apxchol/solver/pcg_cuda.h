@@ -44,7 +44,7 @@ public:
     /// Shares the device operator, which is read-only after setup, and
     /// allocates its own vectors and stream, so copies solve concurrently.
     cuda_pcg(const cuda_pcg& other)
-        : n_(other.n_), op_(other.op_), spmv_lanes_(other.spmv_lanes_) {
+        : n_(other.n_), narrow_(other.narrow_), op_(other.op_), spmv_lanes_(other.spmv_lanes_) {
         if (!other.ready_) return;
         device_ = other.device_;
         const detail::cuda_device_scope device(device_, detail::cuda_device_scope::checked{});
@@ -263,8 +263,14 @@ private:
         APXCHOL_PCG_CUDA_CHECK(cudaMemcpyAsync(vectors_.state, h_state_, Columns * sizeof(*vectors_.state), cudaMemcpyHostToDevice, stream_));
         // Width changes reinterpret the reused storage; clear every grounded
         // coordinate on entry rather than inheriting a prior width's contents.
-        if (laplacian && n_)
-            APXCHOL_PCG_CUDA_CHECK(cudaMemsetAsync(vectors_.z + (n_ - 1) * Columns, 0, Columns * sizeof(double), stream_));
+        constexpr bool narrow = iteration<Precond, Columns>::narrow_z;
+        use_preconditioned(narrow);
+        if (laplacian && n_) {
+            if (narrow)
+                APXCHOL_PCG_CUDA_CHECK(cudaMemsetAsync(vectors_.preconditioned + (n_ - 1) * Columns, 0, Columns * sizeof(float), stream_));
+            else
+                APXCHOL_PCG_CUDA_CHECK(cudaMemsetAsync(vectors_.z + (n_ - 1) * Columns, 0, Columns * sizeof(double), stream_));
+        }
         iteration<Precond, Columns> commands{*this, precond, bnorm};
         buffer<double> warm;
         if (any_warm) {
@@ -317,11 +323,21 @@ private:
         cuda_pcg& s;
         const Precond& precond;
         std::array<double, Columns> bnorm;
+        // The triangular solve leaves its FP32 result unwidened when it can.
+        static constexpr bool narrow_z = requires(const Precond& m, const double* input, float* output,
+                                                  const unsigned* active, cudaStream_t stream) {
+            m.trsv().template solve_LLt_dev_narrow<Columns>(input, output, active, 1u, stream);
+        };
         void precondition() const {
             static_assert(sizeof(cuda_pcg_kernels::solve_state) % sizeof(unsigned) == 0);
-            precond.trsv().template solve_LLt_dev<Columns>(s.vectors_.r, s.vectors_.z,
-                &s.vectors_.state->active, sizeof(cuda_pcg_kernels::solve_state) / sizeof(unsigned),
-                s.stream_);
+            if constexpr (narrow_z)
+                precond.trsv().template solve_LLt_dev_narrow<Columns>(s.vectors_.r, s.vectors_.preconditioned,
+                    &s.vectors_.state->active, sizeof(cuda_pcg_kernels::solve_state) / sizeof(unsigned),
+                    s.stream_);
+            else
+                precond.trsv().template solve_LLt_dev<Columns>(s.vectors_.r, s.vectors_.z,
+                    &s.vectors_.state->active, sizeof(cuda_pcg_kernels::solve_state) / sizeof(unsigned),
+                    s.stream_);
         }
         void finalize(unsigned mode, unsigned it) const {
             // Vector kernels run one thread per panel element.
@@ -345,7 +361,7 @@ private:
 
     static void release_workspace(cuda_pcg_kernels::workspace& vectors, cuda_pcg_kernels::solve_state*& host) noexcept {
         for (void* pointer : std::initializer_list<void*>{vectors.x, vectors.r, vectors.ap,
-                vectors.p, vectors.z, vectors.rhs, vectors.partial, vectors.state})
+                vectors.p, vectors.z, vectors.rhs, vectors.preconditioned, vectors.partial, vectors.state})
             if (pointer) (void)cudaFree(pointer);
         vectors = {};
         if (host) { (void)cudaFreeHost(host); host = nullptr; }
@@ -356,8 +372,13 @@ private:
         cuda_pcg_kernels::workspace next{};
         cuda_pcg_kernels::solve_state* next_host = nullptr;
         try {
-            for (double** pointer : {&next.x, &next.r, &next.p, &next.z, &next.ap, &next.rhs})
+            for (double** pointer : {&next.x, &next.r, &next.p, &next.ap, &next.rhs})
                 APXCHOL_PCG_CUDA_CHECK(cudaMalloc(pointer, columns * n_ * sizeof(double)));
+            // One preconditioned-residual vector, in the precision in use.
+            if (narrow_)
+                APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.preconditioned, columns * n_ * sizeof(float)));
+            else
+                APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.z, columns * n_ * sizeof(double)));
             APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.partial, columns * cuda_pcg_kernels::kMaxBlocks * sizeof(double)));
             APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.state, columns * sizeof(cuda_pcg_kernels::solve_state)));
             APXCHOL_PCG_CUDA_CHECK(cudaHostAlloc(reinterpret_cast<void**>(&next_host),
@@ -372,6 +393,27 @@ private:
         vectors_ = next;
         h_state_ = next_host;
         capacity_ = columns;
+    }
+
+    // Keeps the preconditioned residual in FP32 when the triangular solve
+    // leaves its result unwidened, and in FP64 otherwise. A workspace is
+    // reserved in FP64 until the first solve, so switching to FP32 frees
+    // memory first and cannot run short of what was reserved.
+    void use_preconditioned(bool narrow) {
+        if (narrow == narrow_ && (narrow ? vectors_.preconditioned != nullptr : vectors_.z != nullptr)) return;
+        if (narrow) {
+            (void)cudaFree(vectors_.z);
+            vectors_.z = nullptr;
+            narrow_ = true;
+            APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&vectors_.preconditioned, capacity_ * n_ * sizeof(float)));
+        } else {
+            double* wide = nullptr;
+            APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&wide, capacity_ * n_ * sizeof(double)));
+            (void)cudaFree(vectors_.preconditioned);
+            vectors_.preconditioned = nullptr;
+            vectors_.z = wide;
+            narrow_ = false;
+        }
     }
 
     void destroy() noexcept {
@@ -409,6 +451,7 @@ private:
     int device_ = -1;
     bool ready_ = false;
     unsigned capacity_ = 0;
+    bool narrow_ = false; // The workspace holds the FP32 preconditioned residual.
     std::shared_ptr<const operator_storage> op_;
     // Per-copy: the solve stream, vectors and host-visible exit state.
     cudaStream_t stream_ = nullptr;

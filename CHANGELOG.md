@@ -12,6 +12,7 @@
 - Any 1.x release reads the solver archives written by earlier 1.x releases. A minor release may add a format version and keeps reading older ones; an older apxchol given a newer archive fails with an upgrade message.
 
 ### GPU backends
+- CUDA batched solves move less memory per iteration: 32-column panels are multiplied eight columns at a time, the preconditioned residual stays in the FP32 the triangular solve produces, and the forward triangular sweep writes its result once. A 32-column panel of a dense operator (271 entries per row) takes 30% less time on an RTX 4090, and panels of 5- and 7-point grids take up to 5% less on an RTX 4090 and up to 7% less on an RTX PRO 6000. Results are unchanged.
 - CUDA batched solves copy right-hand sides and solutions between the caller and the device panel in parallel on the host when the panel is large enough. On grids of 3 to 4 million rows a 32-column panel takes about 19% less time on an RTX 4090 and 25% less on an A100.
 - CUDA batched solves are faster on sparse operators: the vector updates of a panel read memory contiguously at every panel width. On 5- and 7-point grids of 3 to 4 million rows, a 32-column panel takes 15 to 21% less time on an RTX 4090 and 26 to 36% less on an A100. Single right-hand-side solves take the same time as before. CUDA sums are added in a different order, so solutions can differ from earlier versions in the last digits and an iteration count can change by one.
 - Metal PCG uses full 32-thread SIMD groups for reductions and long-row multiplication.

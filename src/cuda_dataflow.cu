@@ -88,7 +88,7 @@ template <class Value, unsigned Columns = 1, unsigned RhsLanes = 1> struct dataf
     __device__ void publish(unsigned row, unsigned q, float x) const {
         if (row < n) {
             if (out64) out64[row * Columns + q] = x;
-            else out[row * Columns + q] = x;
+            else if (out) out[row * Columns + q] = x;
         }
         // Ready and value share one atomic word. Canonicalize NaNs so a failed
         // numerical solve cannot turn into an endless wait on the pending marker.

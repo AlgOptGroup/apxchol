@@ -24,6 +24,7 @@ namespace {
 using namespace apxchol::detail::gpu_pcg;
 
 constexpr int kWarps = kBlockThreads / 32;
+constexpr unsigned kMultiplyColumns = 8;
 
 template<int Lanes = 1>
 struct pcg_math {
@@ -57,7 +58,8 @@ __device__ __forceinline__ double block_reduce_sum(double v, double* sh, Math ma
     return warp == 0 ? sum_lanes<32>(math, lane < kWarps ? sh[lane] : 0.0) : 0.0;
 }
 
-template<operation Op, int Lanes = 1, unsigned Columns = 1, class Value = double>
+template<operation Op, int Lanes = 1, unsigned Columns = 1, class Value = double, unsigned Group = Columns,
+         unsigned First = 0>
 __global__ void __launch_bounds__(kBlockThreads)
 step_kernel(std::int64_t n, workspace v, const int* ptr = nullptr,
             const int* col = nullptr, const Value* val = nullptr,
@@ -68,12 +70,12 @@ step_kernel(std::int64_t n, workspace v, const int* ptr = nullptr,
     constexpr int rows = kBlockThreads / Lanes;
     const pcg_work<std::int64_t> work{static_cast<std::int64_t>(blockIdx.x) * rows, n,
         static_cast<std::int64_t>(gridDim.x) * rows, threadIdx.x / Lanes, n};
-    const auto sums = detail::gpu_pcg::step_columns<Lanes, Columns>(
+    const auto sums = detail::gpu_pcg::step_columns_group<Lanes, Columns, Group, First>(
         Op, pcg_math<Lanes>{}, v, ptr, col, val, static_cast<const Value*>(nullptr),
         work, threadIdx.x % Lanes, row_map);
     if constexpr (Op != operation::direction) {
         __shared__ double scratch[Columns][kWarps];
-        for (unsigned q = 0; q < Columns; ++q) {
+        for (unsigned q = First; q < First + Group; ++q) {
             const double total = block_reduce_sum(sums.values[q], scratch[q]);
             if (threadIdx.x == 0) v.partial[blockIdx.x * Columns + q] = total;
         }
@@ -105,9 +107,10 @@ vector_kernel(std::int64_t n, workspace v) {
                 v.r[i] = value;
                 sum = math.add_product(sum, value, value);
             } else if constexpr (Op == operation::dot) {
-                sum = math.add_product(sum, v.r[i], math.preconditioned(v.z[i]));
+                sum = math.add_product(sum, v.r[i], math.preconditioned(
+                    v.preconditioned ? double(v.preconditioned[i]) : v.z[i]));
             } else {
-                const double z = math.preconditioned(v.z[i]);
+                const double z = math.preconditioned(v.preconditioned ? double(v.preconditioned[i]) : v.z[i]);
                 v.p[i] = state.beta == 0 ? z : math.direction(z, v.p[i], state.beta);
             }
         }
@@ -160,9 +163,17 @@ template<unsigned Columns, class Value>
 void multiply(cudaStream_t stream, std::int64_t n, workspace v,
               const operator_csr& a, const Value* values, int lanes) {
     const int grid = pcg_blocks(n * lanes);
+    // The widest panel is multiplied in groups of kMultiplyColumns columns:
+    // each pass gathers from a slice of the direction panel small enough to
+    // stay in the device cache, at the cost of reading the operator once per
+    // pass. Narrower panels fit in one pass.
+    constexpr unsigned group = Columns > 2 * kMultiplyColumns ? kMultiplyColumns : Columns;
     auto launch = [&]<int Lanes>() {
-        step_kernel<operation::multiply, Lanes, Columns><<<grid, kBlockThreads, 0, stream>>>(
-            n, v, a.row_ptr, a.col_idx, values, a.row_map);
+        // One kernel per group position, so every column bound is a constant.
+        [&]<std::size_t... Pass>(std::index_sequence<Pass...>) {
+            (step_kernel<operation::multiply, Lanes, Columns, Value, group, static_cast<unsigned>(Pass) * group><<<
+                grid, kBlockThreads, 0, stream>>>(n, v, a.row_ptr, a.col_idx, values, a.row_map), ...);
+        }(std::make_index_sequence<Columns / group>{});
     };
     switch (lanes) {
         case 1: launch.template operator()<1>(); break;
