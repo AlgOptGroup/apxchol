@@ -7,10 +7,12 @@ template<class Wide> struct star_input {
     unsigned node, begin, end, nodes;
     Wide excess;
     seed_type seed;
+    unsigned trace;   // 1: trace-cycle law (core without exact cliques), 0: GKS
 };
 struct row_result {
     unsigned status, entries, fills, excess_updates;
     float diagonal;
+    unsigned cut;     // trace-cycle: first heavy-core position; >= entries: GKS law
 };
 template<class Record>
 APXCHOL_GPU_FUNCTION bool neighbor_before(Record a, Record b) {
@@ -89,7 +91,9 @@ APXCHOL_GPU_FUNCTION canonical_star<typename Math::wide> combine_star(Math math,
     if (!math.finite(degree)) { result.status = arithmetic_range; return {result,zero}; }
     if (!math.less(zero, degree)) degree = math.from_float(1.0f);
     result.entries = unique;
-    result.fills = unique ? unique - 1 : 0;
+    // Trace-cycle emits one edge per neighbour (cut parents + h cycle edges).
+    result.fills = unique ? (p.trace && unique >= 3 ? unique : unique - 1) : 0;
+    result.cut = unique;
     result.excess_updates = math.less(zero, p.excess) ? unique : 0;
     return {result,degree};
 }
@@ -140,6 +144,99 @@ APXCHOL_GPU_FUNCTION row_result prepare_sample(Math math,Records rows,Prefix pre
     return result;
 }
 
+// Trace-cycle plan on one lane, after prepare_sample (rows ascending by weight,
+// prefix = inclusive prefix sums). Light parents i < cut each draw one partner
+// j > i with probability (a_i + a_j) / mass_i, mass_i = sum_{l>i} a_l +
+// (d-i-1) a_i, at weight a_i a_j mass_i / (D (a_i + a_j)); the heavy core
+// (h = d - cut >= 3 positions) gets one uniformly random h-cycle at weight
+// a_x a_y (h-1) / (2 D). Every pair keeps expectation a_i a_j / D. The cut
+// minimises the CUDA sampler's variance score, computed here in float on
+// weights scaled by the largest; it only affects variance, never the mean.
+// The core permutation is stored in rows[cut..d).slot. Any zero or
+// non-finite scaled weight keeps the GKS law (cut = entries).
+template<class Math,class Records,class Prefix>
+APXCHOL_GPU_FUNCTION row_result prepare_trace(Math math,Records rows,Prefix prefix,
+        row_result result,seed_type seed) {
+    const unsigned d=result.entries;
+    result.cut=d;
+    if (result.status || d<3) return result;
+    const float scale=math.to_float(rows[d-1].value);
+    if (!(scale>0.0f) || !math.finite(math.from_float(scale))) return result;
+    float total=0.0f,total_square=0.0f;
+    for (unsigned i=0;i<d;++i) {
+        const float x=math.to_float(rows[i].value)/scale;
+        if (!(x>0.0f) || !math.finite(math.from_float(x))) return result;
+        total+=x; total_square+=x*x;
+    }
+    if (!math.finite(math.from_float(total)) || !math.finite(math.from_float(total_square))) return result;
+    float before=0.0f,before_square=0.0f,parents=0.0f,best=-1.0f;
+    unsigned cut=0;
+    for (unsigned i=0;i+2<d;++i) {
+        const float x=math.to_float(rows[i].value)/scale;
+        const float square=total_square-before_square;
+        const unsigned h=d-i;
+        const float cycle=h==3 ? 0.0f : float(h-3)*float(h-1)*0.5f*(square>0.0f ? square : 0.0f);
+        const float score=parents+cycle;
+        if (best<0.0f || score<best) { best=score; cut=i; }
+        before+=x; before_square+=x*x;
+        if (i+3<d) {
+            const float m=float(d-i-1),rest=total-before;
+            parents+=(m-1.0f)*x*(2.0f*(rest>0.0f ? rest : 0.0f)+m*x);
+        }
+    }
+    if (!(best>=0.0f) || !math.finite(math.from_float(best))) return result;
+    const unsigned h=d-cut;
+    for (unsigned k=0;k<h;++k) rows[cut+k].slot=cut+k;
+    for (unsigned k=h;k>1;--k) {
+        const auto bits=random_bits(seed^(seed_type(0xA0761D6478BD642FUL)*seed_type(k)));
+        const unsigned j=unsigned(bits%seed_type(k));
+        const unsigned t=rows[cut+k-1].slot; rows[cut+k-1].slot=rows[cut+j].slot; rows[cut+j].slot=t;
+    }
+    result.cut=cut;
+    result.fills=d;
+    return result;
+}
+
+template<class Math,class Output,class Records,class Prefix>
+APXCHOL_GPU_FUNCTION unsigned sample_trace_item(Math math,Output out,
+        star_input<typename Math::wide> p,Records rows,Prefix prefix,
+        canonical_star<typename Math::wide> prepared,unsigned i) {
+    const auto zero=math.from_float(0.0f),degree=prepared.degree;
+    const unsigned d=prepared.result.entries,cut=prepared.result.cut;
+    unsigned a=0,b=0;
+    typename Math::wide weight=zero;
+    if (i>=cut) {
+        const unsigned h=d-cut,slot=i-cut;
+        const unsigned x=rows[i].slot,y=rows[cut+(slot+1==h ? 0u : slot+1)].slot;
+        weight=math.multiply(math.multiply_divide(rows[x].value,rows[y].value,degree),
+                             math.from_float(0.5f*float(h-1)));
+        a=rows[x].node; b=rows[y].node;
+    } else {
+        const auto ai=rows[i].value;
+        const auto total=prefix[d-1];
+        // R(j) = sum_{l>=j} a_l + (d-j) a_i, decreasing in j; R(i+1) = mass.
+        const auto mass=math.add(math.subtract(total,prefix[i]),
+                                 math.multiply(ai,math.from_float(float(d-i-1))));
+        const auto bits=random_bits(p.seed+seed_type(0x9E3779B97F4A7C15UL)*seed_type(i+1));
+        const auto target=math.multiply(math.uniform(bits>>11),mass);
+        unsigned low=i+1,high=d;
+        while (low+1<high) {
+            const unsigned mid=low+(high-low)/2;
+            const auto r=math.add(math.subtract(total,prefix[mid-1]),
+                                  math.multiply(ai,math.from_float(float(d-mid))));
+            if (math.less(target,r)) low=mid; else high=mid;
+        }
+        const auto aj=rows[low].value;
+        weight=math.multiply(math.multiply_divide(ai,aj,degree),math.divide(mass,math.add(ai,aj)));
+        a=rows[i].node; b=rows[low].node;
+    }
+    const float stored=math.to_float(weight);
+    if (!math.finite(weight) || !math.finite(math.from_float(stored)) || math.less(weight,zero))
+        return arithmetic_range;
+    out.fill(i,a<b ? a : b,a<b ? b : a,stored);
+    return success;
+}
+
 template<class Math,class Output,class Records,class Prefix>
 APXCHOL_GPU_FUNCTION unsigned sample_item(Math math,Output out,
         star_input<typename Math::wide> p,Records rows,Prefix prefix,
@@ -152,6 +249,7 @@ APXCHOL_GPU_FUNCTION unsigned sample_item(Math math,Output out,
         if (!math.finite(update)) return arithmetic_range;
         out.excess(i,rows[i].node,update);
     }
+    if (result.cut<unique) return sample_trace_item(math,out,p,rows,prefix,prepared,i);
     if (i>=result.fills) return success;
     const auto suffix=math.subtract(prefix[unique-1],prefix[i]);
     const auto bits=random_bits(p.seed+seed_type(0x9E3779B97F4A7C15UL)*seed_type(i+1));
