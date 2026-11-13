@@ -219,6 +219,9 @@ public:
     }
     /// Which storage the LAST setup() chose.
     bool fp16() const { return fp16_; }
+    /// Whether FP32 panels can hold the sweeps' results of inputs within
+    /// 2^+-32 with room to spare (see setup).
+    bool fp32_panel_range() const { return fp32_panel_range_; }
     /// Width / name of the stored off-diagonal values after the last setup().
     std::size_t value_bytes() const { return fp16_ ? sizeof(_Float16) : sizeof(float); }
     const char* value_name() const { return fp16_ ? "fp16 (per-column scaled)" : "float (fp32)"; }
@@ -736,6 +739,22 @@ private:
             transpose(csc_col_ptr_.data(), csc_row_idx_.data(), csc_vals.data());
 
         build_schedule(options.experimental.cpu_schedule, mark);
+        // FP32 panels hold r / L_jj after the forward sweep and about
+        // r / L_jj^2 after the backward one (times the column scale in
+        // between under FP16 storage). With every diagonal and scale within
+        // 2^+-16 and inputs within 2^+-32 (the range CUDA scales its inputs
+        // into, gpu_scaling::fp32_scale), both stay about 2^60 clear of the
+        // FP32 limits.
+        {
+            const auto in_range = [](float value) { return value >= 0x1p-16f && value <= 0x1p16f; };
+            bool ok = true;
+            #pragma omp parallel for schedule(static) reduction(&& : ok) if (m_ > kSpTRSVOMPThreshold)
+            for (node_index v = 0; v < m_; ++v) {
+                if (fp16_) ok = ok && in_range(diag_[v]) && in_range(scale_[v]);
+                else       ok = ok && in_range(csc_vals32_[csc_col_ptr_[v]]);
+            }
+            fp32_panel_range_ = ok;
+        }
         ready_ = true;
     }
 
@@ -1151,6 +1170,13 @@ public:
         solve_dispatch<bck_dir, Columns>(x_in, y_out, own_workspace_);
     }
 
+    /// Panel solves (Columns > 1) also accept FP32 panels for the output, and
+    /// for the input of the back solve: forward_solve(double in, float out)
+    /// then transpose_solve(float in, float out). A row gathers the output
+    /// panel, widens to FP64, accumulates in FP64 and rounds the stored
+    /// result, which halves the bytes each gather moves. Not valid in place
+    /// across types.
+    ///
     /// Mutable synchronization state of one caller's solves. The non-const
     /// overloads above use this object's own; callers sharing a const
     /// omp_sptrsv, such as solver copies, pass a workspace each from
@@ -1175,11 +1201,11 @@ public:
         return workspace;
     }
     template<int Columns = 1>
-    void forward_solve(const double* x_in, double* y_out, const solve_workspace& workspace) const {
+    void forward_solve(const auto* x_in, auto* y_out, const solve_workspace& workspace) const {
         solve_dispatch<fwd_dir, Columns>(x_in, y_out, workspace);
     }
     template<int Columns = 1>
-    void transpose_solve(const double* x_in, double* y_out, const solve_workspace& workspace) const {
+    void transpose_solve(const auto* x_in, auto* y_out, const solve_workspace& workspace) const {
         solve_dispatch<bck_dir, Columns>(x_in, y_out, workspace);
     }
 
@@ -1187,7 +1213,7 @@ private:
     // One storage branch per solve; FP16 kernels are only entered after the
     // setup-time CPU capability check.
     template <class Dir, int Columns>
-    void solve_dispatch(const double* x_in, double* y_out, const solve_workspace& barrier) const {
+    void solve_dispatch(const auto* x_in, auto* y_out, const solve_workspace& barrier) const {
         if (fp16_) {
             solve_selected<Dir, _Float16, Columns>(x_in, y_out, barrier);
             return;
@@ -1196,7 +1222,7 @@ private:
     }
 
     template <class Dir, class V, int Columns = 1>
-    void solve_selected(const double* x_in, double* y_out, const solve_workspace& barrier) const {
+    void solve_selected(const auto* x_in, auto* y_out, const solve_workspace& barrier) const {
         const unsigned processors = detail::cpu_solve_threads(team_rows_);
         if (processors == 1)
             return solve_levelset_range_serial<Dir, V, Columns>(
@@ -1216,7 +1242,7 @@ private:
     enum class tail_phase { lanes, terminal_run, lane_prefix, terminal_prefix };
 
     template <class Dir, class V, int Columns = 1>
-    void solve_hybrid(const double* x_in, double* y_out, const solve_workspace& workspace) const {
+    void solve_hybrid(const auto* x_in, auto* y_out, const solve_workspace& workspace) const {
         const unsigned processors = critical_plan_.processors;
         bool team_ok = true;
         double* partial = nullptr;
@@ -1289,7 +1315,7 @@ private:
     }
 
     template <class Dir, class V, int Columns = 1>
-    void solve_levelset_range_serial(const double* x_in, double* y_out,
+    void solve_levelset_range_serial(const auto* x_in, auto* y_out,
                                      std::size_t first_level,
                                      std::size_t level_end) const {
         with_base_levels<Dir>([&](const auto& levels) {
@@ -1313,14 +1339,14 @@ private:
 #ifdef __x86_64__
     template <class Dir, class V, int Columns>
     [[gnu::target("avx2,f16c,fma"), gnu::flatten]]
-    void solve_tail_phase_fma(tail_phase phase, const double* x_in, double* y_out,
+    void solve_tail_phase_fma(tail_phase phase, const auto* x_in, auto* y_out,
                               const detail::critical_weak_barrier& barrier, double* partial) const {
         solve_tail_phase_impl<Dir, V, Columns>(phase, x_in, y_out, barrier, partial);
     }
 
     template <class Dir, int Columns>
     [[gnu::target("f16c"), gnu::flatten]]
-    void solve_tail_phase_fp16(tail_phase phase, const double* x_in, double* y_out,
+    void solve_tail_phase_fp16(tail_phase phase, const auto* x_in, auto* y_out,
                                const detail::critical_weak_barrier& barrier, double* partial) const {
         solve_tail_phase_impl<Dir, _Float16, Columns>(phase, x_in, y_out, barrier, partial);
     }
@@ -1328,7 +1354,7 @@ private:
 
     // Called collectively from the hybrid team (terminal_run: by one thread).
     template <class Dir, class V, int Columns = 1>
-    void solve_tail_phase(tail_phase phase, const double* x_in, double* y_out,
+    void solve_tail_phase(tail_phase phase, const auto* x_in, auto* y_out,
                           const detail::critical_weak_barrier& barrier, double* partial) const {
 #if defined(__x86_64__) && !(defined(__AVX2__) && defined(__F16C__) && defined(__FMA__))
         if constexpr (std::is_same_v<V, _Float16> || Columns > 1) {
@@ -1343,7 +1369,7 @@ private:
 
     template <class Dir, class V, int Columns = 1>
     [[gnu::always_inline]]
-    void solve_tail_phase_impl(tail_phase phase, const double* x_in, double* y_out,
+    void solve_tail_phase_impl(tail_phase phase, const auto* x_in, auto* y_out,
                                const detail::critical_weak_barrier& barrier, double* partial) const {
         switch (phase) {
         case tail_phase::lanes:
@@ -1371,7 +1397,7 @@ private:
     template <class V, int Columns>
     [[gnu::always_inline]]
     void sum_tail_prefixes(node_index first, node_index last,
-                           const double* y_out, double* partial) const {
+                           const auto* y_out, double* partial) const {
         if constexpr (Columns > 1) {
             const node_index tail = critical_plan_.first_row;
             const edge_index* prefix = tail_prefix_ptr_.data() + (first - tail);
@@ -1397,7 +1423,7 @@ private:
     // sum its prefix pass stored; every other row is the plain thin kernel.
     template <class Dir, class V, int Columns>
     [[gnu::always_inline]]
-    void solve_tail_row(node_index v, const double* x_in, double* y_out,
+    void solve_tail_row(node_index v, const auto* x_in, auto* y_out,
                         const double* partial) const {
         if constexpr (Dir::forward && Columns > 1) {
             const std::size_t local = static_cast<std::size_t>(v - critical_plan_.first_row);
@@ -1415,7 +1441,7 @@ private:
 
     template <class Dir, class V, int Columns = 1>
     [[gnu::always_inline]]
-    void solve_critical_team_impl(const double* x_in, double* y_out,
+    void solve_critical_team_impl(const auto* x_in, auto* y_out,
                                   const detail::critical_weak_barrier& barrier,
                                   const double* partial) const {
         const unsigned processor =
@@ -1462,13 +1488,13 @@ private:
     // level and row order. Fat levels use `omp for schedule(static)`. Their
     // implicit barriers publish each group's outputs before the next group.
     template <class Dir, class V, int Columns = 1>
-    void solve_levelset(const double* x_in, double* y_out, unsigned processors) const {
+    void solve_levelset(const auto* x_in, auto* y_out, unsigned processors) const {
         solve_levelset_range<Dir, V, Columns>(
             x_in, y_out, 0, base_level_count<Dir>(), processors);
     }
 
     template <class Dir, class V, int Columns = 1>
-    void solve_levelset_range(const double* x_in, double* y_out,
+    void solve_levelset_range(const auto* x_in, auto* y_out,
                               std::size_t first_level,
                               std::size_t level_end, unsigned processors) const {
         if (first_level == level_end) return;
@@ -1483,7 +1509,7 @@ private:
     // body separate lets the hybrid cross from bulk levels to weak
     // supersteps without a second fork/join.
     template <class Dir, class V, int Columns = 1>
-    void solve_levelset_range_team(const double* x_in, double* y_out,
+    void solve_levelset_range_team(const auto* x_in, auto* y_out,
                                    std::size_t first_level,
                                    std::size_t level_end) const {
         with_base_levels<Dir>([&](const auto& levels) {
@@ -1502,7 +1528,7 @@ private:
     }
 
     template <class Dir, class V, int Columns, class Levels>
-    void solve_levelset_range_team_impl(const double* x_in, double* y_out,
+    void solve_levelset_range_team_impl(const auto* x_in, auto* y_out,
                                         const Levels& levels,
                                         std::size_t first_level,
                                         std::size_t level_end) const {
@@ -1525,7 +1551,7 @@ private:
 
     template <class Dir, class V, int Columns, bool Fat, bool Simd, bool Parallel, class Level>
     [[gnu::always_inline]]
-    void solve_level_rows_impl(const Level& level, const double* x_in, double* y_out) const {
+    void solve_level_rows_impl(const Level& level, const auto* x_in, auto* y_out) const {
         const node_index size = static_cast<node_index>(level.size());
         if constexpr (Parallel) {
             #pragma omp for schedule(static)
@@ -1546,20 +1572,20 @@ private:
     // and matching dot kernel, keeping calls and feature checks out of the rows.
     template <class Dir, class V, int Columns, bool Fat, bool Parallel, class Level>
     [[gnu::target("avx2,f16c,fma"), gnu::flatten]]
-    void solve_level_rows_simd(const Level& level, const double* x_in, double* y_out) const {
+    void solve_level_rows_simd(const Level& level, const auto* x_in, auto* y_out) const {
         solve_level_rows_impl<Dir, V, Columns, Fat, Fat, Parallel>(level, x_in, y_out);
     }
 
     template <class Dir, int Columns, bool Fat, bool Parallel, class Level>
     [[gnu::target("f16c"), gnu::flatten]]
-    void solve_level_rows_f16c(const Level& level, const double* x_in, double* y_out) const {
+    void solve_level_rows_f16c(const Level& level, const auto* x_in, auto* y_out) const {
         solve_level_rows_impl<Dir, _Float16, Columns, Fat, false, Parallel>(level, x_in, y_out);
     }
 #endif
 
     template <class Dir, class V, int Columns, bool Fat, bool Parallel, class Level>
     [[gnu::always_inline]]
-    void solve_level_rows(const Level& level, const double* x_in, double* y_out) const {
+    void solve_level_rows(const Level& level, const auto* x_in, auto* y_out) const {
 #if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
         if constexpr (std::is_same_v<V, _Float16>)
             return solve_level_rows_simd<Dir, V, Columns, Fat, Parallel>(level, x_in, y_out);
@@ -1692,6 +1718,7 @@ private:
     bool ready_ = false;
     bool verbose_ = false;
     bool fp16_  = false;   // the storage the last setup() resolved
+    bool fp32_panel_range_ = false;
 
     // The CSR/CSC arrays are streamed on every level-set sweep and are far
     // larger than the dTLB reach of base pages. big_alloc requests huge pages
@@ -1893,7 +1920,7 @@ private:
     // order as a row summed in one.
     template <class Dir, class V, int Columns>
     [[gnu::always_inline]]
-    void add_panel_terms(edge_index p, edge_index end, double* sum, const double* y_out) const {
+    void add_panel_terms(edge_index p, edge_index end, double* sum, const auto* y_out) const {
         const auto& vals = Dir::template vals<V>(*this);
         const auto& idx = Dir::idx(*this);
         for (; p < end; ++p) {
@@ -1910,7 +1937,12 @@ private:
     template <class Dir, class V, int Columns>
     [[gnu::always_inline]]
     void finish_panel_row(node_index v, edge_index p, double* sum,
-                          const double* x_in, double* y_out) const {
+                          const auto* x_in, auto* y_out) const {
+        // FP32 panels: gathered values and the input widen to FP64, the sum
+        // and the backward input scale stay FP64, and only the stored result
+        // is rounded.
+        using stored = std::remove_reference_t<decltype(*y_out)>;
+        static_assert(std::is_same_v<stored, double> || std::is_same_v<stored, float>);
         add_panel_terms<Dir, V, Columns>(p, Dir::last(Dir::ptr(*this).data(), v), sum, y_out);
         const double diagonal = diag<Dir, V>(v);
         double scale = 1;
@@ -1921,7 +1953,7 @@ private:
         const auto offset = std::size_t(v) * Columns;
         #pragma omp simd
         for (int q = 0; q < Columns; ++q)
-            y_out[offset + q] = (x_in[offset + q] * scale - sum[q]) / diagonal;
+            y_out[offset + q] = static_cast<stored>((x_in[offset + q] * scale - sum[q]) / diagonal);
     }
 
     // One row (forward: CSR row i) / column (back: CSC column j) of the sweep:
@@ -1933,34 +1965,34 @@ private:
     // kernel); thin: dot_thin (4-way).
     template <class Dir, class V, int Columns, bool Fat, bool Simd = false>
     [[gnu::always_inline]]
-    void solve_row(node_index v, const double* x_in, double* y_out) const {
+    void solve_row(node_index v, const auto* x_in, auto* y_out) const {
         const edge_index* ptr = Dir::ptr(*this).data();
         const edge_index p0 = Dir::first(ptr, v);
         const edge_index p1 = Dir::last(ptr, v);
         if constexpr (Columns > 1) {
             double sum[Columns]{};
             finish_panel_row<Dir, V, Columns>(v, p0, sum, x_in, y_out);
-            return;
-        }
-        double sum;
-#ifdef __x86_64__
-        if constexpr (std::is_same_v<V, _Float16>) {
-            if constexpr (Simd)
-                sum = dot_fat_simd(Dir::template vals<V>(*this).data(), Dir::idx(*this).data(), p0, p1, y_out);
-            else
-                sum = dot_fp16_scalar<Fat>(Dir::template vals<V>(*this).data(), Dir::idx(*this).data(), p0, p1, y_out);
-        } else
-#endif
-        if constexpr (Fat) {
-            const V* vals = Dir::template vals<V>(*this).data();
-            const node_index* idx = Dir::idx(*this).data();
-            sum = 0.0;
-            for (edge_index p = p0; p < p1; ++p)
-                sum += widen(vals[p]) * y_out[idx[p]];
         } else {
-            sum = dot_thin<V>(Dir::template vals<V>(*this).data(), Dir::idx(*this).data(), p0, p1, y_out);
+            double sum;
+#ifdef __x86_64__
+            if constexpr (std::is_same_v<V, _Float16>) {
+                if constexpr (Simd)
+                    sum = dot_fat_simd(Dir::template vals<V>(*this).data(), Dir::idx(*this).data(), p0, p1, y_out);
+                else
+                    sum = dot_fp16_scalar<Fat>(Dir::template vals<V>(*this).data(), Dir::idx(*this).data(), p0, p1, y_out);
+            } else
+#endif
+            if constexpr (Fat) {
+                const V* vals = Dir::template vals<V>(*this).data();
+                const node_index* idx = Dir::idx(*this).data();
+                sum = 0.0;
+                for (edge_index p = p0; p < p1; ++p)
+                    sum += widen(vals[p]) * y_out[idx[p]];
+            } else {
+                sum = dot_thin<V>(Dir::template vals<V>(*this).data(), Dir::idx(*this).data(), p0, p1, y_out);
+            }
+            y_out[v] = (Dir::template rhs<V>(*this, v, x_in) - sum) / diag<Dir, V>(v);
         }
-        y_out[v] = (Dir::template rhs<V>(*this, v, x_in) - sum) / diag<Dir, V>(v);
     }
 
     // Level sets.

@@ -821,6 +821,14 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
         timings->tick();
     }
     apply_count_ = 0;
+    // FP32 sweeps need the residual inside the range FP32 holds with room to
+    // spare: the one CUDA scales its inputs into. Other panels, and factors
+    // with extreme diagonals, keep FP64 sweeps.
+    fp32_sweeps_ = C > 1 && trsv().fp32_panel_range();
+    for (int c = 0; c < C && fp32_sweeps_; ++c) {
+        const double residual = std::sqrt(rr[c]);
+        fp32_sweeps_ = !active[c] || (residual >= 0x1p-32 && residual <= 0x1p32);
+    }
     rz = apply_fused<C>(r, rs, z, timings);
     {
         // The split panel_update_p uses, so its threads touch p's pages first.
@@ -998,6 +1006,15 @@ std::array<double, C> detail::cpu_route::apply_fused(
     // every ten preconditioner applications.
     const bool center = !factor().sddm && (++apply_count_ % 10) == 0;
     std::array<double, C> rz{};
+    // Panels carry the sweeps' results in FP32: at width 8 a gathered row is
+    // then half a cache line instead of a whole one, and the sweeps are bound
+    // by the bytes they move. CUDA and Metal carry FP32 here as well.
+    if constexpr (C > 1) {
+        if (fp32_sweeps_) {
+            apply_core<C, true>(r, r_sum, center, z, &rz, cp);
+            return rz;
+        }
+    }
     apply_core<C>(r, r_sum, center, z, &rz, cp);
     return rz;
 }
@@ -1016,7 +1033,7 @@ void detail::cpu_route::apply_panel(const double* b, double* z) const {
 /// `b_sum` = Σ b and `center` selects whether to perform the two Laplacian
 /// mean passes (both ignored for SDDM). If `rz_out` is non-null the final
 /// unpermute gather also accumulates b·z into it.
-template<int C>
+template<int C, bool Fp32Sweeps>
 void detail::cpu_route::apply_core(const double* b, const std::array<double, C>& b_sum,
                                    bool center, double* z, std::array<double, C>* rz_out,
                                    checkpoint* cp) const {
@@ -1027,8 +1044,16 @@ void detail::cpu_route::apply_core(const double* b, const std::array<double, C>&
     const std::int64_t n = n_;
     const int workers = detail::cpu_solve_threads(n);
     double* part = part_.data();
-    scratch_.resize(static_cast<std::size_t>(n * C));
-    scratch2_.resize(static_cast<std::size_t>(n * C));
+    // Both outputs are written in full by the sweeps' own threads before
+    // anything reads them.
+    auto& forward_out = [&]() -> auto& {
+        if constexpr (Fp32Sweeps) return sweep_y_; else return scratch_;
+    }();
+    auto& backward_out = [&]() -> auto& {
+        if constexpr (Fp32Sweeps) return sweep_z_; else return scratch2_;
+    }();
+    forward_out.resize(static_cast<std::size_t>(n * C));
+    backward_out.resize(static_cast<std::size_t>(n * C));
 
     std::array<double, C> mean{};
     for (int c = 0; c < C; ++c)
@@ -1042,13 +1067,14 @@ void detail::cpu_route::apply_core(const double* b, const std::array<double, C>&
             z[std::size_t(P[v]) * C + c] = b[v * C + c] - (center ? mean[c] : 0.0);
     if (cp) (*cp)("permute");
 
-    trsv().template forward_solve<C>(z, scratch_.data(), barrier_);
+    trsv().template forward_solve<C>(z, forward_out.data(), barrier_);
     if (cp) (*cp)("forward");
-    trsv().template transpose_solve<C>(scratch_.data(), scratch2_.data(), barrier_);
-    double* out = scratch2_.data();
+    trsv().template transpose_solve<C>(forward_out.data(), backward_out.data(), barrier_);
+    // FP64 or FP32; every read below widens before it is used.
+    auto* out = backward_out.data();
     if (cp) (*cp)("back");
     if (!F.sddm)
-        std::fill_n(out + (n - 1) * C, C, 0.0);
+        std::fill_n(out + (n - 1) * C, C, 0);
 
     std::array<double, C> shift{};
     if (center) {

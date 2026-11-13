@@ -685,6 +685,64 @@ TEST(Solver, CpuScalesExtremeRhsAndWarmStarts) {
     }
 }
 
+// PCG panels carry the triangular sweeps' results in FP32 (scalar solves in
+// FP64), so a panel column and the scalar solve of the same right-hand side
+// apply preconditioners that differ by FP32 rounding, about 6e-8 relative.
+// That is far below the factor's own approximation error, so both must
+// converge in the same number of iterations to within one, and each must meet
+// the tolerance on the original system.
+TEST(Solver, CpuFp32PanelSweepsKeepIterationsAndResiduals) {
+    const scoped_omp_threads threads(4);
+    constexpr int side = 96, n = side * side, columns = 8;
+    constexpr double tol = 1e-8;
+    for (const bool laplacian : {false, true}) {
+        std::vector<test::triplet> entries;
+        std::vector<double> degree(n, laplacian ? 0.0 : 0.01);
+        const auto edge = [&](int i, int j) {
+            const double weight = 1.0 + 0.5 * std::sin(0.37 * i + 0.11 * j);
+            entries.push_back({i, j, -weight});
+            entries.push_back({j, i, -weight});
+            degree[i] += weight;
+            degree[j] += weight;
+        };
+        for (int r = 0; r < side; ++r)
+            for (int c = 0; c < side; ++c) {
+                if (r + 1 < side) edge(r * side + c, (r + 1) * side + c);
+                if (c + 1 < side) edge(r * side + c, r * side + c + 1);
+            }
+        for (int i = 0; i < n; ++i) entries.push_back({i, i, degree[i]});
+        const Sparse matrix = test::from_triplets(n, n, entries);
+        Dense rhs(n, columns);
+        for (int q = 0; q < columns; ++q) {
+            Vector exact(n);
+            for (int i = 0; i < n; ++i) exact[i] = std::sin((i + 1) * (q + 1) * 0.013) + 0.1 * q;
+            if (laplacian) subtract_mean(exact);
+            set_col(rhs, q, test::multiply(matrix, exact));
+        }
+        for (const auto storage : {apxchol::factor_storage_type::fp32,
+                                   apxchol::factor_storage_type::fp16}) {
+            SCOPED_TRACE(::testing::Message() << "laplacian=" << laplacian << " storage=" << int(storage));
+            auto options = cpu_options();
+            options.factor_opts.factor_storage = storage;
+            apxchol::solver owner(test::csc(matrix), options);
+            Dense output(n, columns);
+            const auto panel = owner.solve(std::as_const(rhs).view(), output.view(), tol, 400);
+            ASSERT_EQ(panel.columns.size(), static_cast<std::size_t>(columns));
+            for (int q = 0; q < columns; ++q) {
+                SCOPED_TRACE(q);
+                const auto b = std::as_const(rhs).col(q);
+                const auto scalar = owner.solve(b, tol, 400);
+                EXPECT_TRUE(panel.columns[q].converged);
+                EXPECT_TRUE(scalar.converged);
+                EXPECT_GT(scalar.iterations, 5);
+                EXPECT_LE(std::abs(panel.columns[q].iterations - scalar.iterations), 1);
+                EXPECT_LE(stable_residual(matrix, output.col(q), b), tol);
+                EXPECT_LE(stable_residual(matrix, scalar.x, b), tol);
+            }
+        }
+    }
+}
+
 TEST(Solver, CpuPanelsScaleExceptionalColumnsIndependently) {
     const scoped_omp_threads threads(2);
     const Sparse matrix = operator_matrix(65);
@@ -714,7 +772,13 @@ TEST(Solver, CpuPanelsScaleExceptionalColumnsIndependently) {
                                                     warm ? x0 : std::span<const double>{});
                     ASSERT_TRUE(test::all_finite(output.col(c)));
                     EXPECT_EQ(batch.columns[c].iterations, scalar.iterations);
-                    EXPECT_NEAR(batch.columns[c].residual, scalar.residual, 1e-12);
+                    // Panels store the triangular sweeps' results in FP32 and
+                    // scalar solves in FP64, so the two preconditioners differ
+                    // by FP32 rounding (2^-24, about 6e-8 relative per stored
+                    // value). Relative residuals here are at most 1, so 1e-6
+                    // leaves a factor of 16 for accumulation over the sweeps
+                    // and iterations of this 65-row operator.
+                    EXPECT_NEAR(batch.columns[c].residual, scalar.residual, 1e-6);
                     EXPECT_EQ(batch.columns[c].converged, scalar.converged);
                     EXPECT_EQ(scalar.converged, scalar.residual < 1e-8);
                     if (is_zero(b)) {
