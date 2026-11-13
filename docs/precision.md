@@ -43,6 +43,11 @@ A right-hand side solved alone and the same one solved in a panel both reach
 the tolerance, but the solutions can differ in the last digits and the
 iteration counts by one.
 
+CPU panels add each row's terms in stored order at every width. The compiler
+may contract the multiply-adds of 2- and 4-column panels differently from
+those of single right-hand sides and 8-column panels, so the same right-hand
+side can differ in the last digits between panel widths.
+
 ## Scaled FP16 contract
 
 `drop_tolerance` must be in [0, 1]; zero disables threshold dropping. For each
