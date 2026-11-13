@@ -453,3 +453,38 @@ TEST(SolveRoutes, CudaTriangularSolveWithoutFactorThrows) {
     EXPECT_THROW(empty.solve_LLt_dev<1>(x.data(), x.data()), std::logic_error);
 }
 #endif
+
+TEST(SolveRoutes, OneCallSamplerFollowsTheColumnCountOnCpu) {
+    apxchol::solve_options options;
+    options.backend = apxchol::solve_backend::cpu;
+    for (std::int64_t columns : {1, 4, 15}) {
+        auto o = options;
+        apxchol::detail::choose_one_call_sampler(o, columns);
+        EXPECT_EQ(o.factor_opts.experimental.sampler, apxchol::clique_sampler::gks) << columns;
+    }
+    for (std::int64_t columns : {16, 64}) {
+        auto o = options;
+        apxchol::detail::choose_one_call_sampler(o, columns);
+        EXPECT_EQ(o.factor_opts.experimental.sampler, apxchol::clique_sampler::trace_cycle) << columns;
+    }
+}
+
+TEST(SolveRoutes, OneCallSamplerUsesTheGpuThresholdOnlyWhereTheGpuIsChosen) {
+    apxchol::solve_options options;
+    auto o15 = options, o16 = options, o64 = options;
+    apxchol::detail::choose_one_call_sampler(o15, 15);
+    apxchol::detail::choose_one_call_sampler(o16, 16);
+    apxchol::detail::choose_one_call_sampler(o64, 64);
+    EXPECT_EQ(o15.factor_opts.experimental.sampler, apxchol::clique_sampler::gks);
+    if (apxchol::detail::select_solve_backend(options) == apxchol::solve_backend::cpu) {
+        EXPECT_EQ(o16.factor_opts.experimental.sampler, apxchol::clique_sampler::trace_cycle);
+        EXPECT_EQ(o64.factor_opts.experimental.sampler, apxchol::clique_sampler::trace_cycle);
+    } else {
+        EXPECT_EQ(o16.factor_opts.experimental.sampler, apxchol::clique_sampler::gks);
+#if defined(APXCHOL_USE_CUDA)
+        EXPECT_EQ(o64.factor_opts.experimental.sampler, apxchol::clique_sampler::trace_cycle);
+#else
+        EXPECT_EQ(o64.factor_opts.experimental.sampler, apxchol::clique_sampler::gks);
+#endif
+    }
+}

@@ -2,6 +2,7 @@
 #include "apxchol/detail/checkpoint.h"
 #include "apxchol/operator_class.h"
 #include "apxchol/solver/detail/solver_route.h"
+#include "apxchol/solver/detail/solve_backend.h"
 #include "config.h"
 #include "mtx_input.h"
 #include <fast_matrix_market/app/array.hpp>
@@ -129,7 +130,9 @@ int solve_batch(const detail::csc_matrix<double>& L, const dense_file& B,
                 const run_config& cfg, bool graph, const input_scan& scan) {
     const auto X0 = read_initial_guess(cfg, B.rows, B.cols);
     detail::checkpoint timings;
-    solver owner = make_solver(L, cfg, timings);
+    run_config batch_cfg = cfg;
+    detail::choose_one_call_sampler(batch_cfg.solve_opts, B.cols);
+    solver owner = make_solver(L, batch_cfg, timings);
     dense_file X{B.rows, B.cols, std::vector<double>(B.values.size())};
     const auto res = owner.solve(const_matrix_view{B.values.data(), B.rows, B.cols, B.rows},
                                  matrix_view{X.values.data(), X.rows, X.cols, X.rows},

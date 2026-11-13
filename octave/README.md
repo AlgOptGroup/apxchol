@@ -14,7 +14,9 @@ res2 = s.solve(b2, 1e-10, 1000);   % tolerance and iteration budget for this cal
 ```
 
 For one solve, use `apxchol_solve(A, b)`. Results contain `x`, `iterations`,
-`residual`, `converged` and `solve_seconds`. The built-in solver always checks
+`residual`, `converged` and `solve_seconds`. With 16 or more RHS columns on CPU
+(64 on CUDA) it builds a trace-cycle factor, which costs more setup but needs
+fewer iterations per column. The built-in solver always checks
 the returned solution against the original matrix and RHS.
 
 `s.setup_seconds` is the wall-clock time of the native setup (or `load`),

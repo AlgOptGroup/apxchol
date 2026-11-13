@@ -66,6 +66,13 @@ def _solver_options(*, backend="auto", num_threads=0, seed=None,
     return options
 
 
+def _public(opts):
+    # rhs_columns is reserved for solve(); as a user option it is unknown.
+    if "rhs_columns" in opts:
+        raise ValueError("unknown option 'rhs_columns'")
+    return opts
+
+
 def _scipy_sparse():
     try:
         import scipy.sparse as sp
@@ -145,7 +152,7 @@ class Solver:
 
     def __init__(self, A, **opts):
         csc = _to_csc(A)
-        self._init_csc(csc.data, csc.indices, csc.indptr, **opts)
+        self._init_csc(csc.data, csc.indices, csc.indptr, **_public(opts))
 
     @classmethod
     def from_csc(cls, data, indices, indptr, **opts):
@@ -157,7 +164,7 @@ class Solver:
         Options are the same as :func:`factorize`.
         """
         self = cls.__new__(cls)
-        self._init_csc(data, indices, indptr, **opts)
+        self._init_csc(data, indices, indptr, **_public(opts))
         return self
 
     def __copy__(self):
@@ -199,14 +206,14 @@ class Solver:
         self._initialize(_apxchol.Solver.load(path, options))
         return self
 
-    def _init_csc(self, data, indices, indptr, **opts):
+    def _init_csc(self, data, indices, indptr, *, rhs_columns=0, **opts):
         data, indices, indptr = map(np.asarray, (data, indices, indptr))
         if np.iscomplexobj(data):
             raise ValueError("A must be real; apxchol solves real symmetric systems")
         if indices.dtype.kind not in "iu" or indptr.dtype.kind not in "iu":
             raise ValueError("indices and indptr must have integer dtype")
         options = _solver_options(**opts)
-        self._initialize(_apxchol.Solver(indptr, indices, data, options))
+        self._initialize(_apxchol.Solver(indptr, indices, data, options, rhs_columns))
 
     def _initialize(self, impl):
         self._impl = impl
@@ -418,6 +425,13 @@ def solve(A, b, rtol=None, maxiter=None, *, x0=None, out=None,
     """One-shot convenience: factorize A, then solve A x = b.
 
     ``x0`` and ``out`` have the same meaning as in :meth:`Solver.solve`.
-    The factor is discarded afterwards.
+    The factor is discarded afterwards. With many right-hand-side columns the
+    factor uses the trace-cycle sampler, which costs more setup but fewer
+    iterations per column: from 16 columns when the solve is expected to run
+    on CPU, from 64 on CUDA, never on Metal.
     """
-    return factorize(A, **opts).solve(b, rtol=rtol, maxiter=maxiter, x0=x0, out=out)
+    columns = np.shape(b)[1] if np.ndim(b) == 2 else 1
+    csc = _to_csc(A)
+    solver = Solver.__new__(Solver)
+    solver._init_csc(csc.data, csc.indices, csc.indptr, rhs_columns=columns, **_public(opts))
+    return solver.solve(b, rtol=rtol, maxiter=maxiter, x0=x0, out=out)

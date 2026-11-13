@@ -415,6 +415,24 @@ function test_apxchol()
   assert(reused.converged && norm(Aopts * reused.x - bopts) / norm(bopts) < 1e-8);
   ok = ok + 1; fprintf('ok %d  matrix/initial-guess validation (20 errors)\n', ok);
 
+  % One-call apxchol_solve: from 16 columns on CPU the factor uses the
+  % trace-cycle sampler and needs fewer iterations than the GKS factor.
+  n1 = 30; e1 = ones(n1, 1); T1 = spdiags([-e1 2*e1 -e1], -1:1, n1, n1);
+  Agrid = kron(speye(n1), T1) + kron(T1, speye(n1)) + 0.01 * speye(n1 * n1);
+  Bgrid = Agrid * reshape(sin(1:16 * n1 * n1), [], 16);
+  copts = struct('seed', 3, 'num_threads', 1);
+  plain = apxchol_solver(Agrid, copts);
+  wide = apxchol_solve(Agrid, Bgrid, [], [], [], copts);
+  narrow = apxchol_solve(Agrid, Bgrid(:, 1:15), [], [], [], copts);
+  assert(all(wide.converged) && all(narrow.converged));
+  ref15 = plain.solve(Bgrid(:, 1:15)); ref16 = plain.solve(Bgrid);
+  assert(isequal(narrow.iterations, ref15.iterations), 'fewer than 16 columns must keep GKS');
+  assert(max(wide.iterations) < min(ref16.iterations), '16 columns must use trace-cycle');
+  caught = false;
+  try, apxchol_solver(Agrid, copts, 100); catch, caught = true; end
+  assert(caught, 'apxchol_solver accepted a third argument');
+  ok = ok + 1; fprintf('ok %d  one-call sampler choice by column count\n', ok);
+
   test_archive();
   fprintf('ALL %d TESTS PASSED (plus archive tests)\n', ok);
 end

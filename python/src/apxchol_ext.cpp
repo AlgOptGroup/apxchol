@@ -18,6 +18,7 @@
 #include "apxchol/detail/csc_import.h"
 #include "apxchol/detail/csc_input.h"
 #include "apxchol/solver/detail/solver_route.h"
+#include "apxchol/solver/detail/solve_backend.h"
 #include "apxchol/operator_class.h"
 #include "apxchol/version.h"
 
@@ -156,9 +157,10 @@ apxchol::solve_options parse_options(const py::dict& d) {
 // another thread uses the same solver raises RuntimeError.
 class Solver {
 public:
+    // rhs_columns > 0: one-call solve with that many right-hand sides.
     Solver(py::array indptr, py::array indices, py::array data,
-           const py::dict& options)
-        : slv_(setup(csc_arrays(indptr, indices, data), parse_options(options))) {}
+           const py::dict& options, std::int64_t rhs_columns = 0)
+        : slv_(setup(csc_arrays(indptr, indices, data), one_call(parse_options(options), rhs_columns))) {}
 
     void save(const std::filesystem::path& path) const {
         py::gil_scoped_release release;
@@ -330,6 +332,11 @@ public:
 private:
     explicit Solver(apxchol::solver owner) : slv_(std::move(owner)) {}
 
+    static apxchol::solve_options one_call(apxchol::solve_options options, std::int64_t columns) {
+        if (columns > 0) apxchol::detail::choose_one_call_sampler(options, columns);
+        return options;
+    }
+
     static apxchol::solver setup(const csc_arrays& A, const apxchol::solve_options& options) {
         return A.visit([&](const auto& view) {
             py::gil_scoped_release release;
@@ -425,9 +432,9 @@ PYBIND11_MODULE(_apxchol, m) {
           },
           py::arg("indptr"), py::arg("indices"), py::arg("data"));
     py::class_<Solver>(m, "Solver")
-        .def(py::init<py::array, py::array, py::array, const py::dict&>(),
+        .def(py::init<py::array, py::array, py::array, const py::dict&, std::int64_t>(),
              py::arg("indptr"), py::arg("indices"), py::arg("data"),
-             py::arg("options") = py::dict())
+             py::arg("options") = py::dict(), py::arg("rhs_columns") = 0)
         .def("__copy__", [](const Solver& self) { return Solver(self); })
         .def("save", &Solver::save, py::arg("path"))
         .def_static("load", &Solver::load, py::arg("path"),

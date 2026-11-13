@@ -30,6 +30,7 @@
 #include "apxchol/detail/csc_import.h"
 #include "apxchol/detail/csc_input.h"
 #include "apxchol/operator_class.h"
+#include "apxchol/solver/detail/solve_backend.h"
 
 namespace {
 
@@ -224,9 +225,17 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 
     try {
         if (op == "factorize") {
-            if (nrhs != 2 && nrhs != 3)
-                fail("apxchol:usage", "usage: h = apxchol_mex('factorize', A, options)");
-            const auto options = setup_options(nrhs == 3 ? prhs[2] : nullptr);
+            if (nrhs < 2 || nrhs > 4)
+                fail("apxchol:usage", "usage: h = apxchol_mex('factorize', A, options[, rhs_columns])");
+            auto options = setup_options(nrhs >= 3 ? prhs[2] : nullptr);
+            // rhs_columns: one-call apxchol_solve with that many right-hand sides.
+            if (nrhs == 4) {
+                const double columns = mxIsNumeric(prhs[3]) && mxGetNumberOfElements(prhs[3]) == 1
+                    ? mxGetScalar(prhs[3]) : -1.0;
+                if (!(columns >= 0 && columns <= 1e15) || columns != std::floor(columns))
+                    fail("apxchol:badInput", "rhs_columns must be a non-negative integer");
+                if (columns > 0) apxchol::detail::choose_one_call_sampler(options, static_cast<std::int64_t>(columns));
+            }
             const auto A = mx_to_csc(prhs[1]);
             auto solver = std::make_unique<apxchol::solver>(A->view(), options);
             store_solver(std::move(solver), nlhs, plhs);
