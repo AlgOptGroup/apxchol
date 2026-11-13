@@ -7,7 +7,7 @@ the outer iteration each have their own precision.
 |---|---|---|
 | Mutable residual graph | FP32 weights; reads aggregate in FP64 | Storage and bandwidth; elimination appends weights; late residuals may be coalesced once |
 | Assembled factor | FP32 values | Construction factor, before dropping and storage rounding |
-| CPU triangular solves | FP32 storage by default; optional scaled FP16 off-diagonals. Batched solves store each sweep's result in FP32 | FP16 requires efficient conversion; row sums remain FP64. FP32 results halve the bytes a gathered row moves |
+| CPU triangular solves | FP32 storage by default; optional scaled FP16 off-diagonals. Batched solves store each sweep's result in FP32 | FP16 requires efficient conversion. Row sums remain FP64. FP32 results halve the bytes a gathered row moves |
 | CUDA triangular solves | Scaled FP16 off-diagonals by default; FP32 alternative | Reduced value traffic; GPU triangular-solve arithmetic is FP32 |
 | FP16 scales and diagonals | FP32 | Retain scale range and diagonal quality |
 | Outer CPU/CUDA PCG | FP64 vectors and reductions. CUDA keeps the preconditioned residual in the FP32 its triangular solve produces. CPU batched solves widen it when they undo the permutation | Preserve the original-system iteration and residual accuracy. Widening that vector would not change a value |
