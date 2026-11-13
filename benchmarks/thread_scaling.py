@@ -196,7 +196,7 @@ def _prepare_parac(mid, deadline=None):
     The old scaling runner guessed obsolete `pure/pin/reg` cache names, skipped
     ParAC's adapter interval and tolerance calibration, and silently emitted
     failures.  This prepares exactly the same AMD-reordered operands as
-    parac_runner.py and returns ``(operands, fixed_setup_s)``. Each operand is
+    parac_runner.py and returns ``(operands, fixed_setup_s, adapt_s)``. Each operand is
     ``(amd_path, physics_mode)``; fixed setup is the charged input-dump and
     complete producer work, including the final singleton probe needed to learn
     that no more nontrivial connected components remain.
@@ -205,12 +205,13 @@ def _prepare_parac(mid, deadline=None):
         return _PARAC_PREPARED[mid]
     prepared = []
     fixed_setup_s = 0.0
+    dump_total = 0.0
     if parac._uses_physics(mid):
         amd, reorder_s, _prep, dump_s = parac._prep_amd(
             mid, "op", augment=True, deadline=deadline)
         fixed_setup_s += dump_s + reorder_s
         if not amd:
-            _PARAC_PREPARED[mid] = ([], fixed_setup_s)
+            _PARAC_PREPARED[mid] = ([], fixed_setup_s, 0.0)
             return _PARAC_PREPARED[mid]
         prepared.append((amd, True))
     else:
@@ -224,18 +225,23 @@ def _prepare_parac(mid, deadline=None):
                 mid, parac.DUMP_CPU, rc.BIN["cpu"],
                 parac._cpu_cell_remaining(deadline), parac.MEM_CAP_GB)
             if n_components <= 0:
-                _PARAC_PREPARED[mid] = ([], fixed_setup_s)
+                _PARAC_PREPARED[mid] = ([], fixed_setup_s, 0.0)
                 return _PARAC_PREPARED[mid]
             direct_connected = n_components == 1
+        total_components = n_components
         rank = 0
         while n_components is None or rank < n_components:
             if direct_connected and rank == 0:
                 src, n_nodes, dump_s = native, largest, float(discovery_s)
             else:
-                src, n_nodes, _n_components, dump_s = parac._dump_component(
+                src, n_nodes, dumped_components, dump_s = parac._dump_component(
                     mid, rank, deadline=deadline,
                     discovery_charge_s=(discovery_s if rank == 0 else None))
+                total_components = total_components or dumped_components
             fixed_setup_s += dump_s
+            dump_total += dump_s
+            if rank == 0:
+                first_dump = src
             if src is None or n_nodes < 2:
                 break
             source_tag = f"{'native-' if direct_connected else ''}comp{rank}"
@@ -243,11 +249,21 @@ def _prepare_parac(mid, deadline=None):
                 mid, src, source_tag, deadline=deadline)
             fixed_setup_s += reorder_s
             if not amd:
-                _PARAC_PREPARED[mid] = ([], fixed_setup_s)
+                _PARAC_PREPARED[mid] = ([], fixed_setup_s, 0.0)
                 return _PARAC_PREPARED[mid]
             prepared.append((amd, False))
             rank += 1
-    _PARAC_PREPARED[mid] = (prepared, fixed_setup_s)
+        # As parac_runner.py: a split pays all component work, a connected
+        # matrix only the discovery that proves it connected.
+        if (total_components or 0) > 1:
+            adapt_s = dump_total
+        elif discovery_s is not None:
+            adapt_s = float(discovery_s)
+        else:
+            adapt_s = parac._dump_discovery_seconds(first_dump)
+        _PARAC_PREPARED[mid] = (prepared, fixed_setup_s, adapt_s)
+        return _PARAC_PREPARED[mid]
+    _PARAC_PREPARED[mid] = (prepared, fixed_setup_s, 0.0)
     return _PARAC_PREPARED[mid]
 
 
@@ -257,7 +273,7 @@ def run_parac(mid, t):
     parac.TIMEOUT_CPU = TIMEOUT
     deadline = time.monotonic() + TIMEOUT
     try:
-        operands, fixed_setup_s = _prepare_parac(mid, deadline=deadline)
+        operands, fixed_setup_s, adapt_s = _prepare_parac(mid, deadline=deadline)
         if not operands:
             return "failed", None
         reps = [dict(adapter=0.0, factor_setup=0.0, solve=0.0,
@@ -299,13 +315,16 @@ def run_parac(mid, t):
         accepted = all(rep["valid"] and rep["rhs_sq"] > 0 and
                        parac._residual_pass((rep["residual_sq"] / rep["rhs_sq"]) ** 0.5,
                                             float(TOL)) for rep in reps)
-        return ("complete" if accepted else "not_converged"), dict(
+        metrics = dict(
             stop_contract="original-v1", stop_check_s=chosen["stop_check_s"],
             stop_checks=chosen["stop_checks"],
             n=int(rc.MATRICES[mid]["n"]), nnz=nnz, total_s=total,
             setup_s=setup, solve_s=solve, iters=chosen["iters"],
             rel_res=rel_res, representative_repeat=rep_index + 1,
             rhs_norm=chosen["rhs_sq"] ** 0.5)
+        if adapt_s is not None:
+            metrics["adapt_s"] = adapt_s
+        return ("complete" if accepted else "not_converged"), metrics
     except parac.UnsupportedOperator as error:
         return "n/a", {"total_s": None, "parac_failure_reason": str(error)}
     except (ValueError, OSError) as error:
@@ -487,7 +506,7 @@ def charts(out=f"{ROOT}/results/plots", compact=False):
 def export_csv(path):
     """Portable extract for the exact cells behind the scaling figures."""
     fields = ("matrix", "family", "label", "solver", "config", "threads", "device", "status", "setup_s",
-              "solve_s", "total_s", "iters", "rel_res", "git_sha", "repeat",
+              "adapt_s", "solve_s", "total_s", "iters", "rel_res", "git_sha", "repeat",
               "compiler", "compiler_version", "openmp_runtime", "baseline_kind",
               "baseline_setup_s", "baseline_solve_s", "baseline_total_s",
               "baseline_cell_sha256", "baseline_node_rank", "source_cell_sha256",
@@ -528,7 +547,7 @@ def export_csv(path):
             "baseline_node_rank": reference.get("rank", ""),
             **baseline,
             **{key: metrics.get(key, "")
-               for key in ("setup_s", "solve_s", "total_s", "iters", "rel_res")},
+               for key in ("setup_s", "adapt_s", "solve_s", "total_s", "iters", "rel_res")},
             **{key: provenance.get(key, "")
                for key in ("git_sha", "repeat", "compiler", "compiler_version",
                             "openmp_runtime")},

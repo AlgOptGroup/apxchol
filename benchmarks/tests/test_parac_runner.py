@@ -216,6 +216,8 @@ class ParacTimingContractTest(unittest.TestCase):
         # The final singleton was genuinely extracted and serialized before its
         # size was known, so its 0.4 s adapter interval is charged as well.
         self.assertAlmostEqual(metrics["input_dump_s"], 0.9)
+        # Splitting a disconnected Laplacian is all adaptation.
+        self.assertAlmostEqual(metrics["adapt_s"], 0.9)
         self.assertAlmostEqual(metrics["rhs_norm"], 5 ** 0.5)
         self.assertAlmostEqual(metrics["rel_res"], (97 / 5) ** 0.5 * 1e-9)
 

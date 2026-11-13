@@ -251,7 +251,7 @@ _COMPONENT_INFO_SCHEMA = "component-info-v1"
 def _dump_cache_valid(path, require_meta=False):
     required = [path, path + ".dump-time", path + ".dump-schema"]
     if require_meta:
-        required.append(path + ".meta")
+        required += [path + ".meta", path + ".discovery"]
     if not all(os.path.exists(item) for item in required):
         return False
     with open(path + ".dump-schema") as handle:
@@ -270,8 +270,22 @@ def _dump_cache_seconds(path):
         return float(handle.read())
 
 
+def _dump_discovery_seconds(path):
+    """Component discovery measured inside a component dump (rank 0 charges it).
+
+    _dump_component writes it and its cache is invalid without it, so it is
+    missing only for a dump this runner did not make. Then the cell carries no
+    adapt_s rather than a guessed one."""
+    try:
+        with open(path + ".discovery") as handle:
+            return float(handle.read())
+    except FileNotFoundError:
+        return None
+
+
 def _invalidate_dump_cache(path):
-    for cached in (path, path + ".meta", path + ".dump-time", path + ".dump-schema"):
+    for cached in (path, path + ".meta", path + ".discovery", path + ".dump-time",
+                   path + ".dump-schema"):
         try:
             os.remove(cached)
         except FileNotFoundError:
@@ -800,6 +814,7 @@ def _measure_cpu(family, mid, amd, amds, physics, solver, extra_meta=None,
                "total_s": round(total, 6), "iters": iters, "rel_res": rr, "fillin": 0.0,
                "us_per_nnz": round(total / nnz * 1e6, 4),
                "input_dump_s": round(dump_s, 6),
+               "adapt_s": 0.0,   # physics mode takes the published operator
                "amd_reorder_s": round(amds, 6),
                "adapter_setup_s": round(dump_s + amds + adapter, 6),
                "native_setup_s": round(factor_setup, 6),
@@ -871,6 +886,8 @@ def _dump_component(mid, rank, deadline=None, timeout_cap=TIMEOUT_CPU,
     n_comps, n_nodes = int(m.group(1)), int(m.group(2))
     with open(meta, "w") as handle:
         handle.write(f"{n_nodes} {n_comps}")
+    with open(src + ".discovery", "w") as handle:
+        handle.write(discovery.group(1))
     # Component discovery/sorting is shared setup for the split and belongs in
     # rank 0 exactly once. Every rank still pays its own extraction/serialization
     # adapter. The subprocess currently rediscovers components for later ranks,
@@ -899,6 +916,7 @@ def _measure_cpu_graph_split(family, mid, deadline=None):
     reps = [dict(adapter=0.0, factor_setup=0.0, factor=0.0, solve=0.0,
                  iters=0, residual_sq=0.0, rhs_sq=0.0, valid=True) for _ in range(REPS)]
     dump_tot = amds_tot = 0.0
+    first_dump = None           # rank 0's dump when no native file was probed
     nnz_tot = 0; rss_peak = 0.0
     n_solved = 0; n_comps_total = None; rank = 0; preps = []
     preparations = []
@@ -936,6 +954,8 @@ def _measure_cpu_graph_split(family, mid, deadline=None):
             # Charge that real work even when the descending size order tells us
             # this and all later components are singleton zero blocks.
             dump_tot += dump_s
+            if rank == 0 and discovery_s is None:
+                first_dump = src
             if n_nodes < 2:                  # singleton blocks have b=x=0 exactly
                 break
             source_tag = f"{'native-' if direct_connected else ''}comp{rank}"
@@ -1003,6 +1023,13 @@ def _measure_cpu_graph_split(family, mid, deadline=None):
         return "FAILED"
     rr = (chosen["residual_sq"] / chosen["rhs_sq"]) ** 0.5
     iters = chosen["iters"]
+    # A split pays discovery, extraction and serialization of every component;
+    # a connected matrix only the discovery that proves it connected.
+    if (n_comps_total or 0) > 1:
+        adapt_s = dump_tot
+    else:
+        adapt_s = (float(discovery_s) if discovery_s is not None
+                   else _dump_discovery_seconds(first_dump))
     status = ("complete" if all(rep["valid"] and rep["rhs_sq"] > 0 and
                                   _residual_pass((rep["residual_sq"] / rep["rhs_sq"]) ** 0.5,
                                                  float(TOL)) for rep in reps)
@@ -1023,6 +1050,8 @@ def _measure_cpu_graph_split(family, mid, deadline=None):
                "n_components_total": n_comps_total or n_solved,
                "repeat_rel_res": [str((rep["residual_sq"] / rep["rhs_sq"]) ** 0.5)
                                   if rep["rhs_sq"] > 0 else None for rep in reps]}
+    if adapt_s is not None:
+        metrics["adapt_s"] = round(adapt_s, 6)
     metrics["stop_check_s"] = chosen["stop_check_s"]
     metrics["stop_checks"] = chosen["stop_checks"]
     metrics.update(_cpu_accounting_metrics(preparations, setup, total))
@@ -1293,6 +1322,7 @@ def run_gpu(mid, tol=TOL):
     deadline = time.monotonic() + TIMEOUT_GPU
     src = None
     dump_s = 0.0
+    adapt_s = 0.0   # graph mode: the discovery that proves the input connected
     native_source = False
     try:
         # The graph driver generates one globally zero-sum RHS. That is valid
@@ -1318,6 +1348,7 @@ def run_gpu(mid, tol=TOL):
             if not src or n_components <= 0:
                 return record_gpu_failure(
                     mid, "failed", "ParAC component preparation produced no matrix")
+            adapt_s = dump_s if native_source else _dump_discovery_seconds(src)
         else:
             # physics_produce accepts the published operator directly and performs
             # the mandatory permutation/augmentation itself. Rewriting the same
@@ -1428,6 +1459,8 @@ def run_gpu(mid, tol=TOL):
                    "spsv_analysis_s": spsv, "pcg_kernel_s": pcg,
                    "representative_repeat": rep_index + 1,
                "repeat_rel_res": [r["rr"] for r in runs]}
+        if adapt_s is not None:
+            metrics["adapt_s"] = adapt_s
         if chosen.get("cuda_init"):
             metrics["cuda_init_s"] = float(chosen["cuda_init"])
         metrics["stop_check_s"] = float(chosen["stop_check_s"])

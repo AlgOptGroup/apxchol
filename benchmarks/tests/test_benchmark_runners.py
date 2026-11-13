@@ -433,7 +433,7 @@ class ThreadScalingStoreTest(unittest.TestCase):
                                return_value=("component-amd.mtx", 0.25, "upstream")) as reorder:
             self.assertEqual(
                 thread_scaling._prepare_parac("m"),
-                ([("component-amd.mtx", False)], 0.85),
+                ([("component-amd.mtx", False)], 0.85, 0.6),
             )
             reorder.assert_called_once_with(
                 "m", "component.mtx", "comp0", deadline=None)
@@ -451,7 +451,7 @@ class ThreadScalingStoreTest(unittest.TestCase):
                                return_value=("native-amd.mtx", 0.25, "upstream")) as reorder:
             self.assertEqual(
                 thread_scaling._prepare_parac("m"),
-                ([("native-amd.mtx", False)], 0.45),
+                ([("native-amd.mtx", False)], 0.45, 0.2),
             )
             dump.assert_not_called()
             reorder.assert_called_once_with(
@@ -658,7 +658,7 @@ class FairSweepSelectionTest(unittest.TestCase):
 def cmg_record(rep, status="complete", total=1.0, rel_res=5e-9, **extra):
     record = {"repetition": rep, "retained": rep > 0, "status": status, "n": 4, "nnz": 10,
               "setup_s": total / 2, "solve_s": total / 2, "total_s": total, "iters": 7,
-              "rel_res": rel_res, "pcg_flag": 0, "adaptation_s": 0.01, "components": 2,
+              "rel_res": rel_res, "pcg_flag": 0, "adapt_s": 0.01, "components": 2,
               "grounded_components": 1, "matlab_version": "26.1.0 (R2026a)", "matlab_thread_limit": 1}
     record.update(extra)
     return record
