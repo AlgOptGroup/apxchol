@@ -1245,7 +1245,7 @@ void detail::choose_sampler(solve_options& opts, std::int64_t columns) {
 #if defined(APXCHOL_USE_CUDA)
         threshold = 64;
 #else
-        return;   // Metal setup supports only GKS
+        return;   // Metal: no one-call threshold measured for trace-cycle yet
 #endif
     }
     if (columns >= threshold)
