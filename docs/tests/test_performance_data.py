@@ -62,6 +62,7 @@ class PerformanceDataTest(unittest.TestCase):
                             self.assertLessEqual(float(row["rel_res"]), float(header["tolerance"]), where)
                             self.assertGreaterEqual(int(row["iters"]), 0, where)
                         if row["adapt_s"]:
+                            self.assertGreaterEqual(float(row["adapt_s"]), 0, where)
                             self.assertLessEqual(float(row["adapt_s"]), float(row["setup_s"]), where)
                         if row["status"] == "exceeded_cap":
                             self.assertGreater(float(row["cap_s"]), 0, where)

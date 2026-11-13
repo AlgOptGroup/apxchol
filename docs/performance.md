@@ -58,6 +58,11 @@ converge, and `n/a` means it does not accept that input. The
 
 ![Euler CUDA: speedup of apxchol over each family on every matrix](performance/euler-gpu-families.svg)
 
+An asterisk (`*`) marks a solver whose setup includes input adaptation by the
+benchmark (connected components, a pinned vertex per component, or component
+slices), which it needs to accept a singular or disconnected Laplacian. The
+2026-10-31 campaign shown here predates that measurement, so it has none.
+
 ## How results are measured
 
 Every solver gets the same matrix and right-hand side. A result counts only if

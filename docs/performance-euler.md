@@ -15,6 +15,8 @@ An asterisk (`*`) marks a time whose setup includes input adaptation by the
 benchmark: finding connected components, pinning one vertex per component or
 slicing components, so that the solver accepts a singular or disconnected
 Laplacian. The `adapt_s` column of the data files gives that part of setup.
+This campaign predates that measurement: its `adapt_s` values are empty
+(not measured), so no time on this page carries an asterisk.
 
 The [Performance page](performance.md) groups solvers into families and
 compares apxchol with each family's fastest variant. This page shows every
