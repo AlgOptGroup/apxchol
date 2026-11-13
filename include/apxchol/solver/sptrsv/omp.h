@@ -1598,8 +1598,9 @@ public:
         if (processors == 1) return 0;
         const bool hybrid = hybrid_active_ && processors == critical_plan_.processors;
         const auto count = [&]<class Dir>() {
-            // The terminal run counts as one step. Forward panel solves add
-            // the two prefix-pass barriers on top.
+            // The terminal run counts as one step. The count is the scalar
+            // solve's: a forward panel solve has two more barriers, one
+            // after each prefix pass.
             std::size_t result = hybrid ? critical_plan_.steps + 1 : 0;
             const auto first = hybrid && !Dir::forward ? hybrid_bck_level_begin_ : 0;
             const auto end = hybrid && Dir::forward ? hybrid_fwd_level_end_ : base_level_count<Dir>();
