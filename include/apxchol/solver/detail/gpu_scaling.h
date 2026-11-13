@@ -124,14 +124,12 @@ inline double pow2_scale(double max_abs, double reference) {
     return std::ldexp(1.0, exponent);
 }
 
-// Scale of one right-hand-side column ahead of FP32 triangular sweeps. A
-// column whose largest entry is within 2^+-32 of the reference is left as it
-// is, with room for FP32 intermediate values. Any other is brought into
-// [reference, 2 reference). Powers of two change no significand.
+// Scale of one right-hand-side column ahead of FP32 triangular sweeps: every
+// column is brought into [reference, 2 reference), so the sweeps always see
+// an input of the same size whatever the caller passed. Powers of two change
+// no significand.
 inline double fp32_scale(double max_abs, double reference = 1.0) {
-    if (max_abs == 0) return 1.0;
-    const double relative = max_abs / reference;
-    return relative >= 0x1p-32 && relative <= 0x1p32 ? 1.0 : pow2_scale(max_abs, reference);
+    return max_abs == 0 ? 1.0 : pow2_scale(max_abs, reference);
 }
 
 } // namespace apxchol::detail::gpu_scaling

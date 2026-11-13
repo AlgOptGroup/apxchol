@@ -224,9 +224,9 @@ TEST(GpuPcg, ResidualGrowthDoesNotStopBeforeTolerance) {
 
 TEST(GpuPcg, InputScalingKeepsOrdinaryValuesAndNormalizesExtremes) {
     namespace scaling = apxchol::detail::gpu_scaling;
-    for (const double value : {0.0, 0x1p-32, 1.0, 0x1p32})
+    for (const double value : {0.0, 1.0, 1.5})
         EXPECT_EQ(scaling::fp32_scale(value), 1.0);
-    for (const double value : {1e-100, 1e100, std::numeric_limits<double>::min(),
+    for (const double value : {0x1p-32, 0x1p32, 1e-100, 1e100, std::numeric_limits<double>::min(),
                                std::numeric_limits<double>::max()}) {
         const double scale = scaling::fp32_scale(value);
         EXPECT_TRUE(std::isfinite(scale));
@@ -252,9 +252,10 @@ TEST(GpuPcg, InputScalingFollowsTheReferenceMagnitude) {
     for (const double value : {0.0, 0x1p-33, 0x1p-32, 3.0, 0x1p32, 0x1p33, 1e-100, 1e100})
         EXPECT_EQ(scaling::fp32_scale(value, 1.0), scaling::fp32_scale(value));
     for (const double reference : {0x1p-49, 0x1p50}) {
-        for (const double relative : {0x1p-32, 1.0, 1.5, 0x1p32})
+        for (const double relative : {1.0, 1.5})
             EXPECT_EQ(scaling::fp32_scale(reference * relative, reference), 1.0);
-        for (const double value : {reference * 0x1p-33, reference * 0x1.8p32, 1e-200, 1.0, 1e200}) {
+        for (const double value : {reference * 0x1p-33, reference * 0x1p-32, reference * 0x1p32,
+                                   reference * 0x1.8p32, 1e-200, 1.0, 1e200}) {
             const double scale = scaling::fp32_scale(value, reference);
             EXPECT_NE(scale, 1.0);
             EXPECT_GE(value * scale, reference);
