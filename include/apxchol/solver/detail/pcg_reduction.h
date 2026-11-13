@@ -64,8 +64,8 @@ inline double reduce_parts(const double* part, int nt, int slot = 0, int stride 
 
 /// Deterministic parallel Σ v[i], i in [0, n). `part` must hold
 /// part_capacity() doubles. Fixed 4-way accumulator split per chunk.
-template<int Columns>
-std::array<double, Columns> det_sum_columns(const double* v, std::int64_t n, double* part) {
+template<int Columns, class Value>
+std::array<double, Columns> det_sum_columns(const Value* v, std::int64_t n, double* part) {
     static_assert(Columns > 0 && Columns <= kPartStride);
     int nt_used = 1;
     const int workers = cpu_solve_threads(n);

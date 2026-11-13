@@ -110,7 +110,7 @@ def read_records(work, repeats):
 
 
 _METRICS = ("setup_s", "solve_s", "total_s", "iters", "rel_res", "n", "nnz",
-            "adaptation_s", "components", "grounded_components", "matlab_version",
+            "adapt_s", "components", "grounded_components", "matlab_version",
             "solve_passes", "stop_check_s", "matlab_thread_limit")
 
 

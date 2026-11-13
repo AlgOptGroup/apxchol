@@ -65,8 +65,11 @@ public:
     /// preconditioner's trsv_.solve_LLt_dev expects permuted input and gives
     /// permuted output. Running PCG entirely in permuted space lets us avoid
     /// per-iter permute/unpermute on device.
+    /// fp32_reference is the gpu_scaling::reference_scale of the
+    /// preconditioner the solves will use, 1 when the caller has none.
     void setup(csc_ref<double> L,
-               const std::vector<node_index>& perm, bool verbose = false)
+               const std::vector<node_index>& perm, bool verbose = false,
+               double fp32_reference = 1.0)
     {
         destroy();
         n_ = static_cast<int64_t>(L.n);
@@ -93,6 +96,7 @@ public:
         op->perm.assign(perm.begin(), perm.begin() + n_);
         APXCHOL_PCG_CUDA_CHECK(cudaGetDevice(&device_));
         op->device = device_;
+        op->fp32_reference = fp32_reference;
         if (!cuda_pcg_kernels::try_build_permuted_operator_csr(
                 static_cast<int>(n_), static_cast<int>(L.nnz()),
                 offsets, reinterpret_cast<const int*>(L.idx), L.val,
@@ -128,6 +132,8 @@ public:
 
     bool ready() const { return ready_; }
     int64_t n() const { return n_; }
+    /// Reference magnitude of the FP32 sweeps' input (gpu_scaling.h).
+    double fp32_reference() const { return op_ ? op_->fp32_reference : 1.0; }
     /// Grows this copy's workspace to hold a panel of this many columns. On
     /// device_memory_error or overflow_error the previous workspace stays in use.
     void reserve_panel(unsigned columns) {
@@ -248,7 +254,8 @@ private:
             scales[q] = 1;
             bnorm[q] = 1; // Inactive zero columns never divide by a zero norm.
             if (max_b[q] == 0) continue;
-            scales[q] = detail::gpu_scaling::fp32_scale(std::max(max_b[q], max_x0[q]));
+            scales[q] = detail::gpu_scaling::fp32_scale(std::max(max_b[q], max_x0[q]),
+                                                         op_->fp32_reference);
             // The norm does not depend on the row order, so fold the caller's
             // contiguous column instead of a strided lane of the panel.
             bnorm[q] = detail::gpu_scaling::scaled_norm(b_host.col(q), scales[q]);
@@ -436,6 +443,8 @@ private:
         int device = -1;
         cuda_pcg_kernels::operator_csr matrix;
         std::vector<node_index> perm;
+        // gpu_scaling::reference_scale, fixed at setup.
+        double fp32_reference = 1.0;
         operator_storage() = default;
         operator_storage(const operator_storage&) = delete;
         operator_storage& operator=(const operator_storage&) = delete;

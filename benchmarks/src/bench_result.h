@@ -10,6 +10,9 @@ struct BenchResult {
     int n = 0;
     int nnz = 0;
     double setup_time = 0;
+    // Part of setup_time the harness spent adapting input the solver cannot take
+    // natively: component discovery, Dirichlet pin grounding and component slicing.
+    double adapt_time = 0;
     double solve_time = 0;
     double total_time = 0;
     int iterations = 0;

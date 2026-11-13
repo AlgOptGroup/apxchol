@@ -2,6 +2,7 @@
 #include "metal_setup_options.h"
 #include "apxchol/solver/partition/block_greedy.h"
 #include "apxchol/operator_class.h"
+#include "apxchol/solver/detail/gpu_scaling.h"
 #include "metal_setup/finalizer.h"
 #import <Foundation/Foundation.h>
 #include <limits>
@@ -63,10 +64,8 @@ input_buffers upload(id<MTLDevice> device, csc_ref<double> A) {
                                 "magnitudes in [2^-100, 2^100]");
     out.operator_exact = exact;
     out.max_operator_row = max_row;
-    if (max_diagonal > 0) {
-        const int exponent_sum = std::ilogb(min_diagonal) + std::ilogb(max_diagonal);
-        out.preconditioner_scale = std::scalbn(1.0f, int(std::floor(exponent_sum / 4.0)));
-    }
+    out.preconditioner_scale =
+        static_cast<float>(gpu_scaling::reference_scale(min_diagonal, max_diagonal));
     return out;
 }
 

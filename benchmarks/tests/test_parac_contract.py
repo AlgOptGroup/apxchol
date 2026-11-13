@@ -196,7 +196,7 @@ class ThreadScalingBoundary(unittest.TestCase):
         import thread_scaling as scaling
         runs = [run(), run(), run('2e-8')]
         for i,r in enumerate(runs): r['solve'] = str(100*(i+1))
-        with mock.patch.object(scaling, '_prepare_parac', return_value=([('amd',False)],0)), \
+        with mock.patch.object(scaling, '_prepare_parac', return_value=([('amd',False)],0,0.0)), \
              mock.patch.object(parac, "_obsolete_probe", create=True, side_effect=AssertionError("uncharged probe")), \
              mock.patch.object(parac, '_run_once_cpu', side_effect=runs):
             status,metrics = scaling.run_parac('grid_500',16)
