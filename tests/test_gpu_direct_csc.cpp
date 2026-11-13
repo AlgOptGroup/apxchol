@@ -522,7 +522,7 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
 
 // A sparse ring with a 100-vertex clique: the rounds peel the ring and leave
 // the clique, a dense residual that the setup factors as one exact block.
-TEST(GpuDirectCsc, DenseResidualTailIsFactoredExactly) {
+TEST(GpuDirectCsc, DenseResidualTailSolvesToTolerance) {
 #if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
     GTEST_SKIP() << "32-bit-node CUDA operator construction required";
 #else

@@ -782,10 +782,11 @@ factorization factorize_impl(const Eliminator& elim,
             // larger blocks slowed solves measurably. Skipped when it does not fit.
             constexpr double dense_tail_density = 0.5;
             constexpr std::size_t dense_tail_max_vertices = 128;
-            bool dense_tail_declined = false;
+            // A block that did not fit is retried only once the residual is smaller.
+            std::size_t dense_tail_declined_at = std::numeric_limits<std::size_t>::max();
             std::uint64_t last_live = 0;   // no tail before the first round
             while (!active.empty()) {
-                if (!dense_tail_declined && last_live && active.size() <= dense_tail_max_vertices &&
+                if (active.size() < dense_tail_declined_at && last_live && active.size() <= dense_tail_max_vertices &&
                     double(active.size()) * double(active.size() - 1) * dense_tail_density <=
                         double(last_live)) {
                     // Charge the rounds so far to the same stage as without the block.
@@ -799,7 +800,7 @@ factorization factorize_impl(const Eliminator& elim,
                         active.clear();
                         break;
                     }
-                    dense_tail_declined = true;
+                    dense_tail_declined_at = active.size();
                 }
                 const auto prep = gpu_frontend->prepare(active, opts.experimental.partition,
                     opts.seed, ws.round_index);
