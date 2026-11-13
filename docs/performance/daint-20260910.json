@@ -53,6 +53,7 @@
  "columns": {
   "rel_res": "largest ||b-Ax||/||b|| over the retained repeats, on the original system",
   "setup_s": "seconds, from the repeat with the median setup + solve",
+  "adapt_s": "seconds of setup_s that the benchmark spent adapting the input for this solver (component discovery, Dirichlet pins, component slicing); 0 when the solver takes the input natively, empty when the campaign did not measure it",
   "solve_s": "seconds, same repeat",
   "cap_s": "the competitor's time cap, when one applied",
   "class": "grids, meshes (meshes and circuits), ipm (linear programs), social (social and web graphs)"

@@ -110,8 +110,16 @@ TICKS = [0.5, 1, 2, 5, 10, 20, 50, 100]
 CLIP = 100  # draw larger speedups and unfinished runs at the right edge
 
 
-NUMBERS = {"n": int, "nnz": int, "threads": int, "iters": int, "setup_s": float, "solve_s": float,
-           "rel_res": float, "cap_s": float, "max_rss_mb": float}
+NUMBERS = {"n": int, "nnz": int, "threads": int, "iters": int, "setup_s": float, "adapt_s": float,
+           "solve_s": float, "rel_res": float, "cap_s": float, "max_rss_mb": float}
+ADAPTED_NOTE = ("\\* Setup includes input adaptation by the benchmark: finding connected components, pinning "
+                "one vertex per component or slicing components, so that this solver accepts a singular or "
+                "disconnected Laplacian.")
+
+
+def adapted(cell):
+    """Whether the benchmark adapted the input for this run (the asterisk on the pages)."""
+    return cell is not None and (cell.get("adapt_s") or 0) > 0
 
 
 def read_cells(path, tolerance):
@@ -311,12 +319,13 @@ def heatmap(ax, rows, columns, value_of, classes=None):
     grid = np.full((len(rows), len(columns)), np.nan)
     for i, row in enumerate(rows):
         for j, column in enumerate(columns):
-            value, mark = value_of(row, column)
+            value, mark, *starred = value_of(row, column)
             if mark is not None:
                 ax.text(j, i, mark, ha="center", va="center", fontsize=6.5, color=MUTED)
             else:
                 grid[i, j] = np.log10(value)
-                ax.text(j, i, f"{value:.0f}" if value >= 10 else f"{value:.2g}", ha="center", va="center",
+                text = f"{value:.0f}" if value >= 10 else f"{value:.2g}"
+                ax.text(j, i, text + ("*" if starred and starred[0] else ""), ha="center", va="center",
                         fontsize=6.5, color="white" if abs(grid[i, j]) > .8 else INK)
     ax.imshow(grid, cmap="PuOr", vmin=-1.3, vmax=1.3, aspect="auto")
     ax.set_xticks(range(len(columns)), columns, rotation=60, ha="right", fontsize=7)
@@ -338,8 +347,8 @@ def family_grid(run, platform, device, output):
     families = run.families(device)
 
     def value_of(family, matrix):
-        value, _, mark = run.family_cell(device, family, matrix)
-        return (value, mark) if mark is None else (None, mark)
+        value, best, mark = run.family_cell(device, family, matrix)
+        return (value, mark, adapted(best)) if mark is None else (None, mark)
     fig, ax = plt.subplots(figsize=(.44 * len(run.matrices) + 2.4, .42 * len(families) + 1.9), layout="constrained")
     heatmap(ax, families, run.matrices, value_of, run.cls)
     save(fig, output / f"{platform}-{device}-families.svg")
@@ -358,7 +367,7 @@ def variant_grid(run, platform, device, output):
             return None, MARKS.get(c["status"], c["status"])
         if ref is None:
             return None, "—"
-        return (c["setup_s"] + c["solve_s"]) / ref, None
+        return (c["setup_s"] + c["solve_s"]) / ref, None, adapted(c)
     labels = [r + (" (reference)" if r == reference_label else "") for r in rows]
     fig, ax = plt.subplots(figsize=(.44 * len(run.matrices) + 3.2, .3 * len(rows) + 1.9), layout="constrained")
     heatmap(ax, rows, run.matrices, value_of, run.cls)
@@ -399,14 +408,17 @@ def times_table(run, device):
     ref = apx_label(reference(run.data, device))
     head = ["Matrix", "apxchol setup", "apxchol solve"] + [f"{f} {p}" for f in families for p in ("setup", "solve")]
     lines = ["| " + " | ".join(head) + " |", "|---" + "|---:" * (len(head) - 1) + "|"]
+    starred = False
     for m in run.matrices:
         c = run.cells.get((device, ref, m))
         row = [m] + ([f"{c['setup_s']:.3g}", f"{c['solve_s']:.3g}"] if good(c) else [MARKS.get(c["status"], "—")] * 2)
         for f in families:
             _, best, mark = run.family_cell(device, f, m)
-            row += [f"{best['setup_s']:.3g}", f"{best['solve_s']:.3g}"] if best else [mark or "—", ""]
+            star = "\\*" if adapted(best) else ""
+            row += [f"{best['setup_s']:.3g}{star}", f"{best['solve_s']:.3g}"] if best else [mark or "—", ""]
+            starred = starred or bool(star)
         lines.append("| " + " | ".join(row) + " |")
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n" + (f"\n{ADAPTED_NOTE}\n" if starred else "")
 
 
 def scaling_chart(data, platform, output):

@@ -11,6 +11,11 @@ same matrix and device, and at least 30 s. A run over the cap is shown as
 `≥20×`, not as a time. Other labels: `fail` (failed), `oom` (out of memory),
 `nc` (did not converge) and `n/a` (input not supported).
 
+An asterisk (`*`) marks a time whose setup includes input adaptation by the
+benchmark: finding connected components, pinning one vertex per component or
+slicing components, so that the solver accepts a singular or disconnected
+Laplacian. The `adapt_s` column of the data files gives that part of setup.
+
 The [Performance page](performance.md) groups solvers into families and
 compares apxchol with each family's fastest variant. This page shows every
 variant, how closely the variants of a family agree, and setup and solve

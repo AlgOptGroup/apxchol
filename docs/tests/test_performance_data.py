@@ -6,7 +6,7 @@ import unittest
 
 DATA = Path(__file__).resolve().parents[2] / "docs/performance"
 COLUMNS = ["matrix", "class", "n", "nnz", "solver", "config", "variant", "device", "threads", "status",
-           "setup_s", "solve_s", "iters", "rel_res", "cap_s", "max_rss_mb"]
+           "setup_s", "adapt_s", "solve_s", "iters", "rel_res", "cap_s", "max_rss_mb"]
 STATUSES = {"complete", "exceeded_cap", "failed", "oom", "timeout", "not_converged", "n/a", "missing"}
 CLASSES = {"grids", "meshes", "ipm", "social"}
 DEVICES = {"cpu", "gpu", "metal"}
@@ -61,6 +61,8 @@ class PerformanceDataTest(unittest.TestCase):
                                 self.assertGreaterEqual(float(row[column]), 0, where)
                             self.assertLessEqual(float(row["rel_res"]), float(header["tolerance"]), where)
                             self.assertGreaterEqual(int(row["iters"]), 0, where)
+                        if row["adapt_s"]:
+                            self.assertLessEqual(float(row["adapt_s"]), float(row["setup_s"]), where)
                         if row["status"] == "exceeded_cap":
                             self.assertGreater(float(row["cap_s"]), 0, where)
 
