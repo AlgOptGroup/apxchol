@@ -428,7 +428,7 @@ def solve(A, b, rtol=None, maxiter=None, *, x0=None, out=None,
     The factor is discarded afterwards. With many right-hand-side columns the
     factor uses the trace-cycle sampler, which costs more setup but fewer
     iterations per column: from 16 columns when the backend predicted before
-    the matrix is checked is CPU, from 64 when it is CUDA, never on Metal.
+    the matrix is checked is CPU, from 64 when it is CUDA, from 8 on Metal.
     """
     columns = np.shape(b)[1] if np.ndim(b) == 2 else 1
     csc = _to_csc(A)
