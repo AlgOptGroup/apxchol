@@ -548,12 +548,20 @@ __global__ void initialize_pivots_from_device_selection(
         static_cast<std::uint32_t>(vertex), 0, 0, 0, seed};
 }
 
+// The selection's validation status is read with the batch counts, after the
+// counting kernels. Until then an out-of-range id (flagged by validation) is
+// bound to an empty row, so no kernel before that read indexes by it; other
+// faults (duplicate, inactive, adjacent) name in-range vertices.
 __global__ void bind_pivot_ranges(
         device_pivot* pivots, std::size_t pivot_count,
-        const std::uint32_t* owner_offsets) {
+        const std::uint32_t* owner_offsets, std::size_t vertex_count) {
     const std::size_t ordinal = blockIdx.x * blockDim.x + threadIdx.x;
     if (ordinal >= pivot_count) return;
     const std::uint32_t vertex = pivots[ordinal].vertex;
+    if (static_cast<std::uint64_t>(vertex) >= vertex_count) {
+        pivots[ordinal].incidence_begin = pivots[ordinal].incidence_end = 0;
+        return;
+    }
     pivots[ordinal].incidence_begin = owner_offsets[vertex];
     pivots[ordinal].incidence_end = owner_offsets[vertex + 1];
 }
@@ -1721,6 +1729,8 @@ struct round_common_scratch {
 struct pinned_round_readback {
     device_semantics semantics;
     std::uint32_t cycle_status[2];
+    std::uint32_t validation_status;
+    gpu_round_shadow_normal_batch_counts batch;
 };
 
 class pinned_host_block {
@@ -2131,12 +2141,8 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                        "validate device-selection independence");
         }
         // The only selection-validation readback is this fixed 32-bit
-        // status word; selected ids and resident graph state stay on CUDA.
-        std::uint32_t host_validation_status = 0;
-        copy_to_host(&host_validation_status,
-                     selection_validation_status.get(), 1,
-                     "download device-selection validation status");
-        require_valid_device_selection(host_validation_status);
+        // status word, read with the batch counts below; selected ids and
+        // resident graph state stay on CUDA.
         if (p) {
             initialize_pivots_from_device_selection<<<blocks_for(p), kBlock>>>(
                 selected.data, p, run_seed, pivots.get());
@@ -2148,7 +2154,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                                   p * sizeof(std::uint32_t)),
                        "clear pivot counts");
             bind_pivot_ranges<<<blocks_for(p), kBlock>>>(
-                pivots.get(), p, input_owner_offsets.get());
+                pivots.get(), p, input_owner_offsets.get(), n);
             cuda_check(cudaGetLastError(), "bind resident pivot ranges");
         }
         cuda_check(cudaMemset(semantics.get(), 0, sizeof(device_semantics)),
@@ -2198,8 +2204,20 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                 nullptr, nullptr, 0, nullptr, 0, nullptr, nullptr, nullptr);
             cuda_check(cudaGetLastError(), "count normal batches");
         }
-        copy_to_host(&report.normal_batch, batch_counts.get(), 1,
-                     "download normal/oversized coverage and counts");
+        {
+            auto* staged = readback.get();
+            cuda_check(cudaMemcpyAsync(&staged->validation_status,
+                                       selection_validation_status.get(), sizeof(std::uint32_t),
+                                       cudaMemcpyDeviceToHost),
+                       "queue device-selection validation status download");
+            cuda_check(cudaMemcpyAsync(&staged->batch, batch_counts.get(),
+                                       sizeof(staged->batch), cudaMemcpyDeviceToHost),
+                       "queue normal/oversized coverage and counts download");
+            cuda_check(cudaStreamSynchronize(nullptr),
+                       "download validation status and normal/oversized counts");
+            require_valid_device_selection(staged->validation_status);
+            report.normal_batch = staged->batch;
+        }
         sort_g = static_cast<std::size_t>(report.normal_batch.oversized_gathered);
         g = gpu_round_shadow_checked_add(sort_g,
             static_cast<std::size_t>(report.normal_batch.normal_gathered),

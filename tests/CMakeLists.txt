@@ -24,6 +24,7 @@ add_executable(unit_tests
         test_gpu_factor_finalize.cpp
         test_gpu_owned_sparsify.cpp
         test_gpu_direct_csc.cpp
+        test_gpu_owned_identity.cpp
         test_gpu_repair_cascade.cpp
         test_gpu_operator_csr.cpp
         test_gpu_pcg.cpp
