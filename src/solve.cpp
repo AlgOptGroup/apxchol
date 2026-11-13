@@ -517,6 +517,7 @@ void detail::cpu_route::install_factor(factorization F, checkpoint* cp) {
     // copy), so its setup transient does not sit on a dead copy of the
     // factor. An installed factor is reinstalled exactly; installed_factor()
     // exports it again from the SpTRSV.
+    next->fp32_reference = detail::gpu_scaling::factor_reference_scale(factor, factor_dim);
     if (factor.storage == factor_storage_type::automatic)
         trsv.setup_consuming(factor.L, factor_dim, opts_.factor_opts);
     else
@@ -752,7 +753,8 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
     // Only exceptional columns need scaling; ordinary panels reuse their workspace.
     // Panels carry the triangular sweeps in FP32, so their columns follow
     // CUDA's rule: a column whose largest right-hand-side or warm-start entry
-    // lies outside 2^+-32 is scaled by a power of two, which is exact.
+    // lies outside 2^+-32 of the factor's reference magnitude is scaled by
+    // a power of two, which is exact.
     std::array<double, C> max_b{}, max_x0{};
     if constexpr (C > 1) {
         const int workers = detail::cpu_solve_threads(n);
@@ -784,14 +786,16 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
             maximum = max_b[c];
             if (maximum == 0) continue;
             maximum = std::max(maximum, max_x0[c]);
-            if (ordinary && detail::gpu_scaling::fp32_scale(maximum) == 1.0) continue;
+            if (ordinary && detail::gpu_scaling::fp32_scale(maximum, installed_->fp32_reference) == 1.0)
+                continue;
         } else {
             if (ordinary) continue;
             maximum = vec::max_abs(rhs);
             if (maximum == 0) continue;
             if (x0) maximum = std::max(maximum, vec::max_abs(column(x0, c)));
         }
-        scales[c] = detail::gpu_scaling::pow2_scale(maximum);
+        scales[c] = C > 1 ? detail::gpu_scaling::pow2_scale(maximum, installed_->fp32_reference)
+                          : detail::gpu_scaling::pow2_scale(maximum);
         if (scales[c] == 1.0 || !std::isnormal(vec::scaled_squared_norm(rhs, scales[c])))
             throw std::invalid_argument("CPU solve: RHS and initial guess exceed the common scaling range");
         scaled = true;

@@ -151,6 +151,28 @@ bool same_bytes(const T* left, const T* right, std::size_t count) {
     return std::memcmp(left, right, count * sizeof(T)) == 0;
 }
 
+// 5-point grid with smoothly varying weights: a Laplacian, or SDDM with
+// `excess` added to every diagonal entry. Sorted, unique and fully paired.
+Sparse weighted_grid(int side, double excess) {
+    const int n = side * side;
+    std::vector<test::triplet> entries;
+    std::vector<double> degree(n, excess);
+    const auto edge = [&](int i, int j) {
+        const double weight = 1.0 + 0.5 * std::sin(0.37 * i + 0.11 * j);
+        entries.push_back({i, j, -weight});
+        entries.push_back({j, i, -weight});
+        degree[i] += weight;
+        degree[j] += weight;
+    };
+    for (int r = 0; r < side; ++r)
+        for (int c = 0; c < side; ++c) {
+            if (r + 1 < side) edge(r * side + c, (r + 1) * side + c);
+            if (c + 1 < side) edge(r * side + c, r * side + c + 1);
+        }
+    for (int i = 0; i < n; ++i) entries.push_back({i, i, degree[i]});
+    return test::from_triplets(n, n, entries);
+}
+
 void expect_solution(const Sparse& matrix, std::span<const double> rhs,
                      std::span<const double> x,
                      double tolerance = apxchol::default_tol) {
@@ -696,22 +718,7 @@ TEST(Solver, CpuFp32PanelSweepsKeepIterationsAndResiduals) {
     constexpr int side = 96, n = side * side, columns = 8;
     constexpr double tol = 1e-8;
     for (const bool laplacian : {false, true}) {
-        std::vector<test::triplet> entries;
-        std::vector<double> degree(n, laplacian ? 0.0 : 0.01);
-        const auto edge = [&](int i, int j) {
-            const double weight = 1.0 + 0.5 * std::sin(0.37 * i + 0.11 * j);
-            entries.push_back({i, j, -weight});
-            entries.push_back({j, i, -weight});
-            degree[i] += weight;
-            degree[j] += weight;
-        };
-        for (int r = 0; r < side; ++r)
-            for (int c = 0; c < side; ++c) {
-                if (r + 1 < side) edge(r * side + c, (r + 1) * side + c);
-                if (c + 1 < side) edge(r * side + c, r * side + c + 1);
-            }
-        for (int i = 0; i < n; ++i) entries.push_back({i, i, degree[i]});
-        const Sparse matrix = test::from_triplets(n, n, entries);
+        const Sparse matrix = weighted_grid(side, laplacian ? 0.0 : 0.01);
         Dense rhs(n, columns);
         for (int q = 0; q < columns; ++q) {
             Vector exact(n);
@@ -743,37 +750,17 @@ TEST(Solver, CpuFp32PanelSweepsKeepIterationsAndResiduals) {
     }
 }
 
-// Panels carry the sweeps in FP32, so each column is scaled into FP32 range by
-// a power of two (CUDA's rule) before the iteration and restored after it.
-// Columns from 1e-200 to 1e200 on operators scaled by 1e-30, 1 and 1e30 must
-// then behave like the FP64 scalar solves: same iterations to within one,
-// true residuals at the tolerance.
+// Panels carry the sweeps in FP32, so a column far from the operator's
+// reference magnitude is scaled by a power of two (the rule CUDA uses) before
+// the iteration and restored after it. Columns from 1e-200 to 1e200 on
+// operators scaled by 1e-30, 1 and 1e30 must then behave like the FP64 scalar
+// solves: same iterations to within one, true residuals at the tolerance.
 TEST(Solver, CpuFp32PanelSweepsScaleExtremeColumnsAndOperators) {
     const scoped_omp_threads threads(4);
     constexpr int side = 48, n = side * side, columns = 8;
     constexpr double tol = 1e-8;
-    // Columns outside 2^+-32 are scaled to a largest entry in [1, 2); the two
-    // inside it stay as given. As on CUDA the operator is not scaled, so an
-    // unscaled column far from 1 on an operator near the FP32 limits (1e-8
-    // with 1e30, say) is outside what FP32 intermediates hold and is not
-    // exercised here.
-    const double magnitudes[columns] = {1e-200, 1e-100, 1e-30, 1.0, 1e30, 1e100, 1e200, 4.0};
-    std::vector<test::triplet> entries;
-    std::vector<double> degree(n, 0.01);
-    const auto edge = [&](int i, int j) {
-        const double weight = 1.0 + 0.5 * std::sin(0.37 * i + 0.11 * j);
-        entries.push_back({i, j, -weight});
-        entries.push_back({j, i, -weight});
-        degree[i] += weight;
-        degree[j] += weight;
-    };
-    for (int r = 0; r < side; ++r)
-        for (int c = 0; c < side; ++c) {
-            if (r + 1 < side) edge(r * side + c, (r + 1) * side + c);
-            if (c + 1 < side) edge(r * side + c, r * side + c + 1);
-        }
-    for (int i = 0; i < n; ++i) entries.push_back({i, i, degree[i]});
-    const Sparse unit = test::from_triplets(n, n, entries);
+    const double magnitudes[columns] = {1e-200, 1e-30, 1e-8, 1.0, 1e8, 1e30, 1e200, 4.0};
+    const Sparse unit = weighted_grid(side, 0.01);
     Dense shape(n, columns);
     for (int q = 0; q < columns; ++q) {
         Vector exact(n);
@@ -1923,6 +1910,67 @@ TEST(Solver, CudaWidePanelsCenterLaplacianColumns) {
     }
 }
 #endif
+
+// The GPU triangular sweeps are FP32, so a column is scaled relative to the
+// operator's reference magnitude. Operators and right-hand sides of very
+// different magnitudes must converge to the tolerance on the original system.
+TEST(Solver, GpuSolvesOperatorsAndColumnsOfDifferentMagnitudes) {
+#if !(defined(APXCHOL_USE_CUDA) || defined(APXCHOL_USE_METAL)) || \
+    (defined(APXCHOL_USE_CUDA) && defined(APXCHOL_64BIT_NODE_INDICES))
+    GTEST_SKIP() << "GPU owner required";
+#else
+    if (!apxchol::backend_available(apxchol::solve_backend::gpu))
+        GTEST_SKIP() << "No usable GPU device";
+#if defined(APXCHOL_USE_METAL)
+    // Metal accepts operator values within 2^+-100 (about 1.3e30).
+    constexpr double extreme = 1e25;
+#else
+    constexpr double extreme = 1e30;
+#endif
+    const scoped_omp_threads threads(2);
+    constexpr int side = 48, n = side * side, columns = 9;   // a panel of 8 and one more
+    constexpr double tol = 1e-8;
+    const double magnitudes[3] = {1e-8, 1.0, 1e8};
+    const Sparse unit = weighted_grid(side, 0.01);
+    Dense shape(n, columns);
+    for (int q = 0; q < columns; ++q) {
+        Vector exact(n);
+        for (int i = 0; i < n; ++i) exact[i] = std::sin((i + 1) * (q + 1) * 0.013) + 0.1 * q;
+        set_col(shape, q, test::multiply(unit, exact));
+    }
+    for (const double operator_scale : {1.0 / extreme, 1.0, extreme}) {
+        const Sparse matrix = test::scaled(unit, operator_scale);
+        Dense rhs(n, columns);
+        for (int q = 0; q < columns; ++q)
+            set_col(rhs, q, affine(magnitudes[q % 3], std::as_const(shape).col(q)));
+        for (const auto storage : {apxchol::factor_storage_type::fp16,
+                                   apxchol::factor_storage_type::fp32}) {
+            SCOPED_TRACE(::testing::Message() << "operator scale " << operator_scale
+                                              << " storage " << int(storage));
+            auto options = cpu_options();
+            options.backend = apxchol::solve_backend::gpu;
+            options.factor_opts.factor_storage = storage;
+            apxchol::solver owner(test::csc(matrix), options);
+            Dense output(n, columns);
+            const auto panel = owner.solve(std::as_const(rhs).view(), output.view(), tol, 400);
+            ASSERT_EQ(panel.columns.size(), static_cast<std::size_t>(columns));
+            for (int q = 0; q < columns; ++q) {
+                SCOPED_TRACE(q);
+                const auto b = std::as_const(rhs).col(q);
+                ASSERT_TRUE(test::all_finite(output.col(q)));
+                EXPECT_EQ(panel.columns[q].backend, apxchol::solve_backend::gpu);
+                EXPECT_TRUE(panel.columns[q].converged);
+                EXPECT_LE(stable_residual(matrix, output.col(q), b), tol);
+                if (q < 3) {
+                    const auto scalar = owner.solve(b, tol, 400);
+                    EXPECT_TRUE(scalar.converged);
+                    EXPECT_LE(stable_residual(matrix, scalar.x, b), tol);
+                }
+            }
+        }
+    }
+#endif
+}
 
 TEST(Solver, GpuApplyRejectsNonFiniteInputs) {
 #if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_64BIT_NODE_INDICES)

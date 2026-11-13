@@ -61,6 +61,8 @@ private:
     struct installed {
         factorization F;
         omp_sptrsv trsv;
+        // gpu_scaling::reference_scale of the factor, for panel columns.
+        double fp32_reference = 1.0;
     };
 
     /// SpTRSV setup from F, then publish it as this route's installed state.
@@ -96,7 +98,7 @@ private:
                                             double* z, checkpoint* cp) const;
     // Fp32Sweeps: the two triangular sweeps store their results as FP32
     // panels (PCG panels only; apply() and scalar solves keep FP64). solve_panel
-    // scales each column into FP32 range first, as CUDA does.
+    // scales each column first, by the rule CUDA uses (gpu_scaling::fp32_scale).
     template<int Columns, bool Fp32Sweeps = false>
     void apply_core(const double* b, const std::array<double, Columns>& b_sum, bool center,
                     double* z, std::array<double, Columns>* rz_out, checkpoint* cp) const;

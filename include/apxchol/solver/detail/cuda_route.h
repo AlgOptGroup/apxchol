@@ -37,12 +37,20 @@ public:
                       checkpoint* cp, factorization* F)
         : opts_(opts.factor_opts) {
         auto factor = std::make_shared<factorization>();
+        // An adopted host factor gives the scaling reference itself. A factor
+        // built on the device leaves it to the operator it was built from.
+        double fp32_reference = gpu_scaling::operator_reference_scale(A);
         if (F) {
             if (factorization_access::device_factor(*F))
                 throw std::invalid_argument("apxchol: supply a host factor without a device capsule");
             if (!F->sddm && F->L.rows() == 1)
                 throw std::invalid_argument("CUDA cannot adopt a scalar Laplacian factor");
             *factor = std::move(*F);
+            if (factor->L.has_values()) {
+                const auto rows = static_cast<node_index>(factor->L.rows());
+                fp32_reference = gpu_scaling::factor_reference_scale(
+                    *factor, factor->sddm ? rows : rows - 1);
+            }
             install_factor(*factor, cp);
         } else {
             factorize(*factor, A, cp);
@@ -51,7 +59,7 @@ public:
         // Lumping changes only the factorization; the GPU operator uses A itself.
         if (cp) { cp->descend("setup"); cp->tick(); }
         const auto operator_setup_begin = gpu_setup_diagnostic_clock::now(opts_.verbose);
-        gpcg_.setup(A, F_->perm, opts_.verbose);
+        gpcg_.setup(A, F_->perm, opts_.verbose, fp32_reference);
         if (cp) { (*cp)("gpu_pcg_setup"); cp->ascend(); }
         if (opts_.verbose) {
             const double operator_setup_wall_s = std::chrono::duration<double>(
@@ -121,7 +129,7 @@ public:
         #pragma omp parallel for schedule(static) if(workers > 1) num_threads(workers)
         for (std::int64_t v = 0; v < n; ++v)
             z[P[v]] = b[v] - (center ? mean : 0.0);
-        trsv_.solve_LLt(z.data(), scratch_.data(), gpcg_.stream());
+        trsv_.solve_LLt(z.data(), scratch_.data(), gpcg_.stream(), gpcg_.fp32_reference());
         double* out = scratch_.data();
         if (!F_->sddm) out[n - 1] = 0.0;
         const double shift = center
