@@ -300,7 +300,7 @@ APXCHOL_GPU_FUNCTION void group_star(Memory m, Math math, unsigned row, Group gr
     if (group.lane == 0) {
         s.rows[row] = sparse_round::prepare_sample(math, rows, s.prefix() + begin, reserved);
         if (input.trace)
-            s.rows[row] = sparse_round::prepare_trace(math, rows, s.prefix() + begin, s.rows[row], seed);
+            s.rows[row] = sparse_round::prepare_trace(math, rows, s.rows[row], seed);
         if (s.rows[row].status)
             m.fail(1u << s.rows[row].status);
     }

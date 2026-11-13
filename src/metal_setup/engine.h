@@ -37,7 +37,8 @@ class Engine {
     Engine(id<MTLDevice> dev) : device(dev) {
         NSError *error = nil;
         require(device != nil, "No Metal device for factorization");
-        auto library = metal::compile_library(device, resident_metal_source).library;
+        const std::string source = std::string(resident_metal_source) + resident_metal_source_rest;
+        auto library = metal::compile_library(device, source.c_str()).library;
         auto make_setup_pipeline = [&](unsigned stage, bool scalar) {
             auto values = [MTLFunctionConstantValues new];
             [values setConstantValue:&stage type:MTLDataTypeUInt atIndex:0];

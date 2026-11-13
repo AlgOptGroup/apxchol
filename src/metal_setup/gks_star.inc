@@ -154,8 +154,8 @@ APXCHOL_GPU_FUNCTION row_result prepare_sample(Math math,Records rows,Prefix pre
 // weights scaled by the largest; it only affects variance, never the mean.
 // The core permutation is stored in rows[cut..d).slot. Any zero or
 // non-finite scaled weight keeps the GKS law (cut = entries).
-template<class Math,class Records,class Prefix>
-APXCHOL_GPU_FUNCTION row_result prepare_trace(Math math,Records rows,Prefix prefix,
+template<class Math,class Records>
+APXCHOL_GPU_FUNCTION row_result prepare_trace(Math math,Records rows,
         row_result result,seed_type seed) {
     const unsigned d=result.entries;
     result.cut=d;

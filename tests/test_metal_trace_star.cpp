@@ -54,7 +54,7 @@ pair_map run(pair_map& squares, const std::vector<float>& w, float excess,
         });
         std::vector<wide> prefix(d);
         auto res = sparse_round::prepare_sample(math, rows.data(), prefix.data(), prepared.result);
-        if (trace) res = sparse_round::prepare_trace(math, rows.data(), prefix.data(), res, p.seed);
+        if (trace) res = sparse_round::prepare_trace(math, rows.data(), res, p.seed);
         EXPECT_EQ(res.status, 0u);
         if (res.cut < res.entries) ++trace_rows;
         unsigned fills = 0;
