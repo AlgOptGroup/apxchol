@@ -231,6 +231,7 @@ def test_one_call_solve_uses_trace_cycle_from_16_columns_on_cpu():
     assert rule16.factor_nnz != gks.factor_nnz
     wide = apxchol.solve(A, B, **opts)
     narrow = apxchol.solve(A, B[:, :15], **opts)
+    assert np.all(wide.converged) and np.all(narrow.converged)
     assert np.array_equal(wide.iterations, rule16.solve(B).iterations)
     assert np.array_equal(narrow.iterations, gks.solve(B[:, :15]).iterations)
 

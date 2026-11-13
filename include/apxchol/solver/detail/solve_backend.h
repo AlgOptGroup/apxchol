@@ -14,5 +14,5 @@ solve_backend select_solve_backend(const solve_options& opts,
 // measured inputs; Metal setup supports only GKS. The backend is resolved
 // without the input, so very small automatic inputs may still run on CPU.
 // Callers here cannot set the sampler themselves, so nothing is overridden.
-void choose_one_call_sampler(solve_options& opts, std::int64_t columns);
+void choose_sampler(solve_options& opts, std::int64_t columns);
 } // namespace apxchol::detail

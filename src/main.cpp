@@ -131,7 +131,7 @@ int solve_batch(const detail::csc_matrix<double>& L, const dense_file& B,
     const auto X0 = read_initial_guess(cfg, B.rows, B.cols);
     detail::checkpoint timings;
     run_config batch_cfg = cfg;
-    detail::choose_one_call_sampler(batch_cfg.solve_opts, B.cols);
+    detail::choose_sampler(batch_cfg.solve_opts, B.cols);
     solver owner = make_solver(L, batch_cfg, timings);
     dense_file X{B.rows, B.cols, std::vector<double>(B.values.size())};
     const auto res = owner.solve(const_matrix_view{B.values.data(), B.rows, B.cols, B.rows},

@@ -234,7 +234,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                     mxGetNumberOfElements(prhs[3]) == 1 ? mxGetScalar(prhs[3]) : -1.0;
                 if (!(columns >= 0 && columns <= 1e15) || columns != std::floor(columns))
                     fail("apxchol:badInput", "rhs_columns must be a non-negative integer");
-                if (columns > 0) apxchol::detail::choose_one_call_sampler(options, static_cast<std::int64_t>(columns));
+                if (columns > 0) apxchol::detail::choose_sampler(options, static_cast<std::int64_t>(columns));
             }
             const auto A = mx_to_csc(prhs[1]);
             auto solver = std::make_unique<apxchol::solver>(A->view(), options);

@@ -1154,7 +1154,7 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
 #endif
 }
 
-void detail::choose_one_call_sampler(solve_options& opts, std::int64_t columns) {
+void detail::choose_sampler(solve_options& opts, std::int64_t columns) {
     std::int64_t threshold = 16;
     if (select_solve_backend(opts) == solve_backend::gpu) {
 #if defined(APXCHOL_USE_CUDA)

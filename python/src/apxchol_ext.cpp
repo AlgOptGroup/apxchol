@@ -335,7 +335,7 @@ private:
     static apxchol::solve_options one_call(apxchol::solve_options options, std::int64_t columns) {
         if (columns > 0) {
             py::gil_scoped_release release;   // backend prediction may probe the device
-            apxchol::detail::choose_one_call_sampler(options, columns);
+            apxchol::detail::choose_sampler(options, columns);
         }
         return options;
     }

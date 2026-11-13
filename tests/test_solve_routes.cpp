@@ -459,12 +459,12 @@ TEST(SolveRoutes, OneCallSamplerFollowsTheColumnCountOnCpu) {
     options.backend = apxchol::solve_backend::cpu;
     for (std::int64_t columns : {1, 4, 15}) {
         auto o = options;
-        apxchol::detail::choose_one_call_sampler(o, columns);
+        apxchol::detail::choose_sampler(o, columns);
         EXPECT_EQ(o.factor_opts.experimental.sampler, apxchol::clique_sampler::gks) << columns;
     }
     for (std::int64_t columns : {16, 64}) {
         auto o = options;
-        apxchol::detail::choose_one_call_sampler(o, columns);
+        apxchol::detail::choose_sampler(o, columns);
         EXPECT_EQ(o.factor_opts.experimental.sampler, apxchol::clique_sampler::trace_cycle) << columns;
     }
 }
@@ -472,9 +472,9 @@ TEST(SolveRoutes, OneCallSamplerFollowsTheColumnCountOnCpu) {
 TEST(SolveRoutes, OneCallSamplerUsesTheGpuThresholdOnlyWhereTheGpuIsChosen) {
     apxchol::solve_options options;
     auto o15 = options, o16 = options, o64 = options;
-    apxchol::detail::choose_one_call_sampler(o15, 15);
-    apxchol::detail::choose_one_call_sampler(o16, 16);
-    apxchol::detail::choose_one_call_sampler(o64, 64);
+    apxchol::detail::choose_sampler(o15, 15);
+    apxchol::detail::choose_sampler(o16, 16);
+    apxchol::detail::choose_sampler(o64, 64);
     EXPECT_EQ(o15.factor_opts.experimental.sampler, apxchol::clique_sampler::gks);
     if (apxchol::detail::select_solve_backend(options) == apxchol::solve_backend::cpu) {
         EXPECT_EQ(o16.factor_opts.experimental.sampler, apxchol::clique_sampler::trace_cycle);
