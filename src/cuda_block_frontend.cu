@@ -83,13 +83,18 @@ __global__ void initialize_vertex_ids(std::size_t count, node_index *ids) {
         ids[i] = static_cast<node_index>(i);
 }
 
-__global__ void sum_vertex_degrees(const node_index *ids, std::size_t count,
+// count_on_device, when given, bounds the ids below bound; zero-valued
+// lanes past the count leave the xor/sum digest and the degree sum unchanged.
+__global__ void sum_vertex_degrees(const node_index *ids, std::size_t bound,
+                                   const int *count_on_device,
                                    selector_owned_view view,
                                    device_selected_status *status) {
     const std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
+    const std::size_t count = count_on_device
+        ? static_cast<std::size_t>(*count_on_device) : bound;
     unsigned long long item_hash = 0;
     unsigned long long degree_sum = 0;
-    if (i < count) {
+    if (i < count && i < bound) {
         const node_index vertex = ids[i];
         degree_sum = static_cast<unsigned long long>(view.degree(vertex));
         item_hash = gpu_device_selection_selected_hash(i, vertex);
@@ -162,6 +167,11 @@ __global__ void bounded_decide(const node_index* candidates, std::size_t count,
     const unsigned lane = threadIdx.x & 31U;
     if (index >= count) return; // whole warp, including the final partial block
     const node_index v = candidates[index];
+    // Decided candidates sit out the pass; the warp reads one status word.
+    if (status[v] != 0) {
+        if (lane == 0) winners[index] = 0;
+        return;
+    }
     const bool wins = !any_neighbor(v, view, [&](node_index u) {
         return status[u] == 0 &&
             bounded_priority_precedes(u, v, view, seed, phase);
@@ -199,12 +209,45 @@ struct vertex_is_active {
     }
 };
 
+// With quantile set, the threshold is the device-resident sorted degree
+// (the host path compared the same value widened to double).
 struct degree_is_eligible {
     selector_owned_view view;
     double threshold;
+    const node_index* quantile = nullptr;
     __host__ __device__ bool operator()(node_index v) const {
-        return static_cast<double>(view.degree(v)) <= threshold;
+        const double limit = quantile ? static_cast<double>(*quantile) : threshold;
+        return static_cast<double>(view.degree(v)) <= limit;
     }
+};
+
+// Page-locked host words for the per-round selection read.
+struct pinned_selection_readback {
+    int chosen;
+    int compacted;
+    device_selected_status status;
+};
+
+template<class T>
+class pinned_host_array {
+public:
+    pinned_host_array() = default;
+    ~pinned_host_array() { if (data_) cudaFreeHost(data_); }
+    pinned_host_array(const pinned_host_array&) = delete;
+    pinned_host_array& operator=(const pinned_host_array&) = delete;
+    T* reserve(std::size_t count) {
+        if (count > count_) {
+            if (data_) { cudaFreeHost(data_); data_ = nullptr; count_ = 0; }
+            cuda_check(cudaMallocHost(reinterpret_cast<void**>(&data_), count * sizeof(T)),
+                       "allocate pinned selection readback");
+            count_ = count;
+        }
+        return data_;
+    }
+    T* get() noexcept { return data_; }
+private:
+    T* data_ = nullptr;
+    std::size_t count_ = 0;
 };
 
 double elapsed_ms(clock_type::time_point start, bool verbose) {
@@ -238,11 +281,12 @@ struct gpu_block_frontend::impl {
     bool verbose;
     template<class Input, class T, class Predicate>
     auto select_operation(Input input, T* output, std::size_t count,
-                          Predicate predicate) {
+                          Predicate predicate, int slot = 0) {
         require_cub_count(count, "selection");
-        return [=, this] [[gnu::always_inline]] (void* storage, std::size_t& bytes) {
+        int* const counter = selected_count.get() + slot;
+        return [=] [[gnu::always_inline]] (void* storage, std::size_t& bytes) {
             return cub::DeviceSelect::If(storage, bytes, input, output,
-                                        selected_count.get(), static_cast<int>(count), predicate);
+                                        counter, static_cast<int>(count), predicate);
         };
     }
 
@@ -276,8 +320,11 @@ struct gpu_block_frontend::impl {
         sorted_degrees.reserve(n);
         candidates_original.reserve(n);
         selected_ids.reserve(n);
-        selected_count.reserve(1);
+        // [0] selection counts, [1] the last active compaction (checked later).
+        selected_count.reserve(2);
         selected_status.reserve(1);
+        pinned.reserve(1);
+        pinned_ids.reserve(std::max<std::size_t>(n, 1));
         if (n) {
             initialize_status<<<blocks_for(n), kBlock>>>(n, status.get());
             cuda_check(cudaGetLastError(), "initialize bounded selector status");
@@ -395,13 +442,39 @@ struct gpu_block_frontend::impl {
         return host_count;
     }
 
-    void compact_active_ids(const std::uint8_t* mask) {
-        if (!active_count) return;
+    template<class Input, class T, class Predicate>
+    void select_to_slot(Input input, T* output, std::size_t count, Predicate predicate, int slot) {
+        execute_cub(select_operation(input, output, count, predicate, slot), "CUB ordered selection");
+    }
+
+    // The compacted count is the expected one; its device value is checked
+    // with the next blocking read (prepare's candidate count).
+    void compact_active_ids(const std::uint8_t* mask, std::size_t expected) {
+        if (!active_count) {
+            if (expected) throw std::logic_error("GPU selector owned active count mismatch");
+            return;
+        }
+        verify_pending_compaction();
         const int next = 1 - current_active;
-        active_count = std::size_t(select_if(
-            active_ids[current_active].get(), active_ids[next].get(),
-            active_count, vertex_is_active{mask}));
+        select_to_slot(active_ids[current_active].get(), active_ids[next].get(),
+                       active_count, vertex_is_active{mask}, 1);
         current_active = next;
+        active_count = expected;
+        pending_compaction = true;
+    }
+
+    void check_compaction(int device_count) {
+        pending_compaction = false;
+        if (device_count < 0 || std::size_t(device_count) != active_count)
+            throw std::logic_error("GPU selector owned active count mismatch");
+    }
+
+    void verify_pending_compaction() {
+        if (!pending_compaction) return;
+        int host = 0;
+        cuda_check(cudaMemcpy(&host, selected_count.get() + 1, sizeof(host),
+                              cudaMemcpyDeviceToHost), "download active compaction count");
+        check_compaction(host);
     }
 
     unsigned long long sum_selected_degrees(std::size_t count) {
@@ -412,7 +485,7 @@ struct gpu_block_frontend::impl {
                               sizeof(device_selected_status)),
                    "clear selected-degree/content status");
         sum_vertex_degrees<<<blocks_for(count), kBlock>>>(
-            selected_ids.get(), count, owned_view, selected_status.get());
+            selected_ids.get(), count, nullptr, owned_view, selected_status.get());
         cuda_check(cudaGetLastError(), "sum selected degrees");
         device_selected_status host_status{};
         cuda_check(cudaMemcpy(&host_status, selected_status.get(),
@@ -450,22 +523,29 @@ struct gpu_block_frontend::impl {
                            : static_cast<double>(2ULL * live_edge_count) /
                                  static_cast<double>(active.size());
 
-        double threshold = options.degree_multiplier * average;
+        degree_is_eligible eligible{owned_view, options.degree_multiplier * average};
         const double q = options.degree_quantile.value_or(degree_quantile_host_default);
         if (q > 0.0 && q < 1.0 && !active.empty()) {
             std::size_t rank = static_cast<std::size_t>(q * (active.size() - 1));
             if (rank >= active.size()) rank = active.size() - 1;
             execute_cub(degree_sort_operation(active.size()), "sort active degrees");
-            node_index quantile = 0;
-            cuda_check(cudaMemcpy(&quantile, sorted_degrees.get() + rank,
-                                  sizeof(quantile), cudaMemcpyDeviceToHost),
-                       "download degree quantile");
-            threshold = static_cast<double>(quantile);
+            eligible.quantile = sorted_degrees.get() + rank;
         }
 
-        candidate_count = static_cast<std::size_t>(select_if(
-            active_ids[current_active].get(), candidates_original.get(),
-            active.size(), degree_is_eligible{owned_view, threshold}));
+        if (active.empty()) {
+            verify_pending_compaction();
+            candidate_count = 0;
+        } else {
+            select_to_slot(active_ids[current_active].get(), candidates_original.get(),
+                           active.size(), eligible, 0);
+            int counts[2]{};
+            cuda_check(cudaMemcpy(counts, selected_count.get(),
+                                  (pending_compaction ? 2 : 1) * sizeof(int),
+                                  cudaMemcpyDeviceToHost),
+                       "download selection count");
+            if (pending_compaction) check_compaction(counts[1]);
+            candidate_count = static_cast<std::size_t>(counts[0]);
+        }
 
         last_prepare = elapsed_ms(start, verbose);
         if (verbose) {
@@ -497,19 +577,23 @@ struct gpu_block_frontend::impl {
         set_status<<<blocks_for(candidate_count), kBlock>>>(
             candidates_original.get(), candidate_count, status.get(), 0);
         cuda_check(cudaGetLastError(), "initialize bounded candidates");
+        // Every pass visits the whole candidate list; vertices decided in an
+        // earlier pass skip out (bounded_decide), so each pass decides exactly
+        // the still-undecided set a compaction would have kept, without
+        // reading its size back. Kernel order is the snapshot boundary.
         const node_index* current = candidates_original.get();
-        node_index* next = update_ids.get();
-        std::size_t count = candidate_count;
+        const std::size_t count = candidate_count;
         bounded_passes = 0;
         bounded_candidate_visits = 0;
-        for (unsigned step = 0; step < 4 && count; ++step) {
+        // n<INT_MAX and at most32 lanes/candidate: checked size_t arithmetic,
+        // launch grid remains well within CUDA's signed-int X dimension.
+        if (count > (std::numeric_limits<std::size_t>::max() - (kBlock - 1)) / 32)
+            throw std::overflow_error("bounded selector launch size overflow");
+        const int blocks = blocks_for(count * std::size_t{32});
+        std::size_t undecided = count;
+        for (unsigned step = 0; step < 4 && undecided; ++step) {
             ++bounded_passes;
-            bounded_candidate_visits += count;
-            // n<INT_MAX and at most32 lanes/candidate: checked size_t arithmetic,
-            // launch grid remains well within CUDA's signed-int X dimension.
-            if (count > (std::numeric_limits<std::size_t>::max() - (kBlock - 1)) / 32)
-                throw std::overflow_error("bounded selector launch size overflow");
-            const int blocks = blocks_for(count * std::size_t{32});
+            bounded_candidate_visits += undecided;
             bounded_decide<<<blocks, kBlock>>>(current, count, owned_view,
                 status.get(), pick.get(),
                 bounded_seed, bounded_phase);
@@ -517,13 +601,10 @@ struct gpu_block_frontend::impl {
             bounded_commit<<<blocks, kBlock>>>(current, count, owned_view,
                 pick.get(), status.get());
             cuda_check(cudaGetLastError(), "commit bounded independent set");
-            if (step == 3) break;
-            // Stable compaction is also the completion boundary before the next
-            // snapshot. Selected/blocked vertices never reenter this call.
-            count = static_cast<std::size_t>(select_if(current, next, count,
-                status_equals{status.get(), 0}));
-            current = next;
-            next = next == update_ids.get() ? selected_ids.get() : update_ids.get();
+            // Diagnostics only: count the undecided set as before.
+            if (verbose && step < 3)
+                undecided = static_cast<std::size_t>(select_if(current, update_ids.get(), count,
+                    status_equals{status.get(), 0}));
         }
     }
 
@@ -538,24 +619,43 @@ struct gpu_block_frontend::impl {
         }
 
         launch_bounded_selection();
-        const std::size_t chosen = static_cast<std::size_t>(
-            select_if(candidates_original.get(), selected_ids.get(),
-                      candidate_count, status_equals{status.get(), 1}));
-        if (!chosen)
-            throw std::logic_error("bounded selector made no progress on nonempty candidates");
-        selected_size = chosen;
-        selected_degree_work = sum_selected_degrees(chosen);
-        result.data.resize(chosen);
-        if (chosen) {
-            cuda_check(cudaMemcpy(result.data.data(), selected_ids.get(),
-                                  chosen * sizeof(node_index),
-                                  cudaMemcpyDeviceToHost),
-                       "download block-greedy selection");
-        }
+        // Chosen count, degree sum, digest and ids leave the device in one
+        // synchronization; ids are copied up to the candidate count bound.
+        // Clearing that range first keeps the copied tail defined (initcheck).
+        cuda_check(cudaMemsetAsync(selected_ids.get(), 0, candidate_count * sizeof(node_index)),
+                   "clear selected ids");
+        select_to_slot(candidates_original.get(), selected_ids.get(),
+                       candidate_count, status_equals{status.get(), 1}, 0);
+        cuda_check(cudaMemsetAsync(selected_status.get(), 0, sizeof(device_selected_status)),
+                   "clear selected-degree/content status");
+        sum_vertex_degrees<<<blocks_for(candidate_count), kBlock>>>(
+            selected_ids.get(), candidate_count, selected_count.get(), owned_view,
+            selected_status.get());
+        cuda_check(cudaGetLastError(), "sum selected degrees");
+        auto* staged = pinned.get();
+        auto* staged_ids = pinned_ids.get();
+        cuda_check(cudaMemcpyAsync(&staged->chosen, selected_count.get(), sizeof(int),
+                                   cudaMemcpyDeviceToHost), "queue selection count download");
+        cuda_check(cudaMemcpyAsync(&staged->status, selected_status.get(),
+                                   sizeof(device_selected_status), cudaMemcpyDeviceToHost),
+                   "queue selected-degree sum and ordered selection digest download");
+        cuda_check(cudaMemcpyAsync(staged_ids, selected_ids.get(),
+                                   candidate_count * sizeof(node_index), cudaMemcpyDeviceToHost),
+                   "queue block-greedy selection download");
         set_status<<<blocks_for(candidate_count), kBlock>>>(
             candidates_original.get(), candidate_count, status.get(), 2);
         cuda_check(cudaGetLastError(), "restore block-greedy candidate status");
-        cuda_check(cudaDeviceSynchronize(), "finish block-greedy selection");
+        cuda_check(cudaStreamSynchronize(nullptr), "finish block-greedy selection");
+        if (staged->chosen < 0 || std::size_t(staged->chosen) > candidate_count)
+            throw std::logic_error("bounded selector returned an invalid selection count");
+        const std::size_t chosen = static_cast<std::size_t>(staged->chosen);
+        if (!chosen)
+            throw std::logic_error("bounded selector made no progress on nonempty candidates");
+        selected_size = chosen;
+        selection_content.selection = {staged->status.selection.xor_hash,
+                                       staged->status.selection.sum_hash};
+        selected_degree_work = staged->status.degree_sum;
+        result.data.assign(staged_ids, staged_ids + chosen);
 
         last_select = elapsed_ms(start, verbose);
         if (verbose)
@@ -585,9 +685,7 @@ struct gpu_block_frontend::impl {
             directed_count / 2 > live_edge_count || !offsets || (n && !active) ||
             (directed_count && !incidences))
             throw std::logic_error("GPU selector owned residual has invalid dimensions or lifetime");
-        compact_active_ids(active);
-        if (active_count != expected.active_count)
-            throw std::logic_error("GPU selector owned active count mismatch");
+        compact_active_ids(active, expected.active_count);
         // The private caller binds producer/device/consumed-selection identity
         // before entry. The arrays and digests belong to this exact immutable
         // numerical generation; copying/re-hashing them adds no validation.
@@ -619,6 +717,9 @@ struct gpu_block_frontend::impl {
     device_buffer<int> selected_count;
     device_buffer<device_selected_status> selected_status;
     device_buffer<unsigned char> cub_temp;
+    pinned_host_array<pinned_selection_readback> pinned;
+    pinned_host_array<node_index> pinned_ids;
+    bool pending_compaction = false;
 
     std::vector<node_index> host_active_degrees;
     std::vector<node_index> host_candidate_ids;
@@ -653,7 +754,7 @@ gpu_block_frontend::probe_runtime(node_index n) {
     // Seven vertex arrays, plus the old scratch allocation during growth.
     valid &= add_allocation(bytes, nv, 8 * sizeof(node_index));
     valid &= add_allocation(bytes, nv, sizeof(int) + sizeof(unsigned char));
-    valid &= add_allocation(bytes, 1, sizeof(int) + sizeof(device_selected_status));
+    valid &= add_allocation(bytes, 1, 2 * sizeof(int) + sizeof(device_selected_status));
     if (!valid) {
         result.estimated_bytes = std::numeric_limits<std::size_t>::max();
         return result;
@@ -801,6 +902,11 @@ void gpu_block_frontend::bind_owned_residual(
         p_->bind_owned_residual(incidences, offsets, active, directed_count,
                                 expected, std::move(epoch));
     }, /*read_residual=*/false);
+}
+
+void gpu_block_frontend::verify_bound_residual() {
+    return p_->checked_operation([&] { p_->verify_pending_compaction(); },
+                                 /*read_residual=*/false);
 }
 
 gpu_block_frontend::transfer_stats gpu_block_frontend::transfers() const {

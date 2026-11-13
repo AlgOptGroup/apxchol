@@ -791,7 +791,7 @@ factorization factorize_impl(const Eliminator& elim,
                         double(last_live)) {
                     // Charge the rounds so far to the same stage as without the block.
                     if (cp) (*cp)("gpu_owned_factorization");
-                    if (gpu_round_shadow.finish_owned_dense_tail(active)) {
+                    if (gpu_round_shadow.finish_owned_dense_tail(active, *gpu_frontend)) {
                         // Rounds are independent sets; the block's columns depend
                         // on each other, so each counts as a round of one vertex.
                         for (std::size_t left = active.size(); left; --left)

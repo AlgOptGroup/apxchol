@@ -255,23 +255,22 @@ struct allocation_tracker {
 
 template<class T> using device_buffer = cuda_buffer<T, cuda_check, allocation_tracker>;
 
-// Free device memory is read once. Each stage then requires the allocations
-// whose sizes are known at that boundary on top of the tracked resident bytes,
-// keeping a 10% device margin. Replacements count at their new size without
-// crediting released capacity, so the largest stage total (planned) bounds the
-// tracked peak.
+// Free device memory is read once, at the first stage that allocates. Each
+// stage then requires the allocations whose sizes are known at that boundary
+// on top of the tracked resident bytes, keeping a 10% device margin.
+// Replacements count at their new size without crediting released capacity,
+// so the largest stage total (planned) bounds the tracked peak. A stage that
+// allocates nothing needs no query: rounds on retained capacity skip it.
 class staged_preflight {
 public:
     staged_preflight(const allocation_tracker& tracker, const char* owner)
-        : tracker_(tracker), owner_(owner) {
-        cuda_check(cudaMemGetInfo(&free_, &total_), "query free device memory");
-        margin_ = total_ / 10;
-        available_ = gpu_round_shadow_checked_add(tracker.current, free_,
-                                                  "resident plus free device memory");
+        : tracker_(tracker), owner_(owner), base_(tracker.current) {
         planned_ = tracker.current;
     }
 
-    bool fits(std::size_t additional) const {
+    bool fits(std::size_t additional) {
+        if (!additional) return true;
+        query();
         const std::size_t required = gpu_round_shadow_checked_add(
             tracker_.current, additional, "staged device plan");
         return available_ > margin_ && required <= available_ - margin_;
@@ -293,8 +292,28 @@ public:
     std::size_t planned() const noexcept { return planned_; }
 
 private:
+    // Free memory is measured against the resident bytes at construction:
+    // releases and growths since then change both terms of current + free.
+    void query() {
+        if (queried_) return;
+        cuda_check(cudaMemGetInfo(&free_, &total_), "query free device memory");
+        queried_ = true;
+        margin_ = total_ / 10;
+        const std::size_t freed = base_ > tracker_.current ? base_ - tracker_.current : 0;
+        const std::size_t grown = tracker_.current > base_ ? tracker_.current - base_ : 0;
+        // free_ already reflects allocations since construction; recover the
+        // construction-time total so available_ keeps its original meaning.
+        const std::size_t free_at_base = gpu_round_shadow_checked_add(free_, grown,
+            "free device memory at plan start");
+        available_ = gpu_round_shadow_checked_add(base_,
+            free_at_base > freed ? free_at_base - freed : 0,
+            "resident plus free device memory");
+    }
+
     const allocation_tracker& tracker_;
     std::string owner_;
+    std::size_t base_ = 0;
+    bool queried_ = false;
     std::size_t free_ = 0, total_ = 0, margin_ = 0, available_ = 0, planned_ = 0;
 };
 
@@ -1104,10 +1123,12 @@ __global__ void make_excess_updates(
 }
 
 __global__ void apply_excess_updates(const work_record* updates,
-                                     std::size_t count,
+                                     std::size_t bound,
+                                     const int* device_count,
                                      double* excess) {
     const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < count) excess[updates[i].a] += updates[i].value;
+    if (i < bound && i < static_cast<std::size_t>(*device_count))
+        excess[updates[i].a] += updates[i].value;
 }
 
 __global__ void deactivate_pivots(const device_pivot* pivots,
@@ -1427,6 +1448,20 @@ public:
         return result;
     }
 
+    // Same selection; the count stays in device memory at device_count.
+    template<class Input, class T>
+    void select_to(Input input, const std::uint8_t* flags, T* output,
+                   std::size_t count, int* device_count, const char* what) {
+        if (!count) {
+            cuda_check(cudaMemsetAsync(device_count, 0, sizeof(int)), what);
+            return;
+        }
+        execute(count, what, [&](void* buffer, std::size_t& bytes, int n) {
+            return cub::DeviceSelect::Flagged(
+                buffer, bytes, input, flags, output, device_count, n);
+        });
+    }
+
     template<class T>
     void sort_pairs(const std::uint64_t* keys_in, std::uint64_t* keys_out,
                     const T* values_in, T* values_out,
@@ -1616,12 +1651,36 @@ struct round_common_scratch {
     device_buffer<std::uint32_t> oversized_starts;
     device_buffer<gpu_round_shadow_normal_batch_counts> batch_counts;
     device_buffer<normal_batch_descriptor> batch_descriptors;
+    // Device counts written by CUB selections whose host read is deferred:
+    // [0] raw fill f, [1] survivors s, [2] reduced excess q. One read at
+    // the survivor boundary returns all three.
+    device_buffer<int> deferred_counts;
+    // Phase-local arrays. Each is released at its old point when larger than
+    // retain_bytes; smaller ones keep their capacity for the next round, so
+    // tail rounds make no cudaMalloc/cudaFree (cudaFree synchronizes).
+    device_buffer<work_record> gathered;
+    device_buffer<work_record> gathered_sorted;
+    device_buffer<work_record> dedup_candidates;
+    device_buffer<work_record> oversized_unique;
+    device_buffer<std::byte> canonical;
+    device_buffer<work_record> fills;
+    device_buffer<gpu_round_shadow_incidence> mutated;
+
+    static constexpr std::size_t retain_bytes = std::size_t{16} << 20;
 
     explicit round_common_scratch(allocation_tracker& tracker)
         : cub_temp(tracker), selected_count(tracker), pivots(tracker),
           pivot_counts(tracker), pivot_offsets(tracker), total_degree(tracker),
           semantics(tracker), flags(tracker), oversized_starts(tracker),
-          batch_counts(tracker), batch_descriptors(tracker) {}
+          batch_counts(tracker), batch_descriptors(tracker),
+          deferred_counts(tracker), gathered(tracker), gathered_sorted(tracker),
+          dedup_candidates(tracker), oversized_unique(tracker), canonical(tracker),
+          fills(tracker), mutated(tracker) {}
+
+    template<class T>
+    static void retire(device_buffer<T>& buffer, const char* what) {
+        if (buffer.bytes() > retain_bytes) buffer.reset(what);
+    }
 
     // Scratch needs no preserved prefix. Release before growth so old and new
     // capacities never overlap; unchanged/smaller requests allocate nothing.
@@ -1645,7 +1704,39 @@ struct round_common_scratch {
         oversized_starts.reset("retire oversized unique starts");
         batch_counts.reset("retire normal-batch counters");
         batch_descriptors.reset("retire normal-batch descriptors");
+        deferred_counts.reset("retire deferred counts");
+        gathered.reset("retire gathered records");
+        gathered_sorted.reset("retire sorted gathered records");
+        dedup_candidates.reset("retire dedup candidates");
+        oversized_unique.reset("retire oversized canonical neighbors");
+        canonical.reset("retire canonical neighbors and sampling scratch");
+        fills.reset("retire raw multigraph fill");
+        mutated.reset("retire materialized shadow residual");
     }
+};
+
+// Page-locked host words for reads that must leave the device together.
+// Async copies into pageable memory would each block; into this block they
+// are queued and completed by one stream synchronization.
+struct pinned_round_readback {
+    device_semantics semantics;
+    std::uint32_t cycle_status[2];
+};
+
+class pinned_host_block {
+public:
+    pinned_host_block() = default;
+    ~pinned_host_block() { if (data_) cudaFreeHost(data_); }
+    pinned_host_block(const pinned_host_block&) = delete;
+    pinned_host_block& operator=(const pinned_host_block&) = delete;
+    pinned_round_readback* get() {
+        if (!data_)
+            cuda_check(cudaMallocHost(reinterpret_cast<void**>(&data_), sizeof(*data_)),
+                       "allocate pinned round readback");
+        return data_;
+    }
+private:
+    pinned_round_readback* data_ = nullptr;
 };
 
 struct gpu_round_shadow_device_state::impl {
@@ -1654,6 +1745,7 @@ struct gpu_round_shadow_device_state::impl {
     clique_sampler sampler = clique_sampler::gks;
     allocation_tracker tracker;
     round_common_scratch owned_common_scratch;
+    pinned_host_block readback;
     device_buffer<double> cycle_workspace;
     device_buffer<std::uint32_t> cycle_plan_cut;
     device_buffer<unsigned long long> cycle_plan_state;
@@ -1913,7 +2005,8 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         growth(common.pivot_counts, p), growth(common.pivot_offsets, p + 1),
         growth(common.total_degree, p), growth(common.semantics, 1),
         growth(common.flags, input_count), growth(common.oversized_starts, p),
-        growth(common.batch_counts, 1), growth(common.batch_descriptors, p)}),
+        growth(common.batch_counts, 1), growth(common.batch_descriptors, p),
+        growth(common.deferred_counts, 3)}),
         "forced round");
 
     tracker.begin_round();
@@ -1975,6 +2068,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     common.prepare(pivot_offsets, p + 1, "allocate pivot offsets");
     common.prepare(total_degree, p, "allocate total degrees");
     common.prepare(semantics, 1, "allocate semantic report");
+    common.prepare(common.deferred_counts, 3, "allocate deferred counts");
 
     if (tracker.peak > preflight.planned())
         throw std::logic_error(
@@ -2069,14 +2163,16 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     std::size_t s = 0;
     std::size_t l = 0;
 
-    device_buffer<work_record> first(tracker);
-    device_buffer<work_record> second(tracker);
-    device_buffer<work_record> oversized_unique(tracker);
+    auto& first = common.gathered_sorted;
+    auto& second = common.gathered;
+    auto& oversized_unique = common.oversized_unique;
     auto& flags = common.flags;
     auto& oversized_starts = common.oversized_starts;
     auto& batch_counts = common.batch_counts;
     auto& batch_descriptors = common.batch_descriptors;
     std::size_t sort_g = 0, oversized_u = 0, normal_batch_count = 0;
+    bool cycle_status_pending = false;
+    auto& deferred_counts = common.deferred_counts;
     // The common canonical stream remains compact; only the oversized stream
     // visits the three global neighbor/weight sorts in the owned path.
     common.prepare(flags, input_count, "allocate owned round flags");
@@ -2115,8 +2211,8 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         // The existing D2H completes all descriptor writes. Every batch
         // consumes at least one normal pivot, so B<=p (already CUB-bounded).
         normal_batch_count = static_cast<std::size_t>(report.normal_batch.batches);
-        preflight.require(bytes_of(sort_g, sizeof(work_record)), "oversized gather");
-        second.allocate(sort_g, "allocate oversized gathered records");
+        preflight.require(growth(second, sort_g), "oversized gather");
+        common.prepare(second, sort_g, "allocate oversized gathered records");
         if (sort_g) {
             gather_oversized_raw<<<oversized_blocks, kBlock>>>(
                 pivots.get(), p, device_input.get(), active.get(),
@@ -2130,15 +2226,16 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     auto& keys_b = sort_keys_b;
     // Keep the original g capacity bound: excess reduction still needs keys for
     // the full canonical stream, even if no oversized row exists this round.
+    auto& candidates = common.dedup_candidates;
     preflight.require(sum({growth(keys_a, g), growth(keys_b, g),
-                     bytes_of(sort_g, 3 * sizeof(work_record))}),
+                     growth(first, sort_g), growth(candidates, sort_g),
+                     growth(oversized_unique, sort_g)}),
                 "neighbor deduplication");
     ensure_state_buffer(keys_a, g, "allocate radix keys A", "grow radix keys A");
     ensure_state_buffer(keys_b, g, "allocate radix keys B", "grow radix keys B");
-    first.allocate(sort_g, "allocate sorted gathered records");
-    device_buffer<work_record> candidates(tracker);
-    candidates.allocate(sort_g, "allocate dedup candidates");
-    oversized_unique.allocate(sort_g, "allocate oversized unique neighbors");
+    common.prepare(first, sort_g, "allocate sorted gathered records");
+    common.prepare(candidates, sort_g, "allocate dedup candidates");
+    common.prepare(oversized_unique, sort_g, "allocate oversized unique neighbors");
 
     report.timings.dedup_ms = timer.measure_ms([&] {
         if (sort_g) {
@@ -2166,9 +2263,9 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         set_last_offset<<<1, 1>>>(pivot_offsets.get(), p, static_cast<std::uint32_t>(u));
         cuda_check(cudaGetLastError(), "publish final pivot offset");
     });
-    second.reset("release gathered records");
-    first.reset("release sorted gathered records");
-    candidates.reset("release dedup candidates");
+    common.retire(second, "release gathered records");
+    common.retire(first, "release sorted gathered records");
+    common.retire(candidates, "release dedup candidates");
     const std::size_t factor_column_base = factor_column_count;
     const std::size_t factor_entry_base = factor_entry_count;
     const std::size_t factor_entry_required = gpu_round_shadow_checked_add(
@@ -2202,8 +2299,8 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     const std::size_t canonical_bytes = sum({unique_bytes, record_bytes, record_bytes,
                                             bytes_of(u, sizeof(double))});
     {
-        std::size_t sample_bytes = sum({canonical_bytes,
-            bytes_of(std::max<std::size_t>(u, 1), sizeof(work_record))});
+        std::size_t sample_bytes = sum({growth(common.canonical, canonical_bytes),
+            growth(common.fills, std::max<std::size_t>(u, 1))});
         if (sampler_components)
             sample_bytes = sum({sample_bytes,
                 growth(cycle_workspace, gpu_round_shadow_checked_mul(
@@ -2212,8 +2309,8 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                 growth(cycle_status, 2)});
         preflight.require(sample_bytes, "fill sampling");
     }
-    device_buffer<std::byte> canonical(tracker);
-    canonical.allocate(canonical_bytes, "allocate canonical neighbors and sampling scratch");
+    auto& canonical = common.canonical;
+    common.prepare(canonical, canonical_bytes, "allocate canonical neighbors and sampling scratch");
     auto* const unique = reinterpret_cast<work_record*>(canonical.get());
     auto* const scratch = reinterpret_cast<work_record*>(canonical.get() + unique_bytes);
     auto* const fill_candidates = reinterpret_cast<work_record*>(
@@ -2241,7 +2338,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
 
     // unique <= gathered, so the existing key capacity already covers this
     // stage and its excess-update sorts without another allocation.
-    device_buffer<work_record> fills(tracker);
+    auto& fills = common.fills;
     if (sampler_components) {
         ensure_state_buffer(cycle_workspace, gpu_round_shadow_checked_mul(u, sampler_components,
             "cycle sampler workspace"), "allocate cycle sampler moments", "grow cycle sampler moments");
@@ -2251,7 +2348,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         cuda_check(cudaMemset(cycle_status.get(), 0, 2 * sizeof(std::uint32_t)),
                    "clear cycle sampler status");
     }
-    fills.allocate(std::max<std::size_t>(u, 1), "allocate compact raw fill");
+    common.prepare(fills, std::max<std::size_t>(u, 1), "allocate compact raw fill");
 
     report.timings.sample_ms = timer.measure_ms([&] {
         if (u) {
@@ -2323,17 +2420,8 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                         fill_candidates, flags.get(), cycle_status.get());
                     cuda_check(cudaGetLastError(), "sample large trace rows cooperatively");
                 }
-                std::uint32_t status[2]{};
-                copy_to_host(status, cycle_status.get(), 2, "read cycle sampler status");
-                if (status[0])
-                    throw std::domain_error("GPU cycle sampler: invalid plan or edge outside normal pool range");
-                report.sampler_numerical_fallbacks = status[1];
-                if (verbose) std::fprintf(stderr,
-                    "[gpu-clique-sampler] sampler=trace_cycle pivots=%zu normal_pivots=%llu "
-                    "oversized_pivots=%llu numerical_gks_fallbacks=%u device_sampling=1\n",
-                    p,
-                    static_cast<unsigned long long>(report.normal_batch.normal_pivots),
-                    static_cast<unsigned long long>(report.normal_batch.oversized_pivots), status[1]);
+                // Read with the semantic report at the end of the round.
+                cycle_status_pending = true;
             } else {
                 if (normal_batch_count) {
                     const int emit_blocks = static_cast<int>(
@@ -2358,13 +2446,10 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                 }
             }
         }
-        oversized_unique.reset("release oversized canonical neighbors");
-        const int raw_fill = cub.select(
-            fill_candidates, flags.get(), fills.get(), u,
-            "compact raw GKS fill");
-        if (raw_fill < 0) throw std::runtime_error("GPU round returned a negative sampling count");
-        f = static_cast<std::size_t>(raw_fill);
-        report.raw_fill_edges = f;
+        common.retire(oversized_unique, "release oversized canonical neighbors");
+        // f is first needed at mutation; its count is read with s.
+        cub.select_to(fill_candidates, flags.get(), fills.get(), u,
+                      deferred_counts.get() + 0, "compact raw GKS fill");
 
         // Excess propagation is another deterministic keyed reduction.  It
         // uses canonical pivot/weight/neighbor order and never uses fp64
@@ -2395,29 +2480,25 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         }
         // The sorted input now lives in unique, and its reduction in scratch.
         // The same dead candidate storage fits q<=e<=u without in/out aliasing.
-        const int reduced_count = cub.select(
-            scratch, flags.get(), fill_candidates, e,
-            "compact reduced excess updates");
-        if (reduced_count < 0) throw std::runtime_error("GPU round returned a negative excess reduction count");
-        q = static_cast<std::size_t>(reduced_count);
-        report.excess_targets = q;
-        if (q) {
-            apply_excess_updates<<<blocks_for(q), kBlock>>>(
-                fill_candidates, q, excess.get());
+        // q <= e: launch at e and bound by the device count; q is read with s.
+        cub.select_to(scratch, flags.get(), fill_candidates, e,
+                      deferred_counts.get() + 2, "compact reduced excess updates");
+        if (e) {
+            apply_excess_updates<<<blocks_for(e), kBlock>>>(
+                fill_candidates, e, deferred_counts.get() + 2, excess.get());
             cuda_check(cudaGetLastError(), "launch reduced excess apply");
         }
     });
-    canonical.reset("release canonical neighbors and sampling scratch");
+    common.retire(canonical, "release canonical neighbors and sampling scratch");
 
-    device_buffer<gpu_round_shadow_incidence> residual(tracker);
+    auto& residual = common.mutated;
     auto& degrees = owned_degrees;
     // Survivors and directed fill share the input bound: s + 2f <= input is
     // checked below before any fill is appended.
-    preflight.require(sum({bytes_of(std::max<std::size_t>(input_count, 1),
-                              sizeof(gpu_round_shadow_incidence)),
+    preflight.require(sum({growth(residual, std::max<std::size_t>(input_count, 1)),
                      growth(degrees, n)}), "residual mutation");
-    residual.allocate(std::max<std::size_t>(input_count, 1),
-                      "allocate materialized shadow residual");
+    common.prepare(residual, std::max<std::size_t>(input_count, 1),
+                   "allocate materialized shadow residual");
     ensure_state_buffer(degrees, n, "allocate owned live degrees",
                         "grow owned live degrees");
 
@@ -2432,11 +2513,19 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                 device_input.get(), input_count, active.get(), flags.get());
             cuda_check(cudaGetLastError(), "launch residual survivor marking");
         }
-        const int survivors = cub.select(
-            device_input.get(), flags.get(), residual.get(), input_count,
-            "compact surviving residual incidences");
-        if (survivors < 0) throw std::runtime_error("GPU round returned a negative pivot removal count");
-        s = static_cast<std::size_t>(survivors);
+        cub.select_to(device_input.get(), flags.get(), residual.get(), input_count,
+                      deferred_counts.get() + 1, "compact surviving residual incidences");
+        int counts[3]{};
+        copy_to_host(counts, deferred_counts.get(), 3,
+                     "download raw fill, survivor and excess-target counts");
+        if (counts[0] < 0) throw std::runtime_error("GPU round returned a negative sampling count");
+        if (counts[2] < 0) throw std::runtime_error("GPU round returned a negative excess reduction count");
+        if (counts[1] < 0) throw std::runtime_error("GPU round returned a negative pivot removal count");
+        f = static_cast<std::size_t>(counts[0]);
+        report.raw_fill_edges = f;
+        q = static_cast<std::size_t>(counts[2]);
+        report.excess_targets = q;
+        s = static_cast<std::size_t>(counts[1]);
         report.surviving_input_incidences = s;
         const std::size_t directed_fill = gpu_round_shadow_checked_mul(
             f, 2, "directed fill scratch");
@@ -2451,7 +2540,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
             cuda_check(cudaGetLastError(), "launch raw multigraph-fill application");
         }
     });
-    fills.reset("release raw multigraph fill");
+    common.retire(fills, "release raw multigraph fill");
 
     l = gpu_round_shadow_checked_add(
         s, gpu_round_shadow_checked_mul(f, 2, "actual directed fill"),
@@ -2520,9 +2609,30 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
 
     device_semantics host_semantics{};
     report.timings.download_ms = timer.measure_ms([&] {
-        copy_to_host(&host_semantics, semantics.get(), 1,
-                     "download semantic report");
+        auto* staged = readback.get();
+        cuda_check(cudaMemcpyAsync(&staged->semantics, semantics.get(),
+                                   sizeof(device_semantics), cudaMemcpyDeviceToHost),
+                   "queue semantic report download");
+        if (cycle_status_pending)
+            cuda_check(cudaMemcpyAsync(staged->cycle_status, cycle_status.get(),
+                                       sizeof(staged->cycle_status), cudaMemcpyDeviceToHost),
+                       "queue cycle sampler status download");
+        cuda_check(cudaStreamSynchronize(nullptr), "download semantic report");
+        host_semantics = staged->semantics;
     });
+    common.retire(residual, "release materialized shadow residual");
+    if (cycle_status_pending) {
+        const auto* status = readback.get()->cycle_status;
+        if (status[0])
+            throw std::domain_error("GPU cycle sampler: invalid plan or edge outside normal pool range");
+        report.sampler_numerical_fallbacks = status[1];
+        if (verbose) std::fprintf(stderr,
+            "[gpu-clique-sampler] sampler=trace_cycle pivots=%zu normal_pivots=%llu "
+            "oversized_pivots=%llu numerical_gks_fallbacks=%u device_sampling=1\n",
+            p,
+            static_cast<unsigned long long>(report.normal_batch.normal_pivots),
+            static_cast<unsigned long long>(report.normal_batch.oversized_pivots), status[1]);
+    }
 
     if (total_diagnostics) {
         cuda_check(cudaEventRecord(total_end.get()), "record total end event");
@@ -3082,7 +3192,7 @@ __global__ void emit(const node_index* ids, std::uint32_t K, const double* M, co
 } // namespace dense_tail
 
 bool gpu_round_shadow_device_state::finish_owned_dense_tail(
-        std::span<const node_index> active_ids) {
+        std::span<const node_index> active_ids, gpu_block_frontend& frontend) {
     impl::failed_generation_guard guard{*impl_};
     auto& I = *impl_;
     I.require_current_device("owned dense tail");
@@ -3097,10 +3207,14 @@ bool gpu_round_shadow_device_state::finish_owned_dense_tail(
     if (K > 8192 || !std::is_sorted(active_ids.begin(), active_ids.end()) ||
         (K && active_ids.back() >= n))
         throw std::invalid_argument("GPU dense tail active IDs are invalid");
+    // No prepare follows the last binding: check its deferred compaction.
+    frontend.verify_bound_residual();
     if (!K) { guard.commit(); return true; }
     const auto k32 = std::uint32_t(K);
     // Optional: decline, unchanged, unless the block, its scratch and the
     // largest possible factor-log growth fit with a 10% device margin.
+    // Retained round scratch is still allocated here, so free memory
+    // already excludes it; it is released after the block.
     {
         const std::size_t block = K * K * sizeof(double) + n * sizeof(std::uint32_t) +
             K * (sizeof(node_index) + 3 * sizeof(std::uint32_t) + 3 * sizeof(double));
