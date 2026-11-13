@@ -1,5 +1,6 @@
 #include "cuda_buffer.cuh"
 #include "cuda_digest.cuh"
+#include "cuda_small_scan.cuh"
 #include "apxchol/solver/gpu_block_frontend.h"
 #include "apxchol/solver/detail/gpu_diagnostics.h"
 #include "apxchol/solver/detail/cuda_device_scope.h"
@@ -85,11 +86,17 @@ __global__ void initialize_vertex_ids(std::size_t count, node_index *ids) {
 
 // count_on_device, when given, bounds the ids below bound; zero-valued
 // lanes past the count leave the xor/sum digest and the degree sum unchanged.
+// With restore_ids, it also sets restore_status[restore_ids[i]] = 2 for
+// i < bound (the candidates leave the selection; the selection compaction,
+// the last status reader, ran before).
 __global__ void sum_vertex_degrees(const node_index *ids, std::size_t bound,
                                    const int *count_on_device,
                                    selector_owned_view view,
-                                   device_selected_status *status) {
+                                   device_selected_status *status,
+                                   const node_index* restore_ids = nullptr,
+                                   int* restore_status = nullptr) {
     const std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
+    if (restore_ids && i < bound) restore_status[restore_ids[i]] = 2;
     const std::size_t count = count_on_device
         ? static_cast<std::size_t>(*count_on_device) : bound;
     unsigned long long item_hash = 0;
@@ -117,13 +124,6 @@ __global__ void sum_vertex_degrees(const node_index *ids, std::size_t bound,
         if (lane == 0)
             atomicAdd(&status->degree_sum, degree_sum);
     }
-}
-
-__global__ void set_status(const node_index *ids, std::size_t count,
-                           int *status, int value) {
-    const std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
-    if (i < count)
-        status[ids[i]] = value;
 }
 
 __global__ void initialize_status(std::size_t count, int *status) {
@@ -159,13 +159,10 @@ __device__ bool bounded_priority_precedes(node_index a, node_index b,
     return ha != hb ? ha < hb : a < b;
 }
 
-__global__ void bounded_decide(const node_index* candidates, std::size_t count,
+__device__ void bounded_decide_one(const node_index* candidates, std::size_t index,
         selector_owned_view view, const int* status, unsigned char* winners,
         std::uint64_t seed, std::uint64_t phase) {
-    const std::size_t index =
-        (blockIdx.x * std::size_t(blockDim.x) + threadIdx.x) / 32;
     const unsigned lane = threadIdx.x & 31U;
-    if (index >= count) return; // whole warp, including the final partial block
     const node_index v = candidates[index];
     // Decided candidates sit out the pass; the warp reads one status word.
     if (status[v] != 0) {
@@ -179,12 +176,10 @@ __global__ void bounded_decide(const node_index* candidates, std::size_t count,
     if (lane == 0) winners[index] = wins;
 }
 
-__global__ void bounded_commit(const node_index* candidates, std::size_t count,
+__device__ void bounded_commit_one(const node_index* candidates, std::size_t index,
         selector_owned_view view, const unsigned char* winners, int* status) {
-    const std::size_t index =
-        (blockIdx.x * std::size_t(blockDim.x) + threadIdx.x) / 32;
     const unsigned lane = threadIdx.x & 31U;
-    if (index >= count || !winners[index]) return; // warp-uniform
+    if (!winners[index]) return; // warp-uniform
     const node_index v = candidates[index];
     if (lane == 0) atomicCAS(status + v, 0, 1);
     // Winners are independent in the preceding immutable snapshot. Multiple
@@ -192,6 +187,66 @@ __global__ void bounded_commit(const node_index* candidates, std::size_t count,
     for (std::size_t at = std::size_t(view.begin(v)) + lane;
          at < std::size_t(view.end(v)); at += 32)
         atomicCAS(status + view.neighbor(static_cast<edge_index>(at)), 0, 2);
+}
+
+__global__ void bounded_decide(const node_index* candidates, std::size_t count,
+        selector_owned_view view, const int* status, unsigned char* winners,
+        std::uint64_t seed, std::uint64_t phase) {
+    const std::size_t index =
+        (blockIdx.x * std::size_t(blockDim.x) + threadIdx.x) / 32;
+    if (index >= count) return; // whole warp, including the final partial block
+    bounded_decide_one(candidates, index, view, status, winners, seed, phase);
+}
+
+__global__ void bounded_commit(const node_index* candidates, std::size_t count,
+        selector_owned_view view, const unsigned char* winners, int* status) {
+    const std::size_t index =
+        (blockIdx.x * std::size_t(blockDim.x) + threadIdx.x) / 32;
+    if (index >= count) return; // warp-uniform
+    bounded_commit_one(candidates, index, view, winners, status);
+}
+
+// Selection start: candidates become undecided (status 0); the selected ids
+// (copied up to the candidate bound, so cleared for initcheck) and the
+// degree/digest status are cleared.
+__global__ void begin_bounded_selection(const node_index* candidates, std::size_t count,
+        int* status, node_index* selected_ids, device_selected_status* selected_status) {
+    const std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
+    if (i == 0) *selected_status = {};
+    if (i < count) {
+        status[candidates[i]] = 0;
+        selected_ids[i] = 0;
+    }
+}
+
+constexpr unsigned kBoundedBlock = 1024;
+// Candidate lists up to this size run all passes in one block.
+constexpr std::size_t kBoundedOneBlockLimit = 1024;
+
+// begin_bounded_selection and the four decide/commit passes in one block.
+// __syncthreads separates the phases as the kernel boundaries do: every
+// decide reads the status left by the previous commit, and no commit starts
+// before every decide of its pass has finished.
+__global__ void __launch_bounds__(kBoundedBlock)
+bounded_selection_one_block(const node_index* candidates, std::size_t count,
+        selector_owned_view view, int* status, unsigned char* winners,
+        node_index* selected_ids, device_selected_status* selected_status,
+        std::uint64_t seed, std::uint64_t phase, unsigned passes) {
+    if (threadIdx.x == 0) *selected_status = {};
+    for (std::size_t i = threadIdx.x; i < count; i += blockDim.x) {
+        status[candidates[i]] = 0;
+        selected_ids[i] = 0;
+    }
+    __syncthreads();
+    const std::size_t warp = threadIdx.x / 32, warps = blockDim.x / 32;
+    for (unsigned step = 0; step < passes; ++step) {
+        for (std::size_t index = warp; index < count; index += warps)
+            bounded_decide_one(candidates, index, view, status, winners, seed, phase);
+        __syncthreads();
+        for (std::size_t index = warp; index < count; index += warps)
+            bounded_commit_one(candidates, index, view, winners, status);
+        __syncthreads();
+    }
 }
 
 struct status_equals {
@@ -432,9 +487,24 @@ struct gpu_block_frontend::impl {
         cuda_check(operation(cub_temp.get(), bytes), what);
     }
 
+    // Short inputs take one launch (cuda_small_scan.cuh), same output.
+    template<class Input, class T, class Predicate>
+    void ordered_select(Input input, T* output, std::size_t count, Predicate predicate,
+                        int slot) {
+        if (count && count <= kSmallScanLimit) {
+            small_stable_select<<<1, kSmallScanBlock>>>(
+                input, output, static_cast<int>(count), selected_count.get() + slot,
+                predicate_holds<Input, Predicate>{input, predicate});
+            cuda_check(cudaGetLastError(), "ordered selection");
+            return;
+        }
+        execute_cub(select_operation(input, output, count, predicate, slot),
+                    "CUB ordered selection");
+    }
+
     template<class Input, class T, class Predicate>
     int select_if(Input input, T* output, std::size_t count, Predicate predicate) {
-        execute_cub(select_operation(input, output, count, predicate), "CUB ordered selection");
+        ordered_select(input, output, count, predicate, 0);
         int host_count = 0;
         cuda_check(cudaMemcpy(&host_count, selected_count.get(),
                               sizeof(host_count), cudaMemcpyDeviceToHost),
@@ -444,7 +514,7 @@ struct gpu_block_frontend::impl {
 
     template<class Input, class T, class Predicate>
     void select_to_slot(Input input, T* output, std::size_t count, Predicate predicate, int slot) {
-        execute_cub(select_operation(input, output, count, predicate, slot), "CUB ordered selection");
+        ordered_select(input, output, count, predicate, slot);
     }
 
     // The compacted count is the expected one; its device value is checked
@@ -574,9 +644,6 @@ struct gpu_block_frontend::impl {
     void launch_bounded_selection() {
         // Alternate scratch buffers without touching the original candidates.
         update_ids.reserve(candidate_count);
-        set_status<<<blocks_for(candidate_count), kBlock>>>(
-            candidates_original.get(), candidate_count, status.get(), 0);
-        cuda_check(cudaGetLastError(), "initialize bounded candidates");
         // Every pass visits the whole candidate list; vertices decided in an
         // earlier pass skip out (bounded_decide), so each pass decides exactly
         // the still-undecided set a compaction would have kept, without
@@ -590,6 +657,20 @@ struct gpu_block_frontend::impl {
         if (count > (std::numeric_limits<std::size_t>::max() - (kBlock - 1)) / 32)
             throw std::overflow_error("bounded selector launch size overflow");
         const int blocks = blocks_for(count * std::size_t{32});
+        // Without diagnostics all four passes run; a short list runs them
+        // in one block (same decisions, see bounded_selection_one_block).
+        if (!verbose && count <= kBoundedOneBlockLimit) {
+            bounded_passes = 4;
+            bounded_candidate_visits = 4 * count;
+            bounded_selection_one_block<<<1, kBoundedBlock>>>(current, count, owned_view,
+                status.get(), pick.get(), selected_ids.get(), selected_status.get(),
+                bounded_seed, bounded_phase, 4);
+            cuda_check(cudaGetLastError(), "select bounded independent set in one block");
+            return;
+        }
+        begin_bounded_selection<<<blocks_for(count), kBlock>>>(current, count, status.get(),
+            selected_ids.get(), selected_status.get());
+        cuda_check(cudaGetLastError(), "initialize bounded candidates");
         std::size_t undecided = count;
         for (unsigned step = 0; step < 4 && undecided; ++step) {
             ++bounded_passes;
@@ -618,19 +699,17 @@ struct gpu_block_frontend::impl {
             return result;
         }
 
+        // Also clears the selected ids and the selected-degree/content status.
         launch_bounded_selection();
         // Chosen count, degree sum, digest and ids leave the device in one
-        // synchronization; ids are copied up to the candidate count bound.
-        // Clearing that range first keeps the copied tail defined (initcheck).
-        cuda_check(cudaMemsetAsync(selected_ids.get(), 0, candidate_count * sizeof(node_index)),
-                   "clear selected ids");
+        // synchronization; ids are copied up to the candidate count bound
+        // (cleared above, so the copied tail is defined for initcheck).
         select_to_slot(candidates_original.get(), selected_ids.get(),
                        candidate_count, status_equals{status.get(), 1}, 0);
-        cuda_check(cudaMemsetAsync(selected_status.get(), 0, sizeof(device_selected_status)),
-                   "clear selected-degree/content status");
+        // Also restores the candidates' status to 2 after the compaction.
         sum_vertex_degrees<<<blocks_for(candidate_count), kBlock>>>(
             selected_ids.get(), candidate_count, selected_count.get(), owned_view,
-            selected_status.get());
+            selected_status.get(), candidates_original.get(), status.get());
         cuda_check(cudaGetLastError(), "sum selected degrees");
         auto* staged = pinned.get();
         auto* staged_ids = pinned_ids.get();
@@ -642,9 +721,6 @@ struct gpu_block_frontend::impl {
         cuda_check(cudaMemcpyAsync(staged_ids, selected_ids.get(),
                                    candidate_count * sizeof(node_index), cudaMemcpyDeviceToHost),
                    "queue block-greedy selection download");
-        set_status<<<blocks_for(candidate_count), kBlock>>>(
-            candidates_original.get(), candidate_count, status.get(), 2);
-        cuda_check(cudaGetLastError(), "restore block-greedy candidate status");
         cuda_check(cudaStreamSynchronize(nullptr), "finish block-greedy selection");
         if (staged->chosen < 0 || std::size_t(staged->chosen) > candidate_count)
             throw std::logic_error("bounded selector returned an invalid selection count");
