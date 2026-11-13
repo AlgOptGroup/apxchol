@@ -3,7 +3,7 @@
 ## Unreleased (since v0.2.2)
 
 ### Solver and factorization
-- New experimental trace-cycle clique sampler (`factor_options::experimental.sampler`) on CPU, CUDA and Metal. GKS stays the default. Metal setup builds trace-cycle factors on the device without the exact-core rule. On an M1 Max, setup plus batched solve is faster than with GKS from 8 right-hand sides on 10 of 12 test matrices, against 32 when the factor was built on the CPU.
+- New experimental trace-cycle clique sampler (`factor_options::experimental.sampler`) on CPU, CUDA and Metal. GKS stays the default. Metal setup builds trace-cycle factors on the device without the exact-core rule. On an M1 Max, Metal builds trace-cycle factors 1.1 to 1.7 times slower than GKS factors, but setup plus batched solve is faster than with a Metal-built GKS factor from 8 right-hand sides on 10 of 12 test matrices. A trace-cycle factor built on the CPU reaches that only from 32 right-hand sides.
 - Faster setup: one AoS graph throughout factorization, incremental degrees, and parallel residual sparsification.
 - Inputs are validated by operator class; nearly-SDDM inputs are repaired by M-matrix lumping.
 - Batched solves take any number of right-hand sides on CPU, CUDA and Metal, processed in panels of up to eight columns on CPU, 32 on CUDA and four on Metal.

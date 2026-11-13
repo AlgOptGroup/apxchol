@@ -20,11 +20,14 @@ using pair_map = std::map<std::pair<unsigned, unsigned>, double>;
 struct Sink {
     pair_map* trial;
     unsigned* fills;
+    std::map<unsigned, double>* updates;
     void factor(unsigned, unsigned, float) const {}
     void fill(unsigned, unsigned a, unsigned b, float value) const {
         (*trial)[{a, b}] += value; ++*fills;
     }
-    void excess(unsigned, unsigned, wide) const {}
+    void excess(unsigned, unsigned node, wide value) const {
+        (*updates)[node] += double(value.hi) + double(value.lo);
+    }
 };
 
 // Mean fill weight per pair over `trials` seeds (second moments in `squares`).
@@ -59,11 +62,21 @@ pair_map run(pair_map& squares, const std::vector<float>& w, float excess,
         if (res.cut < res.entries) ++trace_rows;
         unsigned fills = 0;
         pair_map trial;
-        const Sink sink{&trial, &fills};
+        std::map<unsigned, double> updates;
+        const Sink sink{&trial, &fills, &updates};
         for (unsigned i = 0; i < res.entries; ++i)
             EXPECT_EQ(sparse_round::sample_item(math, sink, p, rows.data(), prefix.data(),
                           sparse_round::canonical_star<wide>{res, prepared.degree}, i), 0u);
+        // One fill per neighbour on the trace law, at most d - 1 on GKS.
+        if (res.cut < res.entries) EXPECT_EQ(fills, d);
+        else EXPECT_LE(fills, d ? d - 1 : 0);
         fills_per_star = std::max(fills_per_star, fills);
+        // Excess updates are deterministic: neighbour i gets a_i * excess / D.
+        double D = excess;
+        for (float x : w) D += x;
+        EXPECT_EQ(updates.size(), excess > 0 ? std::size_t(d) : 0u);
+        for (const auto& [node, value] : updates)
+            EXPECT_NEAR(value, double(w[node - 1]) * excess / D, 1e-6 * double(w[node - 1]) * excess / D + 1e-12);
         for (const auto& [k, v] : trial) { sums[k] += v; squares[k] += v * v; }
     }
     for (auto& [k, v] : sums) v /= trials;

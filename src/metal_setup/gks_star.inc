@@ -187,9 +187,13 @@ APXCHOL_GPU_FUNCTION row_result prepare_trace(Math math,Records rows,
     if (!(best>=0.0f) || !math.finite(math.from_float(best))) return result;
     const unsigned h=d-cut;
     for (unsigned k=0;k<h;++k) rows[cut+k].slot=cut+k;
+    // Uniform j in [0, k): reject the lowest 2^64 mod k draws before reducing.
+    seed_type state=seed^seed_type(0xA0761D6478BD642FUL);
     for (unsigned k=h;k>1;--k) {
-        const auto bits=random_bits(seed^(seed_type(0xA0761D6478BD642FUL)*seed_type(k)));
-        const unsigned j=unsigned(bits%seed_type(k));
+        const seed_type bound=seed_type(k),threshold=(seed_type(0)-bound)%bound;
+        seed_type bits;
+        do { state+=seed_type(0x9E3779B97F4A7C15UL); bits=random_bits(state); } while (bits<threshold);
+        const unsigned j=unsigned(bits%bound);
         const unsigned t=rows[cut+k-1].slot; rows[cut+k-1].slot=rows[cut+j].slot; rows[cut+j].slot=t;
     }
     result.cut=cut;
