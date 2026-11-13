@@ -471,20 +471,17 @@ TEST(SolveRoutes, OneCallSamplerFollowsTheColumnCountOnCpu) {
 
 TEST(SolveRoutes, OneCallSamplerUsesTheGpuThresholdOnlyWhereTheGpuIsChosen) {
     apxchol::solve_options options;
-    auto o15 = options, o16 = options, o64 = options;
-    apxchol::detail::choose_sampler(o15, 15);
-    apxchol::detail::choose_sampler(o16, 16);
-    apxchol::detail::choose_sampler(o64, 64);
-    EXPECT_EQ(o15.factor_opts.experimental.sampler, apxchol::clique_sampler::gks);
-    if (apxchol::detail::select_solve_backend(options) == apxchol::solve_backend::cpu) {
-        EXPECT_EQ(o16.factor_opts.experimental.sampler, apxchol::clique_sampler::trace_cycle);
-        EXPECT_EQ(o64.factor_opts.experimental.sampler, apxchol::clique_sampler::trace_cycle);
-    } else {
-        EXPECT_EQ(o16.factor_opts.experimental.sampler, apxchol::clique_sampler::gks);
+    std::int64_t threshold = 16;
+    if (apxchol::detail::select_solve_backend(options) == apxchol::solve_backend::gpu) {
 #if defined(APXCHOL_USE_CUDA)
-        EXPECT_EQ(o64.factor_opts.experimental.sampler, apxchol::clique_sampler::trace_cycle);
+        threshold = 64;
 #else
-        EXPECT_EQ(o64.factor_opts.experimental.sampler, apxchol::clique_sampler::gks);
+        threshold = 8;
 #endif
     }
+    auto below = options, at = options;
+    apxchol::detail::choose_sampler(below, threshold - 1);
+    apxchol::detail::choose_sampler(at, threshold);
+    EXPECT_EQ(below.factor_opts.experimental.sampler, apxchol::clique_sampler::gks) << threshold;
+    EXPECT_EQ(at.factor_opts.experimental.sampler, apxchol::clique_sampler::trace_cycle) << threshold;
 }
