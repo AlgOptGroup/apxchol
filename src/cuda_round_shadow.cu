@@ -1,5 +1,6 @@
 #include "cuda_buffer.cuh"
 #include "cuda_digest.cuh"
+#include "cuda_small_scan.cuh"
 #include "apxchol/csc_work.h"
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 #include "apxchol/solver/sptrsv/cuda.h"
@@ -536,38 +537,52 @@ __global__ void validate_selection_independence(
                  static_cast<std::uint32_t>(selection_adjacent));
 }
 
-__global__ void initialize_pivots_from_device_selection(
+// Thread-sliced zeroing of a small device object (the memset it replaces).
+__device__ void zero_words(void* object, std::size_t bytes, std::size_t thread,
+                           std::size_t threads) {
+    auto* words = static_cast<std::uint32_t*>(object);
+    for (std::size_t w = thread; w < bytes / 4; w += threads) words[w] = 0;
+}
+
+// Round start in one launch: clear the round's status words, then build the
+// pivots from the selection, bind their rows and clear their counts. The
+// validation kernel runs after this one, so its status starts cleared; the
+// pivots do not depend on its result. The status is read with the batch
+// counts, after the counting kernels. Until then an out-of-range id (flagged
+// by validation) is bound to an empty row, so no kernel before that read
+// indexes by it; other faults (duplicate, inactive, adjacent) name in-range
+// vertices.
+__global__ void begin_owned_round(
         const node_index* selected, std::size_t pivot_count,
-        std::uint64_t run_seed, device_pivot* pivots) {
+        std::uint64_t run_seed, const std::uint32_t* owner_offsets,
+        std::size_t vertex_count, device_pivot* pivots,
+        std::uint32_t* pivot_counts, std::uint32_t* validation_status,
+        selection_validation_digest_state* validation_digest,
+        device_semantics* semantics,
+        gpu_round_shadow_normal_batch_counts* batch_counts) {
+    static_assert(sizeof(device_semantics) % 4 == 0 &&
+                  sizeof(gpu_round_shadow_normal_batch_counts) % 4 == 0 &&
+                  sizeof(selection_validation_digest_state) % 4 == 0);
     const std::size_t ordinal = blockIdx.x * blockDim.x + threadIdx.x;
+    if (blockIdx.x == 0) {
+        if (threadIdx.x == 0) *validation_status = 0;
+        zero_words(validation_digest, sizeof(*validation_digest), threadIdx.x, blockDim.x);
+        zero_words(semantics, sizeof(*semantics), threadIdx.x, blockDim.x);
+        zero_words(batch_counts, sizeof(*batch_counts), threadIdx.x, blockDim.x);
+    }
     if (ordinal >= pivot_count) return;
     const node_index vertex = selected[ordinal];
     const std::uint64_t seed = run_seed ^
         ((std::uint64_t(vertex) + 1) * 0x9E3779B97F4A7C15ULL);
-    pivots[ordinal] = {
-        static_cast<std::uint32_t>(vertex), 0, 0, 0, seed};
-}
-
-// The selection's validation status is read with the batch counts, after the
-// counting kernels. Until then an out-of-range id (flagged by validation) is
-// bound to an empty row, so no kernel before that read indexes by it; other
-// faults (duplicate, inactive, adjacent) name in-range vertices.
-__global__ void bind_pivot_ranges(
-        device_pivot* pivots, std::size_t pivot_count,
-        const std::uint32_t* owner_offsets, std::size_t vertex_count) {
-    const std::size_t ordinal = blockIdx.x * blockDim.x + threadIdx.x;
-    if (ordinal >= pivot_count) return;
-    const std::uint32_t vertex = pivots[ordinal].vertex;
-    if (static_cast<std::uint64_t>(vertex) >= vertex_count) {
-        pivots[ordinal].incidence_begin = pivots[ordinal].incidence_end = 0;
-        return;
+    std::uint32_t begin = 0, end = 0;
+    if (static_cast<std::uint64_t>(vertex) < vertex_count) {
+        begin = owner_offsets[vertex];
+        end = owner_offsets[vertex + 1];
     }
-    pivots[ordinal].incidence_begin = owner_offsets[vertex];
-    pivots[ordinal].incidence_end = owner_offsets[vertex + 1];
+    pivots[ordinal] = {static_cast<std::uint32_t>(vertex), begin, end, 0, seed};
+    pivot_counts[ordinal] = 0;
 }
 
-// b < 2^low_bits, so the packed key orders (a, b) like (a << 32) | b; a
-// radix sort over the packed width then makes fewer passes.
 __global__ void build_pair_keys(const work_record* records,
                                 std::size_t count,
                                 std::uint64_t* keys, int low_bits) {
@@ -1265,28 +1280,35 @@ __global__ void merge_survivors_and_fill(
     }
 }
 
-// Each represented owner has exactly one last incidence: no contested writes.
-// Prefix maximum fills gaps for isolated/inactive owners. offset[n] is separate
-// so n == INT_MAX does not require an unsupported n+1-item CUB scan.
-__global__ void residual_owner_ends(
+// Owner offsets and degrees of an owner-sorted residual in one pass:
+// offsets[v] is the number of incidences whose owner is below v (the same
+// values the owner-end marks, prefix maximum and final offset produce), and
+// offsets[n] = count.
+__device__ std::uint32_t residual_owner_lower_bound(
         const gpu_round_shadow_incidence* residual, std::size_t count,
-        std::size_t vertex_count, std::uint32_t* offsets) {
-    const std::size_t i = std::size_t(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (i < count && std::size_t(residual[i].owner) + 1 < vertex_count &&
-        (i + 1 == count || residual[i].owner != residual[i + 1].owner))
-        offsets[std::size_t(residual[i].owner) + 1] = static_cast<std::uint32_t>(i + 1);
+        std::size_t owner) {
+    std::size_t lo = 0, hi = count;
+    while (lo < hi) {
+        const std::size_t mid = lo + (hi - lo) / 2;
+        if (std::size_t(residual[mid].owner) < owner) lo = mid + 1;
+        else hi = mid;
+    }
+    return static_cast<std::uint32_t>(lo);
 }
 
-__global__ void residual_degrees_from_offsets(
-        const std::uint32_t* offsets, std::size_t count, std::uint32_t* degrees) {
-    const std::size_t i = std::size_t(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (i < count) degrees[i] = offsets[i + 1] - offsets[i];
+__global__ void residual_offsets_and_degrees(
+        const gpu_round_shadow_incidence* residual, std::size_t count,
+        std::size_t vertex_count, std::uint32_t* offsets, std::uint32_t* degrees) {
+    const std::size_t v = std::size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (v >= vertex_count) return;
+    const std::uint32_t begin = residual_owner_lower_bound(residual, count, v);
+    const std::uint32_t end = v + 1 < vertex_count
+        ? residual_owner_lower_bound(residual, count, v + 1)
+        : static_cast<std::uint32_t>(count);
+    offsets[v] = begin;
+    degrees[v] = end - begin;
+    if (v + 1 == vertex_count) offsets[vertex_count] = end;
 }
-
-struct owner_offset_max {
-    __host__ __device__ std::uint32_t operator()(
-            std::uint32_t a, std::uint32_t b) const { return a < b ? b : a; }
-};
 
 __global__ void count_residual_degrees(
         const gpu_round_shadow_incidence* residual,
@@ -1449,10 +1471,7 @@ public:
     int select(Input input, const std::uint8_t* flags, T* output,
                std::size_t count, const char* what) {
         if (!count) return 0;
-        execute(count, what, [&](void* buffer, std::size_t& bytes, int n) {
-            return cub::DeviceSelect::Flagged(
-                buffer, bytes, input, flags, output, count_.get(), n);
-        });
+        flagged(input, flags, output, count, count_.get(), what);
         int result = 0;
         copy_to_host(&result, count_.get(), 1, "download selection count");
         return result;
@@ -1466,10 +1485,7 @@ public:
             cuda_check(cudaMemsetAsync(device_count, 0, sizeof(int)), what);
             return;
         }
-        execute(count, what, [&](void* buffer, std::size_t& bytes, int n) {
-            return cub::DeviceSelect::Flagged(
-                buffer, bytes, input, flags, output, device_count, n);
-        });
+        flagged(input, flags, output, count, device_count, what);
     }
 
     template<class T>
@@ -1483,23 +1499,52 @@ public:
         });
     }
 
-    void inclusive_owner_max(std::uint32_t* offsets, std::size_t count) {
-        execute(count, "propagate empty owner offsets",
-                [&](void* buffer, std::size_t& bytes, int n) {
-            return cub::DeviceScan::InclusiveScan(
-                buffer, bytes, offsets, offsets, owner_offset_max{}, n);
+    void exclusive_sum(const std::uint32_t* input, std::uint32_t* output,
+                       std::size_t count) {
+        exclusive_sum(input, output, count, false, 0);
+    }
+
+    // Also sets output[count] = last.
+    void exclusive_sum_with_last(const std::uint32_t* input, std::uint32_t* output,
+                                 std::size_t count, std::uint32_t last) {
+        exclusive_sum(input, output, count, true, last);
+    }
+
+private:
+    template<class Input, class T>
+    void flagged(Input input, const std::uint8_t* flags, T* output,
+                 std::size_t count, int* device_count, const char* what) {
+        if (count <= kSmallScanLimit) {
+            small_stable_select<<<1, kSmallScanBlock>>>(
+                input, output, static_cast<int>(count), device_count, flag_is_set{flags});
+            cuda_check(cudaGetLastError(), what);
+            return;
+        }
+        execute(count, what, [&](void* buffer, std::size_t& bytes, int n) {
+            return cub::DeviceSelect::Flagged(
+                buffer, bytes, input, flags, output, device_count, n);
         });
     }
 
     void exclusive_sum(const std::uint32_t* input, std::uint32_t* output,
-                       std::size_t count) {
+                       std::size_t count, bool write_last, std::uint32_t last) {
+        if (!count && !write_last) return;
+        if (count <= kSmallScanLimit) {
+            small_exclusive_sum<<<1, kSmallScanBlock>>>(
+                input, output, static_cast<int>(count), write_last, last);
+            cuda_check(cudaGetLastError(), "CUB pivot-offset scan");
+            return;
+        }
         execute(count, "CUB pivot-offset scan",
                 [&](void* buffer, std::size_t& bytes, int n) {
             return cub::DeviceScan::ExclusiveSum(buffer, bytes, input, output, n);
         });
+        if (write_last) {
+            set_last_offset<<<1, 1>>>(output, count, last);
+            cuda_check(cudaGetLastError(), "publish final offset");
+        }
     }
 
-private:
     template<class Operation>
     void execute(std::size_t count, const char* what, Operation operation) {
         if (!count) return;
@@ -2081,6 +2126,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     common.prepare(total_degree, p, "allocate total degrees");
     common.prepare(semantics, 1, "allocate semantic report");
     common.prepare(common.deferred_counts, 3, "allocate deferred counts");
+    common.prepare(common.batch_counts, 1, "allocate normal-batch counters");
 
     if (tracker.peak > preflight.planned())
         throw std::logic_error(
@@ -2115,12 +2161,13 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
 
     report.timings.upload_ms = timer.measure_ms([&] {
         const std::uint64_t selection_epoch = report.output_generation;
-        cuda_check(cudaMemset(selection_validation_status.get(), 0,
-                              sizeof(std::uint32_t)),
-                   "clear device-selection validation status");
-        cuda_check(cudaMemset(selection_validation_digest.get(), 0,
-                              sizeof(selection_validation_digest_state)),
-                   "clear device-selection validation digest");
+        // One launch clears the status words and builds the pivots; the
+        // validation below runs after it.
+        begin_owned_round<<<std::max(blocks_for(p), 1), kBlock>>>(
+            selected.data, p, run_seed, input_owner_offsets.get(), n,
+            pivots.get(), pivot_counts.get(), selection_validation_status.get(),
+            selection_validation_digest.get(), semantics.get(), common.batch_counts.get());
+        cuda_check(cudaGetLastError(), "begin owned round");
         if (p) {
             validate_selected_vertices<<<blocks_for(p), kBlock>>>(
                 selected.data, p, n, active.get(), selection_epoch,
@@ -2145,22 +2192,6 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
         // The only selection-validation readback is this fixed 32-bit
         // status word, read with the batch counts below; selected ids and
         // resident graph state stay on CUDA.
-        if (p) {
-            initialize_pivots_from_device_selection<<<blocks_for(p), kBlock>>>(
-                selected.data, p, run_seed, pivots.get());
-            cuda_check(cudaGetLastError(),
-                       "initialize pivots from validated device selection");
-        }
-        if (p) {
-            cuda_check(cudaMemset(pivot_counts.get(), 0,
-                                  p * sizeof(std::uint32_t)),
-                       "clear pivot counts");
-            bind_pivot_ranges<<<blocks_for(p), kBlock>>>(
-                pivots.get(), p, input_owner_offsets.get(), n);
-            cuda_check(cudaGetLastError(), "bind resident pivot ranges");
-        }
-        cuda_check(cudaMemset(semantics.get(), 0, sizeof(device_semantics)),
-                   "clear semantic report");
     });
 
     std::size_t g = 0;
@@ -2185,11 +2216,8 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     // visits the three global neighbor/weight sorts in the owned path.
     common.prepare(flags, input_count, "allocate owned round flags");
     common.prepare(oversized_starts, p, "allocate oversized unique starts");
-    common.prepare(batch_counts, 1, "allocate normal-batch counters");
     common.prepare(batch_descriptors, p, "allocate normal-batch descriptors");
     report.timings.gather_ms = timer.measure_ms([&] {
-        cuda_check(cudaMemset(batch_counts.get(), 0, sizeof(gpu_round_shadow_normal_batch_counts)),
-                   "clear normal-batch counters");
         if (p) {
             count_oversized_raw<<<blocks_for(p), kBlock>>>(
                 pivots.get(), p, device_input.get(), active.get(),
@@ -2284,9 +2312,8 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
             cuda_check(cudaGetLastError(), "index oversized unique rows");
         }
         report.unique_neighbors = report.factor_entries = u;
-        cub.exclusive_sum(pivot_counts.get(), pivot_offsets.get(), p);
-        set_last_offset<<<1, 1>>>(pivot_offsets.get(), p, static_cast<std::uint32_t>(u));
-        cuda_check(cudaGetLastError(), "publish final pivot offset");
+        cub.exclusive_sum_with_last(pivot_counts.get(), pivot_offsets.get(), p,
+                                    static_cast<std::uint32_t>(u));
     });
     common.retire(second, "release gathered records");
     common.retire(first, "release sorted gathered records");
@@ -2595,10 +2622,6 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
     ensure_state_buffer(keys_b, directed_fill, "allocate radix keys B", "grow radix keys B");
 
     report.timings.checksums_ms = timer.measure_ms([&] {
-        if (n)
-            cuda_check(cudaMemset(next_owner_offsets.get(), 0,
-                                  n * sizeof(std::uint32_t)),
-                       "clear owner boundary ends");
         if (directed_fill) {
             build_owner_keys<<<blocks_for(directed_fill), kBlock>>>(
                 residual.get() + s, directed_fill, keys_a.get());
@@ -2614,18 +2637,11 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                 residual.get(), s, device_input.get(), directed_fill,
                 next_residual.get(), semantics.get());
             cuda_check(cudaGetLastError(), "launch stable survivor-fill merge");
-            residual_owner_ends<<<blocks_for(l), kBlock>>>(
-                next_residual.get(), l, n, next_owner_offsets.get());
-            cuda_check(cudaGetLastError(), "launch unique owner boundary ends");
         }
         if (n) {
-            cub.inclusive_owner_max(next_owner_offsets.get(), n);
-            set_last_offset<<<1, 1>>>(
-                next_owner_offsets.get(), n, static_cast<std::uint32_t>(l));
-            cuda_check(cudaGetLastError(), "publish final owner offset");
-            residual_degrees_from_offsets<<<blocks_for(n), kBlock>>>(
-                next_owner_offsets.get(), n, degrees.get());
-            cuda_check(cudaGetLastError(), "derive exact residual degrees");
+            residual_offsets_and_degrees<<<blocks_for(n), kBlock>>>(
+                next_residual.get(), l, n, next_owner_offsets.get(), degrees.get());
+            cuda_check(cudaGetLastError(), "derive owner offsets and exact residual degrees");
         }
 
         if (n) {
