@@ -10,9 +10,8 @@ function res = apxchol_solve(A, b, rtol, maxiter, x0, options)
   % options is the setup struct of APXCHOL_SOLVER. b may contain several RHS
   % columns; optional x0 supplies matching initial guesses.
   %
-  % With 16 or more RHS columns on CPU (64 on CUDA, 8 on Metal) the factor
-  % uses the trace-cycle sampler, which costs more setup but needs fewer
-  % iterations per column.
+  % With 16 or more RHS columns the factor uses the trace-cycle sampler,
+  % which costs more setup but needs fewer iterations per column.
   %
   % For repeated solves against the same A, build the factor once with
   % APXCHOL_SOLVER instead:  s = apxchol_solver(A); res = s.solve(b);
