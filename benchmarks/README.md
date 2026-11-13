@@ -172,8 +172,10 @@ comments, Pages or README measurements.
   apxchol's owner and setup profile use one complete enclosing interval, including
   input validation and temporary storage release. Detailed stage labels are
   exclusive; `unattributed` accounts for work between them, so the setup subtree
-  sums to the owner's construction time used by the benchmark. Component discovery
-  and, for split runs, component slicing are charged separately to benchmark Setup.
+  sums to the owner's construction time used by the benchmark. Benchmark Setup
+  charges component discovery to split runs and to whole runs of an operator with
+  both singular and nonsingular components, whose grounding needs it. Split runs
+  also pay component slicing. Other whole runs pay no discovery time.
   The owner also measures setup when detailed profiling is disabled. Normal benchmark runs omit optional stage
   instrumentation; `--profile` enables it for diagnosis.
 - Common parsing/assembly and independent grading are excluded. Process-wide CUDA

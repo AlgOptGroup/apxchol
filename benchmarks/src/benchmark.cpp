@@ -3459,9 +3459,13 @@ int main(int argc, char** argv) try {
                    g_laplacian_components, g_component_count,
                    g_component_discovery_seconds);
         auto result = single(L, b, graph_name, args.tol, args.maxiter, plan.ground);
-        result.setup_time += g_component_discovery_seconds;
-        result.total_time += g_component_discovery_seconds;
-        result.us_per_nnz = result.total_time / std::max(1, result.nnz) * 1e6;
+        // A whole-operator solve depends on the discovered components only when
+        // grounding must find the singular components of a mixed operator.
+        if (!g_singular_vertices.empty()) {
+            result.setup_time += g_component_discovery_seconds;
+            result.total_time += g_component_discovery_seconds;
+            result.us_per_nnz = result.total_time / std::max(1, result.nnz) * 1e6;
+        }
         return result;
     };
 
