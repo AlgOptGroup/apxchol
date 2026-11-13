@@ -69,7 +69,8 @@ reference keeps all three values the same distance from the FP32 limits.
 
 Each column is multiplied by the power of two that brings its largest
 right-hand-side or initial-guess entry into [reference, 2 reference), whatever
-its size. The iteration runs on the scaled residual, and the solution is
+its size. A zero right-hand side is not scaled, because its solution is
+zero whatever the initial guess. The iteration runs on the scaled residual, and the solution is
 returned in the caller's units. Powers of two change no significand, so
 tolerances, reported residuals, `converged` and iteration counts are those of
 the unscaled system, and a result differs from an unscaled run only where an

@@ -771,6 +771,8 @@ TEST(Solver, CpuFp32PanelSweepsKeepIterationsAndResiduals) {
         }
         for (const auto storage : {apxchol::factor_storage_type::fp32,
                                    apxchol::factor_storage_type::fp16}) {
+            if (storage == apxchol::factor_storage_type::fp16 && !apxchol::detail::omp_sptrsv::fp16_supported())
+                continue;
             SCOPED_TRACE(::testing::Message() << "laplacian=" << laplacian << " storage=" << int(storage));
             auto options = cpu_options();
             options.factor_opts.factor_storage = storage;

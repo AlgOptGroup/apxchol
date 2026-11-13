@@ -750,6 +750,12 @@ public:
             max_abs = std::max(max_abs, std::abs(x_in[i]));
         }
         const double scale = detail::gpu_scaling::fp32_scale(max_abs, reference);
+        // A reference at the edge of FP32 would narrow the input to infinity
+        // or to subnormal values.
+        const double scaled_max = max_abs * scale;
+        if (scaled_max != 0 && !(scaled_max >= std::numeric_limits<sptrsv_value_t>::min() &&
+                                 scaled_max <= std::numeric_limits<sptrsv_value_t>::max()))
+            throw std::invalid_argument("CUDA preconditioner: RHS exceeds the common scaling range");
         for (int64_t i = 0; i < data_->m; ++i)
             ws_.h_stage[i] = static_cast<sptrsv_value_t>(x_in[i] * scale);
         APXCHOL_CUDA_CHECK(cudaMemcpyAsync(ws_.d_x, ws_.h_stage.data(), data_->m * sizeof(sptrsv_value_t), cudaMemcpyHostToDevice, stream));
