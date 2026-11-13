@@ -543,7 +543,8 @@ TEST(CriticalSchedule, HybridRunsFatPrefixAndCriticalThinTailByteIdentically) {
 // gather bulk columns, lane rows and their predecessors in the run.
 TEST(CriticalSchedule, HybridPanelsSumReadyPrefixesAhead) {
     const int saved_threads = omp_get_max_threads();
-    const node_index fat_rounds = 3, fat_width = 4096, tail_rows = 900, run_rows = 300;
+    // Wide enough that the solve team has four threads on every platform's grain.
+    const node_index fat_rounds = 3, fat_width = 32768, tail_rows = 900, run_rows = 300;
     std::vector<node_index> bounds(static_cast<std::size_t>(fat_rounds) + 1);
     for (node_index r = 0; r <= fat_rounds; ++r) bounds[r] = r * fat_width;
     const node_index first_tail_row = bounds.back();
