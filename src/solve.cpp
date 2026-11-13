@@ -750,16 +750,47 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
     for (int c = 0; c < C; c++)
         norm[c] = warm[c] ? std::sqrt(vec::squared_norm(column(b, c))) : std::sqrt(rr[c]);
     // Only exceptional columns need scaling; ordinary panels reuse their workspace.
+    // Panels carry the triangular sweeps in FP32, so their columns follow
+    // CUDA's rule: a column whose largest right-hand-side or warm-start entry
+    // lies outside 2^+-32 is scaled by a power of two, which is exact.
+    std::array<double, C> max_b{}, max_x0{};
+    if constexpr (C > 1) {
+        const int workers = detail::cpu_solve_threads(n);
+        #pragma omp parallel if (workers > 1) num_threads(workers)
+        {
+            std::array<double, C> local_b{}, local_x0{};
+            #pragma omp for schedule(static) nowait
+            for (std::int64_t i = 0; i < n; ++i)
+                for (int c = 0; c < C; ++c) {
+                    local_b[c] = std::max(local_b[c], std::abs(b[i * C + c]));
+                    if (x0) local_x0[c] = std::max(local_x0[c], std::abs(x0[i * C + c]));
+                }
+            #pragma omp critical(apxchol_cpu_panel_max)
+            for (int c = 0; c < C; ++c) {
+                max_b[c] = std::max(max_b[c], local_b[c]);
+                max_x0[c] = std::max(max_x0[c], local_x0[c]);
+            }
+        }
+    }
     std::array<double, C> scales;
     scales.fill(1.0);
     bool scaled = false;
     for (int c = 0; c < C; ++c) {
         const double squared = warm[c] ? norm[c] * norm[c] : rr[c];
-        if ((std::isnormal(squared) && std::isfinite(rr[c])) || n == 0) continue;
+        const bool ordinary = (std::isnormal(squared) && std::isfinite(rr[c])) || n == 0;
         const auto rhs = column(b, c);
-        double maximum = vec::max_abs(rhs);
-        if (maximum == 0) continue;
-        if (x0) maximum = std::max(maximum, vec::max_abs(column(x0, c)));
+        double maximum;
+        if constexpr (C > 1) {
+            maximum = max_b[c];
+            if (maximum == 0) continue;
+            maximum = std::max(maximum, max_x0[c]);
+            if (ordinary && detail::gpu_scaling::fp32_scale(maximum) == 1.0) continue;
+        } else {
+            if (ordinary) continue;
+            maximum = vec::max_abs(rhs);
+            if (maximum == 0) continue;
+            if (x0) maximum = std::max(maximum, vec::max_abs(column(x0, c)));
+        }
         scales[c] = detail::gpu_scaling::pow2_scale(maximum);
         if (scales[c] == 1.0 || !std::isnormal(vec::scaled_squared_norm(rhs, scales[c])))
             throw std::invalid_argument("CPU solve: RHS and initial guess exceed the common scaling range");
@@ -821,14 +852,6 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
         timings->tick();
     }
     apply_count_ = 0;
-    // FP32 sweeps need the residual inside the range FP32 holds with room to
-    // spare: the one CUDA scales its inputs into. Other panels, and factors
-    // with extreme diagonals, keep FP64 sweeps.
-    fp32_sweeps_ = C > 1 && trsv().fp32_panel_range();
-    for (int c = 0; c < C && fp32_sweeps_; ++c) {
-        const double residual = std::sqrt(rr[c]);
-        fp32_sweeps_ = !active[c] || (residual >= 0x1p-32 && residual <= 0x1p32);
-    }
     rz = apply_fused<C>(r, rs, z, timings);
     {
         // The split panel_update_p uses, so its threads touch p's pages first.
@@ -1009,13 +1032,7 @@ std::array<double, C> detail::cpu_route::apply_fused(
     // Panels carry the sweeps' results in FP32: at width 8 a gathered row is
     // then half a cache line instead of a whole one, and the sweeps are bound
     // by the bytes they move. CUDA and Metal carry FP32 here as well.
-    if constexpr (C > 1) {
-        if (fp32_sweeps_) {
-            apply_core<C, true>(r, r_sum, center, z, &rz, cp);
-            return rz;
-        }
-    }
-    apply_core<C>(r, r_sum, center, z, &rz, cp);
+    apply_core<C, (C > 1)>(r, r_sum, center, z, &rz, cp);
     return rz;
 }
 

@@ -95,7 +95,8 @@ private:
     std::array<double, Columns> apply_fused(const double* r, const std::array<double, Columns>& r_sum,
                                             double* z, checkpoint* cp) const;
     // Fp32Sweeps: the two triangular sweeps store their results as FP32
-    // panels (PCG panels only; apply() and scalar solves keep FP64).
+    // panels (PCG panels only; apply() and scalar solves keep FP64). solve_panel
+    // scales each column into FP32 range first, as CUDA does.
     template<int Columns, bool Fp32Sweeps = false>
     void apply_core(const double* b, const std::array<double, Columns>& b_sum, bool center,
                     double* z, std::array<double, Columns>* rz_out, checkpoint* cp) const;
@@ -120,8 +121,6 @@ private:
     mutable buffer<double> r_, z_, p_, Ap_, panel_x_, scratch_, scratch2_;
     // The same two sweep outputs for PCG panels, which carry them in FP32.
     mutable buffer<float> sweep_y_, sweep_z_;
-    // Whether the current panel solve carries them in FP32 (solve_panel).
-    mutable bool fp32_sweeps_ = false;
     // Per-thread partial sums of the deterministic reductions (one cache line
     // per thread; sized to the max team on use).
     mutable std::vector<double> part_;

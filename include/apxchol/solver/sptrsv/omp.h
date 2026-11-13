@@ -219,9 +219,6 @@ public:
     }
     /// Which storage the LAST setup() chose.
     bool fp16() const { return fp16_; }
-    /// Whether FP32 panels can hold the sweeps' results of inputs within
-    /// 2^+-32 with room to spare (see setup).
-    bool fp32_panel_range() const { return fp32_panel_range_; }
     /// Width / name of the stored off-diagonal values after the last setup().
     std::size_t value_bytes() const { return fp16_ ? sizeof(_Float16) : sizeof(float); }
     const char* value_name() const { return fp16_ ? "fp16 (per-column scaled)" : "float (fp32)"; }
@@ -739,22 +736,6 @@ private:
             transpose(csc_col_ptr_.data(), csc_row_idx_.data(), csc_vals.data());
 
         build_schedule(options.experimental.cpu_schedule, mark);
-        // FP32 panels hold r / L_jj after the forward sweep and about
-        // r / L_jj^2 after the backward one (times the column scale in
-        // between under FP16 storage). With every diagonal and scale within
-        // 2^+-16 and inputs within 2^+-32 (the range CUDA scales its inputs
-        // into, gpu_scaling::fp32_scale), both stay about 2^60 clear of the
-        // FP32 limits.
-        {
-            const auto in_range = [](float value) { return value >= 0x1p-16f && value <= 0x1p16f; };
-            bool ok = true;
-            #pragma omp parallel for schedule(static) reduction(&& : ok) if (m_ > kSpTRSVOMPThreshold)
-            for (node_index v = 0; v < m_; ++v) {
-                if (fp16_) ok = ok && in_range(diag_[v]) && in_range(scale_[v]);
-                else       ok = ok && in_range(csc_vals32_[csc_col_ptr_[v]]);
-            }
-            fp32_panel_range_ = ok;
-        }
         ready_ = true;
     }
 
@@ -1718,7 +1699,6 @@ private:
     bool ready_ = false;
     bool verbose_ = false;
     bool fp16_  = false;   // the storage the last setup() resolved
-    bool fp32_panel_range_ = false;
 
     // The CSR/CSC arrays are streamed on every level-set sweep and are far
     // larger than the dTLB reach of base pages. big_alloc requests huge pages

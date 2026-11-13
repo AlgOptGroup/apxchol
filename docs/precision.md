@@ -7,10 +7,10 @@ the outer iteration each have their own precision.
 |---|---|---|
 | Mutable residual graph | FP32 weights; reads aggregate in FP64 | Storage and bandwidth; elimination appends weights; late residuals may be coalesced once |
 | Assembled factor | FP32 values | Construction factor, before dropping and storage rounding |
-| CPU triangular solves | FP32 storage by default; optional scaled FP16 off-diagonals | FP16 requires efficient conversion; CPU arithmetic remains FP64 |
+| CPU triangular solves | FP32 storage by default; optional scaled FP16 off-diagonals. Batched solves store each sweep's result in FP32 | FP16 requires efficient conversion; row sums remain FP64. FP32 results halve the bytes a gathered row moves |
 | CUDA triangular solves | Scaled FP16 off-diagonals by default; FP32 alternative | Reduced value traffic; GPU triangular-solve arithmetic is FP32 |
 | FP16 scales and diagonals | FP32 | Retain scale range and diagonal quality |
-| Outer CPU/CUDA PCG | FP64 vectors and reductions. CUDA keeps the preconditioned residual in the FP32 its triangular solve produces | Preserve the original-system iteration and residual accuracy. Widening that vector would not change a value |
+| Outer CPU/CUDA PCG | FP64 vectors and reductions. CUDA keeps the preconditioned residual in the FP32 its triangular solve produces. CPU batched solves widen it when they undo the permutation | Preserve the original-system iteration and residual accuracy. Widening that vector would not change a value |
 | Metal triangular solves | FP32 storage by default; optional scaled FP16 | Shared CUDA/Metal dataflow worker; FP32 arithmetic |
 | Metal PCG | Mixed FP32 and double-float; host FP64 exit residual | Metal has no native FP64 arithmetic; see below |
 
@@ -47,6 +47,26 @@ CPU panels add each row's terms in stored order at every width. The compiler
 may contract the multiply-adds of 2- and 4-column panels differently from
 those of single right-hand sides and 8-column panels, so the same right-hand
 side can differ in the last digits between panel widths.
+
+CPU batched solves (panels of 2, 4 or 8 columns) store the result of each
+triangular sweep in FP32. A row gathers FP32 values, widens them, accumulates
+its sum in FP64 and rounds only the value it stores. The backward sweep applies
+the FP16 input scale in FP64 before that rounding, as CUDA does. An 8-column
+row is then 32 bytes instead of 64, and the sweeps are bound by the bytes they
+move. Single right-hand sides, `apply()` and the Eigen preconditioner keep
+FP64 sweeps. A panel column and the single solve of the same right-hand side
+therefore apply preconditioners that differ by FP32 rounding, and their
+iteration counts can differ by 1.
+
+CPU panels scale their columns as CUDA does. A column whose largest
+right-hand-side or initial-guess entry lies outside 2^-32 to 2^32 is multiplied
+by the power of two that brings that entry into [1, 2), the iteration runs on
+the scaled column, and the solution is divided by the same power of two.
+Powers of two change no significand, so tolerances, reported residuals and
+`converged` keep their meaning, and columns inside the range are not touched.
+The operator is not scaled on either backend. The FP32 intermediates hold
+about `r / L_jj` and `r / L_jj^2`, so an operator whose entries approach the
+FP32 limits can overflow them on CPU panels and on CUDA alike.
 
 ## Scaled FP16 contract
 

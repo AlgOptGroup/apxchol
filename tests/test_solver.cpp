@@ -743,6 +743,75 @@ TEST(Solver, CpuFp32PanelSweepsKeepIterationsAndResiduals) {
     }
 }
 
+// Panels carry the sweeps in FP32, so each column is scaled into FP32 range by
+// a power of two (CUDA's rule) before the iteration and restored after it.
+// Columns from 1e-200 to 1e200 on operators scaled by 1e-30, 1 and 1e30 must
+// then behave like the FP64 scalar solves: same iterations to within one,
+// true residuals at the tolerance.
+TEST(Solver, CpuFp32PanelSweepsScaleExtremeColumnsAndOperators) {
+    const scoped_omp_threads threads(4);
+    constexpr int side = 48, n = side * side, columns = 8;
+    constexpr double tol = 1e-8;
+    // Columns outside 2^+-32 are scaled to a largest entry in [1, 2); the two
+    // inside it stay as given. As on CUDA the operator is not scaled, so an
+    // unscaled column far from 1 on an operator near the FP32 limits (1e-8
+    // with 1e30, say) is outside what FP32 intermediates hold and is not
+    // exercised here.
+    const double magnitudes[columns] = {1e-200, 1e-100, 1e-30, 1.0, 1e30, 1e100, 1e200, 4.0};
+    std::vector<test::triplet> entries;
+    std::vector<double> degree(n, 0.01);
+    const auto edge = [&](int i, int j) {
+        const double weight = 1.0 + 0.5 * std::sin(0.37 * i + 0.11 * j);
+        entries.push_back({i, j, -weight});
+        entries.push_back({j, i, -weight});
+        degree[i] += weight;
+        degree[j] += weight;
+    };
+    for (int r = 0; r < side; ++r)
+        for (int c = 0; c < side; ++c) {
+            if (r + 1 < side) edge(r * side + c, (r + 1) * side + c);
+            if (c + 1 < side) edge(r * side + c, r * side + c + 1);
+        }
+    for (int i = 0; i < n; ++i) entries.push_back({i, i, degree[i]});
+    const Sparse unit = test::from_triplets(n, n, entries);
+    Dense shape(n, columns);
+    for (int q = 0; q < columns; ++q) {
+        Vector exact(n);
+        for (int i = 0; i < n; ++i) exact[i] = std::sin((i + 1) * (q + 1) * 0.013) + 0.1 * q;
+        set_col(shape, q, test::multiply(unit, exact));
+    }
+    for (const double operator_scale : {1e-30, 1.0, 1e30}) {
+        const Sparse matrix = test::scaled(unit, operator_scale);
+        Dense rhs(n, columns);
+        for (int q = 0; q < columns; ++q)
+            set_col(rhs, q, affine(magnitudes[q], std::as_const(shape).col(q)));
+        for (const auto storage : {apxchol::factor_storage_type::fp32,
+                                   apxchol::factor_storage_type::fp16}) {
+            if (storage == apxchol::factor_storage_type::fp16 && !apxchol::detail::omp_sptrsv::fp16_supported())
+                continue;
+            SCOPED_TRACE(::testing::Message() << "operator scale " << operator_scale
+                                              << " storage " << int(storage));
+            auto options = cpu_options();
+            options.factor_opts.factor_storage = storage;
+            apxchol::solver owner(test::csc(matrix), options);
+            Dense output(n, columns);
+            const auto panel = owner.solve(std::as_const(rhs).view(), output.view(), tol, 400);
+            ASSERT_EQ(panel.columns.size(), static_cast<std::size_t>(columns));
+            for (int q = 0; q < columns; ++q) {
+                SCOPED_TRACE(q);
+                const auto b = std::as_const(rhs).col(q);
+                const auto scalar = owner.solve(b, tol, 400);
+                ASSERT_TRUE(test::all_finite(output.col(q)));
+                EXPECT_TRUE(panel.columns[q].converged);
+                EXPECT_TRUE(scalar.converged);
+                EXPECT_GT(scalar.iterations, 5);
+                EXPECT_LE(std::abs(panel.columns[q].iterations - scalar.iterations), 1);
+                EXPECT_LE(stable_residual(matrix, output.col(q), b), tol);
+            }
+        }
+    }
+}
+
 TEST(Solver, CpuPanelsScaleExceptionalColumnsIndependently) {
     const scoped_omp_threads threads(2);
     const Sparse matrix = operator_matrix(65);
