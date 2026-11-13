@@ -899,9 +899,19 @@ def binary_toolchain(path):
 
 # ── benchmark-binary CSV row -> metrics dict ────────────────────────────────────
 def parse_csv(out):
-    rows = [l for l in out.splitlines() if l and not l.startswith("solver,") and "," in l]
+    lines = out.splitlines()
+    rows = [l for l in lines if l and not l.startswith("solver,") and "," in l]
     if not rows: return None
     f = rows[-1].split(",")
+    headers = [l for l in lines if l.startswith("solver,")]
+    # adapt_s (input adaptation inside setup_s) is the last column when the
+    # header names it; older binaries and other runners omit it.
+    adapt_s = None
+    if headers and headers[-1].rstrip().split(",")[-1] == "adapt_s":
+        try:
+            adapt_s = float(f.pop())
+        except ValueError:
+            return None
     phase_contract = f.pop() if len(f) == 22 or f[-1].startswith("apxchol-wall-") else None
     route = None
     if len(f) >= 15 and f[-4].startswith("original-v"):
@@ -917,6 +927,10 @@ def parse_csv(out):
                  fillin=float(f[9]), us_per_nnz=float(f[10]))
         if not math.isfinite(d["fillin"]):
             d["fillin"] = None
+        if adapt_s is not None:
+            if not (math.isfinite(adapt_s) and 0 <= adapt_s <= d["setup_s"] * 1.00001 + 1e-12):
+                return None
+            d["adapt_s"] = adapt_s
         if phase_contract:
             d["phase_contract"] = phase_contract
         if route:

@@ -178,6 +178,31 @@ class CsvMetricTest(unittest.TestCase):
         )
         self.assertNotIn("effective_threads", rc.parse_csv(output))
 
+    HEADER = ("solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,"
+              "us_per_nnz,solve_rss_mb,solve_vram_mb,setup_vram_mb,retained_repeats,"
+              "representative_repeat,max_repeat_rel_res,stop_contract,solve_passes,"
+              "stop_check_s,execution_route,phase_contract,adapt_s\n")
+
+    def test_adaptation_time_is_the_named_last_column(self):
+        row = ("AMG+CG [AMGCL],m,4,12,1.5,2,3.5,7,1e-9,0,2,3,-1,-1,3,2,9e-9,"
+               "original-v1,1,0.25,,,0.5\n")
+        metrics = rc.parse_csv(self.HEADER + row)
+        self.assertEqual(metrics["adapt_s"], 0.5)
+        self.assertEqual(metrics["setup_s"], 1.5)
+        self.assertEqual(metrics["stop_check_s"], 0.25)
+        self.assertNotIn("execution_route", metrics)
+        apx = ("v1 x,m,4,12,1.5,2,3.5,7,1e-9,0,2,3,-1,-1,3,2,9e-9,"
+               "original-v1,1,0.25,cpu,apxchol-wall-v2,0\n")
+        metrics = rc.parse_csv(self.HEADER + apx)
+        self.assertEqual(metrics["adapt_s"], 0.0)
+        self.assertEqual(metrics["execution_route"], "cpu")
+        self.assertEqual(metrics["phase_contract"], "apxchol-wall-v2")
+
+    def test_adaptation_outside_setup_is_rejected(self):
+        row = ("AMG+CG [AMGCL],m,4,12,1.5,2,3.5,7,1e-9,0,2,3,-1,-1,3,2,9e-9,"
+               "original-v1,1,0.25,,,1.6\n")
+        self.assertIsNone(rc.parse_csv(self.HEADER + row))
+
 
 
 

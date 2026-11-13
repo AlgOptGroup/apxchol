@@ -39,7 +39,9 @@
 #include <iomanip>
 #include <vector>
 #include <string>
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <random>
 #include <algorithm>
 #include <sstream>
@@ -698,7 +700,7 @@ static void print_result_pretty(const BenchResult& r) {
 }
 
 static void print_csv_header() {
-    std::cout << "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz,solve_rss_mb,solve_vram_mb,setup_vram_mb,retained_repeats,representative_repeat,max_repeat_rel_res,stop_contract,solve_passes,stop_check_s,execution_route,phase_contract\n";
+    std::cout << "solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz,solve_rss_mb,solve_vram_mb,setup_vram_mb,retained_repeats,representative_repeat,max_repeat_rel_res,stop_contract,solve_passes,stop_check_s,execution_route,phase_contract,adapt_s\n";
 }
 
 static void print_result_csv(const BenchResult& r) {
@@ -719,7 +721,8 @@ static void print_result_csv(const BenchResult& r) {
               << r.retained_repeats << "," << r.representative_repeat << ","
               << std::scientific << std::setprecision(17)
               << r.max_repeat_rel_residual << "," << bench_stop::contract << ","
-              << r.solve_passes << "," << r.stop_check_seconds << "," << r.execution_route << "," << r.phase_contract << "\n";
+              << r.solve_passes << "," << r.stop_check_seconds << "," << r.execution_route << "," << r.phase_contract << ","
+              << std::setprecision(6) << r.adapt_time << "\n";
 }
 
 // ──────────────────── generate RHS ────────────────────
@@ -760,6 +763,7 @@ static BenchResult median_run(Fn&& fn, int repeats) {
                   << " stop_contract=" << bench_stop::contract
                   << " solve_passes=" << result.solve_passes
                   << " stop_check_s=" << result.stop_check_seconds
+                  << " adapt_s=" << result.adapt_time
                   << " execution_route=" << (result.execution_route.empty() ? "none" : result.execution_route)
                   << " solver=" << std::quoted(result.solver_name) << '\n';
         if (i < 0) continue;
@@ -1719,6 +1723,131 @@ static desing_plan resolve_desing(const std::string& solver, const std::string& 
     return {ok, dec, gnd};
 }
 
+// ─────────── input adaptation: components, pins and slices (charged as adapt_time) ───────────
+// These helpers run inside the setup of the competitors that need them, so they
+// are parallel where the work is per entry. Every result is a pure function of
+// the matrix: the thread count changes the time, never the components, pins or
+// operators.
+
+// Build a compressed CSC matrix column by column. count(j) is the number of
+// entries column j keeps and fill(j, rows, values) writes them in row order.
+// Columns are independent, so both passes run in parallel and write straight
+// into the result's arrays (no Map copy, no triplet sort).
+template<class Count, class Fill>
+static Eigen::SparseMatrix<double> build_columns(int rows, int cols, std::int64_t work,
+                                                 Count&& count, Fill&& fill) {
+    Eigen::SparseMatrix<double> M(rows, cols);
+    int* outer = M.outerIndexPtr();
+    [[maybe_unused]] const bool parallel = work >= (1 << 16);
+#pragma omp parallel for schedule(dynamic, 1024) if (parallel)
+    for (int j = 0; j < cols; ++j) outer[j + 1] = count(j);
+    outer[0] = 0;
+    for (int j = 0; j < cols; ++j) outer[j + 1] += outer[j];
+    M.resizeNonZeros(outer[cols]);
+    int* inner = M.innerIndexPtr();
+    double* values = M.valuePtr();
+#pragma omp parallel for schedule(dynamic, 1024) if (parallel)
+    for (int j = 0; j < cols; ++j) fill(j, inner + outer[j], values + outer[j]);
+    return M;
+}
+
+// Component label of every vertex: the smallest vertex of its connected
+// component over nonzero off-diagonals. Stored zeros do not couple blocks or
+// remove a Laplacian null direction. Concurrent union-find: a root is only ever
+// linked below a smaller root with a compare-and-swap, so the final root of a
+// component is its minimum vertex whatever the thread interleaving.
+static std::vector<int> component_labels(const Eigen::SparseMatrix<double>& L) {
+    const int n = static_cast<int>(L.rows());
+    std::vector<int> parent(n);
+    const auto* outer = L.outerIndexPtr();
+    const auto* inner = L.innerIndexPtr();
+    const auto* values = L.valuePtr();
+    const auto* nonzeros = L.innerNonZeroPtr();
+    [[maybe_unused]] const bool parallel = L.nonZeros() >= (1 << 16);
+#pragma omp parallel if (parallel)
+    {
+#pragma omp for schedule(static)
+        for (int v = 0; v < n; ++v) parent[v] = v;
+        auto find = [&](int x) {
+            for (;;) {
+                const int p = std::atomic_ref<int>(parent[x]).load(std::memory_order_relaxed);
+                if (p == x) return x;
+                const int g = std::atomic_ref<int>(parent[p]).load(std::memory_order_relaxed);
+                // Path halving; a lost race only leaves a longer, still valid path.
+                if (g != p) {
+                    int expected = p;
+                    std::atomic_ref<int>(parent[x]).compare_exchange_weak(
+                        expected, g, std::memory_order_relaxed);
+                }
+                x = p;
+            }
+        };
+#pragma omp for schedule(dynamic, 1024)
+        for (int col = 0; col < n; ++col) {
+            const int end = nonzeros ? outer[col] + nonzeros[col] : outer[col + 1];
+            for (int e = outer[col]; e < end; ++e) {
+                const int row = inner[e];
+                if (row == col || values[e] == 0.0) continue;
+                int a = find(row), b = find(col);
+                while (a != b) {
+                    if (a < b) std::swap(a, b);   // link the larger root below the smaller
+                    int expected = a;
+                    if (std::atomic_ref<int>(parent[a]).compare_exchange_strong(
+                            expected, b, std::memory_order_relaxed))
+                        break;
+                    a = find(a); b = find(b);
+                }
+            }
+        }
+        // The barrier ending the loop above publishes every link.
+#pragma omp for schedule(static)
+        for (int v = 0; v < n; ++v)
+            std::atomic_ref<int>(parent[v]).store(find(v), std::memory_order_relaxed);
+    }
+    return parent;
+}
+
+// Connected components in canonical order: by smallest vertex, each listed in
+// increasing order.
+static std::vector<std::vector<int>> connected_components(const Eigen::SparseMatrix<double>& L) {
+    const int n = static_cast<int>(L.rows());
+    const std::vector<int> label = component_labels(L);
+    std::vector<int> id(n, -1);
+    std::vector<std::vector<int>> comps;
+    for (int v = 0; v < n; ++v) {
+        if (label[v] == v) { id[v] = static_cast<int>(comps.size()); comps.emplace_back(); }
+        comps[id[label[v]]].push_back(v);
+    }
+    return comps;
+}
+
+// The diagonal block of L on `nodes` (increasing), relabelled 0..size-1.
+// local(row) is the row's index in the block, or -1 for a row outside it.
+// Monotone relabelling keeps every column sorted.
+template<class Local>
+static Eigen::SparseMatrix<double> extract_block(const Eigen::SparseMatrix<double>& L,
+                                                 const std::vector<int>& nodes, Local&& local) {
+    if (!L.isCompressed()) throw std::logic_error("extract_block needs a compressed matrix");
+    const int size = static_cast<int>(nodes.size());
+    const auto* outer = L.outerIndexPtr();
+    const auto* inner = L.innerIndexPtr();
+    const auto* values = L.valuePtr();
+    std::int64_t work = 0;
+    for (int v : nodes) work += outer[v + 1] - outer[v];
+    return build_columns(size, size, work,
+        [&](int i) {
+            int c = 0;
+            for (int e = outer[nodes[i]]; e < outer[nodes[i] + 1]; ++e) c += local(inner[e]) >= 0;
+            return c;
+        },
+        [&](int i, int* rows, double* vals) {
+            for (int e = outer[nodes[i]]; e < outer[nodes[i] + 1]; ++e) {
+                const int row = local(inner[e]);
+                if (row >= 0) { *rows++ = row; *vals++ = values[e]; }
+            }
+        });
+}
+
 // Symmetric Dirichlet pin grounding the FULL null space: one node per CONNECTED
 // COMPONENT. For each grounded node p: zero row p's off-diagonals, set L(p,p)=1,
 // zero column p. Keeps L SYMMETRIC, full n x n, and SPD without perturbing the
@@ -1730,81 +1859,87 @@ static desing_plan resolve_desing(const std::string& solver, const std::string& 
 // Always check the residual against the original operator after solving.
 // A connected Laplacian has one constant null vector; a disconnected one has
 // one per component, including isolated vertices. The grounded node ids are
-// returned in `pinned` so callers can zero their RHS entries.
+// returned in `pinned`, ordered by component, so callers can zero their RHS entries.
 static Eigen::SparseMatrix<double> dirichlet_pin(const Eigen::SparseMatrix<double>& L,
                                                  std::vector<int>& pinned) {
-    pinned.clear();
+    if (!L.isCompressed()) throw std::logic_error("dirichlet_pin needs a compressed matrix");
     const int n = static_cast<int>(L.rows());
-    // Preserve the existing deterministic choice: the first DFS-finished vertex
-    // in each component. Use an iterative traversal to avoid recursion on large
-    // graphs. Any vertex is a valid pin for a connected positive-weight Laplacian,
-    // including an articulation point: retained diagonals still include edges to
-    // the pinned vertex, so the remaining principal submatrix stays SPD. Pin
-    // selection can affect conditioning, but is not needed to establish rank.
+    // The pin of a component is the first vertex a depth-first search from its
+    // smallest vertex finishes, scanning each column in stored order. Before its
+    // first pop, that search only descends: from each vertex it takes the first
+    // nonzero off-diagonal to an unvisited vertex. So the pin is the end of that
+    // greedy path, found without visiting the rest of the component. Any vertex is
+    // a valid pin for a connected positive-weight Laplacian, including an
+    // articulation point: retained diagonals still include edges to the pinned
+    // vertex, so the remaining principal submatrix stays SPD. Pin selection can
+    // affect conditioning, but is not needed to establish rank.
+    std::vector<int> roots;
+    if (L.rows() == g_laplacian_dimension && !g_singular_vertices.empty()) {
+        // A mixed operator grounds only its singular components, which the
+        // benchmark already discovered (and charges to this run).
+        for (const auto& nodes : g_laplacian_components)
+            if (g_singular_vertices[nodes.front()]) roots.push_back(nodes.front());
+    } else {
+        const std::vector<int> label = component_labels(L);
+        for (int v = 0; v < n; ++v)
+            if (label[v] == v) roots.push_back(v);
+    }
     const auto* outer = L.outerIndexPtr();
     const auto* inner = L.innerIndexPtr();
     const auto* values = L.valuePtr();
-    std::vector<char> is_pin(n, 0);
-    std::vector<char> seen(n, 0);
-    std::vector<int>  stk; stk.reserve(256);
-    std::vector<int>  cur(n);   // per-node DFS edge cursor (into the CSC column)
-    for (int s = 0; s < n; ++s) {
-        if (seen[s]) continue;
-        seen[s] = 1; cur[s] = outer[s]; stk.push_back(s);
-        int leaf = -1;
-        while (!stk.empty()) {
-            const int u = stk.back();
+    std::vector<char> seen(n, 0);       // paths of different components are disjoint
+    pinned.assign(roots.size(), -1);
+#pragma omp parallel for schedule(dynamic, 1) if (roots.size() > 1 && L.nonZeros() >= (1 << 16))
+    for (std::size_t c = 0; c < roots.size(); ++c) {
+        int u = roots[c];
+        seen[u] = 1;
+        for (;;) {
             int w = -1;
-            while (cur[u] < outer[u + 1]) {
-                const int edge = cur[u]++;
-                const int v = inner[edge];
-                if (v != u && values[edge] != 0.0 && !seen[v]) { w = v; break; }
+            for (int e = outer[u]; e < outer[u + 1]; ++e) {
+                const int v = inner[e];
+                if (v != u && values[e] != 0.0 && !seen[v]) { w = v; break; }
             }
-            if (w != -1) { seen[w] = 1; cur[w] = outer[w]; stk.push_back(w); }
-            else { stk.pop_back(); if (leaf == -1) leaf = u; }  // first finished = DFS leaf
+            if (w == -1) break;
+            seen[w] = 1;
+            u = w;
         }
-        if (L.rows() == g_laplacian_dimension && !g_singular_vertices.empty()
-            && !g_singular_vertices[s]) continue;
-        is_pin[leaf] = 1; pinned.push_back(leaf);
+        pinned[c] = u;
     }
-    // Build P's CSC directly in column order. L is column-major and already sorted, so
-    // dropping pinned rows/cols preserves order -- insert in lexicographic order (cheap,
-    // no per-column search) into a reserve()'d matrix, skipping setFromTriplets' O(nnz
-    // log nnz) sort. (Tried a parallel manual-CSC build: NEGATIVE -- the op is
-    // bandwidth-bound, so parallelism doesn't help and the Map->SparseMatrix copy makes
-    // it net slower.) A pinned column p collapses to just P(p,p)=1 (also handles isolated
-    // nodes, which have no diagonal entry to edit).
-    Eigen::SparseMatrix<double> P(n, n);
-    Eigen::VectorXi cnt(n);
-    for (int k = 0; k < n; ++k) {
-        if (is_pin[k]) { cnt[k] = 1; continue; }
-        int c = 0;
-        for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it)
-            if (!is_pin[it.row()]) ++c;
-        cnt[k] = c;
-    }
-    P.reserve(cnt);
-    for (int k = 0; k < n; ++k) {
-        if (is_pin[k]) { P.insert(k, k) = 1.0; continue; }
-        for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it)
-            if (!is_pin[it.row()]) P.insert(it.row(), k) = it.value();
-    }
-    P.makeCompressed();
-    return P;
+    std::vector<char> is_pin(n, 0);
+    for (int p : pinned) is_pin[p] = 1;
+    // L is column-major and sorted, so dropping pinned rows keeps each column
+    // sorted. A pinned column p collapses to just P(p,p)=1 (also handles
+    // isolated nodes, which have no diagonal entry to edit).
+    return build_columns(n, n, L.nonZeros(),
+        [&](int k) {
+            if (is_pin[k]) return 1;
+            int c = 0;
+            for (int e = outer[k]; e < outer[k + 1]; ++e) c += !is_pin[inner[e]];
+            return c;
+        },
+        [&](int k, int* rows, double* vals) {
+            if (is_pin[k]) { *rows = k; *vals = 1.0; return; }
+            for (int e = outer[k]; e < outer[k + 1]; ++e)
+                if (!is_pin[inner[e]]) { *rows++ = inner[e]; *vals++ = values[e]; }
+        });
 }
 
-// Connected components of L via union-find over nonzero off-diagonals. Stored
-// zeros do not couple blocks or remove a Laplacian null direction.
-static std::vector<std::vector<int>> connected_components(const Eigen::SparseMatrix<double>& L) {
-    const int n = static_cast<int>(L.rows());
-    std::vector<int> parent(n); std::iota(parent.begin(), parent.end(), 0);
-    auto find=[&](int x){ while(parent[x]!=x){parent[x]=parent[parent[x]];x=parent[x];} return x; };
-    for (int k=0;k<L.outerSize();++k)
-        for (Eigen::SparseMatrix<double>::InnerIterator it(L,k);it;++it)
-            if (it.row()!=it.col() && it.value()!=0.0){int a=find((int)it.row()),b=find((int)it.col()); if(a!=b)parent[a]=b;}
-    std::vector<int> cid(n,-1); std::vector<std::vector<int>> comps;
-    for (int v=0;v<n;++v){int r=find(v); if(cid[r]<0){cid[r]=(int)comps.size();comps.emplace_back();} comps[cid[r]].push_back(v);}
-    return comps;
+// Ground a singular Laplacian with dirichlet_pin and zero the pinned RHS
+// entries. The time is the run's adaptation, inside its setup.
+[[maybe_unused]] static Eigen::SparseMatrix<double> ground_with_pin(const Eigen::SparseMatrix<double>& L,
+                                                   Eigen::VectorXd& rhs, BenchResult& r,
+                                                   std::vector<int>& pinned) {
+    Timer t;
+    t.start();
+    Eigen::SparseMatrix<double> P = dirichlet_pin(L, pinned);
+    for (int p : pinned) rhs[p] = 0.0;
+    r.adapt_time += t.elapsed();
+    return P;
+}
+[[maybe_unused]] static Eigen::SparseMatrix<double> ground_with_pin(const Eigen::SparseMatrix<double>& L,
+                                                   Eigen::VectorXd& rhs, BenchResult& r) {
+    std::vector<int> pinned;
+    return ground_with_pin(L, rhs, r, pinned);
 }
 
 // A component of an assembled operator can itself be a graph Laplacian.
@@ -1878,10 +2013,24 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
         BenchResult result = per_solver(L, b, name, tol, maxiter);
         result.setup_time += component_discovery_seconds;
         result.total_time += component_discovery_seconds;
+        result.adapt_time += component_discovery_seconds;
+        result.us_per_nnz = result.total_time / std::max(1, result.nnz) * 1e6;
         return result;
     }
     double split_prep = component_discovery_seconds;
     Timer prep;
+    // Each vertex's component and its index inside it, found once for all slices.
+    prep.start();
+    std::vector<int> component_of(L.rows()), local_index(L.rows());
+#pragma omp parallel for schedule(dynamic, 64) if (L.rows() >= (1 << 16))
+    for (std::size_t c = 0; c < comps.size(); ++c)
+        for (std::size_t i = 0; i < comps[c].size(); ++i) {
+            component_of[comps[c][i]] = static_cast<int>(c);
+            local_index[comps[c][i]] = static_cast<int>(i);
+        }
+    split_prep += prep.elapsed();
+    double inner_adapt = 0;   // grounding inside the component solves
+    int component = -1;
     BenchResult r; r.graph_name=name; r.n=(int)L.rows(); r.nnz=(int)L.nonZeros(); r.fillin=0;
     double setup=0, solve=0, res2=0; int it=0; const double bn=b.norm();
     bool unavailable = false;
@@ -1894,32 +2043,17 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
     // (size, rel_c, ||res_c||, iters) per solved component, for SPLIT_DEBUG.
     std::vector<std::tuple<int,double,double,int>> dbg_rows;
     for (auto& nodes : comps) {
+        ++component;
         const int sn=(int)nodes.size();
         // Only a zero row with an exactly zero RHS is a trivial isolate. A
         // positive-diagonal SDDM singleton must use the same checked adapter and
         // iteration budget as every other block.
         if (sn==1 && L.coeff(nodes[0], nodes[0])==0.0 && b[nodes[0]]==0.0) continue;
         prep.start();
-        std::vector<int> g2l(L.rows(),-1);
-        for (int i=0;i<sn;++i) g2l[nodes[i]]=i;
-        // Build subL's CSC directly. nodes[] is in increasing global order so g2l is
-        // monotonic; iterating column nodes[i] (rows globally sorted) yields local rows
-        // already sorted -> insert in order, skipping setFromTriplets' sort. (Parallel
-        // manual-CSC build tried: NEGATIVE, see dirichlet_pin -- bandwidth-bound.)
-        Eigen::SparseMatrix<double> subL(sn,sn);
-        Eigen::VectorXi cnt(sn);
-        for (int i=0;i<sn;++i) {
-            int c=0;
-            for (Eigen::SparseMatrix<double>::InnerIterator it(L,nodes[i]);it;++it)
-                if (g2l[it.row()]>=0) ++c;
-            cnt[i]=c;
-        }
-        subL.reserve(cnt);
-        for (int i=0;i<sn;++i)
-            for (Eigen::SparseMatrix<double>::InnerIterator it(L,nodes[i]);it;++it) {
-                const int gl=g2l[it.row()]; if (gl>=0) subL.insert(gl,i)=it.value();
-            }
-        subL.makeCompressed();
+        // Rows outside the component are stored zeros that couple nothing.
+        const Eigen::SparseMatrix<double> subL = extract_block(L, nodes, [&](int row) {
+            return component_of[row] == component ? local_index[row] : -1;
+        });
         Eigen::VectorXd subb(sn); for (int i=0;i<sn;++i) subb[i]=b[nodes[i]];
         split_prep += prep.elapsed();
         // A connected subproblem uses its own grounding and centering mode.
@@ -1930,6 +2064,7 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
         if (!g_singular_vertices.empty()) g_laplacian_mode = g_singular_vertices[nodes.front()];
         BenchResult rc = per_solver(subL, subb, name, tol, maxiter);
         setup += rc.setup_time; solve += rc.solve_time; it=std::max(it,rc.iterations);
+        inner_adapt += rc.adapt_time;
         r.solve_passes = std::max(r.solve_passes, rc.solve_passes);
         r.stop_check_seconds += rc.stop_check_seconds;
         measured_fill = measured_fill && rc.factor_offdiag >= 0;
@@ -1979,6 +2114,7 @@ static BenchResult run_split(Fn per_solver, const Eigen::SparseMatrix<double>& L
             "(of setup %.3fs incl per-comp builds %.3fs; solve %.3fs)\n",
             name.c_str(), split_prep, setup+split_prep, setup, solve);
     r.setup_time=setup+split_prep; r.solve_time=solve; r.total_time=r.setup_time+solve;
+    r.adapt_time=split_prep+inner_adapt;
     r.iterations=unavailable?-1:it;
     r.rel_residual = unavailable?-1.0:std::sqrt(res2)/(bn>0?bn:1.0);
     r.us_per_nnz = r.total_time/std::max(1,r.nnz)*1e6;
@@ -2043,10 +2179,7 @@ static BenchResult run_accelerate_cholesky(
     Eigen::VectorXd rhs = b;
     std::vector<int> pinned;
     Eigen::SparseMatrix<double> pinned_operator;
-    if (g_laplacian_mode) {
-        pinned_operator = dirichlet_pin(L, pinned);
-        for (int p : pinned) rhs[p] = 0.0;
-    }
+    if (g_laplacian_mode) pinned_operator = ground_with_pin(L, rhs, r, pinned);
     const Eigen::SparseMatrix<double>& A = g_laplacian_mode ? pinned_operator : L;
     // Accelerate reads one triangle of a symmetric matrix in CSC form.
     std::vector<long> column_starts(n + 1, 0);
@@ -2197,13 +2330,7 @@ static BenchResult run_amgcl(
     Eigen::VectorXd rhs_v = b;
     Eigen::SparseMatrix<double, Eigen::RowMajor> A;
     if (is_laplacian && ground == ground_mode::pin) {
-        Timer tp; tp.start();
-        std::vector<int> pinned;
-        A = dirichlet_pin(L, pinned);
-        for (int p : pinned) rhs_v(p) = 0.0;
-        if (std::getenv("PREP_TIME"))
-            std::fprintf(stderr, "[prep] %s amgcl dirichlet_pin = %.3fs (of setup; n=%d nnz=%d)\n",
-                graph_name.c_str(), tp.elapsed(), n, r.nnz);
+        A = ground_with_pin(L, rhs_v, r);
     } else {
         A = L;
         if (is_laplacian) prm.precond.direct_coarse = false;   // ground == coarse
@@ -2274,9 +2401,7 @@ static BenchResult run_amgcl_cuda(
     Eigen::SparseMatrix<double, Eigen::RowMajor> Asolve;
     int relax_coarse;
     if (is_laplacian && ground == ground_mode::pin) {
-        std::vector<int> pinned;
-        Asolve = dirichlet_pin(L, pinned);   // SPD
-        for (int p : pinned) rhs_v(p) = 0.0;
+        Asolve = ground_with_pin(L, rhs_v, r);   // SPD
         relax_coarse = 0;                    // default direct coarse
     } else {
         Asolve = L;
@@ -2533,10 +2658,8 @@ static BenchResult run_hypre_boomeramg(
     // SDDM/regularized L solves the full operator unchanged. (Under --decompose split this
     // wrapper is called per connected component, so dirichlet_pin grounds a single node.)
     const int m = n;
-    std::vector<int> pinned;
-    Eigen::SparseMatrix<double> Lsub = is_laplacian ? dirichlet_pin(L, pinned) : L;
     Eigen::VectorXd bsub = b;
-    if (is_laplacian) for (int p : pinned) bsub(p) = 0.0;
+    Eigen::SparseMatrix<double> Lsub = is_laplacian ? ground_with_pin(L, bsub, r) : L;
 
     HYPRE_IJMatrix A = eigen_to_hypre_ij(Lsub);
     HYPRE_ParCSRMatrix parA;
@@ -2674,10 +2797,8 @@ static BenchResult run_hypre_boomeramg_gpu(
     // SDDM/regularized L solves the full operator unchanged. (Under --decompose split
     // this wrapper sees one connected component, so dirichlet_pin grounds a single node.)
     const int m = n;
-    std::vector<int> pinned;
-    Eigen::SparseMatrix<double> Lsub = is_laplacian ? dirichlet_pin(L, pinned) : L;
     Eigen::VectorXd bsub = b;
-    if (is_laplacian) for (int p : pinned) bsub(p) = 0.0;
+    Eigen::SparseMatrix<double> Lsub = is_laplacian ? ground_with_pin(L, bsub, r) : L;
 
     // Switch Hypre to GPU execution. main() initializes Hypre only when a
     // Hypre solver was requested, before reaching this function.
@@ -2853,12 +2974,10 @@ static BenchResult run_amgx(
     // Setup: grounding, CSR conversion, AMGX objects, matrix upload and hierarchy.
     Timer t;
     t.start();
-    std::vector<int> pinned;
     Eigen::SparseMatrix<double, Eigen::RowMajor> A;
     Eigen::VectorXd bsub = b;
     if (is_laplacian) {
-        A = dirichlet_pin(L, pinned);
-        for (int p : pinned) bsub(p) = 0.0;
+        A = ground_with_pin(L, bsub, r);
     } else {
         A = L;
     }
@@ -3365,16 +3484,7 @@ int main(int argc, char** argv) try {
             const int cn = static_cast<int>(comp.size());
             std::vector<int> remap(L.rows(), -1);
             for (int i = 0; i < cn; ++i) remap[comp[i]] = i;
-            std::vector<Eigen::Triplet<double>> trips;
-            trips.reserve(L.nonZeros());
-            for (int k = 0; k < L.outerSize(); ++k)
-                for (Eigen::SparseMatrix<double>::InnerIterator it(L, k); it; ++it) {
-                    const int ri = remap[it.row()], ci = remap[it.col()];
-                    if (ri >= 0 && ci >= 0) trips.emplace_back(ri, ci, it.value());
-                }
-            Eigen::SparseMatrix<double> G(cn, cn);
-            G.setFromTriplets(trips.begin(), trips.end());
-            Lc = G;
+            Lc = extract_block(L, comp, [&](int row) { return remap[row]; });
             std::cerr << "[component-dump] rank " << rank << " / " << comps.size()
                       << " components: " << cn << " / " << L.rows() << " nodes\n";
         } else {
@@ -3459,9 +3569,14 @@ int main(int argc, char** argv) try {
                    g_laplacian_components, g_component_count,
                    g_component_discovery_seconds);
         auto result = single(L, b, graph_name, args.tol, args.maxiter, plan.ground);
-        result.setup_time += g_component_discovery_seconds;
-        result.total_time += g_component_discovery_seconds;
-        result.us_per_nnz = result.total_time / std::max(1, result.nnz) * 1e6;
+        // A whole-operator solve depends on the discovered components only when
+        // grounding must find the singular components of a mixed operator.
+        if (!g_singular_vertices.empty()) {
+            result.setup_time += g_component_discovery_seconds;
+            result.total_time += g_component_discovery_seconds;
+            result.adapt_time += g_component_discovery_seconds;
+            result.us_per_nnz = result.total_time / std::max(1, result.nnz) * 1e6;
+        }
         return result;
     };
 

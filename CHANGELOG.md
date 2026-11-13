@@ -109,6 +109,7 @@
 - Published results now come from CSCS Daint; laptop results are archived.
 - GPU memory is now this process's NVML usage above its post-context baseline, measured the same way for apxchol, AMGCL and Hypre, with a new `setup_vram_mb` column; other compute processes are reported separately and flagged as shared.
 - The benchmark builds on macOS with a Metal route for apxchol (`--device metal`), with Metal warm-up excluded from setup and the factor-drop statistics in `--report-fill`.
+- Adapting singular or disconnected Laplacians for solvers that cannot take them (component discovery, Dirichlet pins, component splitting) is charged only to those solvers, runs in parallel and is reported within setup as a new `adapt_s` column. apxchol and Laplacians.jl AC take components natively and pay none.
 
 ### Documentation
 - CLI help groups input, solve and setup options. The website links to the repository and shows a version selector only when release snapshots exist.

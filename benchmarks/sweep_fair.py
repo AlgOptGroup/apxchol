@@ -551,7 +551,7 @@ def capped(result, cap):
     over = st == "timeout" or (st in {"complete", "not_converged"}
                                and any(t > cap for t in _repeat_totals(m)))
     if over:
-        timing = {k: m.pop(k) for k in ("setup_s", "solve_s", "total_s", "us_per_nnz") if k in m}
+        timing = {k: m.pop(k) for k in ("setup_s", "adapt_s", "solve_s", "total_s", "us_per_nnz") if k in m}
         if timing:
             m["capped_timings"] = timing
         st = "exceeded_cap"

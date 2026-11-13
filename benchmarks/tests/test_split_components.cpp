@@ -1,6 +1,10 @@
 #include "apxchol/types.h"
 #include <Eigen/Cholesky>
+#include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <numeric>
+#include <random>
 #include <initializer_list>
 #include <iostream>
 #include <limits>
@@ -356,6 +360,225 @@ void mixed_grounding() {
     require_contract(!constant_null_component(shifted, {0,1}), "pinned a one-ulp shift");
 }
 
+
+// The serial implementations before the adaptation work was parallelized.
+// The parallel ones must reproduce them exactly: same components, same pins,
+// same operators and slices, at every thread count.
+namespace reference {
+
+std::vector<std::vector<int>> connected_components(const Matrix& L) {
+    const int n = static_cast<int>(L.rows());
+    std::vector<int> parent(n); std::iota(parent.begin(), parent.end(), 0);
+    auto find=[&](int x){ while(parent[x]!=x){parent[x]=parent[parent[x]];x=parent[x];} return x; };
+    for (int k=0;k<L.outerSize();++k)
+        for (Matrix::InnerIterator it(L,k);it;++it)
+            if (it.row()!=it.col() && it.value()!=0.0){int a=find((int)it.row()),b=find((int)it.col()); if(a!=b)parent[a]=b;}
+    std::vector<int> cid(n,-1); std::vector<std::vector<int>> comps;
+    for (int v=0;v<n;++v){int r=find(v); if(cid[r]<0){cid[r]=(int)comps.size();comps.emplace_back();} comps[cid[r]].push_back(v);}
+    return comps;
+}
+
+Matrix dirichlet_pin(const Matrix& L, std::vector<int>& pinned) {
+    pinned.clear();
+    const int n = static_cast<int>(L.rows());
+    const auto* outer = L.outerIndexPtr();
+    const auto* inner = L.innerIndexPtr();
+    const auto* values = L.valuePtr();
+    std::vector<char> is_pin(n, 0), seen(n, 0);
+    std::vector<int> stk, cur(n);
+    for (int s = 0; s < n; ++s) {
+        if (seen[s]) continue;
+        seen[s] = 1; cur[s] = outer[s]; stk.push_back(s);
+        int leaf = -1;
+        while (!stk.empty()) {
+            const int u = stk.back();
+            int w = -1;
+            while (cur[u] < outer[u + 1]) {
+                const int edge = cur[u]++;
+                const int v = inner[edge];
+                if (v != u && values[edge] != 0.0 && !seen[v]) { w = v; break; }
+            }
+            if (w != -1) { seen[w] = 1; cur[w] = outer[w]; stk.push_back(w); }
+            else { stk.pop_back(); if (leaf == -1) leaf = u; }
+        }
+        if (L.rows() == g_laplacian_dimension && !g_singular_vertices.empty()
+            && !g_singular_vertices[s]) continue;
+        is_pin[leaf] = 1; pinned.push_back(leaf);
+    }
+    Matrix P(n, n);
+    Eigen::VectorXi cnt(n);
+    for (int k = 0; k < n; ++k) {
+        if (is_pin[k]) { cnt[k] = 1; continue; }
+        int c = 0;
+        for (Matrix::InnerIterator it(L, k); it; ++it) if (!is_pin[it.row()]) ++c;
+        cnt[k] = c;
+    }
+    P.reserve(cnt);
+    for (int k = 0; k < n; ++k) {
+        if (is_pin[k]) { P.insert(k, k) = 1.0; continue; }
+        for (Matrix::InnerIterator it(L, k); it; ++it)
+            if (!is_pin[it.row()]) P.insert(it.row(), k) = it.value();
+    }
+    P.makeCompressed();
+    return P;
+}
+
+Matrix slice(const Matrix& L, const std::vector<int>& nodes) {
+    const int sn = static_cast<int>(nodes.size());
+    std::vector<int> g2l(L.rows(), -1);
+    for (int i = 0; i < sn; ++i) g2l[nodes[i]] = i;
+    Matrix subL(sn, sn);
+    Eigen::VectorXi cnt(sn);
+    for (int i = 0; i < sn; ++i) {
+        int c = 0;
+        for (Matrix::InnerIterator it(L, nodes[i]); it; ++it) if (g2l[it.row()] >= 0) ++c;
+        cnt[i] = c;
+    }
+    subL.reserve(cnt);
+    for (int i = 0; i < sn; ++i)
+        for (Matrix::InnerIterator it(L, nodes[i]); it; ++it) {
+            const int gl = g2l[it.row()]; if (gl >= 0) subL.insert(gl, i) = it.value();
+        }
+    subL.makeCompressed();
+    return subL;
+}
+
+} // namespace reference
+
+// Same shape, same index arrays and bitwise-equal values.
+bool identical(const Matrix& a, const Matrix& b) {
+    if (a.rows() != b.rows() || a.cols() != b.cols() || !a.isCompressed() || !b.isCompressed()
+        || a.nonZeros() != b.nonZeros())
+        return false;
+    const auto nnz = static_cast<std::size_t>(a.nonZeros());
+    return std::equal(a.outerIndexPtr(), a.outerIndexPtr() + a.cols() + 1, b.outerIndexPtr())
+        && std::equal(a.innerIndexPtr(), a.innerIndexPtr() + nnz, b.innerIndexPtr())
+        && std::memcmp(a.valuePtr(), b.valuePtr(), nnz * sizeof(double)) == 0;
+}
+
+// A weighted Laplacian on n vertices split into `groups` random vertex sets,
+// with stored zeros across sets, isolated vertices and shuffled labels. Groups
+// listed in `shifted` get a positive diagonal excess (a mixed operator).
+Matrix random_operator(int n, int groups, std::uint64_t seed, int shifted = 0) {
+    std::mt19937_64 rng(seed);
+    std::vector<int> group(n);
+    std::vector<std::vector<int>> members(groups);
+    for (int v = 0; v < n; ++v) {
+        group[v] = static_cast<int>(rng() % groups);
+        members[group[v]].push_back(v);
+    }
+    std::vector<Triplet> entries;
+    std::vector<double> degree(n, 0.0);
+    std::uniform_real_distribution<double> weight(0.5, 2.0);
+    for (long e = 0; e < 3L * n; ++e) {
+        const int a = static_cast<int>(rng() % n);
+        if (group[a] == 0) continue;                 // group 0 stays isolated
+        const bool across = rng() % 8 == 0;          // a stored zero across groups
+        const auto& pool = members[group[a]];
+        const int b = across ? static_cast<int>(rng() % n)
+                             : pool[rng() % pool.size()];
+        if (a == b) continue;
+        const double w = across ? 0.0 : weight(rng);
+        entries.emplace_back(a, b, -w); entries.emplace_back(b, a, -w);
+        degree[a] += w; degree[b] += w;
+    }
+    for (int v = 0; v < n; ++v) {
+        const double excess = group[v] > 0 && group[v] <= shifted ? 0.25 : 0.0;
+        if (degree[v] != 0.0 || excess != 0.0) entries.emplace_back(v, v, degree[v] + excess);
+    }
+    Matrix L(n, n);
+    L.setFromTriplets(entries.begin(), entries.end());
+    L.makeCompressed();
+    return L;
+}
+
+Matrix grid_laplacian(int side) {
+    std::vector<Triplet> entries;
+    const int n = side * side;
+    std::vector<double> degree(n, 0.0);
+    auto edge = [&](int a, int b, double w) {
+        entries.emplace_back(a, b, -w); entries.emplace_back(b, a, -w);
+        degree[a] += w; degree[b] += w;
+    };
+    for (int r = 0; r < side; ++r)
+        for (int c = 0; c < side; ++c) {
+            const int v = r * side + c;
+            if (c + 1 < side) edge(v, v + 1, 1.0 + (v % 7));
+            if (r + 1 < side) edge(v, v + side, 1.0 + (v % 5));
+        }
+    for (int v = 0; v < n; ++v) entries.emplace_back(v, v, degree[v]);
+    Matrix L(n, n);
+    L.setFromTriplets(entries.begin(), entries.end());
+    L.makeCompressed();
+    return L;
+}
+
+void adaptation_matches_serial_reference() {
+    struct RestoreGlobals {
+        ~RestoreGlobals() {
+            g_singular_vertices.clear(); g_laplacian_components.clear();
+            g_laplacian_dimension = 0; g_component_count = 0; g_laplacian_mode = true;
+        }
+    } restore;
+    const std::vector<std::pair<const char*, Matrix>> cases = {
+        {"many components", random_operator(120000, 4000, 7)},
+        {"few components", random_operator(90000, 3, 11)},
+        {"grid", grid_laplacian(300)},
+        {"mixed", random_operator(80000, 50, 13, 20)},
+    };
+#ifdef _OPENMP
+    const int previous_threads = omp_get_max_threads();
+    const std::vector<int> thread_counts = {1, 3, 8};
+#else
+    const std::vector<int> thread_counts = {1};
+#endif
+    for (const auto& [name, L] : cases) {
+        require_contract(L.nonZeros() >= (1 << 16), "fixture too small for the parallel paths");
+        const bool mixed = std::string(name) == "mixed";
+        const auto expected_components = reference::connected_components(L);
+        require_contract(expected_components.size() > 1 || std::string(name) == "grid",
+                         "fixture lost its components");
+        // Reference pins read the same globals (only a mixed operator sets them).
+        g_singular_vertices.clear(); g_laplacian_dimension = 0;
+        if (mixed) require_contract(prepare_components(L, false), "mixed fixture is not mixed");
+        std::vector<int> expected_pins;
+        const Matrix expected_pinned = reference::dirichlet_pin(L, expected_pins);
+        for (int threads : thread_counts) {
+#ifdef _OPENMP
+            omp_set_num_threads(threads);
+#endif
+            const std::string where = std::string(name) + " at " + std::to_string(threads) + " threads: ";
+            require_contract(connected_components(L) == expected_components,
+                             (where + "components changed").c_str());
+            if (mixed) {
+                require_contract(prepare_components(L, false), "mixed fixture is not mixed");
+                require_contract(g_laplacian_components == expected_components,
+                                 (where + "discovered components changed").c_str());
+            }
+            std::vector<int> pins;
+            const Matrix pinned = dirichlet_pin(L, pins);
+            require_contract(pins == expected_pins, (where + "pins changed").c_str());
+            require_contract(identical(pinned, expected_pinned),
+                             (where + "pinned operator changed").c_str());
+            std::size_t block = 0;
+            Eigen::VectorXd rhs = Eigen::VectorXd::Zero(L.rows());
+            run_split([&](const Matrix& sub, const Eigen::VectorXd&, const std::string&, double, int) {
+                          while (expected_components[block].size() == 1
+                                 && L.coeff(expected_components[block][0],
+                                            expected_components[block][0]) == 0.0)
+                              ++block;   // zero isolates with a zero RHS are skipped
+                          require_contract(identical(sub, reference::slice(L, expected_components[block++])),
+                                           (where + "component slice changed").c_str());
+                          BenchResult part; part.rel_residual = 0; return part;
+                      }, L, rhs, "identity", 1e-8, 1, expected_components,
+                      expected_components.size(), 0.0);
+        }
+        if (mixed) { g_singular_vertices.clear(); g_laplacian_components.clear(); }
+    }
+#ifdef _OPENMP
+    omp_set_num_threads(previous_threads);
+#endif
+}
 } // namespace
 
 int main() {
@@ -372,6 +595,7 @@ int main() {
         {"unavailable_sentinel_propagates", unavailable_sentinel_propagates},
         {"mixed_grounding", mixed_grounding},
         {"auto_split_only_for_disconnected_laplacians", auto_split_only_for_disconnected_laplacians},
+        {"adaptation_matches_serial_reference", adaptation_matches_serial_reference},
     };
     int passed = 0;
     for (const auto& test : cases) {

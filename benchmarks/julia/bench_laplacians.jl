@@ -272,8 +272,11 @@ function na_result(sname, graph_name, n, nnz_A, reason)
                        0.0, 0.0, 0.0, -1, -1.0, 0.0, 0.0)
 end
 
-# The same bounded native-retry policy as src/original_stop.h. Component
-# discovery belongs to setup; checks and retries form one contiguous solve timer.
+# The same bounded native-retry policy as src/original_stop.h. Checks and
+# retries form one contiguous solve timer. Component discovery is charged as
+# adaptation to the references that ground with it; AC takes disconnected
+# Laplacians natively and uses the components only for the original-residual
+# check, which the C++ benchmark also prepares outside every timer.
 function operator_components(A)
     n = size(A, 1)
     seen = falses(n); components = Vector{Vector{Int}}()
@@ -383,8 +386,8 @@ function run_approxchol_operator(A, b, graph_name, tol, maxiter, is_lap; variant
         # Singular Laplacian: recover the adjacency it is the Laplacian OF
         # (A_adj = Diag(diag(A)) - A, exact, no reinterpretation) and use
         # approxchol_lap, which is Laplacian-native.
+        components = operator_components(A)
         t_setup = @elapsed begin
-            components = operator_components(A)
             # This operator-to-adjacency conversion is required by Laplacians.jl's
             # public approxchol_lap entry point, so it belongs to adapter setup.
             adj = sparse(Diagonal(diag(A))) - A
@@ -451,18 +454,22 @@ struct BenchResult
     us_per_nnz::Float64
     solve_passes::Int
     stop_check_seconds::Float64
+    # Part of setup_time spent grounding and slicing input the solver cannot take.
+    adapt_time::Float64
 end
-BenchResult(s,g,n,nz,a,b,c,i,r,f,u) = BenchResult(s,g,n,nz,a,b,c,i,r,f,u,0,0.0)
+BenchResult(s,g,n,nz,a,b,c,i,r,f,u) = BenchResult(s,g,n,nz,a,b,c,i,r,f,u,0,0.0,0.0)
+BenchResult(s,g,n,nz,a,b,c,i,r,f,u,p,k) = BenchResult(s,g,n,nz,a,b,c,i,r,f,u,p,k,0.0)
 
 function print_header_csv()
-    println("solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz,stop_contract,solve_passes,stop_check_s")
+    println("solver,graph,n,nnz,setup_s,solve_s,total_s,iters,rel_res,fillin,us_per_nnz,stop_contract,solve_passes,stop_check_s,adapt_s")
 end
 
 function print_result_csv(r::BenchResult)
-    @printf("%s,%s,%d,%d,%.6e,%.6e,%.6e,%d,%.17e,%.4f,%.4f,original-v1,%d,%.9e\n",
+    @printf("%s,%s,%d,%d,%.6e,%.6e,%.6e,%d,%.17e,%.4f,%.4f,original-v1,%d,%.9e,%.6e\n",
         r.solver_name, r.graph_name, r.n, r.nnz,
         r.setup_time, r.solve_time, r.total_time,
-        r.iterations, r.rel_residual, r.fillin, r.us_per_nnz, r.solve_passes, r.stop_check_seconds)
+        r.iterations, r.rel_residual, r.fillin, r.us_per_nnz, r.solve_passes, r.stop_check_seconds,
+        r.adapt_time)
 end
 
 function print_header_pretty()
@@ -487,11 +494,15 @@ end
 
 function run_grounded_julia(L, b, graph_name, tol, maxiter, direct)
     components = Vector{Vector{Int}}(); free = Int[]; sub = spzeros(0,0); factor = nothing
+    adapt_s = 0.0
     setup_s = @elapsed begin
-        components = operator_components(L)
-        pinned = Set(maximum(nodes) for nodes in components)
-        free = [i for i in axes(L,1) if !(i in pinned)]
-        sub = L[free,free]
+        # Grounding: one pin per component, then the grounded block.
+        adapt_s = @elapsed begin
+            components = operator_components(L)
+            pinned = Set(maximum(nodes) for nodes in components)
+            free = [i for i in axes(L,1) if !(i in pinned)]
+            sub = L[free,free]
+        end
         if direct && !isempty(free); factor = cholesky(sub); end
     end
     its = [0]
@@ -522,7 +533,7 @@ function run_grounded_julia(L, b, graph_name, tol, maxiter, direct)
     name = direct ? "Chol [Julia]" : "CG [Julia]"
     BenchResult(name, graph_name, size(L,1), nnz(L), setup_s, stop.seconds,
         setup_s+stop.seconds, stop.iterations, stop.residual, 0.0,
-        (setup_s+stop.seconds)/nnz(L)*1e6, stop.passes, stop.check_s)
+        (setup_s+stop.seconds)/nnz(L)*1e6, stop.passes, stop.check_s, adapt_s)
 end
 run_cg_julia(L,b,name,tol,maxiter) = run_grounded_julia(L,b,name,tol,maxiter,false)
 run_cholesky_julia(L,b,name,tol,maxiter) = run_grounded_julia(L,b,name,tol,maxiter,true)
