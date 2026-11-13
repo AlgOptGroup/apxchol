@@ -566,12 +566,14 @@ __global__ void bind_pivot_ranges(
     pivots[ordinal].incidence_end = owner_offsets[vertex + 1];
 }
 
+// b < 2^low_bits, so the packed key orders (a, b) like (a << 32) | b; a
+// radix sort over the packed width then makes fewer passes.
 __global__ void build_pair_keys(const work_record* records,
                                 std::size_t count,
-                                std::uint64_t* keys) {
+                                std::uint64_t* keys, int low_bits) {
     const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < count)
-        keys[i] = (std::uint64_t(records[i].a) << 32) | records[i].b;
+        keys[i] = (std::uint64_t(records[i].a) << low_bits) | records[i].b;
 }
 
 __global__ void build_first_keys(const work_record* records,
@@ -2257,10 +2259,15 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
 
     report.timings.dedup_ms = timer.measure_ms([&] {
         if (sort_g) {
-            build_pair_keys<<<blocks_for(sort_g), kBlock>>>(second.get(), sort_g, keys_a.get());
+            // Records are (pivot ordinal < p, neighbor < n); the sort covers
+            // only the packed key's bits (same stable order as all 64).
+            const int neighbor_bits = owner_sort_end_bit(n);
+            build_pair_keys<<<blocks_for(sort_g), kBlock>>>(second.get(), sort_g, keys_a.get(),
+                                                            neighbor_bits);
             cuda_check(cudaGetLastError(), "launch gather-key construction");
             cub.sort_pairs(keys_a.get(), keys_b.get(), second.get(), first.get(),
-                           sort_g, "stable sort gathered neighbors");
+                           sort_g, "stable sort gathered neighbors",
+                           neighbor_bits + owner_sort_end_bit(p));
             reduce_equal_pairs<<<blocks_for(sort_g), kBlock>>>(
                 first.get(), sort_g, candidates.get(), flags.get());
             cuda_check(cudaGetLastError(), "launch deterministic neighbor dedup");
@@ -2384,9 +2391,11 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
                 build_first_keys<<<blocks_for(canonical_sort_count), kBlock>>>(
                     scratch, canonical_sort_count, keys_a.get());
                 cuda_check(cudaGetLastError(), "launch pivot-key construction");
+                // Keys are pivot ordinals < p.
                 cub.sort_pairs(keys_a.get(), keys_b.get(), scratch,
                                sort_input, canonical_sort_count,
-                               "stable regroup canonical neighbors by pivot");
+                               "stable regroup canonical neighbors by pivot",
+                               owner_sort_end_bit(p));
                 scatter_oversized_unique<<<blocks_for(oversized_u), kBlock>>>(
                     oversized_unique.get(), oversized_u, oversized_starts.get(),
                     pivot_offsets.get(), unique);
@@ -2490,8 +2499,9 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
             build_first_keys<<<blocks_for(e), kBlock>>>(
                 fill_candidates, e, keys_a.get());
             cuda_check(cudaGetLastError(), "launch excess target keys");
+            // Keys are target vertices < n.
             cub.sort_pairs(keys_a.get(), keys_b.get(), fill_candidates,
-                           unique, e, "stable sort excess updates");
+                           unique, e, "stable sort excess updates", owner_sort_end_bit(n));
             reduce_equal_pairs<<<blocks_for(e), kBlock>>>(
                 unique, e, scratch, flags.get());
             cuda_check(cudaGetLastError(), "launch deterministic excess reduce");
