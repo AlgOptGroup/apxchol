@@ -18,7 +18,10 @@ adjacency matrix is rejected with an error that suggests the conversion.
 Pass exactly one of:
 
 - `--rhs FILE`: a dense Matrix Market vector, or an `n` by `k` matrix whose
-  columns are solved as one batch;
+  columns are solved as one batch. From `k = 16` on CPU (64 on CUDA) the
+  factor uses the trace-cycle sampler, which costs more setup but needs fewer
+  iterations per column. Metal keeps GKS. With `--backend auto` the threshold
+  follows the backend predicted before the matrix is checked.
 - `--random-rhs`: a random right-hand side for experiments, compatible with
   each connected component of a Laplacian.
 

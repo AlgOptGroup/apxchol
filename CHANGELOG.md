@@ -4,6 +4,7 @@
 
 ### Solver and factorization
 - New experimental trace-cycle clique sampler (`factor_options::experimental.sampler`) on CPU and CUDA. GKS stays the default.
+- One-call solves with many right-hand sides use the trace-cycle sampler: Python `apxchol.solve`, MATLAB/Octave `apxchol_solve` and the CLI with an `--rhs` matrix, from 16 columns when the backend predicted before the matrix is checked is CPU and from 64 when it is CUDA (never on Metal). Its setup costs 1.0 to 1.5 times GKS's and it needs fewer iterations per column. Over 11 benchmark and IPM matrices, setup plus a 16-column CPU solve takes 0.62 to 0.97 of the GKS time, and a 64-column CUDA solve 0.71 to 0.99, on one EPYC 9654 node with 32 threads and one RTX 4090. Kronecker and R-MAT graphs, where GKS already converges in 10 to 14 iterations, take up to 12% (CPU) and 20% (CUDA) longer. Reusable solvers (`factorize`, `apxchol_solver`) keep GKS, so results change only for these one-call solves.
 - Faster setup: one AoS graph throughout factorization, incremental degrees, and parallel residual sparsification.
 - Inputs are validated by operator class; nearly-SDDM inputs are repaired by M-matrix lumping.
 - Batched solves take any number of right-hand sides on CPU, CUDA and Metal, processed in panels of up to eight columns on CPU, 32 on CUDA and four on Metal.

@@ -1239,6 +1239,19 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
 #endif
 }
 
+void detail::choose_sampler(solve_options& opts, std::int64_t columns) {
+    std::int64_t threshold = 16;
+    if (select_solve_backend(opts) == solve_backend::gpu) {
+#if defined(APXCHOL_USE_CUDA)
+        threshold = 64;
+#else
+        return;   // Metal setup supports only GKS
+#endif
+    }
+    if (columns >= threshold)
+        opts.factor_opts.experimental.sampler = clique_sampler::trace_cycle;
+}
+
 namespace {
 // Splits `columns` into panels of the widest width that fits, widest first;
 // every width list ends in 1.
