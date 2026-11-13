@@ -788,6 +788,8 @@ factorization factorize_impl(const Eliminator& elim,
                 if (!dense_tail_declined && last_live && active.size() <= dense_tail_max_vertices &&
                     double(active.size()) * double(active.size() - 1) * dense_tail_density <=
                         double(last_live)) {
+                    // Charge the rounds so far to the same stage as without the block.
+                    if (cp) (*cp)("gpu_owned_factorization");
                     if (gpu_round_shadow.finish_owned_dense_tail(active)) {
                         // Rounds are independent sets; the block's columns depend
                         // on each other, so each counts as a round of one vertex.

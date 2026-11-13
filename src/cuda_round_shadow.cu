@@ -3003,8 +3003,8 @@ gpu_round_shadow_device_state::download_owned_factor_columns(
 // Exact dense tail of the owned route. The residual of K active vertices is scattered into a dense K x K
 // lower triangle (row-major), factored by right-looking Cholesky, and appended
 // as K factor columns in active-ID order with the round convention
-// (diag = sqrt(d), stored entry = -L_ij = w / sqrt(d)). A pivot at or below
-// 1e-10 of its assembled diagonal (pure-Laplacian null space) gets diag 1 and
+// (diag = sqrt(d), stored entry = -L_ij = w / sqrt(d)). A pivot at rounding
+// level of its assembled diagonal (pure-Laplacian null space) gets diag 1 and
 // no entries, like an isolated vertex of the rounds.
 namespace dense_tail {
 __global__ void map_ids(const node_index* ids, std::uint32_t K, std::uint32_t* loc) {
@@ -3032,8 +3032,11 @@ __global__ void add_excess(const node_index* ids, std::uint32_t K, const double*
 }
 __global__ void column(std::uint32_t j, std::uint32_t K, double* M, const double* original,
                        double* root) {
+    // A Schur-complement diagonal at rounding level of its assembled value is
+    // a null-space pivot (a Laplacian component); larger ones are kept.
     const double d = M[std::size_t(j) * K + j];
-    const bool zero = !(d > 1e-10 * original[j]) || !isfinite(d);
+    const double rounding = 64.0 * double(K) * 2.220446049250313e-16;
+    const bool zero = !(d > rounding * original[j]) || !isfinite(d);
     const double r = zero ? 1.0 : sqrt(d);
     for (std::uint32_t i = j + 1 + threadIdx.x; i < K; i += blockDim.x) {
         double& x = M[std::size_t(i) * K + j];
@@ -3101,8 +3104,14 @@ bool gpu_round_shadow_device_state::finish_owned_dense_tail(
     {
         const std::size_t block = K * K * sizeof(double) + n * sizeof(std::uint32_t) +
             K * (sizeof(node_index) + 3 * sizeof(std::uint32_t) + 3 * sizeof(double));
-        const std::size_t log = K * sizeof(gpu_round_shadow_factor_column) +
-            K * (K - 1) / 2 * sizeof(gpu_round_shadow_factor_entry);
+        // Log growth allocates the whole new buffer while the old one is alive.
+        const std::size_t columns_required = std::max<std::size_t>(n, I.factor_column_count + K);
+        const std::size_t entries_required = I.factor_entry_count + K * (K - 1) / 2;
+        const std::size_t log =
+            (I.factor_columns.count() < columns_required
+                 ? columns_required * sizeof(gpu_round_shadow_factor_column) : 0) +
+            (I.factor_entries.count() < entries_required
+                 ? entries_required * sizeof(gpu_round_shadow_factor_entry) : 0);
         std::size_t free = 0, total = 0;
         cuda_check(cudaMemGetInfo(&free, &total), "query dense tail fit");
         if (block + log > free || total / 10 > free - (block + log)) { guard.commit(); return false; }
@@ -3157,6 +3166,32 @@ bool gpu_round_shadow_device_state::finish_owned_dense_tail(
     I.resident_count = 0;
     I.fingerprint.active_count = 0;
     I.fingerprint.live_incidences = 0;
+    // The block ends the rounds: release their scratch and compact the log,
+    // as the last round does, keeping the active/excess/offset view.
+    I.owned_degrees.reset("release completed owned degrees");
+    I.owned_common_scratch.release();
+    I.residual_0.reset("release completed residual slot 0");
+    I.residual_1.reset("release completed residual slot 1");
+    I.owner_offsets(1 - I.current_slot).reset("release spare owner offsets");
+    I.sort_keys_a.reset("release completed radix keys A");
+    I.sort_keys_b.reset("release completed radix keys B");
+    I.selected_epoch_by_vertex.reset("release completed selected epochs");
+    I.cycle_workspace.reset("release completed cycle sampler moments");
+    I.cycle_plan_cut.reset("release completed trace plan cutoffs");
+    I.cycle_plan_state.reset("release completed trace plan streams");
+    I.cycle_status.reset("release completed cycle sampler status");
+    M.reset("release dense tail block");
+    {
+        const std::size_t exact_bytes = I.factor_entry_count * sizeof(gpu_round_shadow_factor_entry);
+        std::size_t free = 0, total_memory = 0;
+        cuda_check(cudaMemGetInfo(&free, &total_memory), "query factor-log compaction fit");
+        if (I.factor_entry_count < I.factor_entries.count() && exact_bytes <= free &&
+            total_memory / 10 <= free - exact_bytes) {
+            I.factor_entries.shrink_preserve(I.factor_entry_count, "allocate final factor-entry log",
+                "copy final factor-entry log", "release grown factor-entry log");
+            ++I.factor_log_allocations;
+        }
+    }
     if (I.verbose)
         std::fprintf(stderr, "[gpu-dense-tail] K=%zu entries=%zu dense_bytes=%zu\n", K, total,
                      K * K * sizeof(double));
