@@ -401,9 +401,12 @@ void panel_residual(std::int64_t n, double *part, Entry entry, std::array<double
     }
 }
 
+// x_alpha is alpha divided by the column's power-of-two scale: p, r and Ap
+// are in scaled units and x stays in the caller's.
 template <int C>
 void panel_update_xr(double *x, const double *p, double *r, const double *Ap,
-                     const std::array<double, C> &alpha, const std::array<bool, C> &active,
+                     const std::array<double, C> &alpha, const std::array<double, C> &x_alpha,
+                     const std::array<bool, C> &active,
                      std::int64_t n, double *part, std::array<double, C> &rr,
                      std::array<double, C> &rs) {
     panel_residual<C>(
@@ -413,7 +416,7 @@ void panel_update_xr(double *x, const double *p, double *r, const double *Ap,
                 for (int c = 0; c < C; ++c)
                     if (C == 1 || active[c]) {
                         const auto i = (first + k) * C + c;
-                        x[i] += alpha[c] * p[i];
+                        x[i] += x_alpha[c] * p[i];
                     }
             std::array<std::array<double, C>, Rows> residuals{};
             for (int k = 0; k < Rows; ++k)
@@ -429,15 +432,21 @@ void panel_update_xr(double *x, const double *p, double *r, const double *Ap,
         rr, rs);
 }
 
+// r = scale * b - product_scale * (A x0), each term scaled before the
+// subtraction. The scales are powers of two, so with scales of 1 this is
+// b - A x0 itself.
 template <int C>
 void panel_init_residual(double *r, const double *b, const double *Ax0, std::int64_t n,
+                         const std::array<double, C> &scales,
+                         const std::array<double, C> &product_scales,
                          double *part, std::array<double, C> &rr, std::array<double, C> &rs) {
     panel_residual<C>(n, part, [=]<int Rows>(std::int64_t first) {
         std::array<std::array<double, C>, Rows> residuals{};
         for (int k = 0; k < Rows; ++k)
             for (int c = 0; c < C; ++c) {
                 const auto i = (first + k) * C + c;
-                residuals[k][c] = Ax0 ? b[i] - Ax0[i] : b[i];
+                residuals[k][c] = Ax0 ? b[i] * scales[c] - Ax0[i] * product_scales[c]
+                                      : b[i] * scales[c];
             }
         for (int k = 0; k < Rows; ++k)
             for (int c = 0; c < C; ++c)
@@ -729,34 +738,24 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
             warm[c] = !vec::is_zero(column(x0, c));
     }
     const bool any_warm = std::any_of(warm.begin(), warm.end(), [](bool v) { return v; });
-    // The split the update loops use, so their threads touch x's pages first.
-    const int touch_workers = detail::cpu_solve_threads(n);
-    if (any_warm) {
-        if (x0 != x) {
-#pragma omp parallel for schedule(static) if (touch_workers > 1) num_threads(touch_workers)
-            for (std::int64_t i = 0; i < n; i++)
-                for (int c = 0; c < C; c++) x[i * C + c] = x0[i * C + c];
-        }
-        if (op_->fp32)
-            (void)panel_spmv<C>(op_->Lrm_f, x, Ap, part);
-        else
-            (void)panel_spmv<C>(op_->Lrm, x, Ap, part);
-    }
-    panel_init_residual<C>(r, b, any_warm ? Ap : nullptr, n, part, rr, rs);
-    if (!any_warm) {
-#pragma omp parallel for schedule(static) if (touch_workers > 1) num_threads(touch_workers)
-        for (std::int64_t i = 0; i < n; i++)
-            for (int c = 0; c < C; c++) x[i * C + c] = 0.0;
-    }
-    for (int c = 0; c < C; c++)
-        norm[c] = warm[c] ? std::sqrt(vec::squared_norm(column(b, c))) : std::sqrt(rr[c]);
-    // Only exceptional columns need scaling; ordinary panels reuse their workspace.
-    // Panels carry the triangular sweeps in FP32, so their columns follow
-    // CUDA's rule: a column whose largest right-hand-side or warm-start entry
-    // lies outside 2^+-32 of the factor's reference magnitude is scaled by
-    // a power of two, which is exact.
-    std::array<double, C> max_b{}, max_x0{};
+    // Panels carry the triangular sweeps in FP32, so every column is scaled
+    // by a power of two that brings its largest right-hand-side or warm-start
+    // entry to the factor's reference magnitude (gpu_scaling::fp32_scale, the
+    // rule CUDA uses). The residual, the direction and their products are in
+    // scaled units. The solution stays in the caller's: its step is
+    // alpha / scale. A power of two changes no significand, so residual
+    // ratios, tolerances and iteration counts are those of the unscaled
+    // system. b is read here, before anything overwrites the packed panel.
+    //
+    // A column scaled by more than 2^+-512 could leave the FP64 range in the
+    // caller's units while its scaled solution is ordinary. Such a column
+    // keeps its solution in scaled units (x_units) and is restored, and
+    // checked, once at the end.
+    std::array<double, C> scales, x_units, max_b{};
+    scales.fill(1.0);
+    x_units.fill(1.0);
     if constexpr (C > 1) {
+        std::array<double, C> max_x0{};
         const int workers = detail::cpu_solve_threads(n);
         #pragma omp parallel if (workers > 1) num_threads(workers)
         {
@@ -773,53 +772,76 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
                 max_x0[c] = std::max(max_x0[c], local_x0[c]);
             }
         }
+        for (int c = 0; c < C; ++c)
+            if (max_b[c] != 0) {
+                scales[c] = detail::gpu_scaling::fp32_scale(std::max(max_b[c], max_x0[c]),
+                                                            installed_->fp32_reference);
+                if (std::abs(std::ilogb(scales[c])) > 512) x_units[c] = scales[c];
+            }
     }
-    std::array<double, C> scales;
-    scales.fill(1.0);
-    bool scaled = false;
-    for (int c = 0; c < C; ++c) {
-        const double squared = warm[c] ? norm[c] * norm[c] : rr[c];
-        const bool ordinary = (std::isnormal(squared) && std::isfinite(rr[c])) || n == 0;
-        const auto rhs = column(b, c);
-        double maximum;
-        if constexpr (C > 1) {
-            maximum = max_b[c];
-            if (maximum == 0) continue;
-            maximum = std::max(maximum, max_x0[c]);
-            if (ordinary && detail::gpu_scaling::fp32_scale(maximum, installed_->fp32_reference) == 1.0)
-                continue;
-        } else {
-            if (ordinary) continue;
-            maximum = vec::max_abs(rhs);
-            if (maximum == 0) continue;
-            if (x0) maximum = std::max(maximum, vec::max_abs(column(x0, c)));
+    const bool deferred = std::any_of(x_units.begin(), x_units.end(), [](double v) { return v != 1.0; });
+    std::array<double, C> product_scales;
+    for (int c = 0; c < C; ++c) product_scales[c] = scales[c] / x_units[c];
+    // The split the update loops use, so their threads touch x's pages first.
+    const int touch_workers = detail::cpu_solve_threads(n);
+    if (any_warm) {
+        if (x0 != x || deferred) {
+#pragma omp parallel for schedule(static) if (touch_workers > 1) num_threads(touch_workers)
+            for (std::int64_t i = 0; i < n; i++)
+                for (int c = 0; c < C; c++) x[i * C + c] = x0[i * C + c] * x_units[c];
         }
-        scales[c] = C > 1 ? detail::gpu_scaling::pow2_scale(maximum, installed_->fp32_reference)
-                          : detail::gpu_scaling::pow2_scale(maximum);
-        if (scales[c] == 1.0 || !std::isnormal(vec::scaled_squared_norm(rhs, scales[c])))
-            throw std::invalid_argument("CPU solve: RHS and initial guess exceed the common scaling range");
-        scaled = true;
+        if (op_->fp32)
+            (void)panel_spmv<C>(op_->Lrm_f, x, Ap, part);
+        else
+            (void)panel_spmv<C>(op_->Lrm, x, Ap, part);
     }
-    if (scaled) {
-        buffer<double> scaled_b(panel), scaled_x0(x0 ? panel : 0);
-        for (std::int64_t i = 0; i < n; ++i)
-            for (int c = 0; c < C; ++c) {
-                scaled_b[i * C + c] = b[i * C + c] * scales[c];
-                if (x0) scaled_x0[i * C + c] = x0[i * C + c] * scales[c];
+    panel_init_residual<C>(r, b, any_warm ? Ap : nullptr, n, scales, product_scales, part, rr, rs);
+    if (!any_warm) {
+#pragma omp parallel for schedule(static) if (touch_workers > 1) num_threads(touch_workers)
+        for (std::int64_t i = 0; i < n; i++)
+            for (int c = 0; c < C; c++) x[i * C + c] = 0.0;
+    }
+    for (int c = 0; c < C; c++)
+        norm[c] = warm[c] ? std::sqrt(vec::scaled_squared_norm(column(b, c), scales[c])) : std::sqrt(rr[c]);
+    if constexpr (C > 1) {
+        // A scaled column has a largest entry near the reference, so its
+        // squared norms are ordinary FP64 values whatever the caller passed.
+        // They are not only when the right-hand side is negligible next to
+        // the warm start, or the initial residual overflows.
+        for (int c = 0; c < C; ++c)
+            if (max_b[c] != 0 && n != 0 && !(std::isnormal(norm[c] * norm[c]) && std::isfinite(rr[c])))
+                throw std::invalid_argument("CPU solve: RHS and initial guess exceed the common scaling range");
+    } else {
+        // Scalar solves keep FP64 sweeps and scale only a column whose squared
+        // norm leaves the FP64 range, by solving a scaled copy.
+        const double squared = warm[0] ? norm[0] * norm[0] : rr[0];
+        if (!((std::isnormal(squared) && std::isfinite(rr[0])) || n == 0)) {
+            const auto rhs = column(b, 0);
+            double maximum = vec::max_abs(rhs);
+            if (maximum != 0) {
+                if (x0) maximum = std::max(maximum, vec::max_abs(column(x0, 0)));
+                const double scale = detail::gpu_scaling::pow2_scale(maximum);
+                if (scale == 1.0 || !std::isnormal(vec::scaled_squared_norm(rhs, scale)))
+                    throw std::invalid_argument("CPU solve: RHS and initial guess exceed the common scaling range");
+                buffer<double> scaled_b(panel), scaled_x0(x0 ? panel : 0);
+                for (std::int64_t i = 0; i < n; ++i) {
+                    scaled_b[i] = b[i] * scale;
+                    if (x0) scaled_x0[i] = x0[i] * scale;
+                }
+                solve_panel<C>(scaled_b.data(), x, results, timings, tol, max_iter,
+                               x0 ? scaled_x0.data() : nullptr);
+                for (std::int64_t i = 0; i < n; ++i) {
+                    double& value = x[i];
+                    const double restored = value / scale;
+                    if (!std::isfinite(restored))
+                        throw std::overflow_error("CPU solve: solution exceeds the finite range");
+                    if (value != 0 && restored == 0)
+                        throw std::underflow_error("CPU solve: solution underflows to zero");
+                    value = restored;
+                }
+                return;
             }
-        solve_panel<C>(scaled_b.data(), x, results, timings, tol, max_iter,
-                        x0 ? scaled_x0.data() : nullptr);
-        for (std::int64_t i = 0; i < n; ++i)
-            for (int c = 0; c < C; ++c) {
-                double& value = x[i * C + c];
-                const double restored = value / scales[c];
-                if (!std::isfinite(restored))
-                    throw std::overflow_error("CPU solve: solution exceeds the finite range");
-                if (value != 0 && restored == 0)
-                    throw std::underflow_error("CPU solve: solution underflows to zero");
-                value = restored;
-            }
-        return;
+        }
     }
     for (int c = 0; c < C; c++) {
         results[c].residual = norm[c] == 0 ? 0 : (warm[c] ? std::sqrt(rr[c]) / norm[c] : 1);
@@ -834,16 +856,30 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
         return std::any_of(active.begin(), active.end(), [](bool v) { return v; });
     };
     const auto center = [&] {
-        if (!laplacian)
-            return;
-        auto mean = detail::det_sum_columns<C>(x, n, part);
-        for (double &v : mean)
-            v /= static_cast<double>(n);
-        const int workers = detail::cpu_solve_threads(n);
+        if (laplacian) {
+            auto mean = detail::det_sum_columns<C>(x, n, part);
+            for (double &v : mean)
+                v /= static_cast<double>(n);
+            const int workers = detail::cpu_solve_threads(n);
 #pragma omp parallel for schedule(static) if (workers > 1) num_threads(workers)
-        for (std::int64_t i = 0; i < n; i++)
-            for (int c = 0; c < C; c++)
-                x[i * C + c] -= mean[c];
+            for (std::int64_t i = 0; i < n; i++)
+                for (int c = 0; c < C; c++)
+                    x[i * C + c] -= mean[c];
+        }
+        if (!deferred) return;
+        // Restore the columns that kept their solution in scaled units.
+        for (int c = 0; c < C; ++c) {
+            if (x_units[c] == 1.0) continue;
+            for (std::int64_t i = 0; i < n; ++i) {
+                double& value = x[i * C + c];
+                const double restored = value / x_units[c];
+                if (!std::isfinite(restored))
+                    throw std::overflow_error("CPU solve: solution exceeds the finite range");
+                if (value != 0 && restored == 0)
+                    throw std::underflow_error("CPU solve: solution underflows to zero");
+                value = restored;
+            }
+        }
     };
     if (!any_active()) {
         center();
@@ -897,7 +933,9 @@ void detail::cpu_route::solve_panel(const double *b, double *x, solve_result *re
         if (!any_active())
             break;
         t = trace ? now() : 0;
-        panel_update_xr<C>(x, p, r, Ap, alpha, active, n, part, rr, rs);
+        std::array<double, C> x_alpha;
+        for (int c = 0; c < C; c++) x_alpha[c] = alpha[c] / product_scales[c];
+        panel_update_xr<C>(x, p, r, Ap, alpha, x_alpha, active, n, part, rr, rs);
         if (trace)
             t_update_xr += now() - t;
         if (use_cp)

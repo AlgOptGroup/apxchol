@@ -173,6 +173,49 @@ Sparse weighted_grid(int side, double excess) {
     return test::from_triplets(n, n, entries);
 }
 
+// SDDM 5-point grid whose weights grow by `decades` powers of ten from one
+// side to the other, so the factor's diagonal spans about that range.
+Sparse graded_grid(int side, double decades) {
+    const int n = side * side;
+    std::vector<test::triplet> entries;
+    std::vector<double> degree(n, 0.0), largest(n, 0.0);
+    const auto grade = [&](int c) {
+        return std::pow(10.0, decades * (static_cast<double>(c) / (side - 1) - 0.5));
+    };
+    const auto edge = [&](int i, int j, double scale) {
+        const double weight = scale * (1.0 + 0.5 * std::sin(0.37 * i + 0.11 * j));
+        entries.push_back({i, j, -weight});
+        entries.push_back({j, i, -weight});
+        degree[i] += weight;
+        degree[j] += weight;
+        largest[i] = std::max(largest[i], weight);
+        largest[j] = std::max(largest[j], weight);
+    };
+    for (int r = 0; r < side; ++r)
+        for (int c = 0; c < side; ++c) {
+            if (r + 1 < side) edge(r * side + c, (r + 1) * side + c, grade(c));
+            if (c + 1 < side) edge(r * side + c, r * side + c + 1, std::sqrt(grade(c) * grade(c + 1)));
+        }
+    for (int i = 0; i < n; ++i) entries.push_back({i, i, degree[i] + 0.0025 * largest[i]});
+    return test::from_triplets(n, n, entries);
+}
+
+// Right-hand sides of a graded_grid solve, eight columns whose largest entry
+// is in [2^exponent, 2^(exponent + 1)).
+Dense graded_columns(const Sparse& matrix, int exponent) {
+    Dense rhs(matrix.rows, 8);
+    for (int q = 0; q < 8; ++q) {
+        Vector exact(matrix.rows);
+        for (int i = 0; i < matrix.rows; ++i) exact[i] = std::sin((i + 1) * (q + 1) * 0.013) + 0.1 * q;
+        const Vector b = test::multiply(matrix, exact);
+        double largest = 0;
+        for (const double v : b) largest = std::max(largest, std::abs(v));
+        const double scale = std::ldexp(1.0, exponent - std::ilogb(largest));
+        for (int i = 0; i < matrix.rows; ++i) rhs(i, q) = b[i] * scale;
+    }
+    return rhs;
+}
+
 void expect_solution(const Sparse& matrix, std::span<const double> rhs,
                      std::span<const double> x,
                      double tolerance = apxchol::default_tol) {
@@ -793,6 +836,39 @@ TEST(Solver, CpuFp32PanelSweepsScaleExtremeColumnsAndOperators) {
                 EXPECT_TRUE(scalar.converged);
                 EXPECT_GT(scalar.iterations, 5);
                 EXPECT_LE(std::abs(panel.columns[q].iterations - scalar.iterations), 1);
+                EXPECT_LE(stable_residual(matrix, output.col(q), b), tol);
+            }
+        }
+    }
+}
+
+// A factor whose diagonal spans 60 decades leaves the FP32 sweeps no slack:
+// only a column sitting at the factor's reference magnitude keeps their
+// results inside FP32. Every column is scaled there, so columns far below it
+// converge like the FP64 scalar solve. A column left at 2^-32 did not.
+TEST(Solver, CpuFp32PanelSweepsConvergeOnAFactorSpanningSixtyDecades) {
+    const scoped_omp_threads threads(4);
+    constexpr double tol = 1e-8;
+    const Sparse matrix = graded_grid(48, 60);
+    for (const auto storage : {apxchol::factor_storage_type::fp32,
+                               apxchol::factor_storage_type::fp16}) {
+        if (storage == apxchol::factor_storage_type::fp16 && !apxchol::detail::omp_sptrsv::fp16_supported())
+            continue;
+        auto options = cpu_options();
+        options.factor_opts.factor_storage = storage;
+        apxchol::solver owner(test::csc(matrix), options);
+        for (const int exponent : {-32, -24, 0, 24}) {
+            SCOPED_TRACE(::testing::Message() << "storage " << int(storage) << " exponent " << exponent);
+            const Dense rhs = graded_columns(matrix, exponent);
+            Dense output(matrix.rows, rhs.cols);
+            const auto panel = owner.solve(std::as_const(rhs).view(), output.view(), tol, 400);
+            for (int q = 0; q < rhs.cols; ++q) {
+                SCOPED_TRACE(q);
+                const auto b = std::as_const(rhs).col(q);
+                const auto scalar = owner.solve(b, tol, 400);
+                EXPECT_TRUE(scalar.converged);
+                EXPECT_TRUE(panel.columns[q].converged);
+                EXPECT_LE(std::abs(panel.columns[q].iterations - scalar.iterations), 2);
                 EXPECT_LE(stable_residual(matrix, output.col(q), b), tol);
             }
         }
@@ -1967,6 +2043,44 @@ TEST(Solver, GpuSolvesOperatorsAndColumnsOfDifferentMagnitudes) {
                     EXPECT_LE(stable_residual(matrix, scalar.x, b), tol);
                 }
             }
+        }
+    }
+#endif
+}
+
+// The same 60-decade factor on CUDA, whose sweeps are FP32 at every width.
+// Metal accepts operator values within 2^+-100 and is not exercised here.
+TEST(Solver, CudaSolvesConvergeOnAFactorSpanningSixtyDecades) {
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA owner required";
+#else
+    if (!apxchol::backend_available(apxchol::solve_backend::gpu))
+        GTEST_SKIP() << "No usable CUDA device";
+    const scoped_omp_threads threads(2);
+    constexpr double tol = 1e-8;
+    const Sparse matrix = graded_grid(48, 60);
+    for (const auto storage : {apxchol::factor_storage_type::fp16,
+                               apxchol::factor_storage_type::fp32}) {
+        auto options = cpu_options();
+        options.backend = apxchol::solve_backend::gpu;
+        options.factor_opts.factor_storage = storage;
+        apxchol::solver owner(test::csc(matrix), options);
+        for (const int exponent : {-32, -24, 0, 24}) {
+            SCOPED_TRACE(::testing::Message() << "storage " << int(storage) << " exponent " << exponent);
+            const Dense rhs = graded_columns(matrix, exponent);
+            Dense output(matrix.rows, rhs.cols);
+            const auto panel = owner.solve(std::as_const(rhs).view(), output.view(), tol, 400);
+            for (int q = 0; q < rhs.cols; ++q) {
+                SCOPED_TRACE(q);
+                const auto b = std::as_const(rhs).col(q);
+                EXPECT_TRUE(panel.columns[q].converged);
+                EXPECT_LE(panel.columns[q].iterations, 25);
+                EXPECT_LE(stable_residual(matrix, output.col(q), b), tol);
+            }
+            const auto scalar = owner.solve(std::as_const(rhs).col(0), tol, 400);
+            EXPECT_TRUE(scalar.converged);
+            EXPECT_LE(scalar.iterations, 25);
+            EXPECT_LE(stable_residual(matrix, scalar.x, std::as_const(rhs).col(0)), tol);
         }
     }
 #endif

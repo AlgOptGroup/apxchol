@@ -58,30 +58,36 @@ FP64 sweeps. A panel column and the single solve of the same right-hand side
 therefore apply preconditioners that differ by FP32 rounding, and their
 iteration counts can differ by 1.
 
-CPU panels and CUDA scale each right-hand-side column relative to the
+CPU panels and CUDA scale every right-hand-side column relative to the
 preconditioner. With diagonal scale `d` the FP32 sweeps turn a residual `r`
 into about `r / sqrt(d)` and then `r / d`. The reference magnitude is the power
 of two at `sqrt(d)`, where `d` is the geometric mean of the smallest and
 largest `L_jj^2` of the factor. It is read once at setup from the host factor.
 A factor that CUDA builds on the device stays there, and the positive diagonal
 entries of the operator it was built from stand in for it. A residual near the
-reference keeps all three values the same distance from the FP32 limits. A column whose largest right-hand-side or initial-guess entry
-is within 2^32 of the reference in either direction is left as it is. Any
-other column is multiplied by the power of two that brings that entry into
-[reference, 2 reference), the iteration runs on the scaled column, and the
-solution is divided by the same power of two. Powers of two change no
-significand, so tolerances, reported residuals and `converged` keep their
-meaning, and a result changes only where an FP32 intermediate would otherwise
-have overflowed or lost bits to underflow. Operators and right-hand sides of
-very different magnitudes therefore converge as they do in FP64.
+reference keeps all three values the same distance from the FP32 limits.
 
-Metal always scales a column so that its largest residual entry is in [1, 2)
-and multiplies the preconditioned residual by the reference magnitude of the
-operator's diagonal. It accepts operator values within 2^-100 to 2^100.
+Each column is multiplied by the power of two that brings its largest
+right-hand-side or initial-guess entry into [reference, 2 reference), whatever
+its size. The iteration runs on the scaled residual, and the solution is
+returned in the caller's units. Powers of two change no significand, so
+tolerances, reported residuals, `converged` and iteration counts are those of
+the unscaled system, and a result differs from an unscaled run only where an
+FP32 intermediate would have overflowed or lost bits to underflow. Operators
+and right-hand sides of very different magnitudes therefore converge as they
+do in FP64, and so do small right-hand sides on a factor whose diagonal spans
+60 decades. CPU single right-hand-side solves keep FP64 sweeps and are not
+scaled this way.
 
-One reference serves the whole factor. When its squared diagonal entries span
-more than about 2^60 the sweeps of some rows can still leave the FP32 range on
-every backend.
+Metal follows a different rule. It scales a column so that the largest entry
+of its initial residual is in [1, 2), runs the sweeps on that, and multiplies
+their result by the reference magnitude of the operator's diagonal. Its sweeps
+therefore see an input near 1 for every operator, and it accepts operator
+values within 2^-100 to 2^100.
+
+One reference serves the whole factor. The widest factor tested has squared
+diagonal entries spanning 60 decades, about 2^200. A wider one can push the
+sweeps of some rows out of the FP32 range on every backend.
 
 ## Scaled FP16 contract
 
