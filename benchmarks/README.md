@@ -180,7 +180,9 @@ comments, Pages or README measurements.
   Dirichlet pin per singular component and, for split runs, component slicing.
   It is charged to the Setup of the runs that need it and reported within Setup
   as `adapt_s`, the way `stop_check_s` is reported within Solve. apxchol takes
-  components natively and reports 0. A whole run pays discovery only when its
+  components natively, so its whole-operator runs report 0. Any split run, an
+  explicit `--decompose split` of apxchol included, reports the discovery and
+  slicing it uses. A whole run pays discovery only when its
   grounding uses it, which is the case for an operator with both singular and
   nonsingular components. The adaptation code is parallel and returns the same
   components, pins and operators at every thread count, so its time measures the
