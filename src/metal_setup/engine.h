@@ -37,7 +37,8 @@ class Engine {
     Engine(id<MTLDevice> dev) : device(dev) {
         NSError *error = nil;
         require(device != nil, "No Metal device for factorization");
-        auto library = metal::compile_library(device, resident_metal_source).library;
+        const std::string source = std::string(resident_metal_source) + resident_metal_source_rest;
+        auto library = metal::compile_library(device, source.c_str()).library;
         auto make_setup_pipeline = [&](unsigned stage, bool scalar) {
             auto values = [MTLFunctionConstantValues new];
             [values setConstantValue:&stage type:MTLDataTypeUInt atIndex:0];
@@ -98,6 +99,7 @@ class Engine {
             s.state->seed = seed;
             s.state->prune_gap = s.state->prune_enabled = 1;
             s.state->degree_quantile = float(metal_degree_quantile(options.experimental.partition.degree_quantile));
+            s.state->trace = options.experimental.sampler == clique_sampler::trace_cycle ? 1u : 0u;
             NSMutableArray *scratch = [NSMutableArray new];
             for (unsigned count = n + 1;;) {
                 count = (count + 255) / 256;

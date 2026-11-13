@@ -65,8 +65,7 @@ struct partition_options {
 /// Research controls outside the 1.x compatibility promise. Members may change
 /// or disappear in any release; keep the defaults for ordinary use.
 /// GPU routes require the defaults of partitioner, cpu_schedule,
-/// exact_core_max_h and double_cycle_min_h. Metal also
-/// requires the default sampler.
+/// exact_core_max_h and double_cycle_min_h.
 struct experimental_options {
     /// Built-in partitioner; GPU construction requires block_greedy.
     partitioner_kind partitioner = partitioner_kind::block_greedy;

@@ -40,6 +40,7 @@ struct State {
     unsigned pending_entries, pending_fills, threshold, edge_capacity, has_excess, eligible;
     unsigned prune_gap, prune_streak, prune_hidden, prune_enabled;
     float degree_quantile;
+    unsigned trace;   // clique sampler: 1 trace-cycle, 0 GKS
     seed_type seed;
 };
 enum class Field : unsigned {
@@ -258,7 +259,7 @@ APXCHOL_GPU_FUNCTION void group_star(Memory m, Math math, unsigned row, Group gr
     const unsigned v = s.selected[row], begin = s.begin[v];
     const auto seed = s.state->seed ^ ((seed_type(v) + 1) * seed_type(0x9E3779B97F4A7C15UL));
     const sparse_round::star_input<typename Math::wide> input{
-        v, begin, s.cursor[v], s.state->nodes, s.excess[v], seed};
+        v, begin, s.cursor[v], s.state->nodes, s.excess[v], seed, s.state->trace};
     auto rows = s.records + begin;
     if (!Emit) {
         const auto gathered = sparse_round::gather_star(math, Input<Memory>{m}, input, rows, group);
@@ -298,6 +299,8 @@ APXCHOL_GPU_FUNCTION void group_star(Memory m, Math math, unsigned row, Group gr
     group_sort(rows, reserved.entries, typename Sort::ByWeight<Math>{math}, group);
     if (group.lane == 0) {
         s.rows[row] = sparse_round::prepare_sample(math, rows, s.prefix() + begin, reserved);
+        if (input.trace)
+            s.rows[row] = sparse_round::prepare_trace(math, rows, s.rows[row], seed);
         if (s.rows[row].status)
             m.fail(1u << s.rows[row].status);
     }
