@@ -201,8 +201,10 @@ def _prepare_parac(mid, deadline=None):
     complete producer work, including the final singleton probe needed to learn
     that no more nontrivial connected components remain.
     """
-    if mid in _PARAC_PREPARED:
-        return _PARAC_PREPARED[mid]
+    # Preparation time, adapt_s included, depends on the thread count.
+    key = (mid, parac.THREADS)
+    if key in _PARAC_PREPARED:
+        return _PARAC_PREPARED[key]
     prepared = []
     fixed_setup_s = 0.0
     dump_total = 0.0
@@ -211,8 +213,8 @@ def _prepare_parac(mid, deadline=None):
             mid, "op", augment=True, deadline=deadline)
         fixed_setup_s += dump_s + reorder_s
         if not amd:
-            _PARAC_PREPARED[mid] = ([], fixed_setup_s, 0.0)
-            return _PARAC_PREPARED[mid]
+            _PARAC_PREPARED[key] = ([], fixed_setup_s, 0.0)
+            return _PARAC_PREPARED[key]
         prepared.append((amd, True))
     else:
         native = parac._native_mtx(mid)
@@ -225,8 +227,8 @@ def _prepare_parac(mid, deadline=None):
                 mid, parac.DUMP_CPU, rc.BIN["cpu"],
                 parac._cpu_cell_remaining(deadline), parac.MEM_CAP_GB)
             if n_components <= 0:
-                _PARAC_PREPARED[mid] = ([], fixed_setup_s, 0.0)
-                return _PARAC_PREPARED[mid]
+                _PARAC_PREPARED[key] = ([], fixed_setup_s, 0.0)
+                return _PARAC_PREPARED[key]
             direct_connected = n_components == 1
         total_components = n_components
         rank = 0
@@ -249,8 +251,8 @@ def _prepare_parac(mid, deadline=None):
                 mid, src, source_tag, deadline=deadline)
             fixed_setup_s += reorder_s
             if not amd:
-                _PARAC_PREPARED[mid] = ([], fixed_setup_s, 0.0)
-                return _PARAC_PREPARED[mid]
+                _PARAC_PREPARED[key] = ([], fixed_setup_s, 0.0)
+                return _PARAC_PREPARED[key]
             prepared.append((amd, False))
             rank += 1
         # As parac_runner.py: a split pays all component work, a connected
@@ -261,10 +263,10 @@ def _prepare_parac(mid, deadline=None):
             adapt_s = float(discovery_s)
         else:
             adapt_s = parac._dump_discovery_seconds(first_dump)
-        _PARAC_PREPARED[mid] = (prepared, fixed_setup_s, adapt_s)
-        return _PARAC_PREPARED[mid]
-    _PARAC_PREPARED[mid] = (prepared, fixed_setup_s, 0.0)
-    return _PARAC_PREPARED[mid]
+        _PARAC_PREPARED[key] = (prepared, fixed_setup_s, adapt_s)
+        return _PARAC_PREPARED[key]
+    _PARAC_PREPARED[key] = (prepared, fixed_setup_s, 0.0)
+    return _PARAC_PREPARED[key]
 
 
 def run_parac(mid, t):

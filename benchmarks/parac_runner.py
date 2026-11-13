@@ -64,7 +64,7 @@ factor/hierarchy. Checks are included in the complete solve interval. Retained
 runs start at the common target without an uncharged calibration probe; every
 repetition must carry patch 0007's stopping receipt and pass original grading.
 """
-import hashlib, json, math, os, re, shlex, subprocess, time
+import glob, hashlib, json, math, os, re, shlex, subprocess, time
 
 from parac_contract import (UnsupportedOperator,
                             require_original_physics)
@@ -248,10 +248,18 @@ _COMPONENT_INFO_RE = re.compile(
 _COMPONENT_INFO_SCHEMA = "component-info-v1"
 
 
+def _timing_file(path, kind):
+    """Sidecar holding a preparation time measured at the current THREADS.
+
+    The prepared file is the same at every thread count, its preparation time
+    is not (component discovery is parallel), so each count measures its own."""
+    return f"{path}.{kind}-t{THREADS}"
+
+
 def _dump_cache_valid(path, require_meta=False):
-    required = [path, path + ".dump-time", path + ".dump-schema"]
+    required = [path, _timing_file(path, "dump-time"), path + ".dump-schema"]
     if require_meta:
-        required += [path + ".meta", path + ".discovery"]
+        required += [path + ".meta", _timing_file(path, "discovery")]
     if not all(os.path.exists(item) for item in required):
         return False
     with open(path + ".dump-schema") as handle:
@@ -259,14 +267,14 @@ def _dump_cache_valid(path, require_meta=False):
 
 
 def _stamp_dump_cache(path, seconds):
-    with open(path + ".dump-time", "w") as handle:
+    with open(_timing_file(path, "dump-time"), "w") as handle:
         handle.write(str(seconds))
     with open(path + ".dump-schema", "w") as handle:
         handle.write(_DUMP_TIMING_SCHEMA)
 
 
 def _dump_cache_seconds(path):
-    with open(path + ".dump-time") as handle:
+    with open(_timing_file(path, "dump-time")) as handle:
         return float(handle.read())
 
 
@@ -277,15 +285,16 @@ def _dump_discovery_seconds(path):
     missing only for a dump this runner did not make. Then the cell carries no
     adapt_s rather than a guessed one."""
     try:
-        with open(path + ".discovery") as handle:
+        with open(_timing_file(path, "discovery")) as handle:
             return float(handle.read())
     except FileNotFoundError:
         return None
 
 
 def _invalidate_dump_cache(path):
-    for cached in (path, path + ".meta", path + ".discovery", path + ".dump-time",
-                   path + ".dump-schema"):
+    timings = glob.glob(glob.escape(path) + ".dump-time-t*") + \
+        glob.glob(glob.escape(path) + ".discovery-t*")
+    for cached in (path, path + ".meta", path + ".dump-schema", *timings):
         try:
             os.remove(cached)
         except FileNotFoundError:
@@ -341,7 +350,8 @@ def _component_info(mid, dump_dir, bin_path, timeout, mem_cap_gb=None):
     consume a file directly or whether the CPU route must split it.
     """
     os.makedirs(dump_dir, exist_ok=True)
-    base = f"{dump_dir}/{rc.matrix_cache_key(mid)}.components"
+    # The discovery time depends on the thread count; the counts do not.
+    base = f"{dump_dir}/{rc.matrix_cache_key(mid)}.components-t{THREADS}"
     meta, schema, input_id = base + ".meta", base + ".schema", base + ".input"
     expected_input = _file_identity(_native_mtx(mid))
     if os.path.exists(meta) and os.path.exists(schema) and os.path.exists(input_id):
@@ -886,7 +896,7 @@ def _dump_component(mid, rank, deadline=None, timeout_cap=TIMEOUT_CPU,
     n_comps, n_nodes = int(m.group(1)), int(m.group(2))
     with open(meta, "w") as handle:
         handle.write(f"{n_nodes} {n_comps}")
-    with open(src + ".discovery", "w") as handle:
+    with open(_timing_file(src, "discovery"), "w") as handle:
         handle.write(discovery.group(1))
     # Component discovery/sorting is shared setup for the split and belongs in
     # rank 0 exactly once. Every rank still pays its own extraction/serialization

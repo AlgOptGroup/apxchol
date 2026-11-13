@@ -193,7 +193,8 @@ comments, Pages or README measurements.
   natively: its component list serves only the stopping check and is not timed.
   ParAC's graph mode pays the discovery that proves a matrix connected, or, for a
   disconnected one, discovery, extraction and serialization of every component.
-  Its physics mode reports 0. CMG pays its component gauge and grounded block.
+  Its physics mode reports 0. ParAC's preparation is timed again at each thread
+  count, since discovery is parallel. CMG pays its component gauge and grounded block.
 - Published cells mark runs with a nonzero `adapt_s` with an asterisk and publish
   `adapt_s` as its own column, so a reader can see or subtract it.
 - Common parsing/assembly and independent grading are excluded. Process-wide CUDA

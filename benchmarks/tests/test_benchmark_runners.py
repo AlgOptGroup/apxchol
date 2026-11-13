@@ -458,6 +458,23 @@ class ThreadScalingStoreTest(unittest.TestCase):
                 "m", "native.mtx", "native-comp0", deadline=None)
         thread_scaling._PARAC_PREPARED.clear()
 
+    def test_parac_scaling_prepares_each_thread_count(self):
+        # Discovery is parallel, so each thread count measures its own adapt_s.
+        thread_scaling._PARAC_PREPARED.clear()
+        with mock.patch.object(thread_scaling.parac, "_uses_physics", return_value=False), \
+             mock.patch.object(thread_scaling.parac, "_native_mtx", return_value="native.mtx"), \
+             mock.patch.object(thread_scaling.parac, "_component_info",
+                               side_effect=[(1, 10000, 0.4), (1, 10000, 0.1)]) as info, \
+             mock.patch.object(thread_scaling.parac, "_reorder_amd",
+                               return_value=("native-amd.mtx", 0.25, "upstream")), \
+             mock.patch.object(thread_scaling.parac, "THREADS", 1):
+            self.assertEqual(thread_scaling._prepare_parac("m")[2], 0.4)
+            self.assertEqual(thread_scaling._prepare_parac("m")[2], 0.4)   # cached
+            thread_scaling.parac.THREADS = 8
+            self.assertEqual(thread_scaling._prepare_parac("m")[2], 0.1)
+            self.assertEqual(info.call_count, 2)
+        thread_scaling._PARAC_PREPARED.clear()
+
 
 class CellSchemaTest(unittest.TestCase):
     def test_stale_cell_is_preserved_until_replacement_returns(self):
