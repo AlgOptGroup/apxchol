@@ -473,10 +473,8 @@ TEST(SolveRoutes, OneCallSamplerUsesTheGpuThresholdOnlyWhereTheGpuIsChosen) {
     apxchol::solve_options options;
     std::int64_t threshold = 16;
     if (apxchol::detail::select_solve_backend(options) == apxchol::solve_backend::gpu) {
-#if defined(APXCHOL_USE_CUDA)
-        threshold = 64;
-#else
-        threshold = 8;
+#if !defined(APXCHOL_USE_CUDA)
+        threshold = 8;   // Metal
 #endif
     }
     auto below = options, at = options;

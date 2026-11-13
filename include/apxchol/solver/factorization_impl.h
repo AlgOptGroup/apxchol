@@ -775,7 +775,30 @@ factorization factorize_impl(const Eliminator& elim,
             if (cp) (*cp)("gpu_csc_initialize");
             bool sparsification_attempted = false;
             peak_graph_bytes = std::max(peak_graph_bytes, work.memory_bytes());
+            // Once the residual is small and at least half dense, the rounds
+            // eliminate one or a few pivots each; factor it exactly as one dense
+            // block instead (both samplers). At most 128 vertices: the block's
+            // columns form one dependency chain in the triangular solve, and
+            // larger blocks slowed solves measurably. Skipped when it does not fit.
+            constexpr double dense_tail_density = 0.5;
+            constexpr std::size_t dense_tail_max_vertices = 128;
+            bool dense_tail_declined = false;
+            std::uint64_t last_live = 0;   // no tail before the first round
             while (!active.empty()) {
+                if (!dense_tail_declined && last_live && active.size() <= dense_tail_max_vertices &&
+                    double(active.size()) * double(active.size() - 1) * dense_tail_density <=
+                        double(last_live)) {
+                    if (gpu_round_shadow.finish_owned_dense_tail(active)) {
+                        // Rounds are independent sets; the block's columns depend
+                        // on each other, so each counts as a round of one vertex.
+                        for (std::size_t left = active.size(); left; --left)
+                            record_round(left, 1, double(last_live) / double(active.size()));
+                        if (cp) (*cp)("gpu_dense_tail");
+                        active.clear();
+                        break;
+                    }
+                    dense_tail_declined = true;
+                }
                 const auto prep = gpu_frontend->prepare(active, opts.experimental.partition,
                     opts.seed, ws.round_index);
                 auto part = gpu_frontend->select_block_greedy();
@@ -824,6 +847,7 @@ factorization factorize_impl(const Eliminator& elim,
                 }
                 const auto report = gpu_round_shadow.run_owned_prefix_round(
                     gpu_frontend->device_selection(), opts.seed);
+                last_live = report.live_incidences;
                 record_round(active.size(), part.data.size(), prep.average_degree);
                 // The device selector returns natural active-id order. This
                 // is host metadata maintenance, not a read of the stale graph.

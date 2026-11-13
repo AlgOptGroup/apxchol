@@ -519,3 +519,43 @@ TEST(GpuDirectCsc, ConsumingSolveRetainsDefaultFp16DropAndOriginalResidualWithou
     }
 #endif
 }
+
+// A sparse ring with a 100-vertex clique: the rounds peel the ring and leave
+// the clique, a dense residual that the setup factors as one exact block.
+TEST(GpuDirectCsc, DenseResidualTailIsFactoredExactly) {
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA operator construction required";
+#else
+    if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
+    constexpr int n = 3000, clique = 100;
+    std::vector<weighted_edge> edges;
+    for (int u = 0; u < n; ++u) edges.push_back({u, (u + 1) % n, 1.0 + (u % 5)});
+    for (int u = 0; u < clique; ++u)
+        for (int v = u + 1; v < clique; ++v) edges.push_back({u * 30, v * 30, 0.5 + ((u + v) % 3)});
+    for (const auto sampler : {apxchol::clique_sampler::gks, apxchol::clique_sampler::trace_cycle})
+    for (double shift : {0.0, 1e-3}) {
+        SCOPED_TRACE(testing::Message() << int(sampler) << " " << shift);
+        const auto A = make_matrix(n, edges, shift);
+        std::vector<double> exact(n);
+        for (int v = 0; v < n; ++v) exact[v] = std::cos(0.5 * v);
+        if (shift == 0.0) {
+            const double mean = std::accumulate(exact.begin(), exact.end(), 0.0) / n;
+            for (double& x : exact) x -= mean;
+        }
+        const std::vector<double> b = apxchol::test::multiply(A, exact);
+        apxchol::solve_options setup;
+        setup.backend = apxchol::solve_backend::gpu;
+        setup.factor_opts.verbose = true;
+        setup.factor_opts.experimental.sampler = sampler;
+        testing::internal::CaptureStderr();
+        std::optional<apxchol::solver> owner;
+        try { owner.emplace(apxchol::test::csc(A), setup); }
+        catch (...) { ADD_FAILURE() << testing::internal::GetCapturedStderr(); throw; }
+        const auto log = testing::internal::GetCapturedStderr();
+        EXPECT_NE(log.find("[gpu-dense-tail]"), std::string::npos) << log;
+        const auto result = owner->solve(b, 1e-8, 500);
+        EXPECT_TRUE(result.converged);
+        EXPECT_LE(apxchol::test::relative_residual(A, result.x, b), 1e-8);
+    }
+#endif
+}
