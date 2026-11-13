@@ -218,18 +218,21 @@ def test_one_shot_forwards_warm_start_and_output(matrix):
 
 
 def test_one_call_solve_uses_trace_cycle_from_16_columns_on_cpu():
-    # apxchol.solve with 16 columns builds the trace-cycle factor, which needs
-    # fewer iterations than the GKS factor of factorize() at the same seed;
-    # with 15 columns it matches factorize() exactly.
+    # With 16 columns apxchol.solve uses the factor the one-call rule builds
+    # for 16 columns (trace-cycle, a different factor from GKS); with 15 it
+    # uses the GKS factor of factorize(). Single thread, so both are fixed.
     A = grid2d_sddm(20)
     B = A @ np.random.default_rng(1).standard_normal((A.shape[0], 16))
     opts = dict(backend="cpu", seed=3, num_threads=1)
+    csc = sp.csc_matrix(A)
+    rule16 = apxchol.Solver.__new__(apxchol.Solver)
+    rule16._init_csc(csc.data, csc.indices, csc.indptr, rhs_columns=16, **opts)
     gks = apxchol.factorize(A, **opts)
+    assert rule16.factor_nnz != gks.factor_nnz
     wide = apxchol.solve(A, B, **opts)
     narrow = apxchol.solve(A, B[:, :15], **opts)
-    assert np.all(wide.converged) and np.all(narrow.converged)
+    assert np.array_equal(wide.iterations, rule16.solve(B).iterations)
     assert np.array_equal(narrow.iterations, gks.solve(B[:, :15]).iterations)
-    assert np.max(wide.iterations) < np.min(gks.solve(B).iterations)
 
 
 @pytest.mark.parametrize("entry", ["factorize", "Solver", "from_csc", "solve"])

@@ -230,8 +230,8 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             auto options = setup_options(nrhs >= 3 ? prhs[2] : nullptr);
             // rhs_columns: one-call apxchol_solve with that many right-hand sides.
             if (nrhs == 4) {
-                const double columns = mxIsNumeric(prhs[3]) && mxGetNumberOfElements(prhs[3]) == 1
-                    ? mxGetScalar(prhs[3]) : -1.0;
+                const double columns = mxIsNumeric(prhs[3]) && !mxIsComplex(prhs[3]) &&
+                    mxGetNumberOfElements(prhs[3]) == 1 ? mxGetScalar(prhs[3]) : -1.0;
                 if (!(columns >= 0 && columns <= 1e15) || columns != std::floor(columns))
                     fail("apxchol:badInput", "rhs_columns must be a non-negative integer");
                 if (columns > 0) apxchol::detail::choose_one_call_sampler(options, static_cast<std::int64_t>(columns));

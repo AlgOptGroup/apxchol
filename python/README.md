@@ -42,7 +42,9 @@ x = result.x
 For one solve, use `apxchol.solve(A, b)`. Results include `x`, `iterations`,
 `residual` and `converged`. With 16 or more right-hand-side columns on CPU (64
 on CUDA) it builds a trace-cycle factor, which costs more setup but needs
-fewer iterations per column. Convergence is always checked against the original
+fewer iterations per column. Metal keeps GKS. The threshold follows the
+backend predicted before the matrix is checked, so an automatic solve that
+then runs on CPU can still use the CUDA threshold. Convergence is always checked against the original
 `A` and `b`; inspect `converged` for success.
 
 See the shared [binding capabilities](https://algoptgroup.github.io/apxchol/docs/usage.html#binding-capabilities)

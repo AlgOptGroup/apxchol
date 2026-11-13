@@ -333,7 +333,10 @@ private:
     explicit Solver(apxchol::solver owner) : slv_(std::move(owner)) {}
 
     static apxchol::solve_options one_call(apxchol::solve_options options, std::int64_t columns) {
-        if (columns > 0) apxchol::detail::choose_one_call_sampler(options, columns);
+        if (columns > 0) {
+            py::gil_scoped_release release;   // backend prediction may probe the device
+            apxchol::detail::choose_one_call_sampler(options, columns);
+        }
         return options;
     }
 
