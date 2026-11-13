@@ -1151,10 +1151,30 @@ TEST_F(MetalDevice, CommonSolverApiRespectsBackendSelection) {
     EXPECT_LT(true_residual(large, large_rhs, fallback.solve(large_rhs).x), apxchol::default_tol);
 }
 
+TEST_F(MetalDevice, TraceCycleSetupSolvesOnDevice) {
+    const sparse_matrix A = grid(30, 31, 0.25, true);
+    auto options = keep_opts();
+    options.backend = apxchol::solve_backend::gpu;
+    options.factor_opts.experimental.sampler = apxchol::clique_sampler::trace_cycle;
+    apxchol::solver trace(apxchol::test::csc(A), options);
+    EXPECT_EQ(trace.backend(), apxchol::solve_backend::gpu);
+    options.factor_opts.experimental.sampler = apxchol::clique_sampler::gks;
+    apxchol::solver gks(apxchol::test::csc(A), options);
+    // One fill per neighbour instead of one fewer.
+    EXPECT_GT(trace.factor().L.nonZeros(), gks.factor().L.nonZeros());
+    for (int q = 1; q <= 3; ++q) {
+        const vector b = rhs(A.rows, q, false);
+        const auto result = trace.solve(b, 1e-8, 1000);
+        EXPECT_TRUE(result.converged);
+        EXPECT_LE(true_residual(A, b, result.x), 1e-8);
+    }
+}
+
 TEST_F(MetalDevice, CommonSolverAdoptsHostFactorWithCpuOnlyOptions) {
     const sparse_matrix A = grid(9, 11, 0.25, true);
     auto options = keep_opts();
     options.factor_opts.experimental.sampler = apxchol::clique_sampler::trace_cycle;
+    options.factor_opts.experimental.exact_core_max_h = 3;
     const auto F = apxchol::factorize(apxchol::test::csc(A), options.factor_opts);
     options.backend = apxchol::solve_backend::gpu;
     EXPECT_THROW(apxchol::solver(apxchol::test::csc(A), options), std::invalid_argument);
@@ -1406,7 +1426,9 @@ TEST(MetalOptions, ResidentSetupRejectsUnsupportedOptionsAndLayouts) {
     options.backend = apxchol::solve_backend::gpu;
     const auto A = grid(4, 4, 0.25);
     options.factor_opts.experimental.sampler = apxchol::clique_sampler::trace_cycle;
+    options.factor_opts.experimental.exact_core_max_h = 3;
     EXPECT_THROW(apxchol::solver(apxchol::test::csc(A), options), std::invalid_argument);
+    options.factor_opts.experimental.exact_core_max_h.reset();
     options.factor_opts.experimental.sampler = apxchol::clique_sampler::gks;
     options.factor_opts.experimental.partitioner = apxchol::partitioner_kind::priority_greedy;
     EXPECT_THROW(apxchol::solver(apxchol::test::csc(A), options), std::invalid_argument);
@@ -1544,7 +1566,9 @@ TEST(MetalOptions, AutomaticSelectionRejectsResidentIncompatibleOptions) {
     const sparse_matrix A = apxchol::test::identity(32769);
     apxchol::solve_options options;
     options.factor_opts.experimental.sampler = apxchol::clique_sampler::trace_cycle;
+    options.factor_opts.experimental.exact_core_max_h = 3;
     EXPECT_EQ(apxchol::test::select_solve_backend(options, A), apxchol::solve_backend::cpu);
+    options.factor_opts.experimental.exact_core_max_h.reset();
     options.factor_opts.experimental.sampler = apxchol::clique_sampler::gks;
     options.backend = apxchol::solve_backend::gpu;
     EXPECT_EQ(apxchol::test::select_solve_backend(options, A), apxchol::solve_backend::gpu);
