@@ -1,9 +1,10 @@
 # Performance
 
 These results compare apxchol with other Laplacian and SDDM solvers on 27
-matrices. Every solver gets the same matrix, right-hand side and stopping rule,
-except the ParAC runs each platform page marks. Times are setup + solve for one right-hand side. Each platform page
-lists every measured result, including failures.
+matrices. Every solver gets the same matrix, right-hand side and stopping rule;
+the platform pages mark the ParAC runs that use ParAC's own right-hand side or
+stopping rule. Times are setup + solve for one right-hand side. Each platform
+page lists every measured result, including failures.
 
 ```{toctree}
 :hidden:
@@ -46,7 +47,7 @@ matrices on both the CPU and the GPU.
 
 Each cell is the speedup of apxchol over the family's fastest variant on that
 matrix. `≥20×` means the solver exceeded its time cap of 20 times apxchol's
-time. `fail`, `oom` and `nc` mean it failed, ran out of memory or did not
+time, and at least 30 s. `fail`, `oom` and `nc` mean it failed, ran out of memory or did not
 converge, and `n/a` means it does not accept that input. The
 [Euler page](performance-euler.md) breaks each family into its variants.
 

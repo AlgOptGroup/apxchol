@@ -19,10 +19,15 @@ fastest complete apxchol setup + solve time on the same matrix, and at least
 
 ![Apple M1 Max CPU: speedup of apxchol over each solver family](performance/mac-families.svg)
 
-On this CPU, AMGCL is faster than apxchol on 11 of 21 matrices, including
-every grid. On linear programs, AMGCL is 1.6× faster on iter0010, and
-BoomerAMG is within 7% of apxchol on the other three.
-apxchol is ahead on most social graphs.
+On this CPU, AMGCL is faster than apxchol on 12 of 21 matrices, including
+every grid. On linear programs, AMGCL is 1.8× faster on iter0010, and
+BoomerAMG is within 6% of apxchol on the other three. apxchol is ahead on five
+of the six social graphs.
+
+An asterisk (`*`) marks a time whose setup includes input adaptation by the
+benchmark: finding connected components, pinning one vertex per component or
+slicing components, so that the solver accepts a singular or disconnected
+Laplacian. The `adapt_s` column of the data files gives that part of setup.
 
 ![Apple M1 Max CPU: apxchol against the fastest other solver on each matrix](performance/mac-best-other.svg)
 
@@ -59,8 +64,7 @@ after one warm-up. Peak memory is the whole process.
 
 ## Provenance
 
-[Every result](performance/mac-20261101.csv) and
-[what all results share](performance/mac-20261101.json): hardware, toolchains,
-revisions and the cap rule. The CPU runs used revision `45f42824`. The Metal
-runs used `0009d670`, from the pull request that added the benchmark's Metal
-route. The header points to the full extract with binary and matrix checksums.
+[Every result](performance/mac-20261114.csv) and
+[what all results share](performance/mac-20261114.json): hardware, toolchains,
+revisions and the cap rule. All runs used apxchol revision `7dee3a3a`. The
+header points to the full extract with binary and matrix checksums.
