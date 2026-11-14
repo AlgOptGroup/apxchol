@@ -30,7 +30,7 @@ function bench_cmg_common(operator_path, rhs_path, output_dir, retained_repeats,
                 S = A; sb = b;
             end
             rec.solve_n = size(S,1);
-            rec.adaptation_s = toc(started);
+            rec.adapt_s = toc(started);
             % Request the canonical public one-output contract: unsupported
             % inputs return before upstream initializes its optional H output.
             pfun = cmg_precondition(S);

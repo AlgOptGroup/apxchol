@@ -687,12 +687,8 @@ void detail::metal_route::device_state::setup(detail::csc_ref<double> A, checkpo
             throw std::invalid_argument("Metal: an operator value is non-finite or outside [2^-100, 2^100]");
         // A fixed positive PCG preconditioner scale preserves x while balancing
         // rho and curvature exponents; diagonal extremes include mixed scales.
-        arguments.preconditioner_scale = 1;
-        if (max_diagonal > 0) {
-            const int exponent_sum = std::ilogb(min_diagonal) + std::ilogb(max_diagonal);
-            const int shift = static_cast<int>(std::floor(exponent_sum / 4.0));
-            arguments.preconditioner_scale = std::scalbn(1.0f, shift);
-        }
+        arguments.preconditioner_scale =
+            static_cast<float>(detail::gpu_scaling::reference_scale(min_diagonal, max_diagonal));
         }
         if (cp) (*cp)("metal_operator");
 

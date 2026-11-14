@@ -151,6 +151,71 @@ bool same_bytes(const T* left, const T* right, std::size_t count) {
     return std::memcmp(left, right, count * sizeof(T)) == 0;
 }
 
+// 5-point grid with smoothly varying weights: a Laplacian, or SDDM with
+// `excess` added to every diagonal entry. Sorted, unique and fully paired.
+Sparse weighted_grid(int side, double excess) {
+    const int n = side * side;
+    std::vector<test::triplet> entries;
+    std::vector<double> degree(n, excess);
+    const auto edge = [&](int i, int j) {
+        const double weight = 1.0 + 0.5 * std::sin(0.37 * i + 0.11 * j);
+        entries.push_back({i, j, -weight});
+        entries.push_back({j, i, -weight});
+        degree[i] += weight;
+        degree[j] += weight;
+    };
+    for (int r = 0; r < side; ++r)
+        for (int c = 0; c < side; ++c) {
+            if (r + 1 < side) edge(r * side + c, (r + 1) * side + c);
+            if (c + 1 < side) edge(r * side + c, r * side + c + 1);
+        }
+    for (int i = 0; i < n; ++i) entries.push_back({i, i, degree[i]});
+    return test::from_triplets(n, n, entries);
+}
+
+// SDDM 5-point grid whose weights grow by `decades` powers of ten from one
+// side to the other, so the factor's diagonal spans about that range.
+Sparse graded_grid(int side, double decades) {
+    const int n = side * side;
+    std::vector<test::triplet> entries;
+    std::vector<double> degree(n, 0.0), largest(n, 0.0);
+    const auto grade = [&](int c) {
+        return std::pow(10.0, decades * (static_cast<double>(c) / (side - 1) - 0.5));
+    };
+    const auto edge = [&](int i, int j, double scale) {
+        const double weight = scale * (1.0 + 0.5 * std::sin(0.37 * i + 0.11 * j));
+        entries.push_back({i, j, -weight});
+        entries.push_back({j, i, -weight});
+        degree[i] += weight;
+        degree[j] += weight;
+        largest[i] = std::max(largest[i], weight);
+        largest[j] = std::max(largest[j], weight);
+    };
+    for (int r = 0; r < side; ++r)
+        for (int c = 0; c < side; ++c) {
+            if (r + 1 < side) edge(r * side + c, (r + 1) * side + c, grade(c));
+            if (c + 1 < side) edge(r * side + c, r * side + c + 1, std::sqrt(grade(c) * grade(c + 1)));
+        }
+    for (int i = 0; i < n; ++i) entries.push_back({i, i, degree[i] + 0.0025 * largest[i]});
+    return test::from_triplets(n, n, entries);
+}
+
+// Right-hand sides of a graded_grid solve, eight columns whose largest entry
+// is in [2^exponent, 2^(exponent + 1)).
+Dense graded_columns(const Sparse& matrix, int exponent) {
+    Dense rhs(matrix.rows, 8);
+    for (int q = 0; q < 8; ++q) {
+        Vector exact(matrix.rows);
+        for (int i = 0; i < matrix.rows; ++i) exact[i] = std::sin((i + 1) * (q + 1) * 0.013) + 0.1 * q;
+        const Vector b = test::multiply(matrix, exact);
+        double largest = 0;
+        for (const double v : b) largest = std::max(largest, std::abs(v));
+        const double scale = std::ldexp(1.0, exponent - std::ilogb(largest));
+        for (int i = 0; i < matrix.rows; ++i) rhs(i, q) = b[i] * scale;
+    }
+    return rhs;
+}
+
 void expect_solution(const Sparse& matrix, std::span<const double> rhs,
                      std::span<const double> x,
                      double tolerance = apxchol::default_tol) {
@@ -685,6 +750,133 @@ TEST(Solver, CpuScalesExtremeRhsAndWarmStarts) {
     }
 }
 
+// PCG panels carry the triangular sweeps' results in FP32 (scalar solves in
+// FP64), so a panel column and the scalar solve of the same right-hand side
+// apply preconditioners that differ by FP32 rounding, about 6e-8 relative.
+// That is far below the factor's own approximation error, so both must
+// converge in the same number of iterations to within one, and each must meet
+// the tolerance on the original system.
+TEST(Solver, CpuFp32PanelSweepsKeepIterationsAndResiduals) {
+    const scoped_omp_threads threads(4);
+    constexpr int side = 96, n = side * side, columns = 8;
+    constexpr double tol = 1e-8;
+    for (const bool laplacian : {false, true}) {
+        const Sparse matrix = weighted_grid(side, laplacian ? 0.0 : 0.01);
+        Dense rhs(n, columns);
+        for (int q = 0; q < columns; ++q) {
+            Vector exact(n);
+            for (int i = 0; i < n; ++i) exact[i] = std::sin((i + 1) * (q + 1) * 0.013) + 0.1 * q;
+            if (laplacian) subtract_mean(exact);
+            set_col(rhs, q, test::multiply(matrix, exact));
+        }
+        for (const auto storage : {apxchol::factor_storage_type::fp32,
+                                   apxchol::factor_storage_type::fp16}) {
+            if (storage == apxchol::factor_storage_type::fp16 && !apxchol::detail::omp_sptrsv::fp16_supported())
+                continue;
+            SCOPED_TRACE(::testing::Message() << "laplacian=" << laplacian << " storage=" << int(storage));
+            auto options = cpu_options();
+            options.factor_opts.factor_storage = storage;
+            apxchol::solver owner(test::csc(matrix), options);
+            Dense output(n, columns);
+            const auto panel = owner.solve(std::as_const(rhs).view(), output.view(), tol, 400);
+            ASSERT_EQ(panel.columns.size(), static_cast<std::size_t>(columns));
+            for (int q = 0; q < columns; ++q) {
+                SCOPED_TRACE(q);
+                const auto b = std::as_const(rhs).col(q);
+                const auto scalar = owner.solve(b, tol, 400);
+                EXPECT_TRUE(panel.columns[q].converged);
+                EXPECT_TRUE(scalar.converged);
+                EXPECT_GT(scalar.iterations, 5);
+                EXPECT_LE(std::abs(panel.columns[q].iterations - scalar.iterations), 1);
+                EXPECT_LE(stable_residual(matrix, output.col(q), b), tol);
+                EXPECT_LE(stable_residual(matrix, scalar.x, b), tol);
+            }
+        }
+    }
+}
+
+// Panels carry the sweeps in FP32, so a column far from the operator's
+// reference magnitude is scaled by a power of two (the rule CUDA uses) before
+// the iteration and restored after it. Columns from 1e-200 to 1e200 on
+// operators scaled by 1e-30, 1 and 1e30 must then behave like the FP64 scalar
+// solves: same iterations to within one, true residuals at the tolerance.
+TEST(Solver, CpuFp32PanelSweepsScaleExtremeColumnsAndOperators) {
+    const scoped_omp_threads threads(4);
+    constexpr int side = 48, n = side * side, columns = 8;
+    constexpr double tol = 1e-8;
+    const double magnitudes[columns] = {1e-200, 1e-30, 1e-8, 1.0, 1e8, 1e30, 1e200, 4.0};
+    const Sparse unit = weighted_grid(side, 0.01);
+    Dense shape(n, columns);
+    for (int q = 0; q < columns; ++q) {
+        Vector exact(n);
+        for (int i = 0; i < n; ++i) exact[i] = std::sin((i + 1) * (q + 1) * 0.013) + 0.1 * q;
+        set_col(shape, q, test::multiply(unit, exact));
+    }
+    for (const double operator_scale : {1e-30, 1.0, 1e30}) {
+        const Sparse matrix = test::scaled(unit, operator_scale);
+        Dense rhs(n, columns);
+        for (int q = 0; q < columns; ++q)
+            set_col(rhs, q, affine(magnitudes[q], std::as_const(shape).col(q)));
+        for (const auto storage : {apxchol::factor_storage_type::fp32,
+                                   apxchol::factor_storage_type::fp16}) {
+            if (storage == apxchol::factor_storage_type::fp16 && !apxchol::detail::omp_sptrsv::fp16_supported())
+                continue;
+            SCOPED_TRACE(::testing::Message() << "operator scale " << operator_scale
+                                              << " storage " << int(storage));
+            auto options = cpu_options();
+            options.factor_opts.factor_storage = storage;
+            apxchol::solver owner(test::csc(matrix), options);
+            Dense output(n, columns);
+            const auto panel = owner.solve(std::as_const(rhs).view(), output.view(), tol, 400);
+            ASSERT_EQ(panel.columns.size(), static_cast<std::size_t>(columns));
+            for (int q = 0; q < columns; ++q) {
+                SCOPED_TRACE(q);
+                const auto b = std::as_const(rhs).col(q);
+                const auto scalar = owner.solve(b, tol, 400);
+                ASSERT_TRUE(test::all_finite(output.col(q)));
+                EXPECT_TRUE(panel.columns[q].converged);
+                EXPECT_TRUE(scalar.converged);
+                EXPECT_GT(scalar.iterations, 5);
+                EXPECT_LE(std::abs(panel.columns[q].iterations - scalar.iterations), 1);
+                EXPECT_LE(stable_residual(matrix, output.col(q), b), tol);
+            }
+        }
+    }
+}
+
+// A factor whose diagonal spans 60 decades leaves the FP32 sweeps no slack:
+// only a column sitting at the factor's reference magnitude keeps their
+// results inside FP32. Every column is scaled there, so columns far below it
+// converge like the FP64 scalar solve. A column left at 2^-32 did not.
+TEST(Solver, CpuFp32PanelSweepsConvergeOnAFactorSpanningSixtyDecades) {
+    const scoped_omp_threads threads(4);
+    constexpr double tol = 1e-8;
+    const Sparse matrix = graded_grid(48, 60);
+    for (const auto storage : {apxchol::factor_storage_type::fp32,
+                               apxchol::factor_storage_type::fp16}) {
+        if (storage == apxchol::factor_storage_type::fp16 && !apxchol::detail::omp_sptrsv::fp16_supported())
+            continue;
+        auto options = cpu_options();
+        options.factor_opts.factor_storage = storage;
+        apxchol::solver owner(test::csc(matrix), options);
+        for (const int exponent : {-32, -24, 0, 24}) {
+            SCOPED_TRACE(::testing::Message() << "storage " << int(storage) << " exponent " << exponent);
+            const Dense rhs = graded_columns(matrix, exponent);
+            Dense output(matrix.rows, rhs.cols);
+            const auto panel = owner.solve(std::as_const(rhs).view(), output.view(), tol, 400);
+            for (int q = 0; q < rhs.cols; ++q) {
+                SCOPED_TRACE(q);
+                const auto b = std::as_const(rhs).col(q);
+                const auto scalar = owner.solve(b, tol, 400);
+                EXPECT_TRUE(scalar.converged);
+                EXPECT_TRUE(panel.columns[q].converged);
+                EXPECT_LE(std::abs(panel.columns[q].iterations - scalar.iterations), 2);
+                EXPECT_LE(stable_residual(matrix, output.col(q), b), tol);
+            }
+        }
+    }
+}
+
 TEST(Solver, CpuPanelsScaleExceptionalColumnsIndependently) {
     const scoped_omp_threads threads(2);
     const Sparse matrix = operator_matrix(65);
@@ -714,7 +906,13 @@ TEST(Solver, CpuPanelsScaleExceptionalColumnsIndependently) {
                                                     warm ? x0 : std::span<const double>{});
                     ASSERT_TRUE(test::all_finite(output.col(c)));
                     EXPECT_EQ(batch.columns[c].iterations, scalar.iterations);
-                    EXPECT_NEAR(batch.columns[c].residual, scalar.residual, 1e-12);
+                    // Panels store the triangular sweeps' results in FP32 and
+                    // scalar solves in FP64, so the two preconditioners differ
+                    // by FP32 rounding (2^-24, about 6e-8 relative per stored
+                    // value). Relative residuals here are at most 1, so 1e-6
+                    // leaves a factor of 16 for accumulation over the sweeps
+                    // and iterations of this 65-row operator.
+                    EXPECT_NEAR(batch.columns[c].residual, scalar.residual, 1e-6);
                     EXPECT_EQ(batch.columns[c].converged, scalar.converged);
                     EXPECT_EQ(scalar.converged, scalar.residual < 1e-8);
                     if (is_zero(b)) {
@@ -1790,6 +1988,105 @@ TEST(Solver, CudaWidePanelsCenterLaplacianColumns) {
     }
 }
 #endif
+
+// The GPU triangular sweeps are FP32, so a column is scaled relative to the
+// operator's reference magnitude. Operators and right-hand sides of very
+// different magnitudes must converge to the tolerance on the original system.
+TEST(Solver, GpuSolvesOperatorsAndColumnsOfDifferentMagnitudes) {
+#if !(defined(APXCHOL_USE_CUDA) || defined(APXCHOL_USE_METAL)) || \
+    (defined(APXCHOL_USE_CUDA) && defined(APXCHOL_64BIT_NODE_INDICES))
+    GTEST_SKIP() << "GPU owner required";
+#else
+    if (!apxchol::backend_available(apxchol::solve_backend::gpu))
+        GTEST_SKIP() << "No usable GPU device";
+#if defined(APXCHOL_USE_METAL)
+    // Metal accepts operator values within 2^+-100 (about 1.3e30).
+    constexpr double extreme = 1e25;
+#else
+    constexpr double extreme = 1e30;
+#endif
+    const scoped_omp_threads threads(2);
+    constexpr int side = 48, n = side * side, columns = 9;   // a panel of 8 and one more
+    constexpr double tol = 1e-8;
+    const double magnitudes[3] = {1e-8, 1.0, 1e8};
+    const Sparse unit = weighted_grid(side, 0.01);
+    Dense shape(n, columns);
+    for (int q = 0; q < columns; ++q) {
+        Vector exact(n);
+        for (int i = 0; i < n; ++i) exact[i] = std::sin((i + 1) * (q + 1) * 0.013) + 0.1 * q;
+        set_col(shape, q, test::multiply(unit, exact));
+    }
+    for (const double operator_scale : {1.0 / extreme, 1.0, extreme}) {
+        const Sparse matrix = test::scaled(unit, operator_scale);
+        Dense rhs(n, columns);
+        for (int q = 0; q < columns; ++q)
+            set_col(rhs, q, affine(magnitudes[q % 3], std::as_const(shape).col(q)));
+        for (const auto storage : {apxchol::factor_storage_type::fp16,
+                                   apxchol::factor_storage_type::fp32}) {
+            SCOPED_TRACE(::testing::Message() << "operator scale " << operator_scale
+                                              << " storage " << int(storage));
+            auto options = cpu_options();
+            options.backend = apxchol::solve_backend::gpu;
+            options.factor_opts.factor_storage = storage;
+            apxchol::solver owner(test::csc(matrix), options);
+            Dense output(n, columns);
+            const auto panel = owner.solve(std::as_const(rhs).view(), output.view(), tol, 400);
+            ASSERT_EQ(panel.columns.size(), static_cast<std::size_t>(columns));
+            for (int q = 0; q < columns; ++q) {
+                SCOPED_TRACE(q);
+                const auto b = std::as_const(rhs).col(q);
+                ASSERT_TRUE(test::all_finite(output.col(q)));
+                EXPECT_EQ(panel.columns[q].backend, apxchol::solve_backend::gpu);
+                EXPECT_TRUE(panel.columns[q].converged);
+                EXPECT_LE(stable_residual(matrix, output.col(q), b), tol);
+                if (q < 3) {
+                    const auto scalar = owner.solve(b, tol, 400);
+                    EXPECT_TRUE(scalar.converged);
+                    EXPECT_LE(stable_residual(matrix, scalar.x, b), tol);
+                }
+            }
+        }
+    }
+#endif
+}
+
+// The same 60-decade factor on CUDA, whose sweeps are FP32 at every width.
+// Metal accepts operator values within 2^+-100 and is not exercised here.
+TEST(Solver, CudaSolvesConvergeOnAFactorSpanningSixtyDecades) {
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA owner required";
+#else
+    if (!apxchol::backend_available(apxchol::solve_backend::gpu))
+        GTEST_SKIP() << "No usable CUDA device";
+    const scoped_omp_threads threads(2);
+    constexpr double tol = 1e-8;
+    const Sparse matrix = graded_grid(48, 60);
+    for (const auto storage : {apxchol::factor_storage_type::fp16,
+                               apxchol::factor_storage_type::fp32}) {
+        auto options = cpu_options();
+        options.backend = apxchol::solve_backend::gpu;
+        options.factor_opts.factor_storage = storage;
+        apxchol::solver owner(test::csc(matrix), options);
+        for (const int exponent : {-32, -24, 0, 24}) {
+            SCOPED_TRACE(::testing::Message() << "storage " << int(storage) << " exponent " << exponent);
+            const Dense rhs = graded_columns(matrix, exponent);
+            Dense output(matrix.rows, rhs.cols);
+            const auto panel = owner.solve(std::as_const(rhs).view(), output.view(), tol, 400);
+            for (int q = 0; q < rhs.cols; ++q) {
+                SCOPED_TRACE(q);
+                const auto b = std::as_const(rhs).col(q);
+                EXPECT_TRUE(panel.columns[q].converged);
+                EXPECT_LE(panel.columns[q].iterations, 25);
+                EXPECT_LE(stable_residual(matrix, output.col(q), b), tol);
+            }
+            const auto scalar = owner.solve(std::as_const(rhs).col(0), tol, 400);
+            EXPECT_TRUE(scalar.converged);
+            EXPECT_LE(scalar.iterations, 25);
+            EXPECT_LE(stable_residual(matrix, scalar.x, std::as_const(rhs).col(0)), tol);
+        }
+    }
+#endif
+}
 
 TEST(Solver, GpuApplyRejectsNonFiniteInputs) {
 #if defined(APXCHOL_USE_CUDA) && defined(APXCHOL_64BIT_NODE_INDICES)

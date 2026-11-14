@@ -61,6 +61,8 @@ private:
     struct installed {
         factorization F;
         omp_sptrsv trsv;
+        // gpu_scaling::reference_scale of the factor, for panel columns.
+        double fp32_reference = 1.0;
     };
 
     /// SpTRSV setup from F, then publish it as this route's installed state.
@@ -94,7 +96,10 @@ private:
     template<int Columns>
     std::array<double, Columns> apply_fused(const double* r, const std::array<double, Columns>& r_sum,
                                             double* z, checkpoint* cp) const;
-    template<int Columns>
+    // Fp32Sweeps: the two triangular sweeps store their results as FP32
+    // panels (PCG panels only; apply() and scalar solves keep FP64). solve_panel
+    // scales each column first, by the rule CUDA uses (gpu_scaling::fp32_scale).
+    template<int Columns, bool Fp32Sweeps = false>
     void apply_core(const double* b, const std::array<double, Columns>& b_sum, bool center,
                     double* z, std::array<double, Columns>* rz_out, checkpoint* cp) const;
 
@@ -116,6 +121,8 @@ private:
     // rejects overlapping calls on one instance. scratch2_ receives the
     // transpose-solve output so the final unpermute gathers straight from it.
     mutable buffer<double> r_, z_, p_, Ap_, panel_x_, scratch_, scratch2_;
+    // The same two sweep outputs for PCG panels, which carry them in FP32.
+    mutable buffer<float> sweep_y_, sweep_z_;
     // Per-thread partial sums of the deterministic reductions (one cache line
     // per thread; sized to the max team on use).
     mutable std::vector<double> part_;

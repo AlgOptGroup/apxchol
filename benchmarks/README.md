@@ -172,10 +172,31 @@ comments, Pages or README measurements.
   apxchol's owner and setup profile use one complete enclosing interval, including
   input validation and temporary storage release. Detailed stage labels are
   exclusive; `unattributed` accounts for work between them, so the setup subtree
-  sums to the owner's construction time used by the benchmark. Component discovery
-  and, for split runs, component slicing are charged separately to benchmark Setup.
+  sums to the owner's construction time used by the benchmark.
   The owner also measures setup when detailed profiling is disabled. Normal benchmark runs omit optional stage
   instrumentation; `--profile` enables it for diagnosis.
+- Input adaptation is the harness work that lets a solver take a singular or
+  disconnected Laplacian it cannot take natively: component discovery, one
+  Dirichlet pin per singular component and, for split runs, component slicing.
+  It is charged to the Setup of the runs that need it and reported within Setup
+  as `adapt_s`, the way `stop_check_s` is reported within Solve. apxchol takes
+  components natively, so its whole-operator runs report 0. Any split run, an
+  explicit `--decompose split` of apxchol included, reports the discovery and
+  slicing it uses. A whole run pays discovery only when its
+  grounding uses it, which is the case for an operator with both singular and
+  nonsingular components. The adaptation code is parallel and returns the same
+  components, pins and operators at every thread count, so its time measures the
+  harness rather than the solver. RCHOL's diagonal shift is part of its own recipe
+  for every input and is not adaptation.
+- External runners report `adapt_s` the same way. The Laplacians.jl CG and
+  Cholesky references pay their pins and grounded block. AC takes components
+  natively: its component list serves only the stopping check and is not timed.
+  ParAC's graph mode pays the discovery that proves a matrix connected, or, for a
+  disconnected one, discovery, extraction and serialization of every component.
+  Its physics mode reports 0. ParAC's preparation is timed again at each thread
+  count, since discovery is parallel. CMG pays its component gauge and grounded block.
+- Published cells mark runs with a nonzero `adapt_s` with an asterisk and publish
+  `adapt_s` as its own column, so a reader can see or subtract it.
 - Common parsing/assembly and independent grading are excluded. Process-wide CUDA
   initialization is separately reported; solver-specific allocations/module loading
   remain charged. Hypre initialization is charged once per row, and so are

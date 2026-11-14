@@ -82,11 +82,10 @@ selected backend. The MATLAB/Octave binding currently uses CPU only.
 For direct C++ input, GPU setup needs every stored off-diagonal `(i, j)` to
 have its matching `(j, i)`. GPU setup also requires 32-bit vertex indices.
 
-CPU setup supports custom partitioners and eliminators. CUDA setup supports
-the experimental `block_greedy` partitioner and GKS or trace-cycle sampling.
-The experimental exact-core and double-cycle rules require CPU
-construction. Metal setup supports the default `block_greedy`/GKS options and
-FP32 graph weights. See [precision limits](precision.md#apple-metal-pcg) for Metal ranges.
+CPU setup supports custom partitioners and eliminators. CUDA and Metal setup
+support the experimental `block_greedy` partitioner and GKS or trace-cycle
+sampling. The experimental exact-core and double-cycle rules require CPU
+construction. Metal setup also requires FP32 graph weights. See [precision limits](precision.md#apple-metal-pcg) for Metal ranges.
 
 These construction restrictions do not prevent using an explicitly supplied
 host factor with a GPU solver. See [factor handoff](extending.md#reusing-a-custom-factor).

@@ -16,7 +16,8 @@ inline bool metal_setup_options_supported(const factor_options &options) {
     return sizeof(node_index) == sizeof(std::uint32_t) &&
            options.experimental.cpu_schedule == cpu_sptrsv_schedule::automatic &&
            options.experimental.partitioner == partitioner_kind::block_greedy &&
-           options.experimental.sampler == clique_sampler::gks &&
+           (options.experimental.sampler == clique_sampler::gks ||
+            options.experimental.sampler == clique_sampler::trace_cycle) &&
            options.experimental.exact_core_max_h.value_or(0) == 0 &&
            options.experimental.double_cycle_min_h == 0 &&
            quantile > 0 && quantile < 1;

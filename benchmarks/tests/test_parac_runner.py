@@ -216,6 +216,8 @@ class ParacTimingContractTest(unittest.TestCase):
         # The final singleton was genuinely extracted and serialized before its
         # size was known, so its 0.4 s adapter interval is charged as well.
         self.assertAlmostEqual(metrics["input_dump_s"], 0.9)
+        # Splitting a disconnected Laplacian is all adaptation.
+        self.assertAlmostEqual(metrics["adapt_s"], 0.9)
         self.assertAlmostEqual(metrics["rhs_norm"], 5 ** 0.5)
         self.assertAlmostEqual(metrics["rel_res"], (97 / 5) ** 0.5 * 1e-9)
 
@@ -322,6 +324,23 @@ class ParacGpuFailureCellTest(unittest.TestCase):
         self.assertEqual(reorder.call_args.args[1], rc.MATRICES["iter0010"]["spec"])
         self.assertEqual(reorder.call_args.args[2], "native-op")
         self.assertEqual(prepared, ("prepared.mtx", 1.25, "upstream", 0.0))
+
+    def test_dump_timing_is_cached_per_thread_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = f"{directory}/comp0.mtx"
+            pathlib.Path(path).write_text("matrix")
+            pathlib.Path(path + ".meta").write_text("2 1")
+            with mock.patch.object(parac, "THREADS", 16):
+                parac._stamp_dump_cache(path, 0.5)
+                with open(parac._timing_file(path, "discovery"), "w") as handle:
+                    handle.write("0.2")
+                self.assertTrue(parac._dump_cache_valid(path, require_meta=True))
+                self.assertEqual(parac._dump_discovery_seconds(path), 0.2)
+            with mock.patch.object(parac, "THREADS", 8):
+                self.assertFalse(parac._dump_cache_valid(path, require_meta=True))
+                self.assertIsNone(parac._dump_discovery_seconds(path))
+            parac._invalidate_dump_cache(path)
+            self.assertEqual(list(pathlib.Path(directory).iterdir()), [])
 
     def test_component_info_cache_avoids_serialization_and_reprobe(self):
         stderr = ("[component-info] 3 components: largest 17 / 20 nodes\n"

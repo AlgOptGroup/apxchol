@@ -30,6 +30,7 @@ include("bench_laplacians.jl")
         @test result.rel_residual <= 1e-8
         @test rhs == original
         @test 0 <= result.stop_check_seconds <= result.solve_time
+        @test result.adapt_time == 0   # AC takes components natively
     end
     grid = lap(grid_graph_adj(8,8))
     rhs = grid * randn(MersenneTwister(42),size(grid,1)); rhs /= norm(rhs)
@@ -37,6 +38,7 @@ include("bench_laplacians.jl")
     @test cg.rel_residual <= 1e-8 && cg.iterations <= 500
     for direct in (false,true)
         result = run_grounded_julia(L,L*collect(1.0:5.0),"disconnected",1e-8,100,direct)
+        @test 0 < result.adapt_time <= result.setup_time
         if direct
             @test result.rel_residual <= 1e-8 && result.iterations <= 100
         else

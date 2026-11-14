@@ -10,6 +10,11 @@ inline const char resident_metal_source[] =
 #include "apxchol/solver/detail/double_float.inc"
 #include "math.inc"
 #include "setup.inc"
+#undef APXCHOL_GPU_CODE
+    ;
+// Two literals: one would exceed the 65,536 characters C++ compilers must accept.
+inline const char resident_metal_source_rest[] =
+#define APXCHOL_GPU_CODE(...) #__VA_ARGS__
 #include "apxchol/solver/detail/residual_sparsify.inc"
 #include "sparsify.inc"
 #include "view.inc"

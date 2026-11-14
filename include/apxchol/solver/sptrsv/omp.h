@@ -2,6 +2,7 @@
 #include "apxchol/types.h"
 #include "apxchol/sparse_csc.h"
 #include "apxchol/big_alloc.h"
+#include "apxchol/csc_work.h"
 #include "apxchol/solver/detail/cpu_parallel.h"
 #include "apxchol/solver/factor_options.h"
 #include "apxchol/solver/sptrsv/critical_schedule.h"
@@ -166,6 +167,10 @@ private:
 ///
 /// The critical-tail path preserves same-processor dependencies in topological
 /// order and uses a staleness-2 weak barrier for cross-processor dependencies.
+/// The terminal run -- the last rows, which one lane would execute alone -- is
+/// taken out of the lanes and run by one thread after them. In forward panel
+/// solves the team first sums, split by entry count, the part of every tail
+/// row whose columns are already complete (see solve_hybrid).
 /// verbose setup prints the level census and resolved tail plan.
 
 // Storage contract (derivation and historical decisions: docs/precision.md):
@@ -809,7 +814,9 @@ private:
         hybrid_fwd_level_end_ = 0;
         hybrid_bck_level_begin_ = 0;
         critical_plan_.clear();
-        critical_barrier_.clear();
+        own_workspace_.clear();
+        terminal_begin_ = 0;
+        std::vector<edge_index>().swap(tail_prefix_ptr_);
         build_levels(mark);
         if (mode == cpu_sptrsv_schedule::automatic)
             build_hybrid_tail(processors, mark);
@@ -864,22 +871,42 @@ private:
             tail_rows != static_cast<std::size_t>(m_ - first_row))
             return;
 
+        // The plan covers [first_row, terminal_begin_); the terminal run
+        // [terminal_begin_, m) is executed after the lanes (before them in
+        // the backward direction), see solve_hybrid.
         critical_plan_ = detail::build_critical_schedule(
             m_, csr_row_ptr_.data(), csr_col_idx_.data(), processors,
-            first_row);
-        critical_barrier_.setup(processors);
+            first_row, &terminal_begin_);
+        // Ready prefix of every tail row: the entries whose columns are
+        // complete before the row's phase starts -- the bulk columns for a
+        // lane row, everything before the run for a terminal row. Rows are
+        // column-sorted, so these entries lead the row. Kept cumulative so a
+        // prefix pass can split its rows by entry count.
+        tail_prefix_ptr_.resize(static_cast<std::size_t>(m_ - first_row) + 1);
+        tail_prefix_ptr_[0] = 0;
+        for (node_index v = first_row; v < m_; ++v) {
+            const node_index* begin = csr_col_idx_.data() + csr_row_ptr_[v];
+            const node_index* end = csr_col_idx_.data() + csr_row_ptr_[v + 1] - 1;
+            const node_index cut = v < terminal_begin_ ? first_row : terminal_begin_;
+            assert(std::is_sorted(begin, end));
+            tail_prefix_ptr_[v - first_row + 1] = tail_prefix_ptr_[v - first_row]
+                + static_cast<edge_index>(std::lower_bound(begin, end, cut) - begin);
+        }
+        own_workspace_.barrier.setup(processors);
         hybrid_fwd_level_end_ = split;
         hybrid_bck_level_begin_ = levels.size() - split;
-        hybrid_active_ = critical_plan_.row_count != 0;
+        hybrid_active_ = true;   // first_row < m_: the tail is not empty
         if (hybrid_active_) {
             mark("hybrid_critical_tail");
             if (verbose_) {
                 std::fprintf(stderr,
                     "[trsv-hybrid] processors=%u bulk_levels=%zu "
-                    "tail_levels=%zu tail_rows=%u critical_supersteps=%zu\n",
+                    "tail_levels=%zu tail_rows=%u critical_supersteps=%zu "
+                    "terminal_rows=%u\n",
                     processors, split, levels.size() - split,
-                    static_cast<unsigned>(critical_plan_.row_count),
-                    critical_plan_.steps);
+                    static_cast<unsigned>(m_ - first_row),
+                    critical_plan_.steps,
+                    static_cast<unsigned>(m_ - terminal_begin_));
             }
         }
     }
@@ -1112,7 +1139,7 @@ public:
     /// Valid in place (x_in == y_out).
     template<int Columns = 1>
     void forward_solve(const double* x_in, double* y_out) {
-        solve_dispatch<fwd_dir, Columns>(x_in, y_out, critical_barrier_);
+        solve_dispatch<fwd_dir, Columns>(x_in, y_out, own_workspace_);
     }
 
     /// Back solve: L^T * z = y.  Under the fp16 storage the input is the
@@ -1121,25 +1148,45 @@ public:
     /// D = I on the fp32 storage. Valid in place (x_in == y_out).
     template<int Columns = 1>
     void transpose_solve(const double* x_in, double* y_out) {
-        solve_dispatch<bck_dir, Columns>(x_in, y_out, critical_barrier_);
+        solve_dispatch<bck_dir, Columns>(x_in, y_out, own_workspace_);
     }
 
+    /// Panel solves (Columns > 1) also accept FP32 panels for the output, and
+    /// for the input of the back solve: forward_solve(double in, float out)
+    /// then transpose_solve(float in, float out). A row gathers the output
+    /// panel, widens to FP64, accumulates in FP64 and rounds the stored
+    /// result, which halves the bytes each gather moves. Not valid in place
+    /// across types.
+    ///
     /// Mutable synchronization state of one caller's solves. The non-const
     /// overloads above use this object's own; callers sharing a const
     /// omp_sptrsv, such as solver copies, pass a workspace each from
     /// make_workspace().
-    using solve_workspace = detail::critical_weak_barrier;
+    struct solve_workspace {
+        detail::critical_weak_barrier barrier;
+        // Ready-prefix sums of the tail rows of one forward panel solve,
+        // sized on first use for the widest panel seen.
+        mutable std::vector<double> partial;
+
+        void clear() {
+            barrier.clear();
+            std::vector<double>().swap(partial);
+        }
+        std::size_t memory_bytes() const {
+            return barrier.memory_bytes() + partial.capacity() * sizeof(double);
+        }
+    };
     solve_workspace make_workspace() const {
         solve_workspace workspace;
-        if (hybrid_active_) workspace.setup(critical_plan_.processors);
+        if (hybrid_active_) workspace.barrier.setup(critical_plan_.processors);
         return workspace;
     }
     template<int Columns = 1>
-    void forward_solve(const double* x_in, double* y_out, const solve_workspace& workspace) const {
+    void forward_solve(const auto* x_in, auto* y_out, const solve_workspace& workspace) const {
         solve_dispatch<fwd_dir, Columns>(x_in, y_out, workspace);
     }
     template<int Columns = 1>
-    void transpose_solve(const double* x_in, double* y_out, const solve_workspace& workspace) const {
+    void transpose_solve(const auto* x_in, auto* y_out, const solve_workspace& workspace) const {
         solve_dispatch<bck_dir, Columns>(x_in, y_out, workspace);
     }
 
@@ -1147,7 +1194,7 @@ private:
     // One storage branch per solve; FP16 kernels are only entered after the
     // setup-time CPU capability check.
     template <class Dir, int Columns>
-    void solve_dispatch(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
+    void solve_dispatch(const auto* x_in, auto* y_out, const solve_workspace& barrier) const {
         if (fp16_) {
             solve_selected<Dir, _Float16, Columns>(x_in, y_out, barrier);
             return;
@@ -1156,7 +1203,7 @@ private:
     }
 
     template <class Dir, class V, int Columns = 1>
-    void solve_selected(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
+    void solve_selected(const auto* x_in, auto* y_out, const solve_workspace& barrier) const {
         const unsigned processors = detail::cpu_solve_threads(team_rows_);
         if (processors == 1)
             return solve_levelset_range_serial<Dir, V, Columns>(
@@ -1169,15 +1216,37 @@ private:
             solve_levelset<Dir, V, Columns>(x_in, y_out, processors);
     }
 
+    // Phases of the tail. The lanes run the critical plan; the terminal run
+    // is the plan-less suffix one thread executes in row order. In forward
+    // panel solves each of the two is preceded by a prefix pass, in which the
+    // whole team sums the ready prefix of every row of that phase.
+    enum class tail_phase { lanes, terminal_run, lane_prefix, terminal_prefix };
+
     template <class Dir, class V, int Columns = 1>
-    void solve_hybrid(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
+    void solve_hybrid(const auto* x_in, auto* y_out, const solve_workspace& workspace) const {
         const unsigned processors = critical_plan_.processors;
         bool team_ok = true;
-        // Keep both phases in one team. The last level-set workshare already
-        // barriers before the critical tail in the forward direction. The
-        // reverse direction needs one explicit phase barrier because a lane
-        // may leave the last weak superstep before every other lane has
-        // published its final tail row.
+        double* partial = nullptr;
+        if constexpr (Dir::forward && Columns > 1) {
+            const std::size_t need =
+                static_cast<std::size_t>(m_ - critical_plan_.first_row) * Columns;
+            if (workspace.partial.size() < need) workspace.partial.resize(need);
+            partial = workspace.partial.data();
+        }
+        // Keep all phases in one team. Forward: bulk levels, lanes, terminal
+        // run. A forward row of the tail gathers every earlier column, so most
+        // of its entries are complete long before the row is reached: for a
+        // lane row the bulk columns, for a terminal row everything before the
+        // run. In panel solves the team sums those ready prefixes first, split
+        // by entry count, and the dependent phase resumes each row's sum where
+        // the prefix stopped, so every row still adds its entries in stored
+        // order and the result keeps its bytes. Backward runs the phases in
+        // reverse; a tail column only has entries inside the tail.
+        //
+        // The last level-set workshare already barriers before the tail in
+        // the forward direction. A lane may leave the last weak superstep
+        // before every other lane has published its final row, so whatever
+        // follows the lanes needs one explicit barrier.
         #pragma omp parallel num_threads(processors) shared(team_ok)
         {
             #pragma omp single
@@ -1186,9 +1255,28 @@ private:
                 if constexpr (Dir::forward) {
                     solve_levelset_range_team<Dir, V, Columns>(
                         x_in, y_out, 0, hybrid_fwd_level_end_);
-                    solve_critical_team<Dir, V, Columns>(x_in, y_out, barrier);
+                    if constexpr (Columns > 1) {
+                        solve_tail_phase<Dir, V, Columns>(
+                            tail_phase::lane_prefix, x_in, y_out, workspace.barrier, partial);
+                        #pragma omp barrier
+                    }
+                    solve_tail_phase<Dir, V, Columns>(
+                        tail_phase::lanes, x_in, y_out, workspace.barrier, partial);
+                    #pragma omp barrier
+                    if constexpr (Columns > 1) {
+                        solve_tail_phase<Dir, V, Columns>(
+                            tail_phase::terminal_prefix, x_in, y_out, workspace.barrier, partial);
+                        #pragma omp barrier
+                    }
+                    #pragma omp single nowait
+                    solve_tail_phase<Dir, V, Columns>(
+                        tail_phase::terminal_run, x_in, y_out, workspace.barrier, partial);
                 } else {
-                    solve_critical_team<Dir, V, Columns>(x_in, y_out, barrier);
+                    #pragma omp single
+                    solve_tail_phase<Dir, V, Columns>(
+                        tail_phase::terminal_run, x_in, y_out, workspace.barrier, partial);
+                    solve_tail_phase<Dir, V, Columns>(
+                        tail_phase::lanes, x_in, y_out, workspace.barrier, partial);
                     #pragma omp barrier
                     solve_levelset_range_team<Dir, V, Columns>(
                         x_in, y_out, hybrid_bck_level_begin_,
@@ -1208,7 +1296,7 @@ private:
     }
 
     template <class Dir, class V, int Columns = 1>
-    void solve_levelset_range_serial(const double* x_in, double* y_out,
+    void solve_levelset_range_serial(const auto* x_in, auto* y_out,
                                      std::size_t first_level,
                                      std::size_t level_end) const {
         with_base_levels<Dir>([&](const auto& levels) {
@@ -1232,32 +1320,111 @@ private:
 #ifdef __x86_64__
     template <class Dir, class V, int Columns>
     [[gnu::target("avx2,f16c,fma"), gnu::flatten]]
-    void solve_critical_fma(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
-        solve_critical_team_impl<Dir, V, Columns>(x_in, y_out, barrier);
+    void solve_tail_phase_fma(tail_phase phase, const auto* x_in, auto* y_out,
+                              const detail::critical_weak_barrier& barrier, double* partial) const {
+        solve_tail_phase_impl<Dir, V, Columns>(phase, x_in, y_out, barrier, partial);
     }
 
     template <class Dir, int Columns>
     [[gnu::target("f16c"), gnu::flatten]]
-    void solve_critical_fp16(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
-        solve_critical_team_impl<Dir, _Float16, Columns>(x_in, y_out, barrier);
+    void solve_tail_phase_fp16(tail_phase phase, const auto* x_in, auto* y_out,
+                               const detail::critical_weak_barrier& barrier, double* partial) const {
+        solve_tail_phase_impl<Dir, _Float16, Columns>(phase, x_in, y_out, barrier, partial);
     }
 #endif
 
+    // Called collectively from the hybrid team (terminal_run: by one thread).
     template <class Dir, class V, int Columns = 1>
-    void solve_critical_team(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
+    void solve_tail_phase(tail_phase phase, const auto* x_in, auto* y_out,
+                          const detail::critical_weak_barrier& barrier, double* partial) const {
 #if defined(__x86_64__) && !(defined(__AVX2__) && defined(__F16C__) && defined(__FMA__))
         if constexpr (std::is_same_v<V, _Float16> || Columns > 1) {
             if (simd_fp16_kernel())
-                return solve_critical_fma<Dir, V, Columns>(x_in, y_out, barrier);
+                return solve_tail_phase_fma<Dir, V, Columns>(phase, x_in, y_out, barrier, partial);
             if constexpr (std::is_same_v<V, _Float16>)
-                return solve_critical_fp16<Dir, Columns>(x_in, y_out, barrier);
+                return solve_tail_phase_fp16<Dir, Columns>(phase, x_in, y_out, barrier, partial);
         }
 #endif
-        solve_critical_team_impl<Dir, V, Columns>(x_in, y_out, barrier);
+        solve_tail_phase_impl<Dir, V, Columns>(phase, x_in, y_out, barrier, partial);
     }
 
     template <class Dir, class V, int Columns = 1>
-    void solve_critical_team_impl(const double* x_in, double* y_out, const detail::critical_weak_barrier& barrier) const {
+    [[gnu::always_inline]]
+    void solve_tail_phase_impl(tail_phase phase, const auto* x_in, auto* y_out,
+                               const detail::critical_weak_barrier& barrier, double* partial) const {
+        switch (phase) {
+        case tail_phase::lanes:
+            return solve_critical_team_impl<Dir, V, Columns>(x_in, y_out, barrier, partial);
+        case tail_phase::terminal_run:
+            if constexpr (Dir::forward) {
+                for (node_index v = terminal_begin_; v < m_; ++v)
+                    solve_tail_row<Dir, V, Columns>(v, x_in, y_out, partial);
+            } else {
+                for (node_index v = m_; v-- > terminal_begin_;)
+                    solve_tail_row<Dir, V, Columns>(v, x_in, y_out, partial);
+            }
+            return;
+        case tail_phase::lane_prefix:
+            return sum_tail_prefixes<V, Columns>(
+                critical_plan_.first_row, terminal_begin_, y_out, partial);
+        case tail_phase::terminal_prefix:
+            return sum_tail_prefixes<V, Columns>(terminal_begin_, m_, y_out, partial);
+        }
+    }
+
+    // Prefix pass over tail rows [first, last): this thread's share by entry
+    // count (detail::work_balanced_range, actual team) of the rows' ready
+    // prefixes, summed in stored order into `partial`.
+    template <class V, int Columns>
+    [[gnu::always_inline]]
+    void sum_tail_prefixes(node_index first, node_index last,
+                           const auto* y_out, double* partial) const {
+        if constexpr (Columns > 1) {
+            const node_index tail = critical_plan_.first_row;
+            const edge_index* prefix = tail_prefix_ptr_.data() + (first - tail);
+            const auto [lo, hi] = detail::work_balanced_range(
+                prefix, static_cast<node_index>(last - first));
+            const edge_index* ptr = csr_row_ptr_.data();
+            for (node_index k = lo; k < hi; ++k) {
+                const node_index v = first + k;
+                double sum[Columns]{};
+                add_panel_terms<fwd_dir, V, Columns>(
+                    ptr[v], ptr[v] + (prefix[k + 1] - prefix[k]), sum, y_out);
+                double* out = partial + static_cast<std::size_t>(v - tail) * Columns;
+                #pragma omp simd
+                for (int q = 0; q < Columns; ++q)
+                    out[q] = sum[q];
+            }
+        } else {
+            (void)first; (void)last; (void)y_out; (void)partial;
+        }
+    }
+
+    // One tail row in its dependent phase. A forward panel row resumes the
+    // sum its prefix pass stored; every other row is the plain thin kernel.
+    template <class Dir, class V, int Columns>
+    [[gnu::always_inline]]
+    void solve_tail_row(node_index v, const auto* x_in, auto* y_out,
+                        const double* partial) const {
+        if constexpr (Dir::forward && Columns > 1) {
+            const std::size_t local = static_cast<std::size_t>(v - critical_plan_.first_row);
+            double sum[Columns];
+            #pragma omp simd
+            for (int q = 0; q < Columns; ++q)
+                sum[q] = partial[local * Columns + q];
+            const edge_index done = tail_prefix_ptr_[local + 1] - tail_prefix_ptr_[local];
+            finish_panel_row<Dir, V, Columns>(v, csr_row_ptr_[v] + done, sum, x_in, y_out);
+        } else {
+            (void)partial;
+            solve_row<Dir, V, Columns, /*Fat=*/false>(v, x_in, y_out);
+        }
+    }
+
+    template <class Dir, class V, int Columns = 1>
+    [[gnu::always_inline]]
+    void solve_critical_team_impl(const auto* x_in, auto* y_out,
+                                  const detail::critical_weak_barrier& barrier,
+                                  const double* partial) const {
         const unsigned processor =
             static_cast<unsigned>(omp_get_thread_num());
         const std::size_t steps = critical_plan_.steps;
@@ -1273,10 +1440,10 @@ private:
                 barrier.wait(processor, 1);
             if constexpr (Dir::forward) {
                 for (std::size_t i = begin; i < end; ++i)
-                    solve_row<Dir, V, Columns, /*Fat=*/false>(rows[i], x_in, y_out);
+                    solve_tail_row<Dir, V, Columns>(rows[i], x_in, y_out, partial);
             } else {
                 for (std::size_t i = end; i-- > begin;)
-                    solve_row<Dir, V, Columns, /*Fat=*/false>(rows[i], x_in, y_out);
+                    solve_tail_row<Dir, V, Columns>(rows[i], x_in, y_out, partial);
             }
             barrier.arrive(processor);
         }
@@ -1302,13 +1469,13 @@ private:
     // level and row order. Fat levels use `omp for schedule(static)`. Their
     // implicit barriers publish each group's outputs before the next group.
     template <class Dir, class V, int Columns = 1>
-    void solve_levelset(const double* x_in, double* y_out, unsigned processors) const {
+    void solve_levelset(const auto* x_in, auto* y_out, unsigned processors) const {
         solve_levelset_range<Dir, V, Columns>(
             x_in, y_out, 0, base_level_count<Dir>(), processors);
     }
 
     template <class Dir, class V, int Columns = 1>
-    void solve_levelset_range(const double* x_in, double* y_out,
+    void solve_levelset_range(const auto* x_in, auto* y_out,
                               std::size_t first_level,
                               std::size_t level_end, unsigned processors) const {
         if (first_level == level_end) return;
@@ -1323,7 +1490,7 @@ private:
     // body separate lets the hybrid cross from bulk levels to weak
     // supersteps without a second fork/join.
     template <class Dir, class V, int Columns = 1>
-    void solve_levelset_range_team(const double* x_in, double* y_out,
+    void solve_levelset_range_team(const auto* x_in, auto* y_out,
                                    std::size_t first_level,
                                    std::size_t level_end) const {
         with_base_levels<Dir>([&](const auto& levels) {
@@ -1342,7 +1509,7 @@ private:
     }
 
     template <class Dir, class V, int Columns, class Levels>
-    void solve_levelset_range_team_impl(const double* x_in, double* y_out,
+    void solve_levelset_range_team_impl(const auto* x_in, auto* y_out,
                                         const Levels& levels,
                                         std::size_t first_level,
                                         std::size_t level_end) const {
@@ -1365,7 +1532,7 @@ private:
 
     template <class Dir, class V, int Columns, bool Fat, bool Simd, bool Parallel, class Level>
     [[gnu::always_inline]]
-    void solve_level_rows_impl(const Level& level, const double* x_in, double* y_out) const {
+    void solve_level_rows_impl(const Level& level, const auto* x_in, auto* y_out) const {
         const node_index size = static_cast<node_index>(level.size());
         if constexpr (Parallel) {
             #pragma omp for schedule(static)
@@ -1386,20 +1553,20 @@ private:
     // and matching dot kernel, keeping calls and feature checks out of the rows.
     template <class Dir, class V, int Columns, bool Fat, bool Parallel, class Level>
     [[gnu::target("avx2,f16c,fma"), gnu::flatten]]
-    void solve_level_rows_simd(const Level& level, const double* x_in, double* y_out) const {
+    void solve_level_rows_simd(const Level& level, const auto* x_in, auto* y_out) const {
         solve_level_rows_impl<Dir, V, Columns, Fat, Fat, Parallel>(level, x_in, y_out);
     }
 
     template <class Dir, int Columns, bool Fat, bool Parallel, class Level>
     [[gnu::target("f16c"), gnu::flatten]]
-    void solve_level_rows_f16c(const Level& level, const double* x_in, double* y_out) const {
+    void solve_level_rows_f16c(const Level& level, const auto* x_in, auto* y_out) const {
         solve_level_rows_impl<Dir, _Float16, Columns, Fat, false, Parallel>(level, x_in, y_out);
     }
 #endif
 
     template <class Dir, class V, int Columns, bool Fat, bool Parallel, class Level>
     [[gnu::always_inline]]
-    void solve_level_rows(const Level& level, const double* x_in, double* y_out) const {
+    void solve_level_rows(const Level& level, const auto* x_in, auto* y_out) const {
 #if defined(__AVX2__) && defined(__F16C__) && defined(__FMA__)
         if constexpr (std::is_same_v<V, _Float16>)
             return solve_level_rows_simd<Dir, V, Columns, Fat, Parallel>(level, x_in, y_out);
@@ -1438,7 +1605,10 @@ public:
         if (processors == 1) return 0;
         const bool hybrid = hybrid_active_ && processors == critical_plan_.processors;
         const auto count = [&]<class Dir>() {
-            std::size_t result = hybrid ? critical_plan_.steps : 0;
+            // The terminal run counts as one step. The count is the scalar
+            // solve's: a forward panel solve has two more barriers, one
+            // after each prefix pass.
+            std::size_t result = hybrid ? critical_plan_.steps + 1 : 0;
             const auto first = hybrid && !Dir::forward ? hybrid_bck_level_begin_ : 0;
             const auto end = hybrid && Dir::forward ? hybrid_fwd_level_end_ : base_level_count<Dir>();
             with_base_levels<Dir>([&](const auto& levels) {
@@ -1518,7 +1688,8 @@ public:
             b += lv->capacity() * sizeof(std::vector<node_index>);
             for (const auto& l : *lv) b += l.capacity() * sizeof(node_index);
         }
-        b += critical_plan_.memory_bytes() + critical_barrier_.memory_bytes();
+        b += critical_plan_.memory_bytes() + own_workspace_.memory_bytes()
+           + tail_prefix_ptr_.capacity() * sizeof(edge_index);
         return b;
     }
 
@@ -1723,6 +1894,48 @@ private:
 
 #endif
 
+    // Panel rows: sum[q] += widen(vals[p]) * y_out[idx[p], q] over the slots
+    // [p, end), in stored order. A row summed in two calls -- the second
+    // continuing the first one's `sum` -- adds the same terms in the same
+    // order as a row summed in one.
+    template <class Dir, class V, int Columns>
+    [[gnu::always_inline]]
+    void add_panel_terms(edge_index p, edge_index end, double* sum, const auto* y_out) const {
+        const auto& vals = Dir::template vals<V>(*this);
+        const auto& idx = Dir::idx(*this);
+        for (; p < end; ++p) {
+            const double value = widen(vals[p]);
+            const auto offset = std::size_t(idx[p]) * Columns;
+            #pragma omp simd
+            for (int q = 0; q < Columns; ++q)
+                sum[q] += value * y_out[offset + q];
+        }
+    }
+
+    // Adds the slots from `p` to the end of panel row v to `sum` and writes
+    // the row's result.
+    template <class Dir, class V, int Columns>
+    [[gnu::always_inline]]
+    void finish_panel_row(node_index v, edge_index p, double* sum,
+                          const auto* x_in, auto* y_out) const {
+        // FP32 panels: gathered values and the input widen to FP64, the sum
+        // and the backward input scale stay FP64, and only the stored result
+        // is rounded.
+        using stored = std::remove_reference_t<decltype(*y_out)>;
+        static_assert(std::is_same_v<stored, double> || std::is_same_v<stored, float>);
+        add_panel_terms<Dir, V, Columns>(p, Dir::last(Dir::ptr(*this).data(), v), sum, y_out);
+        const double diagonal = diag<Dir, V>(v);
+        double scale = 1;
+        if constexpr (!Dir::forward && std::is_same_v<V, _Float16>) {
+            const double reciprocal = inv_scale_[v];
+            scale = reciprocal * reciprocal;
+        }
+        const auto offset = std::size_t(v) * Columns;
+        #pragma omp simd
+        for (int q = 0; q < Columns; ++q)
+            y_out[offset + q] = static_cast<stored>((x_in[offset + q] * scale - sum[q]) / diagonal);
+    }
+
     // One row (forward: CSR row i) / column (back: CSC column j) of the sweep:
     //   y_out[v] = (rhs(v) - sum over the off-diagonal slots of widen(vals) * y_out[idx]) / L~_vv
     // The gather source is y_out itself (earlier levels' results); valid in
@@ -1732,52 +1945,34 @@ private:
     // kernel); thin: dot_thin (4-way).
     template <class Dir, class V, int Columns, bool Fat, bool Simd = false>
     [[gnu::always_inline]]
-    void solve_row(node_index v, const double* x_in, double* y_out) const {
+    void solve_row(node_index v, const auto* x_in, auto* y_out) const {
         const edge_index* ptr = Dir::ptr(*this).data();
         const edge_index p0 = Dir::first(ptr, v);
         const edge_index p1 = Dir::last(ptr, v);
         if constexpr (Columns > 1) {
             double sum[Columns]{};
-            const auto& vals = Dir::template vals<V>(*this);
-            const auto& idx = Dir::idx(*this);
-            for (edge_index p = p0; p < p1; ++p) {
-                const double value = widen(vals[p]);
-                const auto offset = std::size_t(idx[p]) * Columns;
-                #pragma omp simd
-                for (int q = 0; q < Columns; ++q)
-                    sum[q] += value * y_out[offset + q];
-            }
-            const double diagonal = diag<Dir, V>(v);
-            double scale = 1;
-            if constexpr (!Dir::forward && std::is_same_v<V, _Float16>) {
-                const double reciprocal = inv_scale_[v];
-                scale = reciprocal * reciprocal;
-            }
-            const auto offset = std::size_t(v) * Columns;
-            #pragma omp simd
-            for (int q = 0; q < Columns; ++q)
-                y_out[offset + q] = (x_in[offset + q] * scale - sum[q]) / diagonal;
-            return;
-        }
-        double sum;
-#ifdef __x86_64__
-        if constexpr (std::is_same_v<V, _Float16>) {
-            if constexpr (Simd)
-                sum = dot_fat_simd(Dir::template vals<V>(*this).data(), Dir::idx(*this).data(), p0, p1, y_out);
-            else
-                sum = dot_fp16_scalar<Fat>(Dir::template vals<V>(*this).data(), Dir::idx(*this).data(), p0, p1, y_out);
-        } else
-#endif
-        if constexpr (Fat) {
-            const V* vals = Dir::template vals<V>(*this).data();
-            const node_index* idx = Dir::idx(*this).data();
-            sum = 0.0;
-            for (edge_index p = p0; p < p1; ++p)
-                sum += widen(vals[p]) * y_out[idx[p]];
+            finish_panel_row<Dir, V, Columns>(v, p0, sum, x_in, y_out);
         } else {
-            sum = dot_thin<V>(Dir::template vals<V>(*this).data(), Dir::idx(*this).data(), p0, p1, y_out);
+            double sum;
+#ifdef __x86_64__
+            if constexpr (std::is_same_v<V, _Float16>) {
+                if constexpr (Simd)
+                    sum = dot_fat_simd(Dir::template vals<V>(*this).data(), Dir::idx(*this).data(), p0, p1, y_out);
+                else
+                    sum = dot_fp16_scalar<Fat>(Dir::template vals<V>(*this).data(), Dir::idx(*this).data(), p0, p1, y_out);
+            } else
+#endif
+            if constexpr (Fat) {
+                const V* vals = Dir::template vals<V>(*this).data();
+                const node_index* idx = Dir::idx(*this).data();
+                sum = 0.0;
+                for (edge_index p = p0; p < p1; ++p)
+                    sum += widen(vals[p]) * y_out[idx[p]];
+            } else {
+                sum = dot_thin<V>(Dir::template vals<V>(*this).data(), Dir::idx(*this).data(), p0, p1, y_out);
+            }
+            y_out[v] = (Dir::template rhs<V>(*this, v, x_in) - sum) / diag<Dir, V>(v);
         }
-        y_out[v] = (Dir::template rhs<V>(*this, v, x_in) - sum) / diag<Dir, V>(v);
     }
 
     // Level sets.
@@ -1793,7 +1988,11 @@ private:
     // its level sets. Tail rows are stored once in forward slot order; backward
     // maps to the reversed step and traverses that same slot in reverse.
     detail::critical_schedule_plan critical_plan_;
-    detail::critical_weak_barrier critical_barrier_;
+    solve_workspace own_workspace_;
+    // First row of the terminal run, and the cumulative ready-prefix lengths
+    // of the tail rows (see build_hybrid_tail).
+    node_index terminal_begin_ = 0;
+    std::vector<edge_index> tail_prefix_ptr_;
     bool hybrid_active_ = false;
     std::size_t hybrid_fwd_level_end_ = 0;
     std::size_t hybrid_bck_level_begin_ = 0;

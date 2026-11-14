@@ -215,3 +215,35 @@ def test_one_shot_forwards_warm_start_and_output(matrix):
     for keyword in ("x0", "out"):
         with pytest.raises(ValueError):
             apxchol.solve(A, expected, backend="cpu", **{keyword: np.zeros((3, 2))})
+
+
+def test_one_call_solve_uses_trace_cycle_from_16_columns_on_cpu():
+    # With 16 columns apxchol.solve uses the factor the one-call rule builds
+    # for 16 columns (trace-cycle, a different factor from GKS); with 15 it
+    # uses the GKS factor of factorize(). Single thread, so both are fixed.
+    A = grid2d_sddm(20)
+    B = A @ np.random.default_rng(1).standard_normal((A.shape[0], 16))
+    opts = dict(backend="cpu", seed=3, num_threads=1)
+    csc = sp.csc_matrix(A)
+    rule16 = apxchol.Solver.__new__(apxchol.Solver)
+    rule16._init_csc(csc.data, csc.indices, csc.indptr, rhs_columns=16, **opts)
+    gks = apxchol.factorize(A, **opts)
+    assert rule16.factor_nnz != gks.factor_nnz
+    wide = apxchol.solve(A, B, **opts)
+    narrow = apxchol.solve(A, B[:, :15], **opts)
+    assert np.all(wide.converged) and np.all(narrow.converged)
+    assert np.array_equal(wide.iterations, rule16.solve(B).iterations)
+    assert np.array_equal(narrow.iterations, gks.solve(B[:, :15]).iterations)
+
+
+@pytest.mark.parametrize("entry", ["factorize", "Solver", "from_csc", "solve"])
+def test_rhs_columns_is_not_an_option(entry):
+    A = grid2d_sddm(4)
+    with pytest.raises(ValueError, match="unknown option"):
+        if entry == "solve":
+            apxchol.solve(A, np.ones(A.shape[0]), rhs_columns=100)
+        elif entry == "from_csc":
+            csc = sp.csc_matrix(A)
+            apxchol.Solver.from_csc(csc.data, csc.indices, csc.indptr, rhs_columns=100)
+        else:
+            getattr(apxchol, entry)(A, rhs_columns=100)

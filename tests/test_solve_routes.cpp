@@ -453,3 +453,33 @@ TEST(SolveRoutes, CudaTriangularSolveWithoutFactorThrows) {
     EXPECT_THROW(empty.solve_LLt_dev<1>(x.data(), x.data()), std::logic_error);
 }
 #endif
+
+TEST(SolveRoutes, OneCallSamplerFollowsTheColumnCountOnCpu) {
+    apxchol::solve_options options;
+    options.backend = apxchol::solve_backend::cpu;
+    for (std::int64_t columns : {1, 4, 15}) {
+        auto o = options;
+        apxchol::detail::choose_sampler(o, columns);
+        EXPECT_EQ(o.factor_opts.experimental.sampler, apxchol::clique_sampler::gks) << columns;
+    }
+    for (std::int64_t columns : {16, 64}) {
+        auto o = options;
+        apxchol::detail::choose_sampler(o, columns);
+        EXPECT_EQ(o.factor_opts.experimental.sampler, apxchol::clique_sampler::trace_cycle) << columns;
+    }
+}
+
+TEST(SolveRoutes, OneCallSamplerUsesTheGpuThresholdOnlyWhereTheGpuIsChosen) {
+    apxchol::solve_options options;
+    std::int64_t threshold = 16;
+    if (apxchol::detail::select_solve_backend(options) == apxchol::solve_backend::gpu) {
+#if !defined(APXCHOL_USE_CUDA)
+        threshold = 8;   // Metal
+#endif
+    }
+    auto below = options, at = options;
+    apxchol::detail::choose_sampler(below, threshold - 1);
+    apxchol::detail::choose_sampler(at, threshold);
+    EXPECT_EQ(below.factor_opts.experimental.sampler, apxchol::clique_sampler::gks) << threshold;
+    EXPECT_EQ(at.factor_opts.experimental.sampler, apxchol::clique_sampler::trace_cycle) << threshold;
+}
