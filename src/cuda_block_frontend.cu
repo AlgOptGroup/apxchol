@@ -283,27 +283,7 @@ struct pinned_selection_readback {
     device_selected_status status;
 };
 
-template<class T>
-class pinned_host_array {
-public:
-    pinned_host_array() = default;
-    ~pinned_host_array() { if (data_) cudaFreeHost(data_); }
-    pinned_host_array(const pinned_host_array&) = delete;
-    pinned_host_array& operator=(const pinned_host_array&) = delete;
-    T* reserve(std::size_t count) {
-        if (count > count_) {
-            if (data_) { cudaFreeHost(data_); data_ = nullptr; count_ = 0; }
-            cuda_check(cudaMallocHost(reinterpret_cast<void**>(&data_), count * sizeof(T)),
-                       "allocate pinned selection readback");
-            count_ = count;
-        }
-        return data_;
-    }
-    T* get() noexcept { return data_; }
-private:
-    T* data_ = nullptr;
-    std::size_t count_ = 0;
-};
+template<class T> using pinned_host_array = cuda_pinned_buffer<T, cuda_check>;
 
 double elapsed_ms(clock_type::time_point start, bool verbose) {
     if (!verbose)
@@ -378,8 +358,8 @@ struct gpu_block_frontend::impl {
         // [0] selection counts, [1] the last active compaction (checked later).
         selected_count.reserve(2);
         selected_status.reserve(1);
-        pinned.reserve(1);
-        pinned_ids.reserve(std::max<std::size_t>(n, 1));
+        pinned.reserve(1, "allocate pinned selection readback");
+        pinned_ids.reserve(std::max<std::size_t>(n, 1), "allocate pinned selection ids");
         if (n) {
             initialize_status<<<blocks_for(n), kBlock>>>(n, status.get());
             cuda_check(cudaGetLastError(), "initialize bounded selector status");

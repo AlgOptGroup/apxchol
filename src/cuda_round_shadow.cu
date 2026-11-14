@@ -1780,21 +1780,6 @@ struct pinned_round_readback {
     gpu_round_shadow_normal_batch_counts batch;
 };
 
-class pinned_host_block {
-public:
-    pinned_host_block() = default;
-    ~pinned_host_block() { if (data_) cudaFreeHost(data_); }
-    pinned_host_block(const pinned_host_block&) = delete;
-    pinned_host_block& operator=(const pinned_host_block&) = delete;
-    pinned_round_readback* get() {
-        if (!data_)
-            cuda_check(cudaMallocHost(reinterpret_cast<void**>(&data_), sizeof(*data_)),
-                       "allocate pinned round readback");
-        return data_;
-    }
-private:
-    pinned_round_readback* data_ = nullptr;
-};
 
 struct gpu_round_shadow_device_state::impl {
     bool verbose = false;
@@ -1802,7 +1787,7 @@ struct gpu_round_shadow_device_state::impl {
     clique_sampler sampler = clique_sampler::gks;
     allocation_tracker tracker;
     round_common_scratch owned_common_scratch;
-    pinned_host_block readback;
+    cuda_pinned_buffer<pinned_round_readback, cuda_check> readback;
     device_buffer<double> cycle_workspace;
     device_buffer<std::uint32_t> cycle_plan_cut;
     device_buffer<unsigned long long> cycle_plan_state;
@@ -2235,7 +2220,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
             cuda_check(cudaGetLastError(), "count normal batches");
         }
         {
-            auto* staged = readback.get();
+            auto* staged = readback.reserve(1, "allocate pinned round readback");
             cuda_check(cudaMemcpyAsync(&staged->validation_status,
                                        selection_validation_status.get(), sizeof(std::uint32_t),
                                        cudaMemcpyDeviceToHost),
@@ -2653,7 +2638,7 @@ gpu_round_shadow_report gpu_round_shadow_device_state::impl::compute(
 
     device_semantics host_semantics{};
     report.timings.download_ms = timer.measure_ms([&] {
-        auto* staged = readback.get();
+        auto* staged = readback.reserve(1, "allocate pinned round readback");
         cuda_check(cudaMemcpyAsync(&staged->semantics, semantics.get(),
                                    sizeof(device_semantics), cudaMemcpyDeviceToHost),
                    "queue semantic report download");
