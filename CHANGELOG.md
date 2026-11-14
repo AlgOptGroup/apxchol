@@ -89,7 +89,7 @@
 - New `apxchol.as_operator(M)`, `apxchol_as_operator(M)` and CLI `--convert-input`: a finite symmetric matrix with at least one off-diagonal entry, all of them positive, becomes its graph Laplacian `L = D - M` (self-loops cancel), any other finite symmetric matrix is used as given and checked by the solver, and asymmetric or non-finite input is an error.
 - The CLI solves an `n` by `k` `--rhs` file as one batch, writes an `n` by `k` solution with `-o`, and logs iterations and residuals per column.
 - The v1 API compatibility scope is documented.
-- Breaking: from 1.0, the installed CMake package accepts any version request with the same major version (0.x stays minor-scoped), and the shared core library's soname now carries `major.minor` (`libapxchol_core.so.0.3` for this version).
+- Breaking: from 1.0, the installed CMake package accepts equal or older version requests within the same major version (0.x stays minor-scoped), and the shared core library's soname now carries `major.minor` (`libapxchol_core.so.1.0` at 1.0).
 - The partitioner and eliminator extension interfaces are experimental in 1.x and may change in minor releases.
 - Breaking: research controls (`omp_threshold`, `min_is_fraction`, `parallel_residual_threshold`, `exact_core_max_h`, `double_cycle_min_h`, `cpu_schedule`) move to `factor_options::experimental`, outside the 1.x compatibility promise, and leave the CLI, Python and MATLAB/Octave.
 - Breaking: `partitioner`, `partition` (`degree_quantile`, `degree_multiplier`) and `sampler` move to `factor_options::experimental`, outside the 1.x compatibility promise. The stable factorization options are now `seed`, `factor_storage`, `drop_tolerance`, `positive_offdiag_tolerance` and `verbose`.
@@ -101,14 +101,14 @@
 - Breaking: unset `degree_quantile`, `parallel_residual_threshold` and `exact_core_max_h` are `std::nullopt` instead of -1 or `SIZE_MAX`, and the sentinel constants and resolvers such as `exact_core_by_route` and `degree_quantile_or_host_default` are removed.
 - Breaking: CLI `--is` is removed, `--factor-drop` and `--maxiter` are renamed `--drop-tolerance` and `--max-iter`, and `--factor-storage` accepts names only.
 - Python and MATLAB/Octave accept the same stable setup options.
-- Python wheels for CPython 3.11+ on Linux and macOS arm64 (GPU wheels select the backend at runtime), standalone CLI archives, and MATLAB/Octave batched solves with save/load.
+- New `solve_options::num_threads` (CLI `--threads`, `num_threads` in Python and MATLAB/Octave) caps the CPU threads of a solver's setup and solves. Zero uses the caller's OpenMP setting.
+- Python wheels for CPython 3.11+ and PyPy 3.11 on Linux and macOS arm64 (GPU wheels select the backend at runtime), standalone CLI archives, and MATLAB/Octave batched solves with save/load.
 - Wheels declare a `License-Expression` that matches their contents (BSD-3-Clause and Apache-2.0 WITH LLVM-exception; Linux CUDA wheels add the NVIDIA CUDA EULA and ship its text) and take the root LICENSE at build time; minimum scikit-build-core is 0.12.
 - Relicensed from BSD-4-Clause to BSD-3-Clause.
 - Breaking: `solver::solve()` and `solver::apply()` are non-const because they use the solver's workspace; concurrent non-const calls on one solver are not allowed.
 
 ### Benchmarks
 - The benchmark harness checks every result against the original system's residual and reports setup, solve and memory separately.
-- Published results now come from CSCS Daint; laptop results are archived.
 - GPU memory is now this process's NVML usage above its post-context baseline, measured the same way for apxchol, AMGCL and Hypre, with a new `setup_vram_mb` column; other compute processes are reported separately and flagged as shared.
 - The benchmark builds on macOS with a Metal route for apxchol (`--device metal`), with Metal warm-up excluded from setup and the factor-drop statistics in `--report-fill`.
 - Adapting singular or disconnected Laplacians for solvers that cannot take them (component discovery, Dirichlet pins, component splitting) is charged only to those solvers, runs in parallel and is reported within setup as a new `adapt_s` column. apxchol and Laplacians.jl AC take components natively and pay none.
