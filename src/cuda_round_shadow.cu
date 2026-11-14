@@ -3169,27 +3169,82 @@ __global__ void add_excess(const node_index* ids, std::uint32_t K, const double*
     M[k * K + k] += excess[ids[k]];
     original[k] = M[k * K + k];
 }
-__global__ void column(std::uint32_t j, std::uint32_t K, double* M, const double* original,
-                       double* root) {
-    // A Schur-complement diagonal at rounding level of its assembled value is
-    // a null-space pivot (a Laplacian component); larger ones are kept.
-    const double d = M[std::size_t(j) * K + j];
+// Right-looking Cholesky in 32-column panels, about 3 launches per panel.
+// panel_diag factors the diagonal tile in one warp. A Schur-complement
+// diagonal at rounding level of its assembled value is a null-space pivot
+// (a Laplacian component): its column is zeroed, root 1, live 0; larger
+// pivots are kept. panel_rows solves the rows below against the tile (one
+// thread per row); panel_syrk updates the trailing lower tiles (one block per
+// tile). The diagonal entries of M keep their assembled values; root holds
+// the factor diagonal.
+constexpr std::uint32_t kPanel = 32;
+__global__ void panel_diag(std::uint32_t jb, std::uint32_t K, double* M, const double* original,
+                           double* root, std::uint8_t* live) {
+    __shared__ double T[kPanel][kPanel + 1];
+    const std::uint32_t t = threadIdx.x, cnt = min(kPanel, K - jb);
     const double rounding = 64.0 * double(K) * 2.220446049250313e-16;
-    const bool zero = !(d > rounding * original[j]) || !isfinite(d);
-    const double r = zero ? 1.0 : sqrt(d);
-    for (std::uint32_t i = j + 1 + threadIdx.x; i < K; i += blockDim.x) {
-        double& x = M[std::size_t(i) * K + j];
-        x = zero ? 0.0 : x / r;
+    for (std::uint32_t r = 0; r < cnt; ++r)
+        T[r][t] = t <= r ? M[std::size_t(jb + r) * K + jb + t] : 0.0;
+    __syncwarp();
+    for (std::uint32_t j = 0; j < cnt; ++j) {
+        const double d = T[j][j];
+        const bool zero = !(d > rounding * original[jb + j]) || !isfinite(d);
+        const double r = zero ? 1.0 : sqrt(d);
+        if (t > j && t < cnt) T[t][j] = zero ? 0.0 : T[t][j] / r;
+        if (t == 0) { root[jb + j] = r; live[jb + j] = !zero; }
+        __syncwarp();
+        if (t > j && t < cnt)
+            for (std::uint32_t k = j + 1; k <= t; ++k) T[t][k] -= T[t][j] * T[k][j];
+        __syncwarp();
     }
-    if (threadIdx.x == 0) root[j] = r;
+    for (std::uint32_t r = 0; r < cnt; ++r)
+        if (t <= r) M[std::size_t(jb + r) * K + jb + t] = T[r][t];
 }
-__global__ void update(std::uint32_t j, std::uint32_t K, double* M) {
-    const std::size_t m = K - j - 1;
-    const std::size_t t = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
-    if (t >= m * m) return;
-    const std::size_t i = j + 1 + t / m, k = j + 1 + t % m;
-    if (k > i) return;
-    M[i * K + k] -= M[i * K + j] * M[k * K + j];
+__global__ void panel_rows(std::uint32_t jb, std::uint32_t K, double* M, const double* root,
+                           const std::uint8_t* live) {
+    __shared__ double L[kPanel][kPanel + 1];
+    const std::uint32_t cnt = min(kPanel, K - jb);
+    for (std::uint32_t e = threadIdx.x; e < kPanel * kPanel; e += blockDim.x) {
+        const std::uint32_t r = e / kPanel, c = e % kPanel;
+        L[r][c] = r < cnt && c < r ? M[std::size_t(jb + r) * K + jb + c] : 0.0;
+    }
+    __syncthreads();
+    const std::size_t i = jb + cnt + blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
+    if (i >= K) return;
+    double* row = M + i * K + jb;
+    double x[kPanel];
+#pragma unroll
+    for (std::uint32_t j = 0; j < kPanel; ++j) {
+        if (j >= cnt) break;
+        double v = row[j];
+#pragma unroll
+        for (std::uint32_t k = 0; k < j; ++k) v -= x[k] * L[j][k];
+        x[j] = live[jb + j] ? v / root[jb + j] : 0.0;
+        row[j] = x[j];
+    }
+}
+__global__ void panel_syrk(std::uint32_t jb, std::uint32_t K, std::uint32_t tiles, double* M) {
+    __shared__ double A[kPanel][kPanel + 1], B[kPanel][kPanel + 1];
+    const std::uint32_t I = blockIdx.x / tiles, J = blockIdx.x % tiles;
+    if (J > I) return;
+    const std::uint32_t cnt = min(kPanel, K - jb), base = jb + cnt;
+    const std::uint32_t i0 = base + I * kPanel, k0 = base + J * kPanel;
+    for (std::uint32_t e = threadIdx.x; e < kPanel * kPanel; e += blockDim.x) {
+        const std::uint32_t r = e / kPanel, c = e % kPanel;
+        A[r][c] = i0 + r < K && c < cnt ? M[std::size_t(i0 + r) * K + jb + c] : 0.0;
+        B[r][c] = k0 + r < K && c < cnt ? M[std::size_t(k0 + r) * K + jb + c] : 0.0;
+    }
+    __syncthreads();
+    const std::uint32_t r = threadIdx.x / 8, c0 = (threadIdx.x % 8) * 4;
+    if (i0 + r >= K) return;
+    for (std::uint32_t q = 0; q < 4; ++q) {
+        const std::uint32_t c = c0 + q;
+        if (k0 + c >= K || k0 + c > i0 + r) continue;
+        double s = 0;
+#pragma unroll 8
+        for (std::uint32_t j = 0; j < kPanel; ++j) s = fma(A[r][j], B[c][j], s);
+        M[std::size_t(i0 + r) * K + k0 + c] -= s;
+    }
 }
 __global__ void count(std::uint32_t K, const double* M, std::uint32_t* counts) {
     const std::size_t j = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x;
@@ -3246,7 +3301,7 @@ bool gpu_round_shadow_device_state::finish_owned_dense_tail(
     // already excludes it; it is released after the block.
     {
         const std::size_t block = K * K * sizeof(double) + n * sizeof(std::uint32_t) +
-            K * (sizeof(node_index) + 3 * sizeof(std::uint32_t) + 3 * sizeof(double));
+            K * (sizeof(node_index) + 3 * sizeof(std::uint32_t) + 3 * sizeof(double) + sizeof(std::uint8_t));
         // Log growth allocates the whole new buffer while the old one is alive.
         const std::size_t columns_required = std::max<std::size_t>(n, I.factor_column_count + K);
         const std::size_t entries_required = I.factor_entry_count + K * (K - 1) / 2;
@@ -3262,6 +3317,7 @@ bool gpu_round_shadow_device_state::finish_owned_dense_tail(
     device_buffer<node_index> ids(I.tracker);
     device_buffer<std::uint32_t> loc(I.tracker), counts(I.tracker), offsets(I.tracker), status(I.tracker);
     device_buffer<double> M(I.tracker), original(I.tracker), root(I.tracker);
+    device_buffer<std::uint8_t> live(I.tracker);
     ids.allocate(K, "allocate dense tail IDs");
     loc.allocate(n, "allocate dense tail map");
     counts.allocate(K, "allocate dense tail counts");
@@ -3270,6 +3326,7 @@ bool gpu_round_shadow_device_state::finish_owned_dense_tail(
     M.allocate(K * K, "allocate dense tail block");
     original.allocate(K, "allocate dense tail diagonal");
     root.allocate(K, "allocate dense tail roots");
+    live.allocate(K, "allocate dense tail pivot flags");
     copy_to_device(ids.get(), active_ids.data(), K, "upload dense tail IDs");
     cuda_check(cudaMemset(loc.get(), 0xFF, n * sizeof(std::uint32_t)), "clear dense tail map");
     cuda_check(cudaMemset(M.get(), 0, K * K * sizeof(double)), "clear dense tail block");
@@ -3280,10 +3337,13 @@ bool gpu_round_shadow_device_state::finish_owned_dense_tail(
             I.residual(I.current_slot).get(), I.resident_count, loc.get(), k32, M.get(), status.get());
     dense_tail::add_excess<<<blocks_for(K), kBlock>>>(ids.get(), k32, I.excess.get(), M.get(), original.get());
     cuda_check(cudaGetLastError(), "assemble dense tail");
-    for (std::uint32_t j = 0; j < k32; ++j) {
-        dense_tail::column<<<1, kBlock>>>(j, k32, M.get(), original.get(), root.get());
-        const std::size_t m = K - j - 1;
-        if (m) dense_tail::update<<<blocks_for(m * m), kBlock>>>(j, k32, M.get());
+    for (std::uint32_t jb = 0; jb < k32; jb += dense_tail::kPanel) {
+        dense_tail::panel_diag<<<1, dense_tail::kPanel>>>(jb, k32, M.get(), original.get(), root.get(), live.get());
+        const std::uint32_t rest = k32 - std::min(k32, jb + dense_tail::kPanel);
+        if (!rest) continue;
+        dense_tail::panel_rows<<<(rest + 127) / 128, 128>>>(jb, k32, M.get(), root.get(), live.get());
+        const std::uint32_t tiles = (rest + dense_tail::kPanel - 1) / dense_tail::kPanel;
+        dense_tail::panel_syrk<<<tiles * tiles, 256>>>(jb, k32, tiles, M.get());
     }
     cuda_check(cudaGetLastError(), "factor dense tail");
     dense_tail::count<<<blocks_for(K), kBlock>>>(k32, M.get(), counts.get());
