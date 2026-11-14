@@ -598,14 +598,14 @@ TEST(GpuDirectCsc, DenseTailSolveMatchesTheCpuRoute) {
             std::optional<apxchol::solver> owner;
             try { owner.emplace(apxchol::test::csc(A), setup); }
             catch (...) { if (log) ADD_FAILURE() << testing::internal::GetCapturedStderr(); throw; }
-            std::vector<double> X(B.size());
+            std::vector<double> X(B.size() + std::size_t(n));   // the batch, then the scalar solve
             const auto single = owner->solve(std::span<const double>(B.data(), n), tol, 1000);
             EXPECT_TRUE(single.converged);
             const auto batch = owner->solve(apxchol::const_matrix_view{B.data(), n, columns, n},
                                             apxchol::matrix_view{X.data(), n, columns, n}, tol, 1000);
             if (log) *log = testing::internal::GetCapturedStderr();
             for (const auto& column : batch.columns) EXPECT_TRUE(column.converged);
-            std::copy(single.x.begin(), single.x.end(), X.begin());   // column 0 from the scalar solve
+            std::copy(single.x.begin(), single.x.end(), X.begin() + std::ptrdiff_t(columns) * n);
             return X;
         };
         std::string log;
@@ -632,7 +632,7 @@ TEST(GpuDirectCsc, DenseTailSolveMatchesTheCpuRoute) {
             EXPECT_LE(diff, 1e-4 * ref);
         }
         const auto cpu = solve_all(apxchol::solve_backend::cpu, nullptr);
-        for (int q = 0; q < columns; ++q) {
+        for (int q = 0; q <= columns; ++q) {
             std::vector<double> diff(n), ref(cpu.begin() + std::ptrdiff_t(q) * n, cpu.begin() + std::ptrdiff_t(q + 1) * n);
             for (int v = 0; v < n; ++v) diff[v] = gpu[std::size_t(q) * n + v] - ref[v];
             if (shift == 0.0) {   // Laplacian: compare up to the constant vector

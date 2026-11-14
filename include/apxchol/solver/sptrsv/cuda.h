@@ -697,8 +697,7 @@ public:
             s.adoption_host_download_bytes = adoption_download_bytes;
             s.factor_bytes = adopted_bytes;
 
-            if (factor.data_.finalized_sorted_triangular)
-                choose_dense_tail(s, tail_begin);
+            choose_dense_tail(s, tail_begin);
             if (factor.data_.finalized_sorted_triangular)
                 setup_device_kernel_backend(s, factor);
             else

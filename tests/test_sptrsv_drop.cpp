@@ -1325,12 +1325,14 @@ TEST(GpuSptrsvAdoptionDevice, Fp32AndFp16MatchTheExistingUploadPathBitForBit) {
         for (double& item : input) item = value(rng);
     }
 
+    // A generic capsule applies a dense tail like the upload path (tail = -1: none).
+    for (const std::int64_t tail : {std::int64_t(-1), std::int64_t(m - 300)})
     for (bool fp16 : {false, true}) {
-        SCOPED_TRACE(fp16 ? "fp16" : "fp32");
+        SCOPED_TRACE(testing::Message() << (fp16 ? "fp16" : "fp32") << " tail " << tail);
         const apxchol::factor_options options{.factor_storage = fp16
             ? apxchol::factor_storage_type::fp16 : apxchol::factor_storage_type::fp32};
         apxchol::detail::cuda_sptrsv uploaded;
-        uploaded.setup(factor, m, options);
+        uploaded.setup(factor, m, options, tail);
         ASSERT_FALSE(uploaded.adopted_device_factor());
         ASSERT_EQ(uploaded.adoption_host_download_bytes(), 0u);
 
@@ -1343,7 +1345,7 @@ TEST(GpuSptrsvAdoptionDevice, Fp32AndFp16MatchTheExistingUploadPathBitForBit) {
         {
             apxchol::detail::cuda_sptrsv adopted;
             adopted.setup_adopting_device_factor(
-                std::move(prepared.factor), options);
+                std::move(prepared.factor), options, tail);
             EXPECT_TRUE(prepared.factor.empty());
             ASSERT_TRUE(adopted.ready());
             EXPECT_TRUE(adopted.adopted_device_factor());
