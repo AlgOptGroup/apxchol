@@ -9,6 +9,7 @@
 #include "scoped_omp_threads.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <functional>
@@ -18,7 +19,9 @@
 #include <latch>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -45,11 +48,11 @@ static_assert(std::is_copy_constructible_v<apxchol::solver>);
 static_assert(std::is_copy_assignable_v<apxchol::solver>);
 static_assert(noexcept(apxchol::backend_available(apxchol::solve_backend::gpu)));
 
-Sparse operator_matrix(int n = 64) {
+Sparse operator_matrix(int n = 64, std::span<const int> offsets = std::array{1, 7}) {
     std::vector<test::triplet> entries;
     for (int i = 0; i < n; ++i) {
-        entries.push_back({i, i, 5.0});
-        for (const int offset : {1, 7}) {
+        entries.push_back({i, i, 2.0 * static_cast<double>(offsets.size()) + 1.0});
+        for (const int offset : offsets) {
             const int j = (i + offset) % n;
             entries.push_back({i, j, -1.0});
             entries.push_back({j, i, -1.0});
@@ -1799,10 +1802,9 @@ apxchol::const_matrix_view left_columns(const Dense& D, std::int64_t width) {
 }
 }  // namespace
 
-TEST(Solver, CudaWidePanelsPreserveStoppedColumnsAndScalarReuse) {
+void cuda_wide_panels_preserve_stopped_columns_and_scalar_reuse(const Sparse& matrix) {
     if (!cuda_device_present()) GTEST_SKIP() << "No CUDA devices";
     const scoped_omp_threads threads(2);
-    const Sparse matrix = operator_matrix(129);
     Dense exact(matrix.rows, 33), rhs(matrix.rows, 33), guess(matrix.rows, 33);
     for (int q = 0; q < exact.cols; ++q)
         for (int i = 0; i < exact.rows; ++i)
@@ -1866,6 +1868,17 @@ TEST(Solver, CudaWidePanelsPreserveStoppedColumnsAndScalarReuse) {
         EXPECT_EQ(before.iterations, after.iterations);
         EXPECT_EQ(before.x, after.x);
     }
+}
+
+TEST(Solver, CudaWidePanelsPreserveStoppedColumnsAndScalarReuse) {
+    cuda_wide_panels_preserve_stopped_columns_and_scalar_reuse(operator_matrix(129));
+}
+
+// With 129 entries per row, panels wider than 16 columns take the packed path.
+TEST(Solver, CudaWidePanelsPackLongRows) {
+    std::array<int, 64> offsets;
+    std::iota(offsets.begin(), offsets.end(), 1);
+    cuda_wide_panels_preserve_stopped_columns_and_scalar_reuse(operator_matrix(129, offsets));
 }
 
 TEST(Solver, CudaWidePanelsNarrowWhenDeviceMemoryIsShort) {

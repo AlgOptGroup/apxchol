@@ -368,7 +368,7 @@ private:
 
     static void release_workspace(cuda_pcg_kernels::workspace& vectors, cuda_pcg_kernels::solve_state*& host) noexcept {
         for (void* pointer : std::initializer_list<void*>{vectors.x, vectors.r, vectors.ap,
-                vectors.p, vectors.z, vectors.rhs, vectors.preconditioned, vectors.partial, vectors.state})
+                vectors.p, vectors.z, vectors.rhs, vectors.preconditioned, vectors.partial, vectors.packed, vectors.state})
             if (pointer) (void)cudaFree(pointer);
         vectors = {};
         if (host) { (void)cudaFreeHost(host); host = nullptr; }
@@ -387,6 +387,8 @@ private:
             else
                 APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.z, columns * n_ * sizeof(double)));
             APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.partial, columns * cuda_pcg_kernels::kMaxBlocks * sizeof(double)));
+            if (cuda_pcg_kernels::packs_multiply(columns, static_cast<double>(op_->matrix.nnz) / static_cast<double>(n_)))
+                APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.packed, cuda_pcg_kernels::packed_multiply_doubles(n_) * sizeof(double)));
             APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.state, columns * sizeof(cuda_pcg_kernels::solve_state)));
             APXCHOL_PCG_CUDA_CHECK(cudaHostAlloc(reinterpret_cast<void**>(&next_host),
                 columns * sizeof(cuda_pcg_kernels::solve_state), cudaHostAllocDefault));

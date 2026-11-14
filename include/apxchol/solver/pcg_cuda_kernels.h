@@ -16,6 +16,9 @@ struct workspace : detail::gpu_pcg::workspace<double, double> {
     // The preconditioned residual as the FP32 triangular solve produced it.
     // When it is nullptr the dot and direction steps read the FP64 vector z.
     float* preconditioned = nullptr;
+    // Scratch of packed_multiply_doubles(n) doubles. The multiply of a wide
+    // panel takes the packed path exactly when this is not nullptr.
+    double* packed = nullptr;
 };
 enum exit_flag : unsigned {
     kVerifySolution = 1, kSolutionOverflow = 2, kSolutionUnderflow = 4
@@ -57,6 +60,20 @@ inline constexpr int kMaxBlocks    = 2048;
 inline int pcg_blocks(std::int64_t units) {
     const std::int64_t b = (units + kBlockThreads - 1) / kBlockThreads;
     return static_cast<int>(b < 1 ? 1 : b > kMaxBlocks ? kMaxBlocks : b);
+}
+
+/// A panel wider than 2 * kMultiplyColumns columns is multiplied in groups of
+/// kMultiplyColumns columns. From kPackedRowEntries stored entries per row on
+/// average, each group gathers from a packed copy of its direction columns,
+/// which needs the scratch below: the packed direction, product and partials.
+/// Shorter rows do not repay the copies.
+inline constexpr unsigned kMultiplyColumns = 8;
+inline constexpr double kPackedRowEntries = 128;
+constexpr bool packs_multiply(unsigned columns, double entries_per_row) {
+    return columns > 2 * kMultiplyColumns && entries_per_row >= kPackedRowEntries;
+}
+constexpr std::size_t packed_multiply_doubles(std::int64_t n) {
+    return (2 * static_cast<std::size_t>(n) + kMaxBlocks) * kMultiplyColumns;
 }
 
 // Nearest power of two to average nnz/row, capped at one warp.
