@@ -77,15 +77,20 @@ ctest --test-dir build --output-on-failure
 ./build/apxchol matrix.mtx --rhs rhs.mtx -o solution.mtx
 ```
 
-The CLI reads the matrix as `A`. `--convert-input` forms the Laplacian of an
+The CLI reads the matrix as `A`, and `--convert-input` forms the Laplacian of an
 adjacency matrix. An `--rhs` file with several columns is solved as one batch.
 `--random-rhs` generates a test RHS.
 The [command-line guide](docs/cli.md) lists the available controls.
 
 ## Performance
 
-Cross-solver results will appear in 1.0. See [performance](docs/performance.md)
-for the methodology and the measured [batching case study](docs/batching.md).
+![apxchol against the fastest other solver on each matrix](docs/performance/euler-best-other.svg)
+
+Each dot is one of 27 matrices on ETH Euler, once for the AMD EPYC CPU and once
+for the RTX 4090: how much faster apxchol's setup + solve is than the fastest
+other solver on that matrix and device. apxchol leads on linear programs and most social graphs, and is close to
+algebraic multigrid on grids and meshes. [Performance](docs/performance.md) has
+per-solver results, other platforms and the method.
 
 ## Learn more
 

@@ -121,6 +121,7 @@
 - Clearer messages for a solver used by 2 threads at once, an archive from a newer version, and positive off-diagonal input entries.
 - Errors for an invalid tolerance, iteration budget, thread count or backend, an unsupported GPU request and a missing Metal device start with `apxchol:` and name the next step.
 - A new Input formats page shows how to pass matrices from Eigen, SuiteSparse/CHOLMOD, SciPy, MATLAB/Octave, raw CSR/CSC arrays and Matrix Market files; CI builds and runs its examples.
+- The Performance page has a page per platform: Euler (x86_64, CUDA), Daint (ARM64, CUDA) and Apple M1 Max (Metal).
 
 ### Fixes
 - The CLI reports "matrix is empty" and exits 2 for a dense (array) input with no rows or columns, instead of crashing with SIGFPE while reading it.

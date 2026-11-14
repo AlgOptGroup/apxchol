@@ -68,6 +68,8 @@ jobs:
           key: docs-gcc14
       - name: Install Python dependencies
         run: python -m pip install -r docs/requirements.txt scipy -e ./python
+      - name: Check performance rendering
+        run: python -m unittest docs/tests/test_performance_render.py -v
       - name: Run the SciPy input-formats example
         run: python examples/input_formats/scipy_input.py
       - name: Build CLI
