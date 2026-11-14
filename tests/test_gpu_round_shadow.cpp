@@ -3266,9 +3266,11 @@ TEST(GpuOwnedPrefix, TinyTailAndExportKeepTheirContracts) {
     std::vector<double> rhs(A.rows), permuted(A.rows), expected(A.rows);
     for (std::int64_t v = 0; v < A.rows; ++v) rhs[v] = 1.0 + double(v) / double(A.rows - 1);
     for (std::int64_t v = 0; v < A.rows; ++v) permuted[exported.perm[v]] = rhs[v];
-    // The direct CUDA reference uses the same FP32 arithmetic as the owner.
+    // The direct CUDA reference uses the same FP32 arithmetic as the owner,
+    // including the trailing chain the owner applies by its inverse.
     apxchol::detail::cuda_sptrsv uploaded;
-    uploaded.setup(exported.L, static_cast<node_index>(A.rows), factor_options);
+    uploaded.setup(exported.L, static_cast<node_index>(A.rows), factor_options,
+                   apxchol::detail::cuda_dense_tail_begin(exported));
     uploaded.solve_LLt(permuted.data(), expected.data());
     const std::vector<double> actual = owner.apply(rhs);
     for (std::int64_t v = 0; v < A.rows; ++v) EXPECT_EQ(actual[v], expected[exported.perm[v]]) << v;
