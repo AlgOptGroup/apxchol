@@ -12,9 +12,9 @@ same matrix and device, and at least 30 s. A run over the cap is shown as
 `nc` (did not converge) and `n/a` (input not supported).
 
 An asterisk (`*`) marks a time whose setup includes input adaptation by the
-benchmark: finding connected components, pinning one vertex per component or
-slicing components, so that the solver accepts a singular or disconnected
-Laplacian. The `adapt_s` column of the data files gives that part of setup.
+benchmark. The benchmark finds connected components, pins one vertex per
+component or slices components, so that the solver accepts a singular or
+disconnected Laplacian. The `adapt_s` column of the data files gives that part of setup.
 This campaign predates that measurement: its `adapt_s` values are empty
 (not measured), so no time on this page carries an asterisk.
 

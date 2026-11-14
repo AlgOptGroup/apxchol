@@ -25,9 +25,9 @@ BoomerAMG is within 6% of apxchol on the other three. apxchol is ahead on five
 of the six social graphs.
 
 An asterisk (`*`) marks a time whose setup includes input adaptation by the
-benchmark: finding connected components, pinning one vertex per component or
-slicing components, so that the solver accepts a singular or disconnected
-Laplacian. The `adapt_s` column of the data files gives that part of setup.
+benchmark. The benchmark finds connected components, pins one vertex per
+component or slices components, so that the solver accepts a singular or
+disconnected Laplacian. The `adapt_s` column of the data files gives that part of setup.
 
 ![Apple M1 Max CPU: apxchol against the fastest other solver on each matrix](performance/mac-best-other.svg)
 

@@ -37,7 +37,7 @@
  "notes": [
   "Two devices, both measured 2026-11-14 from apxchol main 7dee3a3a: cpu (apxchol and every competitor) and metal (apxchol only). The 17 matrix files have the same SHA-256 as in the 2026-11-01 campaign.",
   "Competitors are capped at max(20 x the best complete CPU apxchol total on the same matrix on this Mac, 30 s) per solve. A run over the cap or a process killed at its deadline is exceeded_cap; times are withheld and cap_s is kept. ParAC's runner has no per-solve cap: its cell (preparation plus three runs) is killed at 4 x cap + 300 s and its median-total run is checked against the cap.",
-  "8 OpenMP threads (the 8 performance cores). macOS has no CPU pinning, so runs are unpinned. Processes ran under nice 10, one at a time, on a shared host. Accelerate uses its own thread pool, which --threads does not control. AC/AC2 and CMG are serial (threads 1 for CMG).",
+  "8 OpenMP threads (the 8 performance cores). macOS has no CPU pinning, so runs are unpinned. Processes ran under nice 10, one at a time, on a shared host. Accelerate uses its own thread pool, which --threads does not control. AC/AC2 and CMG are serial. The threads column records the requested count, so AC/AC2 and Accelerate rows show 8, and CMG rows show 1.",
   "C++ series: one warmup and three retained repetitions. AC/AC2: three processes after Julia's fixed warm-up fixtures. ParAC: three runs, no warmup (runner default). CMG: one warmup and three retained processes, solutions regraded with Julia outside timing.",
   "RCHOL/pRCHOL use the portable Eigen PCG (no MKL on arm64) and the repository's macOS affinity shim, which disables their Linux-only thread pinning.",
   "ParAC: portable CPU solve (patch 0008), ParAC's own zero-sum RHS (Euler's 'portable, own RHS' variant). The MKL and shared-RHS variants were not run (no MKL on arm64; shared RHS out of scope here).",
@@ -46,7 +46,7 @@
   "adapt_s is the part of setup_s that the benchmark spent adapting the input for a solver that does not accept a singular or disconnected operator as given (component discovery, Dirichlet pins, component slices). apxchol, AC/AC2, RCHOL and pRCHOL take components natively and report 0.",
   "apxchol CPU ran on all 27 matrices. Competitors ran on the 20 matrices whose every Euler series peaks at or below 13 GB, plus grid_3000. Other competitor cells are n/a with the reason: either the series' Euler peak RSS exceeds a 16 GB per-process budget, or the matrix was outside the competitor tier.",
   "No competitor has a Metal backend; Metal cells are apxchol only.",
-  "max_rss_mb is the process peak from BSD time -l."
+  "max_rss_mb is the process peak from BSD time -l. It was not recorded for the AC/AC2 runs, whose cells leave it empty."
  ],
  "tolerance": 1e-08,
  "source_commits": [
@@ -67,6 +67,6 @@
  "full_extract": {
   "repository": "https://github.com/AlgOptGroup/apxchol-research",
   "path": "campaigns/mac-20261114/extract.json",
-  "sha256": "feaf8e3e30fdd17b78b7f936aecd887a945076b06e80998255f2cab38deb237d"
+  "sha256": "4ed5097975b44dd83bf67e2a806bfd004b873307915e6b5f1982168521f8dd12"
  }
 }
