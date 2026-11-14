@@ -1360,6 +1360,10 @@ private:
         std::span<const node_index> active_ids, gpu_block_frontend& frontend);
     gpu_owned_sparsify_stats sparsify_owned_residual(
         gpu_block_frontend& frontend, std::uint64_t seed);
+    // Factor the remaining residual exactly as one dense block and append its
+    // columns in active-ID order. Returns false, unchanged, when the block
+    // does not fit in device memory.
+    bool finish_owned_dense_tail(std::span<const node_index> active_ids);
     std::unique_ptr<gpu_block_frontend> initialize_owned_csc(
         const gpu_owned_csc_buffers& input, bool& sddm);
     gpu_round_shadow_report compute_owned_prefix(
@@ -1435,6 +1439,14 @@ public:
             throw std::logic_error("GPU sparsification requires an accepted owned boundary");
         auto stats = device_state_->sparsify_owned_residual(frontend, seed);
         return stats;
+    }
+
+    bool finish_owned_dense_tail(std::span<const node_index> active_ids) {
+        if (!active_ || owned_materialized_ || !has_owned_residual())
+            throw std::logic_error("GPU dense tail requires an accepted owned boundary");
+        if (!device_state_->finish_owned_dense_tail(active_ids)) return false;
+        factor_log_columns_ += active_ids.size();
+        return true;
     }
 
     gpu_round_shadow_report run_owned_prefix_round(

@@ -1241,13 +1241,9 @@ solve_backend detail::select_solve_backend(const solve_options& opts,
 
 void detail::choose_sampler(solve_options& opts, std::int64_t columns) {
     std::int64_t threshold = 16;
-    if (select_solve_backend(opts) == solve_backend::gpu) {
-#if defined(APXCHOL_USE_CUDA)
-        threshold = 64;
-#else
-        threshold = 8;   // Metal
+#if !defined(APXCHOL_USE_CUDA)
+    if (select_solve_backend(opts) == solve_backend::gpu) threshold = 8;   // Metal
 #endif
-    }
     if (columns >= threshold)
         opts.factor_opts.experimental.sampler = clique_sampler::trace_cycle;
 }

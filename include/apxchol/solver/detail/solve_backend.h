@@ -10,7 +10,7 @@ solve_backend select_solve_backend(const solve_options& opts,
 // For entry points that factor and solve in one call (Python solve, Octave
 // apxchol_solve, CLI --rhs): choose the clique sampler from the number of
 // right-hand-side columns the factor will serve. Trace-cycle from 16 columns
-// on CPU, 64 on CUDA and 8 on Metal, where its setup plus batched solve beat
+// on CPU and CUDA and from 8 on Metal, where its setup plus batched solve beat
 // GKS on most measured inputs. The backend is resolved
 // without the input, so very small automatic inputs may still run on CPU.
 // Callers here cannot set the sampler themselves, so nothing is overridden.
