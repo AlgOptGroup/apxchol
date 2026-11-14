@@ -31,8 +31,9 @@ constexpr identity_case kCases[] = {
 } // namespace
 
 TEST(GpuOwnedIdentity, FactorDigestsMatchRecordedUpstreamFactors) {
-#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
-    GTEST_SKIP() << "32-bit-node CUDA build required";
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_EDGE_INDICES)
+    // The recorded digests hash 32-bit column pointers and row indices.
+    GTEST_SKIP() << "32-bit-index CUDA build required";
 #else
     if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
     for (const auto& c : kCases) {
