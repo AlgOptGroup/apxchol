@@ -7,6 +7,7 @@
 #include "gpu_owned_identity_fixture.h"
 #include "apxchol/solver/elimination/gpu_round_shadow.h"
 
+#if defined(APXCHOL_USE_CUDA) && !defined(APXCHOL_64BIT_EDGE_INDICES)
 namespace {
 
 struct identity_case {
@@ -29,6 +30,7 @@ constexpr identity_case kCases[] = {
 };
 
 } // namespace
+#endif
 
 TEST(GpuOwnedIdentity, FactorDigestsMatchRecordedUpstreamFactors) {
 #if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_EDGE_INDICES)
