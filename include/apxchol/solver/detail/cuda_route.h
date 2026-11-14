@@ -21,6 +21,22 @@
 #include <vector>
 
 namespace apxchol::detail {
+
+/// First column of F's trailing dependency chain, or -1: the columns of
+/// its last single-vertex rounds and any columns after the last round,
+/// which are eliminated one at a time. CUDA setup records its exact dense
+/// block this way, and the rounds are saved with the factor, so a fresh,
+/// reloaded or adopted factor gets the same chain.
+inline std::int64_t cuda_dense_tail_begin(const factorization& F) {
+    if (F.rounds.empty()) return -1;
+    std::size_t begin = 0;
+    for (const auto& round : F.rounds) begin += round.is_size;
+    for (auto r = F.rounds.rbegin(); r != F.rounds.rend() && r->is_size <= 1; ++r)
+        begin -= r->is_size;
+    const std::size_t m = static_cast<std::size_t>(F.L.rows()) - !F.sddm;
+    return begin < m ? static_cast<std::int64_t>(begin) : -1;
+}
+
 // solver validates options and arguments, selects the route and rejects
 // overlapping calls; the route trusts its arguments. Copies share the
 // factor and operator and own their device workspace and stream.
@@ -251,17 +267,18 @@ private:
             std::fprintf(stderr, "[sptrsv-setup gpu] %-22s %8.2f ms  (context creation %.2f ms)\n",
                          "cuda_init", cuda_init_s * 1e3, cuda_context::context_seconds() * 1e3);
         auto& device = factorization_access::device_factor(F);
+        const std::int64_t tail_begin = cuda_dense_tail_begin(F);
         if (device) {
-            trsv_.setup_adopting_device_factor(std::move(*device), opts_);
+            trsv_.setup_adopting_device_factor(std::move(*device), opts_, tail_begin);
             device.reset();
         } else {
             const auto n = static_cast<node_index>(F.L.rows());
             const node_index m = F.sddm ? n : n - 1;
             if (F.storage == factor_storage_type::automatic)
-                trsv_.setup(F.L, m, opts_);
+                trsv_.setup(F.L, m, opts_, tail_begin);
             else
                 trsv_.install_exact(F.L, m, F.storage == factor_storage_type::fp16,
-                                    F.scale.data(), opts_);
+                                    F.scale.data(), opts_, tail_begin);
         }
         if (cp) { (*cp)("sptrsv_setup"); cp->ascend(); }
         // The device holds its own copy; installed_factor() downloads it.

@@ -775,13 +775,13 @@ factorization factorize_impl(const Eliminator& elim,
             if (cp) (*cp)("gpu_csc_initialize");
             bool sparsification_attempted = false;
             peak_graph_bytes = std::max(peak_graph_bytes, work.memory_bytes());
-            // Once the residual is small and at least half dense, the rounds
-            // eliminate one or a few pivots each; factor it exactly as one dense
-            // block instead (both samplers). At most 128 vertices: the block's
-            // columns form one dependency chain in the triangular solve, and
-            // larger blocks slowed solves measurably. Skipped when it does not fit.
-            constexpr double dense_tail_density = 0.5;
-            constexpr std::size_t dense_tail_max_vertices = 128;
+            // Once the residual is small and at least a quarter dense, the
+            // rounds eliminate one or a few pivots each; factor it exactly as
+            // one dense block instead (both samplers). At most 2048 vertices:
+            // the triangular solve applies the block by its exact inverse,
+            // 2 K^2 floats of device memory. Skipped when it does not fit.
+            constexpr double dense_tail_density = 0.25;
+            constexpr std::size_t dense_tail_max_vertices = 2048;
             // A block that did not fit is retried only once the residual is smaller.
             std::size_t dense_tail_declined_at = std::numeric_limits<std::size_t>::max();
             std::uint64_t last_live = 0;   // no tail before the first round

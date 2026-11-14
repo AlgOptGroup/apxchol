@@ -559,3 +559,93 @@ TEST(GpuDirectCsc, DenseResidualTailSolvesToTolerance) {
     }
 #endif
 }
+
+// The dense tail reaches the triangular solve: the solver applies the tail
+// block by its exact inverse, for one right-hand side and for a panel, and the
+// solutions match the CPU route (no dense tail) within the PCG tolerance.
+TEST(GpuDirectCsc, DenseTailSolveMatchesTheCpuRoute) {
+#if !defined(APXCHOL_USE_CUDA) || defined(APXCHOL_64BIT_NODE_INDICES)
+    GTEST_SKIP() << "32-bit-node CUDA operator construction required";
+#else
+    if (!apxchol::detail::gpu_round_shadow_runtime_available()) GTEST_SKIP() << "CUDA unavailable";
+    // Ring with chords (well conditioned) and a 100-vertex clique left dense.
+    constexpr int n = 3000, clique = 100, columns = 8;
+    std::vector<weighted_edge> edges;
+    for (int u = 0; u < n; ++u) {
+        edges.push_back({u, (u + 1) % n, 1.0 + (u % 5)});
+        if (const int v = (37 * u + 11) % n; v != u) edges.push_back({u, v, 0.5});
+    }
+    for (int u = 0; u < clique; ++u)
+        for (int v = u + 1; v < clique; ++v) edges.push_back({u * 30, v * 30, 0.5 + ((u + v) % 3)});
+    const double tol = 1e-10;
+    for (const auto sampler : {apxchol::clique_sampler::gks, apxchol::clique_sampler::trace_cycle})
+    for (double shift : {0.0, 1e-3}) {
+        SCOPED_TRACE(testing::Message() << int(sampler) << " " << shift);
+        const auto A = make_matrix(n, edges, shift);
+        std::vector<double> B(std::size_t(n) * columns);
+        for (int q = 0; q < columns; ++q) {
+            std::vector<double> exact(n);
+            for (int v = 0; v < n; ++v) exact[v] = std::cos(0.5 * v + q);
+            const auto b = apxchol::test::multiply(A, exact);
+            std::copy(b.begin(), b.end(), B.begin() + std::ptrdiff_t(q) * n);
+        }
+        auto solve_all = [&](apxchol::solve_backend backend, std::string* log) {
+            apxchol::solve_options setup;
+            setup.backend = backend;
+            setup.factor_opts.verbose = log != nullptr;
+            setup.factor_opts.experimental.sampler = sampler;
+            if (log) testing::internal::CaptureStderr();
+            std::optional<apxchol::solver> owner;
+            try { owner.emplace(apxchol::test::csc(A), setup); }
+            catch (...) { if (log) ADD_FAILURE() << testing::internal::GetCapturedStderr(); throw; }
+            std::vector<double> X(B.size());
+            const auto single = owner->solve(std::span<const double>(B.data(), n), tol, 1000);
+            EXPECT_TRUE(single.converged);
+            const auto batch = owner->solve(apxchol::const_matrix_view{B.data(), n, columns, n},
+                                            apxchol::matrix_view{X.data(), n, columns, n}, tol, 1000);
+            if (log) *log = testing::internal::GetCapturedStderr();
+            for (const auto& column : batch.columns) EXPECT_TRUE(column.converged);
+            std::copy(single.x.begin(), single.x.end(), X.begin());   // column 0 from the scalar solve
+            return X;
+        };
+        std::string log;
+        const auto gpu = solve_all(apxchol::solve_backend::gpu, &log);
+        EXPECT_NE(log.find("[apxchol] dense tail solve: rows="), std::string::npos) << log;
+        {
+            // The preconditioner itself: the GPU factor applied on CUDA (tail by
+            // its inverse) and on CPU (substitution) agree to FP32 rounding.
+            apxchol::solve_options setup;
+            setup.backend = apxchol::solve_backend::gpu;
+            setup.factor_opts.experimental.sampler = sampler;
+            apxchol::solver device(apxchol::test::csc(A), setup);
+            apxchol::solve_options host;
+            host.backend = apxchol::solve_backend::cpu;
+            apxchol::solver cpu_owner(apxchol::test::csc(A), device.factor(), host);
+            std::vector<double> r(n);
+            for (int v = 0; v < n; ++v) r[v] = std::sin(0.3 * v) + (v % 7 == 0 ? 1.0 : 0.0);
+            const auto z_gpu = device.apply(r), z_cpu = cpu_owner.apply(r);
+            double diff = 0, ref = 0;
+            for (int v = 0; v < n; ++v) {
+                diff = std::max(diff, std::abs(z_gpu[v] - z_cpu[v]));
+                ref = std::max(ref, std::abs(z_cpu[v]));
+            }
+            EXPECT_LE(diff, 1e-4 * ref);
+        }
+        const auto cpu = solve_all(apxchol::solve_backend::cpu, nullptr);
+        for (int q = 0; q < columns; ++q) {
+            std::vector<double> diff(n), ref(cpu.begin() + std::ptrdiff_t(q) * n, cpu.begin() + std::ptrdiff_t(q + 1) * n);
+            for (int v = 0; v < n; ++v) diff[v] = gpu[std::size_t(q) * n + v] - ref[v];
+            if (shift == 0.0) {   // Laplacian: compare up to the constant vector
+                const double d = std::accumulate(diff.begin(), diff.end(), 0.0) / n;
+                const double r = std::accumulate(ref.begin(), ref.end(), 0.0) / n;
+                for (double& x : diff) x -= d;
+                for (double& x : ref) x -= r;
+            }
+            const auto norm = [](const std::vector<double>& x) {
+                return std::sqrt(std::inner_product(x.begin(), x.end(), x.begin(), 0.0));
+            };
+            EXPECT_LE(norm(diff), 1e-6 * norm(ref)) << "column " << q;
+        }
+    }
+#endif
+}

@@ -1592,4 +1592,133 @@ TEST(GpuDataflowDevicePlan, TilePackingPreservesFp32AndFp16SweepsBitForBit) {
         }
     }
 }
+
+// A factor whose last T rows form a full lower triangle (the exact dense
+// tail). The plan skips those rows and the exact-inverse products solve them
+// after the forward dataflow sweep and before the back one. Results must match
+// the serial fp64 reference over ALL rows, for fp32 and fp16 storage, one and
+// four right-hand sides, and with the forward result in `out` or (panels, out
+// null) in the forward tag array; host and device plans must skip the same rows.
+static sparse_csc make_dense_tail_lower(node_index n, node_index T) {
+    std::mt19937 rng(4242 + n + T);
+    std::uniform_real_distribution<double> ubase(0.0, 0.01), udiag(1.0, 3.0);
+    std::uniform_real_distribution<double> utail(0.0, 0.5 / double(T));
+    std::poisson_distribution<int> pcount(6);
+    const node_index first = n - T;
+    std::vector<std::vector<node_index>> col_rows(n);
+    for (node_index j = 0; j < n; ++j) {
+        auto& rows = col_rows[j];
+        rows.push_back(j);
+        if (j + 1 < n) {
+            std::uniform_int_distribution<node_index> urow(j + 1, n - 1);
+            for (int t = pcount(rng); t > 0; --t) rows.push_back(urow(rng));
+        }
+        if (j >= first) for (node_index i = j + 1; i < n; ++i) rows.push_back(i);
+        std::sort(rows.begin(), rows.end());
+        rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+    }
+    sparse_csc L;
+    csc_access::n(L) = n;
+    csc_access::outer(L).assign(static_cast<size_t>(n) + 1, 0);
+    for (node_index j = 0; j < n; ++j)
+        csc_access::outer(L)[j + 1] = csc_access::outer(L)[j] + static_cast<edge_index>(col_rows[j].size());
+    csc_access::inner(L).resize(static_cast<size_t>(csc_access::outer(L)[n]));
+    csc_access::vals(L).resize(static_cast<size_t>(csc_access::outer(L)[n]));
+    for (node_index j = 0; j < n; ++j) {
+        edge_index out = csc_access::outer(L)[j];
+        for (node_index r : col_rows[j]) {
+            csc_access::inner(L)[out] = r;
+            csc_access::vals(L)[out] = static_cast<factor_value_t>(
+                r == j ? udiag(rng) : -(j >= first ? utail(rng) : ubase(rng)));
+            ++out;
+        }
+    }
+    return L;
+}
+
+TEST(GpuDataflow, DenseTailInverseMatchesTheSerialReference) {
+    namespace D = apxchol::detail;
+    const node_index n = 20001, m = n - 1;
+    const int grid = D::dataflow_grid_size();
+    for (node_index T : {node_index(33), node_index(700)}) {
+        SCOPED_TRACE(T);
+        const df_factor F(make_dense_tail_lower(n, T + 1), m);   // tail rows [m - T, m)
+        const unsigned begin = unsigned(m - T);
+        for (bool reverse : {false, true}) {
+            const auto& A = reverse ? F.LT : F.Lc;
+            // The device closes a batch at every 256-row chunk boundary inside the planned range.
+            const unsigned lo = reverse ? unsigned(T) : 0u, hi = reverse ? unsigned(m) : begin;
+            std::vector<unsigned> blocks{lo};
+            for (unsigned q = (lo / 256 + 1) * 256; q < hi; q += 256) blocks.push_back(q);
+            blocks.push_back(hi);
+            const auto host = df::pack(A.ptr.data(), {unsigned(m), reverse}, blocks, 256u);
+            const auto device = D::build_dataflow_device_plan(m, reverse, A.nnz,
+                reverse ? F.d_Tp : F.d_Lp, 256, nullptr, nullptr, 32, int(begin));
+            EXPECT_EQ(device.n_batches * df::lanes, host.words.size());
+            EXPECT_EQ(dev_download(device.words, host.words.size()), host.words);
+            cudaFree(device.words); cudaFree(device.segments);
+        }
+        for (bool fp16 : {false, true}) {
+            SCOPED_TRACE(fp16 ? "fp16" : "fp32");
+            const void* Lvals = fp16 ? static_cast<const void*>(F.d_Lv16) : static_cast<const void*>(F.d_Lv);
+            const std::size_t bytes = std::size_t(T) * T * sizeof(float);
+            float *inv = nullptr, *inv_t = nullptr;
+            ASSERT_EQ(cudaMalloc(&inv, bytes), cudaSuccess);
+            ASSERT_EQ(cudaMalloc(&inv_t, bytes), cudaSuccess);
+            D::build_dataflow_tail_inverse(begin, unsigned(T), F.d_Lp, F.d_Li, Lvals, fp16, F.d_diag, inv, inv_t);
+            for (bool forward_in_tags : {false, true}) {
+                SCOPED_TRACE(forward_in_tags ? "forward result in tags" : "forward result in out");
+                auto check = [&]<unsigned C, unsigned R>() {
+                    SCOPED_TRACE(C);
+                    constexpr unsigned lanes = R == 1 ? 32 : 8;
+                    const auto pf = df::pack<lanes>(F.Lc.ptr.data(), {unsigned(m), false}, std::array{0u, begin}, 256u);
+                    const auto pb = df::pack<lanes>(F.LT.ptr.data(), {unsigned(m), true}, std::array{unsigned(T), unsigned(m)}, 256u);
+                    dev_plan dpf = upload_plan(pf), dpb = upload_plan(pb);
+                    dpf.nb = int(pf.words.size() / lanes); dpb.nb = int(pb.words.size() / lanes);
+                    std::vector<float> x(std::size_t(m) * C);
+                    for (std::size_t i = 0; i < x.size(); ++i) x[i] = std::sin(0.37 * double(i) + 0.1);
+                    const unsigned tag_count = unsigned(m) + unsigned(std::max(dpf.slots, dpb.slots));
+                    unsigned *tags = nullptr, *ticket = nullptr, *forward_tags = nullptr;
+                    float *dx = dev_upload(x.data(), x.size()), *dy = nullptr, *dz = nullptr;
+                    ASSERT_EQ(cudaMalloc(&tags, std::size_t(tag_count) * C * sizeof(unsigned)), cudaSuccess);
+                    ASSERT_EQ(cudaMalloc(&forward_tags, std::size_t(tag_count) * C * sizeof(unsigned)), cudaSuccess);
+                    ASSERT_EQ(cudaMalloc(&ticket, sizeof(unsigned)), cudaSuccess);
+                    ASSERT_EQ(cudaMalloc(&dy, x.size() * sizeof(float)), cudaSuccess);
+                    ASSERT_EQ(cudaMalloc(&dz, x.size() * sizeof(float)), cudaSuccess);
+                    // As the solver does: the forward tail's scratch is the back sweep's tags.
+                    D::dataflow_tail tail{begin, unsigned(T), inv, inv_t, tags + std::size_t(begin) * C};
+                    D::dataflow_solve<C, R>(0, m, false, F.d_Lp, F.d_Li, Lvals, fp16 ? F.d_diag : nullptr, nullptr,
+                        dpf.bs, dpf.spec, unsigned(dpf.nb), forward_in_tags ? forward_tags : tags, tag_count, ticket,
+                        grid, dx, forward_in_tags ? nullptr : dy, nullptr, nullptr, nullptr, 1, tail);
+                    const float* back_rhs = forward_in_tags ? reinterpret_cast<const float*>(forward_tags) : dy;
+                    const void* Tvals = fp16 ? static_cast<const void*>(F.d_Tv16) : static_cast<const void*>(F.d_Tv);
+                    D::dataflow_solve<C, R>(0, m, true, F.d_Tp, F.d_Ti, Tvals, fp16 ? F.d_diag : nullptr,
+                        fp16 ? F.d_is2 : nullptr, dpb.bs, dpb.spec, unsigned(dpb.nb), tags, tag_count, ticket,
+                        grid, back_rhs, dz, nullptr, nullptr, nullptr, 1, tail);
+                    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+                    const auto y = dev_download(back_rhs, x.size()), z = dev_download(dz, x.size());
+                    for (unsigned q = 0; q < C; ++q) {
+                        std::vector<float> xq(m), yq(m), zq(m);
+                        for (int i = 0; i < int(m); ++i) {
+                            xq[i] = x[std::size_t(i) * C + q]; yq[i] = y[std::size_t(i) * C + q]; zq[i] = z[std::size_t(i) * C + q];
+                        }
+                        const auto y_ref = host_reference_sweep(m, false, F.Lc.ptr.data(), F.Lc.idx.get(),
+                            F.Lc.vals.get(), fp16 ? F.L16.vals.get() : nullptr, F.h16.diag.data(), nullptr, xq);
+                        const auto z_ref = host_reference_sweep(m, true, F.LT.ptr.data(), F.LT.idx.get(),
+                            F.LT.vals.get(), fp16 ? F.LT16.vals.get() : nullptr, F.h16.diag.data(),
+                            fp16 ? F.inv_scale2.data() : nullptr, yq);
+                        EXPECT_LT(rel_diff(y_ref, yq).first, kSweepTol) << "forward, column " << q;
+                        EXPECT_LT(rel_diff(z_ref, zq).first, kSweepTol) << "back, column " << q;
+                    }
+                    for (void* p : {(void*)tags, (void*)forward_tags, (void*)ticket, (void*)dx, (void*)dy, (void*)dz})
+                        cudaFree(p);
+                    free_plan(dpf); free_plan(dpb);
+                };
+                check.template operator()<1, 1>();
+                check.template operator()<4, 4>();
+            }
+            for (void* p : {(void*)inv, (void*)inv_t}) cudaFree(p);
+        }
+    }
+}
 #endif // APXCHOL_USE_CUDA
