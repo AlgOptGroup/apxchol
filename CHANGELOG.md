@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased (since v0.2.2)
+## Unreleased (since v1.0.0)
+
+Full history: <https://github.com/AlgOptGroup/apxchol/compare/v1.0.0...main>
+
+## 1.0.0
 
 ### Solver and factorization
 - New experimental trace-cycle clique sampler (`factor_options::experimental.sampler`) on CPU, CUDA and Metal. GKS stays the default. Metal setup builds trace-cycle factors on the device without the exact-core rule. On an M1 Max, Metal builds trace-cycle factors 1.1 to 1.7 times slower than GKS factors, but setup plus batched solve is faster than with a Metal-built GKS factor from 8 right-hand sides on 10 of 12 test matrices. A trace-cycle factor built on the CPU reaches that only from 32 right-hand sides.
@@ -132,6 +136,6 @@
 - The CLI rejects an empty matrix and RHS files with no rows or columns with an error (exit 2); it used to crash.
 - Breaking: saving a solver replaces an existing file instead of refusing. It writes `<path>.tmp`, flushes it, renames it into place and syncs the directory, so readers never see a partial archive and the new file survives a power loss, and the new file gets the usual umask permissions (for example 0644) instead of always 0600.
 
-Full history: <https://github.com/AlgOptGroup/apxchol/compare/v0.2.2...main>
+Full history: <https://github.com/AlgOptGroup/apxchol/compare/v0.2.2...v1.0.0>
 
 0.1.0–0.2.0 were published before the public history was squashed and have no source tag.
