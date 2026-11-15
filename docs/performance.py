@@ -101,7 +101,7 @@ VARIANTS = {"ac": "AC", "ac2": "AC2", "rchol": "serial", "rchol_par": "pRCHOL", 
 CLASSES = {"grids": "Grids", "meshes": "Meshes and circuits", "ipm": "Linear programs (IPM)",
            "social": "Social and web graphs"}
 DEVICES = {"cpu": "CPU", "gpu": "CUDA", "metal": "Metal"}
-MARKS = {"failed": "fail", "not_converged": "nc", "timeout": "t/o", "exceeded_cap": "≥20×", "oom": "oom",
+MARKS = {"failed": "fail", "not_converged": "nc", "timeout": "t/o", "exceeded_cap": "cap", "oom": "oom",
          "n/a": "n/a", "missing": "—"}
 UNFINISHED = np.inf  # a run that did not finish counts as an apxchol win
 INK, MUTED, GRID = "#1f1f1f", "#5f5e5a", "#e4e3df"
@@ -222,7 +222,9 @@ class Campaign:
         statuses = [c["status"] for c in cells]
         if not statuses or all(s == "n/a" for s in statuses):
             return None, None, "n/a"
-        for status in ("exceeded_cap", "timeout", "oom", "not_converged", "failed", "missing"):
+        if "missing" in statuses:
+            return None, None, MARKS["missing"]
+        for status in ("exceeded_cap", "timeout", "oom", "not_converged", "failed"):
             if status in statuses:
                 return UNFINISHED, None, MARKS[status]
         return UNFINISHED, None, MARKS.get(statuses[0], statuses[0])
@@ -254,6 +256,10 @@ def family_chart(run, platform, output):
             y = row + offset
             values = [run.family_cell(device, family, m)[0] for m in run.matrices]
             values = sorted(v for v in values if v is not None)
+            if not values:
+                ax.annotate(f"{DEVICES[device]}: no comparable results", (1.01, y),
+                            xycoords=("axes fraction", "data"), va="center", fontsize=8.5, color=INK)
+                continue
             finished = [v for v in values if v < UNFINISHED]
             median = np.median(values)
             lo, hi = np.percentile(np.minimum(values, 1e9), [25, 75])
@@ -281,11 +287,13 @@ def best_other_chart(run, platform, output):
                              squeeze=False)
     winners = collections.Counter()
     for ax, device in zip(axes[0], devices):
+        compared = 0
         for matrix in run.matrices:
             options = [(v, f) for f in run.families(device)
                        for v in [run.family_cell(device, f, matrix)[0]] if v is not None]
             if not options:
                 continue
+            compared += 1
             value, family = min(options)
             jitter = (sum(map(ord, matrix)) % 7 - 3) * .07
             y = list(CLASSES.values()).index(run.cls[matrix]) + jitter
@@ -296,6 +304,8 @@ def best_other_chart(run, platform, output):
             winners[family] += 1
             ax.plot(value, y, "o", markersize=7, color=FAMILY_COLORS.get(family, "#9a9993"),
                     markeredgecolor="white", markeredgewidth=1)
+        if not compared:
+            ax.text(.5, .5, "No comparable results", transform=ax.transAxes, ha="center", va="center", color=MUTED)
         ax.set_yticks(range(len(CLASSES)), list(CLASSES.values()))
         ax.set_ylim(len(CLASSES) - .5, -.5)
         ax.set_title(DEVICES[device], loc="left", fontsize=10)
@@ -306,9 +316,10 @@ def best_other_chart(run, platform, output):
         handles.append(plt.Line2D([], [], marker="o", linestyle="", color="#9a9993", label="another solver"))
     if winners["none"]:
         handles.append(plt.Line2D([], [], marker="o", linestyle="", markerfacecolor="white", markeredgecolor=MUTED,
-                                  label="no other solver finished"))
-    fig.legend(handles=handles, loc="outside upper left", ncol=len(handles), frameon=False, fontsize=8.5,
-               title="Fastest other solver:", title_fontsize=8.5, alignment="left")
+                                  label="no measured competitor finished"))
+    if handles:
+        fig.legend(handles=handles, loc="outside upper left", ncol=len(handles), frameon=False, fontsize=8.5,
+                   title="Fastest other solver:", title_fontsize=8.5, alignment="left")
     save(fig, output / f"{platform}-best-other.svg")
 
 

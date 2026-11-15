@@ -8,7 +8,7 @@ original system.
 
 Competitors are capped at 20 times apxchol's fastest setup + solve time on the
 same matrix and device, and at least 30 s. A run over the cap is shown as
-`≥20×`, not as a time. Other labels: `fail` (failed), `oom` (out of memory),
+`cap`, not as a time. Other labels: `fail` (failed), `oom` (out of memory),
 `nc` (did not converge) and `n/a` (input not supported).
 
 An asterisk (`*`) marks a time whose setup includes input adaptation by the

@@ -4,12 +4,13 @@ ETH LeoMed nodes: AMD EPYC Milan with 28 virtual cores per node, and one
 NVIDIA RTX 4090 (24 GB) for the CUDA series. CPU series use 28 threads on a
 whole node.
 
-This page shows a partial set. RCHOL, pRCHOL, AC, AC2, CMG and ParAC are
-still running on LeoMed, so their cells are empty for now.
+This page shows a partial set. A dash (`—`) marks an unmeasured cell.
+Unmeasured cells are excluded from comparisons and do not count as apxchol
+wins.
 
 Competitors are capped at 20 times apxchol's fastest setup + solve time on the
 same matrix and device, or 30 s if that is longer. A run over the cap is shown
-as `≥20×`, not as a time. Other labels: `fail` (failed), `oom` (out of memory),
+as `cap`, not as a time. Other labels: `fail` (failed), `oom` (out of memory),
 `nc` (did not converge) and `n/a` (input not supported).
 
 An asterisk (`*`) marks a time whose setup includes input adaptation by the
