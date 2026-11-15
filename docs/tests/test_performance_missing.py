@@ -51,7 +51,7 @@ class MissingMeasurements(unittest.TestCase):
     def test_cap_is_not_fixed_speedup(self):
         self.other.update(status='exceeded_cap', cap_s=30.)
         run = self.campaign()
-        self.assertEqual(self.other['cap_s'] / run.apx('cpu', 'grid'), 15.)
+        self.assertEqual(run.family_cell('cpu', 'AMGCL', 'grid')[0], self.p.UNFINISHED)
         self.assertEqual(run.family_cell('cpu', 'AMGCL', 'grid')[2], 'cap')
         table = self.p.times_table(run, 'cpu')
         self.assertIn('cap', table)

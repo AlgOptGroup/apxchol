@@ -49,8 +49,8 @@ matrices on both the CPU and the GPU.
 
 Each cell is the speedup of apxchol over the family's fastest variant on that
 matrix. `cap` means the solver exceeded its time cap. The cap is the larger of
-30 s and 20 times the fastest eligible apxchol setup + solve on that matrix
-and device. Displayed speedups use apxchol's default configuration, so a capped
+30 s and 20 times the fastest completed apxchol setup + solve meeting the
+1e-8 tolerance on that matrix and device. Displayed speedups use apxchol's default configuration, so a capped
 run does not establish a fixed speed ratio. `fail`, `oom` and `nc` mean it failed,
 ran out of memory or did not converge, and `n/a` means it does not accept that input. The
 [Euler page](performance-euler.md) breaks each family into its variants.

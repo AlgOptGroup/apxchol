@@ -208,8 +208,9 @@ class Campaign:
     def family_cell(self, device, family, matrix):
         """Speedup of apxchol over the fastest variant of a family, the winning cell and a status mark.
 
-        Returns (speedup, cell, mark); speedup is UNFINISHED when no variant finished and None when
-        every variant marks the input unsupported or apxchol itself has no result."""
+        Returns (speedup, cell, mark). A measured failure is UNFINISHED when no variant finished.
+        None means the reference is missing, all variants are unsupported, or no variant finished
+        and at least one family measurement is missing."""
         ref = self.apx(device, matrix)
         cells = [self.cells[device, s, matrix] for s in self.competitors(device)
                  if s.split(" (")[0] == family and (device, s, matrix) in self.cells]
