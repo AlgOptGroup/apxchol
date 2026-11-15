@@ -1363,7 +1363,8 @@ private:
     // Factor the remaining residual exactly as one dense block and append its
     // columns in active-ID order. Returns false, unchanged, when the block
     // does not fit in device memory.
-    bool finish_owned_dense_tail(std::span<const node_index> active_ids);
+    bool finish_owned_dense_tail(std::span<const node_index> active_ids,
+                                 gpu_block_frontend& frontend);
     std::unique_ptr<gpu_block_frontend> initialize_owned_csc(
         const gpu_owned_csc_buffers& input, bool& sddm);
     gpu_round_shadow_report compute_owned_prefix(
@@ -1441,10 +1442,11 @@ public:
         return stats;
     }
 
-    bool finish_owned_dense_tail(std::span<const node_index> active_ids) {
+    bool finish_owned_dense_tail(std::span<const node_index> active_ids,
+                                 gpu_block_frontend& frontend) {
         if (!active_ || owned_materialized_ || !has_owned_residual())
             throw std::logic_error("GPU dense tail requires an accepted owned boundary");
-        if (!device_state_->finish_owned_dense_tail(active_ids)) return false;
+        if (!device_state_->finish_owned_dense_tail(active_ids, frontend)) return false;
         factor_log_columns_ += active_ids.size();
         return true;
     }

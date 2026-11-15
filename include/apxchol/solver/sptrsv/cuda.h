@@ -344,9 +344,11 @@ public:
     }
     /// Build and compact L11 on the host, upload it, and build dataflow tables.
     /// verbose reports setup stages; the caller establishes the CUDA context.
+    /// tail_begin (dense_tail_begin) marks a trailing chain of rows that the
+    /// solve applies by its exact inverse, or -1.
     void setup(const sparse_csc& L, node_index m,
-               const factor_options& options = {}) {
-        setup_host(L, m, options, fp16_resolved(options.factor_storage), false, nullptr);
+               const factor_options& options = {}, std::int64_t tail_begin = -1) {
+        setup_host(L, m, options, fp16_resolved(options.factor_storage), false, nullptr, tail_begin);
     }
 
     /// Upload an exported installed factor (factorization::storage fp32 or
@@ -355,8 +357,8 @@ public:
     /// scale holds s_j for columns [0, m). options.drop_tolerance and
     /// factor_storage are ignored.
     void install_exact(const sparse_csc& L, node_index m, bool fp16, const float* scale,
-                       const factor_options& options = {}) {
-        setup_host(L, m, options, fp16, true, scale);
+                       const factor_options& options = {}, std::int64_t tail_begin = -1) {
+        setup_host(L, m, options, fp16, true, scale, tail_begin);
     }
 
     /// Download the installed factor in factorization's form (solve.h):
@@ -396,7 +398,7 @@ private:
     // otherwise L is an installed factor with fp16 column scales exact_scale
     // (ignored for fp32), uploaded without change.
     void setup_host(const sparse_csc& L, node_index m, const factor_options& options,
-                    bool fp16, bool exact, const float* exact_scale) {
+                    bool fp16, bool exact, const float* exact_scale, std::int64_t tail_begin) {
         validate_options(options);
         destroy();
         const auto next = std::make_shared<state>();
@@ -448,6 +450,7 @@ private:
         APXCHOL_CUDA_CHECK(cudaMemGetInfo(&free_before, &total));
         s.cleanup_needed = true;
         s.factor_bytes = 0;
+        choose_dense_tail(s, tail_begin);
         // Both storage formats use the same transpose, upload and plan construction.
         auto upload_transpose = [&](const auto& back, const char* stage) {
             const auto forward = gpu_factor_prep::transpose_csr(back);
@@ -503,6 +506,7 @@ private:
             upload_transpose(LT, "transpose");
         }
         build_lane_plans(s, s.L_row_ptr, s.LT_row_ptr);
+        build_dense_tail(s, s.L_row_ptr, s.L_col_idx, s.L_values, s.diag);
         allocate_workspace(s);
         // Pageable uploads may still be in flight; solves run on other streams.
         APXCHOL_CUDA_CHECK(cudaDeviceSynchronize());
@@ -562,7 +566,7 @@ public:
     /// route downloads factor values or uploads a factor CSR again.
     void setup_adopting_device_factor(
             cuda_sptrsv_device_factor factor,
-            const factor_options& options = {}) {
+            const factor_options& options = {}, std::int64_t tail_begin = -1) {
         // A prior failed ordinary setup may have left partial allocations. The
         // ordinary setup calls destroy() before reuse too; make the fresh-state
         // precondition concrete before adopting another owner.
@@ -693,12 +697,15 @@ public:
             s.adoption_host_download_bytes = adoption_download_bytes;
             s.factor_bytes = adopted_bytes;
 
+            choose_dense_tail(s, tail_begin);
             if (factor.data_.finalized_sorted_triangular)
                 setup_device_kernel_backend(s, factor);
             else
                 setup_kernel_backend(s, LT_ptr, L_ptr);
             mark("kernel backend tables");
             build_lane_plans(s, factor.data_.L_row_ptr, factor.data_.LT_row_ptr);
+            build_dense_tail(s, factor.data_.L_row_ptr, factor.data_.L_col_idx, factor.data_.L_values,
+                             factor.data_.diag);
             allocate_workspace(s);
             // Solves run on other streams than the plan construction.
             APXCHOL_CUDA_CHECK(cudaDeviceSynchronize());
@@ -869,10 +876,15 @@ private:
         // own row-length histogram (the two differ a lot -- an elimination
         // factor's hub rows land in CSR of L, its columns stay bounded).
         namespace df = detail::gpu_dataflow;
-        const std::array blocks{0u, unsigned(mi)};
+        // A dense tail's rows [planned, m) leave both plans and the row
+        // statistics, as in the device plan: forward plans positions
+        // [0, planned), back the reversed positions [m - planned, m).
+        const unsigned planned = unsigned(planned_rows(s));
         for (bool reverse : {false, true}) {
             const auto ptr = reverse ? LT_ptr : L_ptr;
-            const auto stats = gpu_factor_prep::dataflow_row_stats(ptr);
+            const std::array blocks = reverse ? std::array{unsigned(mi) - planned, unsigned(mi)}
+                                              : std::array{0u, planned};
+            const auto stats = gpu_factor_prep::dataflow_row_stats(ptr.first(std::size_t(planned) + 1));
             const unsigned split = stats.split_threshold(s.nnz);
             s.df_split_min[reverse] = split;
             const auto plan = df::pack(ptr.data(), {unsigned(mi), reverse}, blocks, split);
@@ -900,7 +912,7 @@ private:
                 static_cast<int>(s.m), reverse, static_cast<int>(s.nnz),
                 reverse ? factor.data_.LT_row_ptr : factor.data_.L_row_ptr, -1,
                 !reverse && s.fp16 ? factor.data_.diag : nullptr,
-                !reverse && s.fp16 ? factor.data_.inv_scale2 : nullptr);
+                !reverse && s.fp16 ? factor.data_.inv_scale2 : nullptr, 32, planned_rows(s));
             s.df_split_min[reverse] = plan.stats.split_threshold(s.nnz);
             // Consume allocations immediately, before any operation can throw.
             // The outer setup catch then owns every partial plan via destroy().
@@ -917,6 +929,46 @@ private:
             }
         }
         initialize_dataflow_state(s);
+    }
+
+    // Rows the dataflow plans: all, or those before the dense tail.
+    static int planned_rows(const state& s) {
+        return s.tail.rows ? int(s.tail.begin) : int(s.m);
+    }
+
+    // Called before the plans. Rows [tail_begin, m) form a dependency chain
+    // (dense_tail_begin); apply at most their last kDataflowTailMaxRows rows
+    // as products with the block's exact inverse instead of the dataflow.
+    // Keeps the dataflow for fewer than 2 rows. The choice depends on the
+    // factor only, so every install of one factor solves alike; the inverses
+    // (2 rows^2 floats) are factor arrays and fail setup if they do not fit.
+    static void choose_dense_tail(state& s, std::int64_t tail_begin) {
+        if (tail_begin < 0 || tail_begin >= s.m) return;
+        const std::int64_t begin =
+            std::max(tail_begin, s.m - std::int64_t(detail::kDataflowTailMaxRows));
+        const std::int64_t rows = s.m - begin;
+        if (rows < 2) return;
+        s.tail.begin = unsigned(begin);
+        s.tail.rows = unsigned(rows);
+    }
+
+    // After the plans: the inverse of the tail block from CSR(L).
+    static void build_dense_tail(state& s, const int* L_row_ptr, const int* L_col_idx,
+                                 const void* L_values, const float* diag) {
+        if (!s.tail.rows) return;
+        const std::size_t bytes = std::size_t(s.tail.rows) * s.tail.rows * sizeof(float);
+        // Consume each allocation into s at once: the setup catch frees it.
+        APXCHOL_CUDA_CHECK(cudaMalloc(&s.d_tail_inverse, bytes));
+        s.factor_bytes += bytes;
+        APXCHOL_CUDA_CHECK(cudaMalloc(&s.d_tail_inverse_t, bytes));
+        s.factor_bytes += bytes;
+        detail::build_dataflow_tail_inverse(s.tail.begin, s.tail.rows, L_row_ptr, L_col_idx, L_values,
+                                            s.fp16, diag, s.d_tail_inverse, s.d_tail_inverse_t);
+        s.tail.inverse = s.d_tail_inverse;
+        s.tail.inverse_t = s.d_tail_inverse_t;
+        if (s.verbose)
+            std::fprintf(stderr, "[apxchol] dense tail solve: rows=%u begin=%u m=%lld inverse=%.1f MB\n",
+                         s.tail.rows, s.tail.begin, static_cast<long long>(s.m), 2 * bytes / 1e6);
     }
 
     static void initialize_dataflow_state(state& s) {
@@ -1027,7 +1079,7 @@ private:
                 next[reverse] = detail::build_dataflow_device_plan(
                     static_cast<int>(s.m), reverse, static_cast<int>(s.nnz),
                     reverse ? LT_row_ptr : L_row_ptr, s.df_split_min[reverse],
-                    nullptr, nullptr, 8);
+                    nullptr, nullptr, 8, planned_rows(s));
                 if (next[reverse].n_slots > s.df_slots)
                     throw std::logic_error("GPU RHS-lane plan changed segment storage");
             }
@@ -1057,16 +1109,24 @@ private:
         // forward result is written once. A published word is the fp32 value.
         auto* const forward_tags = Columns == 1 ? tags : reinterpret_cast<unsigned*>(y);
         auto* const forward_out = Columns == 1 ? y : nullptr;
+        // The forward tail keeps its right-hand side in the back sweep's tags.
+        // Panels: the forward sweep never touches them. Scalar: they are the
+        // forward tags, but the tail rows' words are written only after the
+        // sweep and its result goes to y.
+        auto tail = data_->tail;
+        if (tail.rows) tail.scratch = tags + std::size_t(tail.begin) * Columns;
         dataflow_solve<Columns, RhsLanes>(stream, m, false, data_->L_row_ptr, data_->L_col_idx, data_->L_values, data_->diag, nullptr,
                        RhsLanes == 1 ? data_->d_fwd_words : data_->lane_plans[0].words,
                        RhsLanes == 1 ? data_->d_fwd_segments : data_->lane_plans[0].segments,
                        RhsLanes == 1 ? data_->fwd_batches : data_->lane_plans[0].n_batches,
-                       forward_tags, tag_count, ws_.d_df_ticket, data_->df_grid, ws_.d_x, forward_out, active, rhs64, nullptr, active_stride);
+                       forward_tags, tag_count, ws_.d_df_ticket, data_->df_grid, ws_.d_x, forward_out, active, rhs64, nullptr, active_stride,
+                       tail);
         dataflow_solve<Columns, RhsLanes>(stream, m, true, data_->LT_row_ptr, data_->LT_col_idx, data_->LT_values, data_->diag, data_->inv_scale2,
                        RhsLanes == 1 ? data_->d_bck_words : data_->lane_plans[1].words,
                        RhsLanes == 1 ? data_->d_bck_segments : data_->lane_plans[1].segments,
                        RhsLanes == 1 ? data_->bck_batches : data_->lane_plans[1].n_batches,
-                       tags, tag_count, ws_.d_df_ticket, data_->df_grid, y, out32 ? out32 : ws_.d_x, active, nullptr, out64, active_stride);
+                       tags, tag_count, ws_.d_df_ticket, data_->df_grid, y, out32 ? out32 : ws_.d_x, active, nullptr, out64, active_stride,
+                       tail);
     }
 
     void destroy() noexcept {
@@ -1089,7 +1149,8 @@ private:
             void* const allocations[] = {
                 d_fwd_words, d_bck_words, d_fwd_segments, d_bck_segments,
                 lane_plans[0].words, lane_plans[0].segments,
-                lane_plans[1].words, lane_plans[1].segments};
+                lane_plans[1].words, lane_plans[1].segments,
+                d_tail_inverse, d_tail_inverse_t};
             for (void* allocation : allocations)
                 if (allocation) (void)cudaFree(allocation);
         }
@@ -1116,6 +1177,10 @@ private:
         int           df_grid         = 0;
         std::array<unsigned, 2> df_split_min{};
         std::array<detail::dataflow_device_plan, 2> lane_plans{};
+        // Dense tail applied by its exact inverse (choose_dense_tail).
+        detail::dataflow_tail tail{};
+        float* d_tail_inverse = nullptr;
+        float* d_tail_inverse_t = nullptr;
         // fp16 storage: binary16
         // values of CSR(L~^T) and CSR(L~), the fp32 scaled diagonal and the
         // back solve's per-row input scale inv_scale^2 -- held in DOUBLE (r_j^2

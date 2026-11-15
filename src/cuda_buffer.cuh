@@ -104,4 +104,30 @@ private:
     std::size_t count_ = 0;
 };
 
+// Page-locked host memory for device-to-host copies that one stream
+// synchronization completes together (async copies into pageable memory block).
+template<class T, auto Check>
+class cuda_pinned_buffer {
+public:
+    cuda_pinned_buffer() = default;
+    ~cuda_pinned_buffer() { if (data_) cudaFreeHost(data_); }
+    cuda_pinned_buffer(const cuda_pinned_buffer&) = delete;
+    cuda_pinned_buffer& operator=(const cuda_pinned_buffer&) = delete;
+
+    // Grows to at least count elements; contents are not preserved.
+    T* reserve(std::size_t count, const char* what) {
+        if (count > count_) {
+            if (data_) { cudaFreeHost(data_); data_ = nullptr; count_ = 0; }
+            Check(cudaMallocHost(reinterpret_cast<void**>(&data_), count * sizeof(T)), what);
+            count_ = count;
+        }
+        return data_;
+    }
+    T* get() noexcept { return data_; }
+
+private:
+    T* data_ = nullptr;
+    std::size_t count_ = 0;
+};
+
 } // namespace apxchol::detail

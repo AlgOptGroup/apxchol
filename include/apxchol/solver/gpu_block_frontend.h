@@ -96,6 +96,9 @@ private:
                              const gpu_device_selection_content& expected,
                              std::weak_ptr<const void> epoch);
     gpu_device_selection selection_for_residual_handoff() const;
+    // Checks the last binding's deferred active-compaction count when no
+    // prepare follows it (the owner factors the rest as a dense block).
+    void verify_bound_residual();
     void reset() noexcept;
     struct impl;
     std::unique_ptr<impl> p_;
