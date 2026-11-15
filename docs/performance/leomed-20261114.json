@@ -1,0 +1,64 @@
+{
+ "campaign": "leomed-20261114",
+ "date": "2026-11-14",
+ "hardware": {
+  "cpu": "AMD EPYC-Milan, 28 virtual cores per node (ETH LeoMed compute-biomed and gpu-biomed nodes)",
+  "sockets": 1,
+  "gpus": [
+   {
+    "name": "NVIDIA GeForce RTX 4090 (24 GB)",
+    "count": 1
+   }
+  ]
+ },
+ "toolchains": [
+  {
+   "compiler": "clang",
+   "compiler_version": "20.1.8",
+   "openmp_runtime": "llvm-libomp",
+   "arch_flags": "-march=native",
+   "node_index_bits": "32",
+   "edge_index_bits": "32",
+   "hypre_cuda": "off"
+  },
+  {
+   "compiler": "clang",
+   "compiler_version": "20.1.8",
+   "openmp_runtime": "llvm-libomp",
+   "arch_flags": "-march=native",
+   "node_index_bits": "32",
+   "edge_index_bits": "32",
+   "hypre_cuda": "on"
+  }
+ ],
+ "notes": [
+  "Two devices measured 2026-11-14 at apxchol main 7dee3a3a: cpu on a whole 28-core EPYC-Milan node and gpu on one RTX 4090 with 28 cores.",
+  "Competitors are capped at max(20 x the best complete apxchol setup + solve on the same matrix and device, 30 s) per solve, from this campaign's own apxchol cells.",
+  "C++ series: one warmup and three retained repetitions, 28 OpenMP threads pinned to the job's cores.",
+  "Toolchain: Compute Canada StdEnv/2023, LLVM 20.1.8 (AVX2 build) with -march=native, CUDA 13.4.3 with the CUDA forward-compatibility driver library. Serial RCHOL and pRCHOL come from a StdEnv/2026 + LLVM 22.1.8 build, because serial RCHOL fails with the StdEnv/2023 toolchain ('invalid factor diagonal', job 10015602).",
+  "RCHOL/pRCHOL use the portable Eigen PCG (no MKL).",
+  "ParAC and CMG were not run on LeoMed.",
+  "adapt_s is the part of setup_s that the benchmark spent adapting the input for a solver that does not accept a singular or disconnected operator as given. apxchol, AC/AC2, RCHOL and pRCHOL take components natively and report 0."
+ ],
+ "tolerance": 1e-08,
+ "source_commits": [
+  "7dee3a3a6dabf6b29251c3c37996989b46e6eea6"
+ ],
+ "cap_rule": "max(20 x the fastest complete apxchol setup + solve on the same matrix and device, 30 s); a competitor over the cap, or killed at it, is exceeded_cap",
+ "files": [
+  "leomed-20261114.csv"
+ ],
+ "columns": {
+  "rel_res": "largest ||b-Ax||/||b|| over the retained repeats, on the original system",
+  "setup_s": "seconds, from the repeat with the median setup + solve",
+  "adapt_s": "seconds of setup_s that the benchmark spent adapting the input for this solver (component discovery, Dirichlet pins, component slicing); 0 when the solver takes the input natively, empty when the campaign did not measure it",
+  "solve_s": "seconds, same repeat",
+  "cap_s": "the competitor's time cap, when one applied",
+  "class": "grids, meshes (meshes and circuits), ipm (linear programs), social (social and web graphs)"
+ },
+ "full_extract": {
+  "repository": "https://github.com/AlgOptGroup/apxchol-research",
+  "path": "campaigns/leomed-20261114/extract.json",
+  "sha256": "4290c05a7c757a9eb74aaba5af51e6a7ba3ce952cafc9e3cbec6d7be55c6b1d4"
+ }
+}

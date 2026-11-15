@@ -10,6 +10,7 @@ page lists every measured result, including failures.
 :hidden:
 
 Euler (x86_64 + CUDA) <performance-euler>
+LeoMed (x86_64 + CUDA) <performance-leomed>
 Daint (ARM64 + CUDA) <performance-daint>
 Apple M1 Max (CPU + Metal) <performance-mac>
 ```
@@ -17,6 +18,7 @@ Apple M1 Max (CPU + Metal) <performance-mac>
 | Platform | Hardware | Routes |
 |---|---|---|
 | [Euler](performance-euler.md) | 2 × AMD EPYC 9554, 8 × RTX 4090 | CPU, CUDA |
+| [LeoMed](performance-leomed.md) | AMD EPYC Milan (28 cores), RTX 4090 | CPU, CUDA |
 | [Daint](performance-daint.md) | NVIDIA GH200 (72-core Grace, Hopper) | ARM CPU, CUDA |
 | [Apple M1 Max](performance-mac.md) | M1 Max, 32 GB unified memory | ARM CPU, Metal |
 

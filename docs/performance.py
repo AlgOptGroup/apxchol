@@ -508,7 +508,7 @@ def campaigns(directory, output):
     """Render every docs/performance/<platform>-<date>.json campaign header and its CSV files."""
     for path in sorted(directory.glob("*-2*.json")):
         platform = path.name.split("-")[0]
-        if platform in ("euler", "daint", "mac"):
+        if platform in ("euler", "leomed", "daint", "mac"):
             campaign(load(path), platform, output)
 
 

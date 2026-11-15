@@ -15,7 +15,7 @@ HEADER = {"campaign", "date", "hardware", "toolchains", "notes", "tolerance", "s
 
 
 def headers():
-    return [p for p in sorted(DATA.glob("*-2*.json")) if p.name.split("-")[0] in ("euler", "daint", "mac")]
+    return [p for p in sorted(DATA.glob("*-2*.json")) if p.name.split("-")[0] in ("euler", "leomed", "daint", "mac")]
 
 
 class PerformanceDataTest(unittest.TestCase):
