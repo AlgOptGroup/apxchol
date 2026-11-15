@@ -394,12 +394,19 @@ private:
             release_workspace(next, next_host);
             throw;
         }
-        // The packed multiply is optional: without its scratch the panel keeps
-        // its width and multiplies with the unpacked kernels.
-        if (cuda_pcg_kernels::packs_multiply(columns, static_cast<double>(op_->matrix.nnz) / static_cast<double>(n_)) &&
-            cudaMalloc(&next.packed, cuda_pcg_kernels::packed_multiply_doubles(n_) * sizeof(double)) != cudaSuccess) {
-            next.packed = nullptr;
-            (void)cudaGetLastError();
+        // The packed multiply is optional: when the device has no memory for
+        // its scratch, the panel keeps its width and multiplies with the
+        // unpacked kernels. Any other failure is an error.
+        if (cuda_pcg_kernels::packs_multiply(columns, static_cast<double>(op_->matrix.nnz) / static_cast<double>(n_))) {
+            const cudaError_t status = cudaMalloc(&next.packed, cuda_pcg_kernels::packed_multiply_doubles(n_) * sizeof(double));
+            if (status == cudaErrorMemoryAllocation) {
+                next.packed = nullptr;
+                (void)cudaGetLastError();
+            } else if (status != cudaSuccess) {
+                next.packed = nullptr;
+                release_workspace(next, next_host);
+                APXCHOL_PCG_CUDA_CHECK(status);
+            }
         }
         // Every solve reinitializes its inputs. Publish only after all new
         // allocations succeed; an allocation failure keeps the old owner usable.
