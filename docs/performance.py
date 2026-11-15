@@ -101,7 +101,8 @@ VARIANTS = {"ac": "AC", "ac2": "AC2", "rchol": "serial", "rchol_par": "pRCHOL", 
 CLASSES = {"grids": "Grids", "meshes": "Meshes and circuits", "ipm": "Linear programs (IPM)",
            "social": "Social and web graphs"}
 DEVICES = {"cpu": "CPU", "gpu": "CUDA", "metal": "Metal"}
-MARKS = {"failed": "fail", "not_converged": "nc", "timeout": "t/o", "exceeded_cap": "cap", "oom": "oom",
+# Marks are used only after good(cell) rejects a result.
+MARKS = {"complete": "nc", "failed": "fail", "not_converged": "nc", "timeout": "t/o", "exceeded_cap": "cap", "oom": "oom",
          "n/a": "n/a", "missing": "—"}
 UNFINISHED = np.inf  # a run that did not finish counts as an apxchol win
 INK, MUTED, GRID = "#1f1f1f", "#5f5e5a", "#e4e3df"
@@ -208,7 +209,8 @@ class Campaign:
     def family_cell(self, device, family, matrix):
         """Speedup of apxchol over the fastest variant of a family, the winning cell and a status mark.
 
-        Returns (speedup, cell, mark). A measured failure is UNFINISHED when no variant finished.
+        Returns (speedup, cell, mark). UNFINISHED marks measured failures or missed tolerance
+        when no variant meets tolerance.
         None means the reference is missing, all variants are unsupported, or no variant finished
         and at least one family measurement is missing."""
         ref = self.apx(device, matrix)
@@ -225,7 +227,7 @@ class Campaign:
             return None, None, "n/a"
         if "missing" in statuses:
             return None, None, MARKS["missing"]
-        for status in ("exceeded_cap", "timeout", "oom", "not_converged", "failed"):
+        for status in ("exceeded_cap", "timeout", "oom", "not_converged", "failed", "complete"):
             if status in statuses:
                 return UNFINISHED, None, MARKS[status]
         return UNFINISHED, None, MARKS.get(statuses[0], statuses[0])

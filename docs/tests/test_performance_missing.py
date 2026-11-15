@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from xml.etree import ElementTree
 
 @unittest.skipUnless(all(importlib.util.find_spec(m) for m in ('matplotlib', 'numpy')), 'plot dependencies unavailable')
 class MissingMeasurements(unittest.TestCase):
@@ -56,6 +57,27 @@ class MissingMeasurements(unittest.TestCase):
         table = self.p.times_table(run, 'cpu')
         self.assertIn('cap', table)
         self.assertNotIn('≥20×', table)
+
+    def test_completed_without_tolerance_is_nonconverged_in_all_views(self):
+        self.other.update(status='complete', setup_s=2., solve_s=2., rel_res=1e-5, meets_tolerance=False)
+        run = self.campaign()
+        self.assertEqual(run.family_cell('cpu', 'AMGCL', 'grid'), (self.p.UNFINISHED, None, 'nc'))
+        self.rows.insert(1, dict(self.other, config='unsupported', status='n/a'))
+        self.assertEqual(self.campaign().family_cell('cpu', 'AMGCL', 'grid'), (self.p.UNFINISHED, None, 'nc'))
+        self.assertIn('| grid | 1 | 1 | nc |  |', self.p.times_table(run, 'cpu'))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            self.p.family_grid(run, 'test', 'cpu', output)
+            self.p.variant_grid(run, 'test', 'cpu', output)
+            for name in ('test-cpu-families.svg', 'test-cpu-variants.svg'):
+                svg = (output / name).read_text()
+                labels = [''.join(node.itertext()) for node in ElementTree.fromstring(svg).iter('{http://www.w3.org/2000/svg}text')]
+                self.assertIn('nc', labels)
+                self.assertNotIn('complete', labels)
+
+    def test_inaccurate_and_missing_family_stays_unmeasured(self):
+        self.rows.append(dict(self.other, config='other', status='complete', setup_s=2., solve_s=2., rel_res=1e-5))
+        self.assertEqual(self.campaign().family_cell('cpu', 'AMGCL', 'grid'), (None, None, '—'))
 
     def test_distinct_failure_marks_are_preserved(self):
         for status, mark in [('timeout', 't/o'), ('failed', 'fail'), ('oom', 'oom')]:
