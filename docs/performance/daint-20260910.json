@@ -32,7 +32,7 @@
  ],
  "notes": [
   "No relative competitor cap: cells used fixed whole-cell deadlines.",
-  "ParAC cells predate the current stopping rule (patch 0007) and report ParAC's own residual on its own right-hand side.",
+  "ParAC used exported campaign RHS and its own recurrence stopping rule with a per-matrix calibrated tolerance; each retained solution was graded against the original system at 1e-8. The current original-residual stopping rule came later. There are 106 completed cells and two G3 Graph calibration failures. Export-receipt hashes support 39 of 108 cells; three selected records have path links without direct raw-record hashes. The 26 completed Graph CPU setup times combine separately measured preparation with the original solve, without measured preparation variability; they remain historical composite timings.",
   "GPU apxchol series use degree quantile 0.8 or 0.2; the current device default is 0.5."
  ],
  "tolerance": 1e-08,

@@ -7,7 +7,15 @@ configurations) were run, and 507 of them met the 1e-8 tolerance.
 ```{note}
 These results were recorded in September 2026 under older benchmark rules.
 Competitors had no time cap relative to apxchol, so speedups above 20 appear
-as numbers. ParAC used its own stopping rule, residual and right-hand side.
+as numbers. ParAC used exported campaign right-hand sides and stopped on its
+own recurrence residual, with a tolerance calibrated per matrix. Each retained
+solution was then checked against the original system at 1e-8; stopping on the
+original residual came later. There are 106 completed ParAC cells and two G3
+Graph calibration failures. Export-receipt hashes support 39 of the 108 cells;
+three selected records are linked to raw results by path without a direct hash.
+The 26 completed Graph CPU setup times combine a later preparation measurement
+with the original solve, without measured preparation variability. These
+composite timings remain historical.
 The GPU apxchol reference is GKS at degree quantile 0.8; the current default
 is 0.5. The pRCHOL failures predate a heap-corruption fix in the benchmark
 adapter.

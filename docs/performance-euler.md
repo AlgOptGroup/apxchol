@@ -24,8 +24,8 @@ variant, how closely the variants of a family agree, and setup and solve
 separately.
 
 ```{note}
-ParAC runs in two ways. "Own RHS" uses ParAC's own zero-sum right-hand side,
-as on Daint; "shared RHS" uses the campaign's common right-hand side. Most
+ParAC runs in two ways. "Own RHS" uses ParAC's own zero-sum right-hand side;
+"shared RHS" uses the campaign's common right-hand side. Most
 `n/a` cells are ParAC: its Physics mode grounds a singular Laplacian by
 dropping a row, and its Graph mode cannot solve a disconnected graph with a
 single zero-sum right-hand side. CMG runs as the canonical MATLAB code and as
