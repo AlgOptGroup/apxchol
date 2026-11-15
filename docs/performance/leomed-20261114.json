@@ -28,12 +28,13 @@
    "arch_flags": "-march=native",
    "node_index_bits": "32",
    "edge_index_bits": "32",
-   "hypre_cuda": "on"
+   "hypre_cuda": "on",
+   "cuda": "13.4.3"
   }
  ],
  "notes": [
   "Two devices measured 2026-11-14 at apxchol main 7dee3a3a: cpu on a whole 28-core EPYC-Milan node and gpu on one RTX 4090 with 28 cores.",
-  "Competitors are capped at max(20 x the best complete apxchol setup + solve on the same matrix and device, 30 s) per solve, from this campaign's own apxchol cells.",
+  "Competitors are capped at max(20 x the best complete apxchol setup + solve on the same matrix and device, over every apxchol configuration run on that device, 30 s) per solve, from this campaign's own apxchol cells.",
   "C++ series: one warmup and three retained repetitions, 28 OpenMP threads pinned to the job's cores.",
   "Toolchain: Compute Canada StdEnv/2023, LLVM 20.1.8 (AVX2 build) with -march=native, CUDA 13.4.3 with the CUDA forward-compatibility driver library. Serial RCHOL and pRCHOL come from a StdEnv/2026 + LLVM 22.1.8 build, because serial RCHOL fails with the StdEnv/2023 toolchain ('invalid factor diagonal', job 10015602).",
   "RCHOL/pRCHOL use the portable Eigen PCG (no MKL).",
@@ -59,6 +60,6 @@
  "full_extract": {
   "repository": "https://github.com/AlgOptGroup/apxchol-research",
   "path": "campaigns/leomed-20261114/extract.json",
-  "sha256": "4290c05a7c757a9eb74aaba5af51e6a7ba3ce952cafc9e3cbec6d7be55c6b1d4"
+  "sha256": "e532055e5604113493a2a00b9d8e9c7db9e7b09d461c7ce6354c074c945408b6"
  }
 }

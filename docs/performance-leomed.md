@@ -2,7 +2,10 @@
 
 ETH LeoMed nodes: AMD EPYC Milan with 28 virtual cores per node, and one
 NVIDIA RTX 4090 (24 GB) for the CUDA series. CPU series use 28 threads on a
-whole node. ParAC and CMG were not run here.
+whole node.
+
+This page shows a partial set. RCHOL, pRCHOL, AC, AC2, CMG and ParAC are
+still running on LeoMed, so their cells are empty for now.
 
 Competitors are capped at 20 times apxchol's fastest setup + solve time on the
 same matrix and device, or 30 s if that is longer. A run over the cap is shown
