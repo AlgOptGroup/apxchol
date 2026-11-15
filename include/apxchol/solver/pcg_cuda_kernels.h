@@ -17,7 +17,8 @@ struct workspace : detail::gpu_pcg::workspace<double, double> {
     // When it is nullptr the dot and direction steps read the FP64 vector z.
     float* preconditioned = nullptr;
     // Scratch of packed_multiply_doubles(n) doubles. The multiply of a wide
-    // panel takes the packed path exactly when this is not nullptr.
+    // panel takes the packed path exactly when this is not nullptr. It is
+    // nullptr when rows are short or when the device had no memory for it.
     double* packed = nullptr;
 };
 enum exit_flag : unsigned {
@@ -66,7 +67,8 @@ inline int pcg_blocks(std::int64_t units) {
 /// kMultiplyColumns columns. From kPackedRowEntries stored entries per row on
 /// average, each group gathers from a packed copy of its direction columns,
 /// which needs the scratch below: the packed direction, product and partials.
-/// Shorter rows do not repay the copies.
+/// Shorter rows did not repay the copies on an RTX 4090. The cutoff is not
+/// measured between 121 and 271 entries per row, nor on other devices.
 inline constexpr unsigned kMultiplyColumns = 8;
 inline constexpr double kPackedRowEntries = 128;
 constexpr bool packs_multiply(unsigned columns, double entries_per_row) {

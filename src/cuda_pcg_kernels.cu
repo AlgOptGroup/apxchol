@@ -158,15 +158,18 @@ finalize_kernel(const double* part, int blocks, solve_state* state, unsigned mod
     }
 }
 
-// Copies Group columns of an interleaved Columns-wide panel to or from a
-// packed Group-wide panel. One thread per packed element.
+// Copies the active ones of Group columns of an interleaved Columns-wide panel
+// to or from a packed Group-wide panel. One thread per packed element. state
+// points at the first copied column. The multiply writes only active columns,
+// so the others are neither read nor written, as in the unpacked multiply.
 template<unsigned Columns, unsigned Group, unsigned First, bool Pack>
 __global__ void __launch_bounds__(kBlockThreads)
-copy_columns_kernel(std::int64_t rows, double* wide, double* narrow) {
+copy_columns_kernel(std::int64_t rows, double* wide, double* narrow, const solve_state* state) {
     const std::int64_t elements = rows * static_cast<std::int64_t>(Group);
     const std::int64_t stride = static_cast<std::int64_t>(gridDim.x) * kBlockThreads;
     for (std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * kBlockThreads + threadIdx.x;
          i < elements; i += stride) {
+        if (!state[i % Group].active) continue;
         const std::int64_t j = i / Group * Columns + First + i % Group;
         if constexpr (Pack) narrow[i] = wide[j];
         else wide[j] = narrow[i];
@@ -195,12 +198,12 @@ void multiply(cudaStream_t stream, std::int64_t n, workspace v,
             w.partial = w.ap + n * group;
             const int copy_grid = pcg_blocks(n * group);
             auto pass = [&]<unsigned First>() {
-                copy_columns_kernel<Columns, group, First, true><<<copy_grid, kBlockThreads, 0, stream>>>(n, v.p, w.p);
                 w.state = v.state + First;
+                copy_columns_kernel<Columns, group, First, true><<<copy_grid, kBlockThreads, 0, stream>>>(n, v.p, w.p, w.state);
                 step_kernel<operation::multiply, Lanes, group, Value><<<
                     grid, kBlockThreads, 0, stream>>>(n, w, a.row_ptr, a.col_idx, values, a.row_map);
-                copy_columns_kernel<Columns, group, First, false><<<copy_grid, kBlockThreads, 0, stream>>>(n, v.ap, w.ap);
-                copy_columns_kernel<Columns, group, First, false><<<1, kBlockThreads, 0, stream>>>(grid, v.partial, w.partial);
+                copy_columns_kernel<Columns, group, First, false><<<copy_grid, kBlockThreads, 0, stream>>>(n, v.ap, w.ap, w.state);
+                copy_columns_kernel<Columns, group, First, false><<<1, kBlockThreads, 0, stream>>>(grid, v.partial, w.partial, w.state);
             };
             [&]<std::size_t... Pass>(std::index_sequence<Pass...>) {
                 (pass.template operator()<static_cast<unsigned>(Pass) * group>(), ...);

@@ -387,14 +387,19 @@ private:
             else
                 APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.z, columns * n_ * sizeof(double)));
             APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.partial, columns * cuda_pcg_kernels::kMaxBlocks * sizeof(double)));
-            if (cuda_pcg_kernels::packs_multiply(columns, static_cast<double>(op_->matrix.nnz) / static_cast<double>(n_)))
-                APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.packed, cuda_pcg_kernels::packed_multiply_doubles(n_) * sizeof(double)));
             APXCHOL_PCG_CUDA_CHECK(cudaMalloc(&next.state, columns * sizeof(cuda_pcg_kernels::solve_state)));
             APXCHOL_PCG_CUDA_CHECK(cudaHostAlloc(reinterpret_cast<void**>(&next_host),
                 columns * sizeof(cuda_pcg_kernels::solve_state), cudaHostAllocDefault));
         } catch (...) {
             release_workspace(next, next_host);
             throw;
+        }
+        // The packed multiply is optional: without its scratch the panel keeps
+        // its width and multiplies with the unpacked kernels.
+        if (cuda_pcg_kernels::packs_multiply(columns, static_cast<double>(op_->matrix.nnz) / static_cast<double>(n_)) &&
+            cudaMalloc(&next.packed, cuda_pcg_kernels::packed_multiply_doubles(n_) * sizeof(double)) != cudaSuccess) {
+            next.packed = nullptr;
+            (void)cudaGetLastError();
         }
         // Every solve reinitializes its inputs. Publish only after all new
         // allocations succeed; an allocation failure keeps the old owner usable.

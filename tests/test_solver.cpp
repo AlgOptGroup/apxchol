@@ -31,6 +31,7 @@
 #include <vector>
 
 #if defined(APXCHOL_USE_CUDA)
+#include "apxchol/solver/pcg_cuda_kernels.h"
 #include <cuda_runtime.h>
 #endif
 
@@ -1878,6 +1879,8 @@ TEST(Solver, CudaWidePanelsPreserveStoppedColumnsAndScalarReuse) {
 TEST(Solver, CudaWidePanelsPackLongRows) {
     std::array<int, 64> offsets;
     std::iota(offsets.begin(), offsets.end(), 1);
+    using apxchol::detail::cuda_pcg_kernels::packs_multiply;
+    static_assert(packs_multiply(32, 129) && !packs_multiply(16, 129) && !packs_multiply(32, 127));
     cuda_wide_panels_preserve_stopped_columns_and_scalar_reuse(operator_matrix(129, offsets));
 }
 
