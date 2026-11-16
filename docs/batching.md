@@ -15,6 +15,15 @@ has its own convergence result. See the [Python batch interface](../python/READM
 and [C++ matrix solve](reference/cpp.md#reusable-solver) for shapes, output storage
 and initial guesses. [MATLAB/Octave](../octave/README.md) also accepts matrix RHSs.
 
+On CUDA, one-call solves with 16 or more right-hand sides (Python
+`apxchol.solve` and the CLI with an `--rhs` matrix) use the trace-cycle sampler. The choice depends only on the number
+of right-hand sides; it does not check whether setup fits in device memory.
+A GPU setup memory error is reported without retrying another sampler or
+backend. Reusable factors retain the default GKS sampler: use
+`apxchol.factorize(A, backend="gpu")` in Python, then call the solver's
+`solve(B)` method. GKS also needs
+workspace and does not guarantee that setup fits in device memory.
+
 ## Accounting for setup and reuse
 
 Setup is paid once per solver. For a workload with several calls, measure setup
