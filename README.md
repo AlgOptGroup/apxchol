@@ -84,12 +84,16 @@ The [command-line guide](docs/cli.md) lists the available controls.
 
 ## Performance
 
+The chart shows the 31 October 2026 Euler campaign, measured before 1.0.0
+at apxchol revision `1c4abb35`. Later solver changes are not measured here.
+
 ![apxchol against the fastest other solver on each matrix](docs/performance/euler-best-other.svg)
 
 Each dot is one of 27 matrices on ETH Euler, once for the AMD EPYC CPU and once
 for the RTX 4090: how much faster apxchol's setup + solve is than the fastest
-other solver on that matrix and device. apxchol leads on linear programs and most social graphs, and is close to
-algebraic multigrid on grids and meshes. [Performance](docs/performance.md) has
+other solver on that matrix and device. In this campaign, apxchol leads on
+linear programs and most social graphs, and is close to algebraic multigrid
+on grids and meshes. [Performance](docs/performance.md) has
 per-solver results, other platforms and the method.
 
 ## Learn more

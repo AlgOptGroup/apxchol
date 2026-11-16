@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 
 HAVE_PLOTTING = all(importlib.util.find_spec(m) for m in ("matplotlib", "numpy"))
 
@@ -53,6 +54,45 @@ class AdaptedTimesTest(unittest.TestCase):
                 svg = (Path(out) / name).read_text()
                 self.assertIn(">2*<", svg, name)
                 self.assertNotIn(">3*<", svg, name)
+
+    def test_readme_chart_matches_current_campaign(self):
+        # Compare plotted positions relative to their axes, not pixel layout or
+        # font-dependent SVG bytes. Direct axes children exclude tick markers.
+        def contents(path):
+            root = ET.parse(path).getroot()
+            ns = {"s": "http://www.w3.org/2000/svg"}
+            clips = {c.attrib["id"]: c.find("s:rect", ns)
+                     for c in root.findall(".//s:clipPath", ns)}
+            points = []
+            for axes in root.findall(".//s:g", ns):
+                if not axes.get("id", "").startswith("axes_"):
+                    continue
+                for line in axes.findall("s:g", ns):
+                    if not line.get("id", "").startswith("line2d_"):
+                        continue
+                    for group in line.findall("s:g[@clip-path]", ns):
+                        rect = clips[group.attrib["clip-path"][5:-1]]
+                        for point in group.findall("s:use", ns):
+                            x = (float(point.attrib["x"]) - float(rect.attrib["x"])) / float(rect.attrib["width"])
+                            y = (float(point.attrib["y"]) - float(rect.attrib["y"])) / float(rect.attrib["height"])
+                            style = dict(part.strip().split(": ", 1) for part in point.attrib["style"].split(";") if part.strip())
+                            points.append((axes.attrib["id"], x, y, style.get("fill"), style.get("stroke")))
+            texts = ["".join(t.itertext()) for t in root.findall(".//s:text", ns)]
+            return points, texts
+
+        directory = Path(__file__).parents[1] / "performance"
+        with tempfile.TemporaryDirectory() as out:
+            run = self.p.Campaign(self.p.load(directory / "euler-20261031.json"))
+            self.p.best_other_chart(run, "euler", Path(out))
+            expected, labels = contents(Path(out) / "euler-best-other.svg")
+        actual, committed_labels = contents(directory / "euler-best-other.svg")
+        self.assertTrue(expected, "the comparison must include plotted observations")
+        self.assertEqual(len(actual), len(expected), "regenerate the README chart with campaign changes")
+        self.assertEqual(committed_labels, labels)
+        for old, new in zip(actual, expected):
+            self.assertEqual((old[0], old[3:]), (new[0], new[3:]))
+            self.assertAlmostEqual(old[1], new[1], places=5)
+            self.assertAlmostEqual(old[2], new[2], places=5)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,10 @@ ETH LeoMed nodes: AMD EPYC Milan with 28 virtual cores per node, and one
 NVIDIA RTX 4090 (24 GB) for the CUDA series. CPU series use 28 threads on a
 whole node.
 
+These measurements were taken on 14 November 2026 at apxchol revision
+`7dee3a3a`, before 1.0.0. They predate later CUDA setup changes and the
+trace-cycle default for one-call solves with many right-hand sides.
+
 This page shows a partial set. A dash (`—`) marks an unmeasured cell.
 Unmeasured cells are excluded from comparisons and do not count as apxchol
 wins.

@@ -206,6 +206,13 @@ class Campaign:
         c = self.cells.get((device, apx_label(reference(self.data, device)), matrix))
         return c["setup_s"] + c["solve_s"] if good(c) else None
 
+    def apx_mark(self, device, matrix):
+        """Explain why a ratio has no usable apxchol reference."""
+        cell = self.cells.get((device, apx_label(reference(self.data, device)), matrix))
+        if cell is None or cell["status"] == "missing":
+            return "—"
+        return "ref " + MARKS.get(cell["status"], cell["status"])
+
     def family_cell(self, device, family, matrix):
         """Speedup of apxchol over the fastest variant of a family, the winning cell and a status mark.
 
@@ -218,7 +225,7 @@ class Campaign:
                  if s.split(" (")[0] == family and (device, s, matrix) in self.cells]
         done = [c for c in cells if good(c)]
         if ref is None:
-            return None, None, "—"
+            return None, None, self.apx_mark(device, matrix)
         if done:
             best = min(done, key=lambda c: c["setup_s"] + c["solve_s"])
             return (best["setup_s"] + best["solve_s"]) / ref, best, None
@@ -380,7 +387,7 @@ def variant_grid(run, platform, device, output):
         if not good(c):
             return None, MARKS.get(c["status"], c["status"])
         if ref is None:
-            return None, "—"
+            return None, run.apx_mark(device, matrix)
         return (c["setup_s"] + c["solve_s"]) / ref, None, adapted(c)
     labels = [r + (" (reference)" if r == reference_label else "") for r in rows]
     fig, ax = plt.subplots(figsize=(.44 * len(run.matrices) + 3.2, .3 * len(rows) + 1.9), layout="constrained")
@@ -425,7 +432,8 @@ def times_table(run, device):
     starred = False
     for m in run.matrices:
         c = run.cells.get((device, ref, m))
-        row = [m] + ([f"{c['setup_s']:.3g}", f"{c['solve_s']:.3g}"] if good(c) else [MARKS.get(c["status"], "—")] * 2)
+        mark = MARKS.get(c["status"], "—") if c is not None else "—"
+        row = [m] + ([f"{c['setup_s']:.3g}", f"{c['solve_s']:.3g}"] if good(c) else [mark] * 2)
         for f in families:
             _, best, mark = run.family_cell(device, f, m)
             star = "\\*" if adapted(best) else ""

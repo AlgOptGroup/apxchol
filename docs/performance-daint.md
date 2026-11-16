@@ -1,7 +1,7 @@
 # Daint: ARM64 Grace and CUDA
 
 CSCS Daint GH200: 72-core NVIDIA Grace CPU and Hopper GPU. These are the
-ARM CPU results. All 540 planned results (27 matrices × 20 solver
+ARM CPU and CUDA results. All 540 planned results (27 matrices × 20 solver
 configurations) were run, and 507 of them met the 1e-8 tolerance.
 
 ```{note}

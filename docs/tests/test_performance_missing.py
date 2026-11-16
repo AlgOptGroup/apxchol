@@ -83,5 +83,28 @@ class MissingMeasurements(unittest.TestCase):
         for status, mark in [('timeout', 't/o'), ('failed', 'fail'), ('oom', 'oom')]:
             self.assertEqual(self.p.MARKS[status], mark)
 
+    def test_failed_reference_keeps_its_status_without_a_speedup(self):
+        self.other.update(status='complete', setup_s=2., solve_s=2., rel_res=1e-9, meets_tolerance=True)
+        for status, mark in [('failed', 'fail'), ('oom', 'oom'), ('timeout', 't/o'), ('complete', 'nc')]:
+            with self.subTest(status=status):
+                self.reference.update(status=status, meets_tolerance=False)
+                run = self.campaign()
+                self.assertEqual(run.family_cell('cpu', 'AMGCL', 'grid'), (None, None, 'ref ' + mark))
+                self.assertIn('| grid | ' + mark + ' | ' + mark + ' | ref ' + mark + ' |  |', self.p.times_table(run, 'cpu'))
+                with tempfile.TemporaryDirectory() as directory:
+                    output = Path(directory)
+                    self.p.family_grid(run, 'test', 'cpu', output)
+                    self.p.variant_grid(run, 'test', 'cpu', output)
+                    for name in ('test-cpu-families.svg', 'test-cpu-variants.svg'):
+                        labels = [''.join(node.itertext()) for node in ElementTree.parse(output / name).iter('{http://www.w3.org/2000/svg}text')]
+                        self.assertIn('ref ' + mark, labels)
+
+    def test_absent_reference_row_does_not_crash_table(self):
+        self.other.update(status='complete', setup_s=2., solve_s=2., rel_res=1e-9, meets_tolerance=True)
+        self.rows = [dict(self.reference, matrix='other'), self.other]
+        run = self.campaign()
+        self.assertEqual(run.family_cell('cpu', 'AMGCL', 'grid'), (None, None, '—'))
+        self.assertIn('| grid | — | — | — |  |', self.p.times_table(run, 'cpu'))
+
 if __name__ == '__main__':
     unittest.main()

@@ -20,9 +20,9 @@ fastest complete apxchol setup + solve time on the same matrix, and at least
 ![Apple M1 Max CPU: speedup of apxchol over each solver family](performance/mac-families.svg)
 
 On this CPU, AMGCL is faster than apxchol on 12 of 21 matrices, including
-every grid. On linear programs, AMGCL is 1.8× faster on iter0010, and
-BoomerAMG is within 6% of apxchol on the other three. apxchol is ahead on five
-of the six social graphs.
+every grid. On linear programs, AMGCL is 1.9× faster on iter0010. BoomerAMG
+is about 1.2× faster on iter0030 and iter0040, and 3% slower on iter0020.
+apxchol is ahead on five of the six social graphs.
 
 An asterisk (`*`) marks a time whose setup includes input adaptation by the
 benchmark. The benchmark finds connected components, pins one vertex per

@@ -1,10 +1,16 @@
 # Performance
 
+The headline charts below use the 31 October 2026 Euler campaign, measured
+before 1.0.0 at apxchol revision `1c4abb35`. They do not measure later solver
+changes. Other platforms record their own dates and revisions.
+
 These results compare apxchol with other Laplacian and SDDM solvers on 27
 matrices. Every solver gets the same matrix, right-hand side and stopping rule.
 The platform pages mark the ParAC runs that use ParAC's own right-hand side or
 stopping rule. Times are setup + solve for one right-hand side. Each platform
-page lists every measured result, including failures.
+page lists every measured result, including failures. In comparison grids,
+a `ref` prefix (such as `ref fail`) identifies an unsuccessful apxchol
+reference; no ratio is computed for that cell. A dash means unmeasured.
 
 ```{toctree}
 :hidden:
