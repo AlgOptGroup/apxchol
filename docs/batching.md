@@ -17,7 +17,7 @@ and initial guesses. [MATLAB/Octave](../octave/README.md) also accepts matrix RH
 
 On CUDA, one-call solves with 16 or more right-hand sides (Python
 `apxchol.solve` and the CLI with an `--rhs` matrix) use the trace-cycle sampler. The choice depends only on the number
-of right-hand sides; it does not check whether setup fits in device memory.
+of right-hand sides. It does not check whether setup fits in device memory.
 A GPU setup memory error is reported without retrying another sampler or
 backend. Reusable factors retain the default GKS sampler: use
 `apxchol.factorize(A, backend="gpu")` in Python, then call the solver's
