@@ -1,6 +1,7 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 type: software
+version: 1.0.0
 title: "apxchol: scalable approximate Cholesky preconditioning for Laplacian and SDDM systems"
 abstract: >-
   A C++23 library implementing a parallel approximate-Cholesky preconditioner

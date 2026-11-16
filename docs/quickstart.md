@@ -5,10 +5,6 @@ It factors `A` once and reuses that factor for every right-hand side.
 
 ## Python
 
-Until the next release, `pip` installs 0.2.2, which solves one right-hand
-side per call and has no `as_operator`. To run this example, install the
-development version [from source](../python/README.md#build-from-source).
-
 ```{include} ../_readme.md
 :start-after: <!-- quickstart -->
 :end-before: <!-- /quickstart -->
