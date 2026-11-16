@@ -5,8 +5,10 @@ NVIDIA RTX 4090 (24 GB) for the CUDA series. CPU series use 28 threads on a
 whole node.
 
 These measurements were taken on 14 November 2026 at apxchol revision
-`7dee3a3a`, before 1.0.0. They predate later CUDA setup changes and the
-trace-cycle default for one-call solves with many right-hand sides.
+`7dee3a3a`, before 1.0.0. Later changes added one-call sampler selection
+([#166](https://github.com/AlgOptGroup/apxchol/pull/166)) and lowered the CUDA
+trace-cycle threshold to 16 right-hand sides while changing dense-tail setup
+([#171](https://github.com/AlgOptGroup/apxchol/pull/171)).
 
 This page shows a partial set. A dash (`—`) marks an unmeasured cell.
 Unmeasured cells are excluded from comparisons and do not count as apxchol
