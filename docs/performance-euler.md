@@ -162,6 +162,24 @@ The earlier Skitter profile contains seven 1,800-second logical-cell timeouts. N
 
 [Earlier Skitter timeouts records](performance/euler-21003376-skitter-timeouts.csv) · [Provenance](performance/euler-21003376-skitter-timeouts.json)
 
+## Skitter follow-up on EPYC 7742
+
+This exclusive allocation on eu-g5-041-1 used frozen source `7dee3a3a`, clang 19.1.3 and x86-64-v3. It produced 23 completed C++ measurements at the original-system tolerance of 1e-8. Up to 64 threads stay on one socket. At 128 threads, work uses 64 cores on each socket. Keep this allocation separate from the EPYC 9654 and 9554 profiles above.
+
+![Skitter: measured setup plus solve on EPYC 7742](performance/euler-21174263-cpp-scaling-scaling.svg)
+
+```{include} performance/euler-21174263-cpp-scaling-table.md
+```
+
+[Measured costs](performance/euler-21174263-cpp-scaling.csv) · [Measurement provenance](performance/euler-21174263-cpp-scaling.json)
+
+The complete scope was 40 slots. The other 17 are retained below: five ParAC preparation-stage timeouts, eleven slots not run for budget, and one BoomerAMG interruption when the allocation budget ran out. None of the five ParAC attempts reached its native solver. These outcomes establish no ParAC solve-speed comparison. An em dash means there is no solver cell receipt, with the controller's reason shown beside it.
+
+```{include} performance/euler-21174263-status-coverage-table.md
+```
+
+[Remaining outcomes](performance/euler-21174263-status-coverage.csv) · [Outcome provenance](performance/euler-21174263-status-coverage.json)
+
 ## Provenance
 
 [Every result](performance/euler-20261031.csv), the

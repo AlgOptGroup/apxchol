@@ -55,6 +55,19 @@ every matrix with a zero factor diagonal.
 ```{include} performance/leomed-gpu-times.md
 ```
 
+## November RCHOL follow-up
+
+This separate run on compute-biomed-20 used source `7dee3a3a`, clang 22.1.8 and native tuning. The host exposes a virtualized EPYC-Milan topology with 28 vCPUs. Physical-core and NUMA placement are not established. pRCHOL reports 16 effective workers in its 21 outcomes with repetition receipts.
+
+All 54 outcomes are retained: 30 completed measurements, 21 over-cap results and three failures. Completed measurements meet the original-system tolerance of 1e-8 in the warmup and all three retained runs. These are descriptive costs from one allocation and do not enter the historical headline rankings.
+
+The frozen cap rule counts the warmup as well as retained runs. The table flags warmup-only cap exceedances and processes stopped before complete repetition receipts. The pRCHOL YouTube result also misses tolerance after 500 iterations, even though its raw status is over cap. It is not an accurate solution. The failure notes report the observed errors without assigning an unverified native cause.
+
+```{include} performance/leomed-20261117-rchol-10019793-table.md
+```
+
+[RCHOL outcomes](performance/leomed-20261117-rchol-10019793.csv) · [RCHOL provenance](performance/leomed-20261117-rchol-10019793.json)
+
 ## Provenance
 
 [Every result](performance/leomed-20261114.csv) and
