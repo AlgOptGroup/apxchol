@@ -10,7 +10,9 @@
   "profile": "virtualized AMD EPYC Milan, Julia AC and AC2 qualification",
   "cost_contract": "Qualification stopped before the first measurement because the fixture loader could not open its grid RHS reference. Each dash represents an unmeasured planned cell.",
   "flags": [],
-  "notes": [],
+  "notes": [
+    "The source receipts digest identifies the terminal file inventory for this allocation."
+  ],
   "provenance": {
     "job": 10020053,
     "rows": 54,
@@ -19,11 +21,17 @@
       "missing": 54
     },
     "csv_sha256": "46f612400b8eef3339efbc55cc450b1a82772bcd2c6fcc586f80bda46920f4d6",
-    "terminal_inventory_sha256": "459a524ea281cc45bb00ca0dc0276dad5450ee6958109830147bce3cb2806d90",
     "independent_review_sha256": "c7008764269b69f08738a411c3147b9ee4b631bb471371e1bd16d93be4066a98",
     "source_cell_sha256": {
       "planned caps.json": "d9c28cb048f6ca0d71693d8d8ed1f719ee4a9c1711193eea5432134215a41ebe"
     },
-    "date_basis": "Reviewed on this date."
+    "date_basis": "Reviewed on this date.",
+    "source_receipts_sha256": "459a524ea281cc45bb00ca0dc0276dad5450ee6958109830147bce3cb2806d90"
+  },
+  "columns": {
+    "status": "Recorded outcomes: missing.",
+    "setup_s": "Blank because qualification ended before measurement.",
+    "solve_s": "Blank because qualification ended before measurement.",
+    "rel_res": "Blank because no solve ran."
   }
 }

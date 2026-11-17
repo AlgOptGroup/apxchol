@@ -17,7 +17,7 @@
     "n": "Blank without a completed cell measurement",
     "nnz": "Blank without a completed cell measurement",
     "iters": "Representative iteration count when a measurement completed",
-    "status": "complete is a measurement; timeout is a preparation limit; missing is a controller not-run or allocation interruption explained in flags",
+    "status": "All 23 measurements in this CSV have status complete.",
     "max_rss_mb": "Not projected. Process peak includes parsing, warmup and repetitions, not a matched setup-and-solve memory measurement."
   },
   "notes": [
@@ -25,7 +25,7 @@
     "C++ uses one warmup and three retained runs. AMGCL and BoomerAMG include measured input adaptation, marked with an asterisk.",
     "The complete scope is 40 slots: 23 completed C++ measurements, five ParAC preparation-stage timeouts, 11 budget-not-run slots and one allocation-interrupted BoomerAMG slot.",
     "The five observed ParAC attempts launched zero native solves. These timeouts establish no native solver speed.",
-    "Missing rows are explicit controller dispositions, not fabricated solver receipts or solver failures."
+    "The 17 other outcomes are listed in euler-21174263-status-coverage.csv. Its companion JSON explains each disposition."
   ],
   "provenance": {
     "job": 21174263,

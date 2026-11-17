@@ -10,7 +10,9 @@
   "profile": "virtualized AMD EPYC Milan, clang 22.1.8",
   "cost_contract": "One warmup and three retained runs per cell. Setup and solve come from the median-total retained run. Setup includes measured input adaptation and once-charged HYPRE initialization where applicable.",
   "flags": [],
-  "notes": [],
+  "notes": [
+    "The source receipts digest identifies the terminal file inventory for this allocation."
+  ],
   "provenance": {
     "job": 10020051,
     "rows": 24,
@@ -19,7 +21,6 @@
       "complete": 24
     },
     "csv_sha256": "9fb60c1240f4f05ecbbd7283113329d15a2b296d1395822e213182106e3be011",
-    "terminal_inventory_sha256": "c53f74c4bd59ee391c238efa28bb79af995278b10f1240d228b5b801a355cd57",
     "independent_review_sha256": "c7008764269b69f08738a411c3147b9ee4b631bb471371e1bd16d93be4066a98",
     "source_cell_sha256": {
       "runs/scaling-leomed-l22-10020051/cells/as-Skitter__amgcl_none__t1.json": "e3e3b9bb02aa37843e8f82e21ac38b8df5091c3d42bbb71f6709b5932a6ae691",
@@ -50,6 +51,13 @@
     "git_sha": "7dee3a3a6dabf6b29251c3c37996989b46e6eea6",
     "arch_flags": "-march=native",
     "compiler_version": "22.1.8",
-    "date_basis": "Reviewed on this date."
+    "date_basis": "Reviewed on this date.",
+    "source_receipts_sha256": "c53f74c4bd59ee391c238efa28bb79af995278b10f1240d228b5b801a355cd57"
+  },
+  "columns": {
+    "status": "Recorded outcomes: complete.",
+    "setup_s": "Setup time in seconds for the median-total repeat.",
+    "solve_s": "Solve time in seconds from the same repeat.",
+    "rel_res": "Largest original-system relative residual among the three retained repeats."
   }
 }

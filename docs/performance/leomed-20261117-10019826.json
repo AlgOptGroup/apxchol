@@ -10,7 +10,9 @@
   "profile": "virtualized AMD EPYC Milan, 28 vCPUs, portable C++ ParAC on the shared campaign RHS",
   "cost_contract": "Setup includes input export, AMD reordering, adapter preparation and factorization. The table gives the median-total repeat when each of the three costs is within the larger of 30 seconds and 20 times the recorded apxchol reference cost. Each repeat must satisfy the original-system residual tolerance.",
   "flags": [],
-  "notes": [],
+  "notes": [
+    "The source receipts digest identifies the terminal file inventory for this allocation."
+  ],
   "provenance": {
     "job": 10019826,
     "rows": 54,
@@ -22,7 +24,6 @@
       "timeout": 2
     },
     "csv_sha256": "52e509b93af733727db00974b178072e74cd55a77ed69d6bb7010b33ff15cd72",
-    "terminal_inventory_sha256": "99f71e546bdee9e698b2abf051f9702d13fe72ee01cc34cafeeebe744f15774d",
     "independent_review_sha256": "c7008764269b69f08738a411c3147b9ee4b631bb471371e1bd16d93be4066a98",
     "source_cell_sha256": {
       "runs/parac-component-l22-10019826/cpu-portable-shared/cells/grids/grid3d_100__parac__none__t28__cpu.json": "895066fb678d2b1fc96a4e8b95d40ba8192ce934d58ebcae52bf67f878afe20d",
@@ -83,6 +84,14 @@
     "git_sha": "7dee3a3a6dabf6b29251c3c37996989b46e6eea6",
     "arch_flags": "unknown",
     "compiler_version": "22.1.8+15.3.0",
-    "date_basis": "Reviewed on this date."
+    "date_basis": "Reviewed on this date.",
+    "source_receipts_sha256": "99f71e546bdee9e698b2abf051f9702d13fe72ee01cc34cafeeebe744f15774d"
+  },
+  "columns": {
+    "status": "Recorded outcomes: complete, exceeded_cap, n/a, timeout.",
+    "setup_s": "Setup time in seconds for the median-total repeat.",
+    "solve_s": "Solve time in seconds from the same repeat.",
+    "rel_res": "Largest original-system relative residual among the three retained repeats.",
+    "cap_s": "Maximum eligible setup plus solve time in seconds for each repeat."
   }
 }

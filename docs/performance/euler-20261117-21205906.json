@@ -10,7 +10,9 @@
   "profile": "AMD EPYC 7742, clang 19.1.3, x86-64-v3",
   "cost_contract": "One warmup and three retained runs per cell. Setup and solve come from the median-total retained run. Setup includes measured input adaptation and once-charged HYPRE initialization where applicable.",
   "flags": [],
-  "notes": [],
+  "notes": [
+    "The source receipts digest identifies the terminal file inventory for this allocation."
+  ],
   "provenance": {
     "job": 21205906,
     "rows": 5,
@@ -19,7 +21,6 @@
       "complete": 5
     },
     "csv_sha256": "477c93ee47968ce6ed2b21a70650d202f2bcc87fa11ebb03eb3ba5b3633f5767",
-    "terminal_inventory_sha256": "75fc977f30cd93c97e8e9964b8e078f3a13a633539d85d490be668ae4c07ce54",
     "independent_review_sha256": "b4fb5acd30fabac0dfa0550738482f7737be6220be5728188bbbfe40489658ed",
     "source_cell_sha256": {
       "runs/21205906-missing-cpp-t2-t4/t2/cells/as-Skitter__amgcl_none__t2.json": "3533c5208f264022340c037102701d13165919bf948f8f6268e11076764d6b1d",
@@ -32,6 +33,13 @@
     "arch_flags": "-march=x86-64-v3",
     "compiler_version": "19.1.3",
     "date_basis": "Reviewed on this date.",
-    "benchmark_sha256": "57513180e034bc09f0f287cd866930985fae3a605358cdca0b7f9c7bb6d1cf8a"
+    "benchmark_sha256": "57513180e034bc09f0f287cd866930985fae3a605358cdca0b7f9c7bb6d1cf8a",
+    "source_receipts_sha256": "75fc977f30cd93c97e8e9964b8e078f3a13a633539d85d490be668ae4c07ce54"
+  },
+  "columns": {
+    "status": "Recorded outcomes: complete.",
+    "setup_s": "Setup time in seconds for the median-total repeat.",
+    "solve_s": "Solve time in seconds from the same repeat.",
+    "rel_res": "Largest original-system relative residual among the three retained repeats."
   }
 }

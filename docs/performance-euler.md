@@ -182,7 +182,7 @@ The complete scope was 40 slots. The other 17 are retained below: five ParAC pre
 
 ## Additional Skitter CPU measurements
 
-Two allocations on the EPYC 7742 filled nine previously unmeasured solver and thread-count combinations. Job 21205904 used one thread. Job 21205906 used two threads and also measured four-thread BoomerAMG. Each job built its own binary. The tables report costs for each allocation separately.
+Two allocations on the EPYC 7742 filled nine previously unmeasured solver and thread-count combinations. Job 21205904 used 1 thread. Job 21205906 used 2 threads and also measured four-thread BoomerAMG. Each job built its own binary. The tables report costs for each allocation separately.
 
 ### Single-thread costs (job 21205904)
 
