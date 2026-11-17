@@ -25,7 +25,7 @@
     "rel_res": "Maximum retained original-system residual; independent native grades for ParAC",
     "max_rss_mb": "Not projected. Retained process RSS is not a matched setup-and-solve memory measurement.",
     "iters": "Iteration count from the representative run, when recorded",
-    "status": "Recorded outcome: complete, unsupported, over-cap or timeout"
+    "status": "Raw CSV status. Observed value: complete."
   },
   "notes": [
     "Host-specific descriptive evidence; do not pool across allocations or with historical headline profiles",
