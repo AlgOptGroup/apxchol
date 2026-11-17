@@ -29,7 +29,7 @@
     "adapt_s": "Measured setup adaptation, when cost-eligible",
     "cap_s": "Per-repeat cap only, when established; logical-cell deadlines are not copied here",
     "iters": "Iteration count from the representative run, when recorded",
-    "status": "Raw CSV status. Observed values: complete, exceeded_cap, n/a, timeout.",
+    "status": "Raw CSV status. Observed values: complete, exceeded_cap, n/a, timeout. The n/a status means the solver configuration does not support that input.",
     "max_rss_mb": "Not projected. Retained process RSS is not a matched setup-and-solve memory measurement."
   },
   "provenance": {
