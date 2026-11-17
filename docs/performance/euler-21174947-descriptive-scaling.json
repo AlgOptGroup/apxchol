@@ -14,10 +14,13 @@
     "setup_s": "Reviewed representative setup including measured adaptation",
     "solve_s": "Solve from the same representative repeat",
     "rel_res": "Maximum retained original-system residual; independent native grades for ParAC",
-    "max_rss_mb": "Not projected; solve RSS is not interchangeable with process peak"
+    "max_rss_mb": "Not projected. Retained process RSS is not a matched setup-and-solve memory measurement.",
+    "iters": "Iteration count from the representative run, when recorded",
+    "status": "Recorded outcome: complete, unsupported, over-cap or timeout"
   },
   "notes": [
-    "Host-specific descriptive evidence; do not pool across allocations or with historical headline profiles"
+    "Host-specific descriptive evidence; do not pool across allocations or with historical headline profiles",
+    "Submission requested normal.4h, while the scheduler recorded bigmem.4h. The reason for that assignment was not captured. Hardware receipts identify the actual exclusive EPYC 9654 allocation described here."
   ],
   "provenance": {
     "job": 21174947,
@@ -38,9 +41,6 @@
       "outer": 340,
       "ParAC_inner": 180
     },
-    "review_receipts": [
-      "2026-11-16-117-euler-grid-21174947-annotation-closure.md"
-    ],
     "setup_note": "BoomerAMG setup includes once-charged Hypre initialization.",
     "placement_64": "64 physical cores on socket 0",
     "raw_solver_aliases": {},
@@ -62,6 +62,7 @@
     },
     "source_annotations_sha256": "e346f8fbdc55a31c5098daba83f993b2e1d1f784f5d50243d78880e01d220899",
     "source_cell_audit_sha256": "67fc69ec8cae5cf5aed7d45daeb2ec20194393a81cd88a44ac3c922e12f17b96",
-    "csv_sha256": "2167ccd6b92b882e1e1d6803dc71ebbe889a429e2cf95f647588d3dacb322eb1"
+    "csv_sha256": "2167ccd6b92b882e1e1d6803dc71ebbe889a429e2cf95f647588d3dacb322eb1",
+    "review_storage": "Review and raw campaign records are retained in the maintainer-held private campaign archive. The public sidecar records their binding digests."
   }
 }

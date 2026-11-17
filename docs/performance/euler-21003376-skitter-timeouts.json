@@ -22,7 +22,10 @@
     "n": "Empty when not recorded in that outcome",
     "nnz": "Empty when not recorded in that outcome",
     "adapt_s": "Measured setup adaptation, when cost-eligible",
-    "cap_s": "Per-repeat cap only, when established; logical-cell deadlines are not copied here"
+    "cap_s": "Per-repeat cap only, when established; logical-cell deadlines are not copied here",
+    "iters": "Iteration count from the representative run, when recorded",
+    "status": "Recorded outcome: complete, unsupported, over-cap or timeout",
+    "max_rss_mb": "Not projected. Retained process RSS is not a matched setup-and-solve memory measurement."
   },
   "provenance": {
     "job": 21003376,

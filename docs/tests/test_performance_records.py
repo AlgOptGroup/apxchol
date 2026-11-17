@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+@unittest.skipUnless(all(importlib.util.find_spec(m) for m in ('matplotlib', 'numpy')), 'plot dependencies unavailable')
 class RecordsProfiles(unittest.TestCase):
     def setUp(self):
         self.docs = Path(__file__).parents[1]
@@ -29,10 +30,14 @@ class RecordsProfiles(unittest.TestCase):
                     self.assertEqual(len(rows), data['provenance']['rows'])
                     self.assertIn('| Matrix | Threads |', table)
                     cells = self.p.read_cells(header.with_suffix('.csv'), data['tolerance'])
-                    for cell in cells:
-                        self.assertIn('| '+cell['matrix']+' |', table)
-                    if 'timeouts' in header.stem:
-                        self.assertTrue(all('| t/o | t/o | t/o |' in row for row in rows))
+                    self.assertEqual(len(rows), len(cells))
+                    cells.sort(key=lambda c: (c['matrix'], c['threads'], self.p.series_label(c)))
+                    marks = {'n/a': 'n/a', 'exceeded_cap': 'cap', 'timeout': 't/o', 'missing': '—'}
+                    for row, cell in zip(rows, cells):
+                        fields = [field.strip() for field in row.split('|')[1:-1]]
+                        self.assertEqual(fields[:3], [cell['matrix'], str(cell['threads']), self.p.series_label(cell)])
+                        if cell['status'] != 'complete':
+                            self.assertEqual(fields[3:6], [marks[cell['status']]] * 3)
                     count += len(rows)
             self.assertEqual(count, 115)
             self.assertEqual(list(output.glob('*.svg')), [])

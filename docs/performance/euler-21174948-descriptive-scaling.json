@@ -23,11 +23,14 @@
     "setup_s": "Reviewed representative setup including measured adaptation",
     "solve_s": "Solve from the same representative repeat",
     "rel_res": "Maximum retained original-system residual; independent native grades for ParAC",
-    "max_rss_mb": "Not projected; solve RSS is not interchangeable with process peak"
+    "max_rss_mb": "Not projected. Retained process RSS is not a matched setup-and-solve memory measurement.",
+    "iters": "Iteration count from the representative run, when recorded",
+    "status": "Recorded outcome: complete, unsupported, over-cap or timeout"
   },
   "notes": [
     "Host-specific descriptive evidence; do not pool across allocations or with historical headline profiles",
-    "Flagged IPM ParAC32 remains in the table but is excluded from thread-scaling interpretation"
+    "Flagged IPM ParAC32 remains in the table but is excluded from thread-scaling interpretation",
+    "Submission requested normal.4h, while the scheduler recorded bigmem.4h. The reason for that assignment was not captured. Hardware receipts identify the actual exclusive EPYC 9654 allocation described here."
   ],
   "provenance": {
     "job": 21174948,
@@ -48,9 +51,6 @@
       "outer": 340,
       "ParAC_inner": 180
     },
-    "review_receipts": [
-      "2026-11-16-117-euler-ipm-21174948-annotation-closure.md"
-    ],
     "setup_note": "BoomerAMG setup includes once-charged Hypre initialization.",
     "placement_64": "64 physical cores on socket 0",
     "raw_solver_aliases": {
@@ -74,6 +74,7 @@
     },
     "source_annotations_sha256": "2843935c41b39a4e2b25a5f1781924e013685a748c6673842e0705fd7eeba17b",
     "source_cell_audit_sha256": "11d3fd7868894a8d41dcd230b0b7b7efc7d3f99b090c2817edc5a64b6c5cc8ed",
-    "csv_sha256": "6a00ef0e0e14ca3426c2a1c755e1384263246b7633cc26342f676b5f02363bb0"
+    "csv_sha256": "6a00ef0e0e14ca3426c2a1c755e1384263246b7633cc26342f676b5f02363bb0",
+    "review_storage": "Review and raw campaign records are retained in the maintainer-held private campaign archive. The public sidecar records their binding digests."
   }
 }

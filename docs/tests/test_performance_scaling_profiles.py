@@ -4,8 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-import numpy as np
 
+@unittest.skipUnless(all(importlib.util.find_spec(m) for m in ('matplotlib', 'numpy')), 'plot dependencies unavailable')
 class ScalingProfiles(unittest.TestCase):
     def setUp(self):
         self.docs=Path(__file__).parents[1]
@@ -28,6 +28,7 @@ class ScalingProfiles(unittest.TestCase):
             self.assertIn('ParAC (Physics, portable, shared RHS)',ipm)
             self.assertIn('23.260550',ipm)
     def test_flag_is_retained_but_breaks_the_trend(self):
+        import numpy as np
         captured=[]
         with tempfile.TemporaryDirectory() as t, patch.object(self.p,'save',side_effect=lambda fig,path:captured.append(fig)):
             self.p.scaling_profile(self.headers[1],Path(t))

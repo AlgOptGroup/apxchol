@@ -17,7 +17,9 @@
     "Each variant used one shared 64-thread allocation with boost enabled, on different nodes (eu-g6-038 portable; eu-g6-032 MKL). Cross-node variant comparisons are descriptive only.",
     "Native saved-vector grades were reviewed; vector bytes remain remote and were not replayed locally. Inclusive preparation costs that add graph serialization are not projected here.",
     "The predeclared cap classifies portable grid3d_250 as exceeded_cap: worst repeat 129.171317 s versus 128.44994 s (0.56% over). This cap uses an exclusive-profile reference; a shared-only reference would admit that cell. The original classification is retained.",
-    "Timeout cap_s fields are blank. These cells used cap-derived deadlines; as-Skitter had a 30 s cap, a 330 s slot and a 1650 s logical-cell limit. com-Orkut had a 380.034 s cap, a 680 s slot and a 3400 s logical-cell limit. Blank cap_s does not imply an uncapped run."
+    "Timeout cap_s fields are blank. These cells used cap-derived deadlines; as-Skitter had a 30 s cap, a 330 s slot and a 1650 s logical-cell limit. com-Orkut had a 380.034 s cap, a 680 s slot and a 3400 s logical-cell limit. Blank cap_s does not imply an uncapped run.",
+    "ParAC Physics cannot preserve the original parabolic_fem and thermal2 operators: their stored off-diagonals include 524288 and 420 positive entries respectively. Its producer would replace these with negative absolute values. Graph mode applies to Laplacians, so both modes are marked n/a for these inputs.",
+    "For kron_g500-logn16, nnz is the summed stored-entry count of the two solved non-singleton components (4967463). The reported n includes all 65536 vertices, including 10215 singleton components. This nnz definition differs from the full-operator count (4977678) in the historical table."
   ],
   "columns": {
     "setup_s": "Recorded representative setup, when cost-eligible",
@@ -26,7 +28,10 @@
     "n": "Empty when not recorded in that outcome",
     "nnz": "Empty when not recorded in that outcome",
     "adapt_s": "Measured setup adaptation, when cost-eligible",
-    "cap_s": "Per-repeat cap only, when established; logical-cell deadlines are not copied here"
+    "cap_s": "Per-repeat cap only, when established; logical-cell deadlines are not copied here",
+    "iters": "Iteration count from the representative run, when recorded",
+    "status": "Recorded outcome: complete, unsupported, over-cap or timeout",
+    "max_rss_mb": "Not projected. Retained process RSS is not a matched setup-and-solve memory measurement."
   },
   "provenance": {
     "job": 21013867,

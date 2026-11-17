@@ -18,6 +18,11 @@ SCALING_HEADER = {"kind", "campaign", "date", "files", "tolerance", "profile", "
                   "cost_contract", "columns", "notes", "provenance"}
 
 
+# These closed profiles retained the complete archive and cell-audit bindings.
+ARCHIVE_BOUND_JOBS = {21174947, 21174948}
+ARCHIVE_BOUND_KEYS = ("source_archive_sha256", "dependency_manifest_sha256",
+                      "source_annotations_sha256", "source_cell_audit_sha256", "csv_sha256")
+
 def headers():
     return [p for p in sorted(DATA.glob("*-2*.json")) if p.name.split("-")[0] in ("euler", "leomed", "daint", "mac")]
 
@@ -35,11 +40,11 @@ class PerformanceDataTest(unittest.TestCase):
                 self.assertTrue((DATA / name).is_file(), name)
             if scaling:
                 provenance = header["provenance"]
-                required = ("source_archive_sha256", "dependency_manifest_sha256", "source_annotations_sha256", "source_cell_audit_sha256", "csv_sha256") if provenance["job"] in (21174947, 21174948) else ("csv_sha256",)
+                required = ARCHIVE_BOUND_KEYS if provenance["job"] in ARCHIVE_BOUND_JOBS else ("csv_sha256",)
                 self.assertTrue(any(key in provenance for key in ("source_annotations_sha256", "source_receipts_sha256")))
                 for key in required:
                     self.assertRegex(provenance[key], r"^[0-9a-f]{64}$")
-                content = (DATA / header["files"][0]).read_bytes()
+                content = (DATA / f"{path.stem}.csv").read_bytes()
                 self.assertEqual(hashlib.sha256(content).hexdigest(), provenance["csv_sha256"])
                 self.assertEqual(len(list(csv.DictReader(content.decode().splitlines()))), provenance["rows"])
             else:
