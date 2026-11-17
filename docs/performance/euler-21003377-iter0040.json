@@ -1,0 +1,53 @@
+{
+  "kind": "scaling",
+  "campaign": "euler-21003377-iter0040",
+  "date": "2026-11-16",
+  "files": [
+    "euler-21003377-iter0040.csv"
+  ],
+  "tolerance": 1e-08,
+  "host": "eu-g6-038",
+  "profile": "shared AMD EPYC 9554; one allocation, 1\u201364 threads",
+  "flags": [],
+  "cost_contract": "1800-second logical-cell ceiling, including preparation and repetitions; no new relative-cap score.",
+  "notes": [
+    "Descriptive values from one shared allocation with boost enabled; do not pool with exclusive or relocated profiles.",
+    "ParAC preparation and solve are largely serial; nominal thread count is not a parallel-efficiency claim.",
+    "Native saved-vector grade receipts were reviewed; vector bytes remain remote and were not replayed locally."
+  ],
+  "columns": {
+    "setup_s": "Recorded representative setup, when cost-eligible",
+    "solve_s": "Same representative repeat, including original-system verification",
+    "rel_res": "Maximum retained original-system residual, when available",
+    "n": "Empty when not recorded in that outcome",
+    "nnz": "Empty when not recorded in that outcome",
+    "adapt_s": "Measured setup adaptation, when cost-eligible",
+    "cap_s": "Per-repeat cap only, when established; logical-cell deadlines are not copied here"
+  },
+  "provenance": {
+    "job": 21003377,
+    "environment": {
+      "sha256": "3496a486378fb571fa092f3b7faefbff888f2e355a6342c43384542693a68eb1",
+      "startup": "job=21003377 node=eu-g6-038 cpuset=0,1,2,3,4,5,6,7,24,25,26,27,28,29,30,31,40,41,42,43,44,45,46,47,56,57,58,59,60,61,62,63,72,73,74,75,76,77,78,79,88,89,90,91,92,93,94,95,104,105,106,107,108,109,110,111,120,121,122,123,124,125,126,127 source=7dee3a3a6dabf6b29251c3c37996989b46e6eea6 series=apxchol bg+tree,apxchol trace-cycle,AMGCL,BoomerAMG,ParAC start=2026-11-16T18:10:05Z"
+    },
+    "source_commit": "7dee3a3a6dabf6b29251c3c37996989b46e6eea6",
+    "source_annotations_sha256": "11e8acb48b8ba565c7bddc54a13272ceb32c6d646db27e4756529c6e341108c1",
+    "source_cell_audit_sha256": "45b3636731d62d720aab6f841ef300cca9d19bb72844b3703969778e16147831",
+    "inventory_sha256": "b49fbd49ed0d6f0ed95d9bcea4e6dc7c1725db138c3e8ffcb96d942819d10894",
+    "review_sha256": "9119e49f837f260259d7102ef139950a5efed1a97cee2149e4bcfdbb0af3d805",
+    "repetitions": {
+      "cpp": "1 warmup,3 retained",
+      "ParAC": "0 warmup,3 measured"
+    },
+    "cpp_toolchain": "clang 19.1.3, -march=native",
+    "ParAC_toolchain": "gcc+clang 12.2.0+19.1.3; driver ISA unknown",
+    "raw_solver_aliases": {
+      "parac_physics": "parac"
+    },
+    "source_archive_binding": "not retained in this collection",
+    "rows": 35,
+    "csv_sha256": "dac8ed7456ecf29d88e2a949059344e6d59d021e268f63b1f1895e5fe6110e08",
+    "class_mapping_source": "a98b31137fd2b3783808bd19859a941013cc7838",
+    "class_mapping_sha256": "19bba74e4b09ad399a9b1ac4392768553eddb285585d92425251e2155a5d87c9"
+  }
+}

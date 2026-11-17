@@ -15,8 +15,9 @@ An asterisk (`*`) marks a time whose setup includes input adaptation by the
 benchmark. The benchmark finds connected components, pins one vertex per
 component or slices components, so that the solver accepts a singular or
 disconnected Laplacian. The `adapt_s` column of the data files gives that part of setup.
-This campaign predates that measurement: its `adapt_s` values are empty
-(not measured), so no time on this page carries an asterisk.
+The historical headline and scaling results have empty `adapt_s` values
+(not measured). The November follow-ups below report measured adaptation and
+mark it with an asterisk.
 
 The [Performance page](performance.md) groups solvers into families and
 compares apxchol with each family's fastest variant. This page shows every
@@ -83,6 +84,83 @@ both sockets. Competitors are capped at 20 times apxchol's time at the same
 thread count, and a cross marks a run over the cap.
 
 ![Euler: setup + solve time against thread count](performance/euler-scaling.svg)
+
+## November scaling follow-ups
+
+These two profiles use separate exclusive EPYC 9654 allocations and frozen source `7dee3a3a`, with clang 19.1.3 and x86-64-v3. Each contains 40 measurements at the original-system tolerance of 1e-8. At 64 threads, work stays on one socket; 128 threads use 96 cores on one socket and 32 on the other. Keep these profiles separate from the historical headline results above.
+
+C++ series use one warmup and three retained runs. ParAC uses three measured runs without a warmup. The 1,800-second limit covers the whole logical cell, including preparation and repetitions. Setup includes measured input adaptation; BoomerAMG also includes its once-charged initialization.
+
+### Grid 2000 × 2000
+
+![Grid follow-up: setup plus solve by thread count on eu-g9-052-3](performance/euler-21174947-descriptive-scaling-scaling.svg)
+
+```{include} performance/euler-21174947-descriptive-scaling-table.md
+```
+
+[Grid measurements](performance/euler-21174947-descriptive-scaling.csv) · [Grid provenance](performance/euler-21174947-descriptive-scaling.json)
+
+### IPM iter0040
+
+ParAC's 32-thread observation includes a Julia producer time of 23.26 seconds, compared with about 5 seconds at adjacent thread counts. Its cause is unknown. The diamond retains that observation while excluding it from the trend line.
+
+![IPM follow-up: setup plus solve by thread count on eu-g9-052-4, with the preparation outlier marked separately](performance/euler-21174948-descriptive-scaling-scaling.svg)
+
+```{include} performance/euler-21174948-descriptive-scaling-table.md
+```
+
+[IPM measurements](performance/euler-21174948-descriptive-scaling.csv) · [IPM provenance](performance/euler-21174948-descriptive-scaling.json)
+
+## Shared-node follow-ups
+
+These additional profiles retain 185 outcomes separately from the exclusive runs and historical rankings. The shared allocations used boost and source `7dee3a3a`. ParAC used a gcc+clang 12.2.0+19.1.3 driver with unknown ISA flags; the C++ scaling series used clang 19.1.3 with native tuning. Saved-vector original-system grades were reviewed, but the remote vector bytes were not replayed locally.
+
+### Shared-node thread scaling
+
+The grid and IPM profiles each contain 35 completed measurements from job 21003377 on eu-g6-038. C++ uses one warmup and three retained runs; ParAC uses three measured runs without a warmup. ParAC preparation and solving are largely serial, so nominal thread counts do not establish parallel efficiency. These allocations are distinct from the exclusive follow-ups above.
+
+![Shared grid: setup plus solve by thread count](performance/euler-21003377-grid-2000-scaling.svg)
+
+```{include} performance/euler-21003377-grid-2000-table.md
+```
+
+[Shared grid measurements](performance/euler-21003377-grid-2000.csv) · [Provenance](performance/euler-21003377-grid-2000.json)
+
+![Shared IPM: setup plus solve by thread count](performance/euler-21003377-iter0040-scaling.svg)
+
+```{include} performance/euler-21003377-iter0040-table.md
+```
+
+[Shared IPM measurements](performance/euler-21003377-iter0040.csv) · [Provenance](performance/euler-21003377-iter0040.json)
+
+### Shared-RHS ParAC records
+
+The two headline follow-ups retain 108 outcomes: 35 cost-eligible completions, 11 over-cap results, 58 unsupported inputs and four timeouts. Portable and MKL ran in separate shared 64-thread allocations, on eu-g6-038 and eu-g6-032 respectively. These are absolute descriptive costs; no matched apxchol ratio or portable-versus-MKL speedup is inferred. Setup here excludes the separately retained inclusive graph-serialization cost.
+
+Caps come from the predeclared historical `ed63b8bc` table. Portable grid3d_250 exceeds its 128.44994-second cap by 0.56%; a shared-only reference would admit it. Its original over-cap classification remains visible. Over-cap timings stay blank even when the solution met tolerance.
+
+#### Portable ParAC
+
+```{include} performance/euler-21013867-parac-followup-table.md
+```
+
+[Portable ParAC records](performance/euler-21013867-parac-followup.csv) · [Provenance](performance/euler-21013867-parac-followup.json)
+
+#### MKL ParAC
+
+```{include} performance/euler-21013868-parac-followup-table.md
+```
+
+[MKL ParAC records](performance/euler-21013868-parac-followup.csv) · [Provenance](performance/euler-21013868-parac-followup.json)
+
+The earlier Skitter profile contains seven 1,800-second logical-cell timeouts. No native-solve evidence was collected for those cells. Missing dimensions, residuals and costs remain missing.
+
+#### Earlier Skitter timeouts
+
+```{include} performance/euler-21003376-skitter-timeouts-table.md
+```
+
+[Earlier Skitter timeouts records](performance/euler-21003376-skitter-timeouts.csv) · [Provenance](performance/euler-21003376-skitter-timeouts.json)
 
 ## Provenance
 

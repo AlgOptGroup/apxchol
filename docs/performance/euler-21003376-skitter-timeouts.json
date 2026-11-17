@@ -1,0 +1,41 @@
+{
+  "kind": "records",
+  "campaign": "euler-21003376-skitter-timeouts",
+  "date": "2026-11-16",
+  "files": [
+    "euler-21003376-skitter-timeouts.csv"
+  ],
+  "tolerance": 1e-08,
+  "host": "eu-g6-036",
+  "profile": "shared-node Skitter timeout coverage only",
+  "flags": [],
+  "cost_contract": "All seven logical cells reached 1800 seconds. No complete setup/solve cost or numerical success is established.",
+  "notes": [
+    "Preserve all seven timeouts; they provide no native solver speed comparison.",
+    "Empty dimensions and residuals mean those fields were not recorded in the terminal cell receipt.",
+    "No native-solve evidence was collected for these cells; no preparation-stage diagnosis from another job is imported."
+  ],
+  "columns": {
+    "setup_s": "Recorded representative setup, when cost-eligible",
+    "solve_s": "Same representative repeat, including original-system verification",
+    "rel_res": "Maximum retained original-system residual, when available",
+    "n": "Empty when not recorded in that outcome",
+    "nnz": "Empty when not recorded in that outcome",
+    "adapt_s": "Measured setup adaptation, when cost-eligible",
+    "cap_s": "Per-repeat cap only, when established; logical-cell deadlines are not copied here"
+  },
+  "provenance": {
+    "job": 21003376,
+    "environment": {
+      "sha256": "a7e4def7d2e9f0b0c4bd7f2d411a83f01745d6a033257371836c3d9d9e30b00a",
+      "startup": "job=21003376 node=eu-g6-036 cpuset=16,17,18,19,20,21,22,23,56,57,58,59,60,61,62,63,72,73,74,75,76,77,78,79,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127 source=7dee3a3a6dabf6b29251c3c37996989b46e6eea6 series=ParAC start=2026-11-16T17:43:00Z"
+    },
+    "source_commit": "7dee3a3a6dabf6b29251c3c37996989b46e6eea6",
+    "source_receipts_sha256": "b20a405c547197cff0095949657ac6d5262d14e5c43e64e5e0ddb45f906f9ea0",
+    "repetitions": "Not completed; inherited warmup label is not evidence of an executed warmup",
+    "rows": 7,
+    "csv_sha256": "273e9ad43daf3f5f185d65085866d44b79a0ba14c05c3218c229b99a780ca1b7",
+    "class_mapping_source": "a98b31137fd2b3783808bd19859a941013cc7838",
+    "class_mapping_sha256": "19bba74e4b09ad399a9b1ac4392768553eddb285585d92425251e2155a5d87c9"
+  }
+}

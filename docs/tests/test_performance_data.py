@@ -1,5 +1,6 @@
 """Check the compact benchmark data that the Performance pages are rendered from."""
 import csv
+import hashlib
 import json
 from pathlib import Path
 import unittest
@@ -13,6 +14,9 @@ DEVICES = {"cpu", "gpu", "metal"}
 HEADER = {"campaign", "date", "hardware", "toolchains", "notes", "tolerance", "source_commits", "cap_rule",
           "files", "columns", "full_extract"}
 
+SCALING_HEADER = {"kind", "campaign", "date", "files", "tolerance", "profile", "host", "flags",
+                  "cost_contract", "columns", "notes", "provenance"}
+
 
 def headers():
     return [p for p in sorted(DATA.glob("*-2*.json")) if p.name.split("-")[0] in ("euler", "leomed", "daint", "mac")]
@@ -23,13 +27,24 @@ class PerformanceDataTest(unittest.TestCase):
         self.assertTrue(headers())
         for path in headers():
             header = json.loads(path.read_text())
-            self.assertEqual(set(header), HEADER, path.name)
+            scaling = header.get("kind") in ("scaling", "records")
+            self.assertEqual(set(header), SCALING_HEADER if scaling else HEADER, path.name)
             self.assertEqual(header["campaign"], path.stem)
             self.assertIn(f"{path.stem}.csv", header["files"])
             for name in header["files"]:
                 self.assertTrue((DATA / name).is_file(), name)
-            self.assertTrue(header["full_extract"]["repository"].startswith("https://github.com/"))
-            self.assertRegex(header["full_extract"]["sha256"], r"^[0-9a-f]{64}$")
+            if scaling:
+                provenance = header["provenance"]
+                required = ("source_archive_sha256", "dependency_manifest_sha256", "source_annotations_sha256", "source_cell_audit_sha256", "csv_sha256") if provenance["job"] in (21174947, 21174948) else ("csv_sha256",)
+                self.assertTrue(any(key in provenance for key in ("source_annotations_sha256", "source_receipts_sha256")))
+                for key in required:
+                    self.assertRegex(provenance[key], r"^[0-9a-f]{64}$")
+                content = (DATA / header["files"][0]).read_bytes()
+                self.assertEqual(hashlib.sha256(content).hexdigest(), provenance["csv_sha256"])
+                self.assertEqual(len(list(csv.DictReader(content.decode().splitlines()))), provenance["rows"])
+            else:
+                self.assertTrue(header["full_extract"]["repository"].startswith("https://github.com/"))
+                self.assertRegex(header["full_extract"]["sha256"], r"^[0-9a-f]{64}$")
 
     def test_every_csv_belongs_to_a_campaign(self):
         listed = {name for path in headers() for name in json.loads(path.read_text())["files"]}
@@ -50,8 +65,9 @@ class PerformanceDataTest(unittest.TestCase):
                         self.assertIn(row["status"], STATUSES, where)
                         self.assertIn(row["class"], CLASSES, where)
                         self.assertIn(row["device"], DEVICES, where)
-                        self.assertGreater(int(row["n"]), 0, where)
-                        self.assertGreater(int(row["nnz"]), 0, where)
+                        for dimension in ("n", "nnz"):
+                            if row[dimension] or row["status"] == "complete" or header.get("kind") != "records":
+                                self.assertGreater(int(row[dimension]), 0, where)
                         key = (row["matrix"], row["solver"], row["config"], row["variant"], row["device"],
                                row["threads"])
                         self.assertNotIn(key, seen, where)

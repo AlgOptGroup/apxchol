@@ -443,12 +443,22 @@ def times_table(run, device):
     return "\n".join(lines) + "\n" + (f"\n{ADAPTED_NOTE}\n" if starred else "")
 
 
+def scaling_flags(data, cell):
+    """Notes attached to a particular thread-count observation."""
+    return [note for flag in data.get("flags", [])
+            if (flag["matrix"], flag["solver"], flag["threads"]) ==
+               (cell["matrix"], cell["solver"], cell["threads"])
+            for note in flag["notes"]]
+
+
 def scaling_chart(data, platform, output):
     """Setup + solve time against thread count; a cross on the top edge marks a capped run."""
     scaling = data["scaling"]
     series = list(dict.fromkeys(series_label(c) for c in scaling["cells"]))
     colors = dict(zip(series, ("#2a78d6", "#1baf7a", "#eb6834", "#6250d6", "#e34948", "#eda100")))
-    fig, axes = plt.subplots(1, len(scaling["matrices"]), figsize=(3.6 * len(scaling["matrices"]), 3.4),
+    separate = data.get("kind") == "scaling"
+    width = max(7.2, 3.6 * len(scaling["matrices"])) if separate else 3.6 * len(scaling["matrices"])
+    fig, axes = plt.subplots(1, len(scaling["matrices"]), figsize=(width, 3.8 if separate else 3.4),
                              layout="constrained", squeeze=False)
     for ax, matrix in zip(axes[0], scaling["matrices"]):
         capped = []
@@ -457,7 +467,17 @@ def scaling_chart(data, platform, output):
                              if c["matrix"] == matrix and series_label(c) == s), key=lambda p: p[0])
             done = [(t, c["setup_s"] + c["solve_s"]) for t, c in points if good(c)]
             capped += [(t, s) for t, c in points if c["status"] in ("exceeded_cap", "timeout")]
-            if done:
+            if separate:
+                trend = [(t, c["setup_s"] + c["solve_s"] if good(c) and not scaling_flags(data, c) else np.nan)
+                         for t, c in points]
+                if trend:
+                    ax.plot(*zip(*trend), "o-", color=colors[s], markersize=3.5, linewidth=1.4)
+                flagged = [(t, c["setup_s"] + c["solve_s"]) for t, c in points
+                           if good(c) and scaling_flags(data, c)]
+                if flagged:
+                    ax.plot(*zip(*flagged), linestyle="", marker="D", markerfacecolor="none",
+                            markeredgecolor=colors[s], markersize=6)
+            elif done:
                 ax.plot(*zip(*done), "o-", color=colors[s], markersize=3.5, linewidth=1.4)
         ax.set_yscale("log")
         top = ax.get_ylim()[1]
@@ -467,12 +487,19 @@ def scaling_chart(data, platform, output):
         ax.set_xticks(scaling["thread_counts"], [str(t) for t in scaling["thread_counts"]])
         ax.minorticks_off()
         ax.grid(color=GRID, linewidth=.8)
-        ax.set_title(matrix, loc="left", fontsize=10)
+        title = matrix + "\n" + data["host"] if separate else matrix
+        ax.set_title(title, loc="left", fontsize=10)
         ax.set_xlabel("threads", color=MUTED, fontsize=9)
     axes[0][0].set_ylabel("setup + solve (s)", color=MUTED, fontsize=9)
     handles = [plt.Line2D([], [], marker="o", color=colors[s], label=s, markersize=4) for s in series]
-    handles.append(plt.Line2D([], [], marker="x", linestyle="", color=MUTED, label="over the cap"))
-    fig.legend(handles=handles, loc="outside upper left", ncol=len(handles), frameon=False, fontsize=8.5)
+    handles.append(plt.Line2D([], [], marker="x", linestyle="", color=MUTED,
+                              label="cell deadline" if separate else "over the cap"))
+    if data.get("flags"):
+        handles.append(plt.Line2D([], [], marker="D", linestyle="", markerfacecolor="none",
+                                  color=MUTED, label="flagged observation"))
+    fig.legend(handles=handles, loc="outside upper left", ncol=2 if separate else len(handles), frameon=False, fontsize=8.5)
+    if separate:
+        fig.text(.02, -.03, "Single allocation; descriptive only. Flagged observations are outside the trend lines.", fontsize=8)
     save(fig, output / f"{platform}-scaling.svg")
 
 
@@ -526,12 +553,55 @@ def campaign(data, platform, output):
         scaling_chart(data, platform, output)
 
 
+def scaling_profile(path, output):
+    """Render a separate scaling profile without headline scores or thread collapse."""
+    path = Path(path)
+    data = json.loads(path.read_text())
+    name = data["campaign"]
+    if data.get("kind") not in ("scaling", "records") or name != path.stem:
+        raise ValueError("invalid scaling profile identity")
+    cells = read_cells(path.with_suffix(".csv"), data["tolerance"])
+    data["scaling"] = {"matrices": list(dict.fromkeys(c["matrix"] for c in cells)),
+                       "thread_counts": sorted({c["threads"] for c in cells}), "cells": cells}
+    output.mkdir(parents=True, exist_ok=True)
+    records = data["kind"] == "records"
+    if not records:
+        scaling_chart(data, name, output)
+    lines = [f"{data['host']}: {data['profile']}.", "",
+             "| Threads | Solver | Setup (s) | Solve (s) | Total (s) | Note |",
+             "| ---: | --- | ---: | ---: | ---: | --- |"]
+    if records:
+        lines[2] = "| Matrix " + lines[2]
+        lines[3] = "| --- " + lines[3]
+    starred = False
+    for cell in sorted(cells, key=lambda c: (c["matrix"], c["threads"], series_label(c))):
+        notes = scaling_flags(data, cell)
+        star = "\\*" if adapted(cell) else ""
+        starred = starred or bool(star)
+        costs = [f"{cell['setup_s']:.3g}{star}", f"{cell['solve_s']:.3g}",
+                 f"{cell['setup_s'] + cell['solve_s']:.3g}"] if good(cell) else [MARKS[cell["status"]]] * 3
+        lines.append("| " + " | ".join(([cell["matrix"]] if records else []) + [str(cell["threads"]), series_label(cell), *costs,
+                                         "; ".join(notes)]) + " |")
+    if starred:
+        lines += ["", ADAPTED_NOTE]
+    lines += ["", data["cost_contract"], "",
+              "Each matrix has one allocation; compare thread counts within that profile. "
+              "Flagged observations remain in the data and table, but do not establish a scaling trend."]
+    if records:
+        lines = lines[:-1]
+    lines += ["", *data.get("notes", [])]
+    (output / f"{name}-table.md").write_text("\n".join(lines) + "\n")
+
+
 def campaigns(directory, output):
     """Render every docs/performance/<platform>-<date>.json campaign header and its CSV files."""
     for path in sorted(directory.glob("*-2*.json")):
         platform = path.name.split("-")[0]
         if platform in ("euler", "leomed", "daint", "mac"):
-            campaign(load(path), platform, output)
+            if json.loads(path.read_text()).get("kind") in ("scaling", "records"):
+                scaling_profile(path, output)
+            else:
+                campaign(load(path), platform, output)
 
 
 def render(report_paths, output, revision=None):
