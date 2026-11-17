@@ -15,7 +15,7 @@ class RecordsProfiles(unittest.TestCase):
         spec.loader.exec_module(self.p)
         self.headers = [p for p in (self.docs/'performance').glob('*-2*.json')
                         if json.loads(p.read_text()).get('kind') == 'records']
-        self.assertEqual(len(self.headers), 5)
+        self.assertEqual(len(self.headers), 12)
 
     def test_records_preserve_population_and_matrix_without_charts(self):
         count = 0
@@ -39,7 +39,7 @@ class RecordsProfiles(unittest.TestCase):
                         if cell['status'] != 'complete':
                             self.assertEqual(fields[3:6], [marks[cell['status']]] * 3)
                     count += len(rows)
-            self.assertEqual(count, 186)
+            self.assertEqual(count, 429)
             self.assertEqual(list(output.glob('*.svg')), [])
 
     def test_records_dispatch_never_ranks_headlines(self):
@@ -49,7 +49,7 @@ class RecordsProfiles(unittest.TestCase):
                 (directory/header.name).write_bytes(header.read_bytes())
             with patch.object(self.p, 'scaling_profile') as profile, patch.object(self.p, 'campaign') as headline:
                 self.p.campaigns(directory, directory/'output')
-                self.assertEqual(profile.call_count, 5)
+                self.assertEqual(profile.call_count, 12)
                 headline.assert_not_called()
 
 if __name__ == '__main__':

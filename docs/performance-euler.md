@@ -180,6 +180,25 @@ The complete scope was 40 slots. The other 17 are retained below: five ParAC pre
 
 [Remaining outcomes](performance/euler-21174263-status-coverage.csv) · [Outcome provenance](performance/euler-21174263-status-coverage.json)
 
+## Additional Skitter CPU measurements
+
+Two allocations on the EPYC 7742 filled nine previously unmeasured solver and thread-count combinations. Job 21205904 used one thread. Job 21205906 used two threads and also measured four-thread BoomerAMG. Each job built its own binary. The tables report costs for each allocation separately.
+
+### Single-thread costs (job 21205904)
+
+```{include} performance/euler-20261117-21205904-table.md
+```
+
+[Download costs and outcomes](performance/euler-20261117-21205904.csv) · [Measurement provenance](performance/euler-20261117-21205904.json)
+
+### Two- and four-thread costs (job 21205906)
+
+```{include} performance/euler-20261117-21205906-table.md
+```
+
+[Download costs and outcomes](performance/euler-20261117-21205906.csv) · [Measurement provenance](performance/euler-20261117-21205906.json)
+
+
 ## Provenance
 
 [Every result](performance/euler-20261031.csv), the

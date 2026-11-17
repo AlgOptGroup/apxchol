@@ -1,10 +1,10 @@
 # LeoMed: x86_64 and CUDA
 
 ETH LeoMed nodes: AMD EPYC Milan with 28 virtual cores per node, and one
-NVIDIA RTX 4090 (24 GB) for the CUDA series. CPU series use 28 threads on a
+NVIDIA RTX 4090 (24 GB) for the CUDA series. Headline CPU series use 28 threads on a
 whole node.
 
-These measurements were taken on 14 November 2026 at apxchol revision
+The headline measurements were taken on 14 November 2026 at apxchol revision
 `7dee3a3a`, before 1.0.0. Later changes added one-call sampler selection
 ([#166](https://github.com/AlgOptGroup/apxchol/pull/166)) and lowered the CUDA
 trace-cycle threshold to 16 right-hand sides while changing dense-tail setup
@@ -27,7 +27,7 @@ of setup.
 
 ```{note}
 Serial RCHOL and pRCHOL come from a separate build with LLVM 22.1.8. With the
-LLVM 20.1.8 toolchain used for every other series here, serial RCHOL stops on
+LLVM 20.1.8 toolchain used for the other headline series, serial RCHOL stops on
 every matrix with a zero factor diagonal.
 ```
 
@@ -67,6 +67,46 @@ The frozen cap rule counts the warmup as well as retained runs. The table flags 
 ```
 
 [RCHOL outcomes](performance/leomed-20261117-rchol-10019793.csv) · [RCHOL provenance](performance/leomed-20261117-rchol-10019793.json)
+
+## November CPU follow-ups
+
+Five allocations on compute-biomed-20 covered 234 planned results. The two ParAC builds produced 31 eligible timings on the shared RHS. Another 15 completed above the cap, 58 used unsupported routes and four timed out. The C++ scaling runs produced 72 timings. Julia qualification stopped before any of its 54 measurements. The following tables keep each allocation separate from the headline scores.
+
+### Portable ParAC (job 10019826)
+
+```{include} performance/leomed-20261117-10019826-table.md
+```
+
+[Download costs and outcomes](performance/leomed-20261117-10019826.csv) · [Measurement provenance](performance/leomed-20261117-10019826.json)
+
+### MKL ParAC (job 10019827)
+
+```{include} performance/leomed-20261117-10019827-table.md
+```
+
+[Download costs and outcomes](performance/leomed-20261117-10019827.csv) · [Measurement provenance](performance/leomed-20261117-10019827.json)
+
+### Skitter thread scaling (job 10020051)
+
+```{include} performance/leomed-20261117-10020051-table.md
+```
+
+[Download costs and outcomes](performance/leomed-20261117-10020051.csv) · [Measurement provenance](performance/leomed-20261117-10020051.json)
+
+### Grid and IPM thread scaling (job 10020052)
+
+```{include} performance/leomed-20261117-10020052-table.md
+```
+
+[Download costs and outcomes](performance/leomed-20261117-10020052.csv) · [Measurement provenance](performance/leomed-20261117-10020052.json)
+
+### Julia AC and AC2 (job 10020053)
+
+```{include} performance/leomed-20261117-10020053-table.md
+```
+
+[Download costs and outcomes](performance/leomed-20261117-10020053.csv) · [Measurement provenance](performance/leomed-20261117-10020053.json)
+
 
 ## Provenance
 
