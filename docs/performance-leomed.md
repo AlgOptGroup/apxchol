@@ -110,7 +110,7 @@ Five allocations on compute-biomed-20 covered 234 planned results. The two ParAC
 
 ### Julia AC and AC2 follow-up (job 10030941)
 
-On 18 November, both Julia solvers passed qualification. Across 27 matrices, 30 of the 54 outcomes yielded eligible timings, 18 exceeded the time cap, 4 were unsupported and 2 missed the residual tolerance. The capped rows on G3_circuit also missed tolerance. For AC2 on com-Orkut, only one repeat finished.
+On 18 November, both Julia solvers passed qualification. Across 27 matrices, 30 of the 54 outcomes yielded eligible timings, 18 exceeded the time cap, 4 were unsupported and the 2 apache2 outcomes were classified as nonconverged. Both solvers missed the residual tolerance on apache2 and G3_circuit, for 4 tolerance failures in total. The G3_circuit outcomes are included in the 18 capped results. For AC2 on com-Orkut, only one repeat finished.
 
 ```{include} performance/leomed-20261118-10030941-table.md
 ```
