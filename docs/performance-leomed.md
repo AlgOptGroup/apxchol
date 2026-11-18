@@ -108,6 +108,15 @@ Five allocations on compute-biomed-20 covered 234 planned results. The two ParAC
 [Download costs and outcomes](performance/leomed-20261117-10020053.csv) · [Measurement provenance](performance/leomed-20261117-10020053.json)
 
 
+### Julia AC and AC2 follow-up (job 10030941)
+
+On 18 November, both Julia solvers passed qualification. Across 27 matrices, 30 of the 54 outcomes yielded eligible timings, 18 exceeded the time cap, 4 were unsupported and 2 missed the residual tolerance. The capped rows on G3_circuit also missed tolerance. For AC2 on com-Orkut, only one repeat finished.
+
+```{include} performance/leomed-20261118-10030941-table.md
+```
+
+[Download costs and outcomes](performance/leomed-20261118-10030941.csv) · [Measurement provenance](performance/leomed-20261118-10030941.json)
+
 ## Provenance
 
 [Every result](performance/leomed-20261114.csv) and
