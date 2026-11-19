@@ -199,6 +199,15 @@ Two allocations on the EPYC 7742 filled nine previously unmeasured solver and th
 [Download costs and outcomes](performance/euler-20261117-21205906.csv) · [Measurement provenance](performance/euler-20261117-21205906.json)
 
 
+## Skitter ParAC at 1, 2 and 4 threads
+
+On 19 November, job 21589131 ran the three ParAC configurations left unmeasured by job 21174263. All three reached the time limit during preparation.
+
+```{include} performance/euler-20261119-21589131-table.md
+```
+
+[Download outcomes](performance/euler-20261119-21589131.csv) · [Measurement provenance](performance/euler-20261119-21589131.json)
+
 ## Provenance
 
 [Every result](performance/euler-20261031.csv), the
