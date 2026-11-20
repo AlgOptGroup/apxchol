@@ -67,4 +67,4 @@ composite timings remain historical.
 [Every result](performance/daint-20260910.csv) and
 [what all results share](performance/daint-20260910.json), converted from the
 published [results table](https://github.com/AlgOptGroup/apxchol/blob/390467c0dcb665a531ef5ab6bf53e2e895646900/benchmarks/daint/results.csv),
-which also records each cell's source revision and toolchain.
+which lists the source revision for each cell. The source table records a compiler for 405 of 540 rows. Compiler information is missing for all 108 ParAC rows and all 27 packed CMG rows.
