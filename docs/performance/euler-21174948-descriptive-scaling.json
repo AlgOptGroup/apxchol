@@ -1,0 +1,80 @@
+{
+  "kind": "scaling",
+  "campaign": "euler-21174948-descriptive-scaling",
+  "date": "2026-11-16",
+  "files": [
+    "euler-21174948-descriptive-scaling.csv"
+  ],
+  "tolerance": 1e-08,
+  "profile": "exclusive AMD EPYC 9654; clang 19.1.3, x86-64-v3; one allocation per matrix",
+  "host": "eu-g9-052-4",
+  "flags": [
+    {
+      "matrix": "iter0040",
+      "solver": "parac_physics",
+      "threads": 32,
+      "notes": [
+        "Preparation outlier: Julia physics producer 23.260550 s versus t16 4.973225s and t64 5.026567s. Underlying cause not determined; do not interpret as thread scaling."
+      ]
+    }
+  ],
+  "cost_contract": "1800-second logical-cell ceiling; no headline per-run relative cap. cap_s is empty because the deadline covers multiple repetitions and preparation.",
+  "columns": {
+    "setup_s": "Reviewed representative setup including measured adaptation",
+    "solve_s": "Solve from the same representative repeat",
+    "rel_res": "Maximum retained original-system residual; independent native grades for ParAC",
+    "max_rss_mb": "Not projected. Retained process RSS is not a matched setup-and-solve memory measurement.",
+    "iters": "Iteration count from the representative run, when recorded",
+    "status": "Raw CSV status. Observed value: complete."
+  },
+  "notes": [
+    "Host-specific descriptive evidence; do not pool across allocations or with historical headline profiles",
+    "Flagged IPM ParAC32 remains in the table but is excluded from thread-scaling interpretation",
+    "Submission requested normal.4h, while the scheduler recorded bigmem.4h. The reason for that assignment was not captured. Hardware receipts identify the actual exclusive EPYC 9654 allocation described here."
+  ],
+  "provenance": {
+    "job": 21174948,
+    "scheduler_partition": "bigmem.4h",
+    "requested_partition": "normal.4h",
+    "binary_sha256": {
+      "benchmark": "2c9c934bc3e33682dc65091b57f441f3f425a87f4763eb947e53a004e11d9e9d",
+      "portable-cpp": "1879840ad72e146a1060b2f9738667fc5fac28e8fc07a46576f9a9e90c19341c"
+    },
+    "binary_note": "Different embedded job-ID build paths; reference and competitor binaries bound separately. No cross-host binary/performance identity inferred.",
+    "source_archive_sha256": "7520022788f0b2f086c3e74a99fa78eb44cc4cc7ff1f3fc03f044eaf1dc72a60",
+    "dependency_manifest_sha256": "ea0ccc8e1a36a15d2ccae9612dda0facd1f2870b57b35328b1ec08707c007d5c",
+    "julia": {
+      "version": "1.12.4",
+      "cpu_target": "x86-64-v3"
+    },
+    "address_space_caps_gib": {
+      "outer": 340,
+      "ParAC_inner": 180
+    },
+    "setup_note": "BoomerAMG setup includes once-charged Hypre initialization.",
+    "placement_64": "64 physical cores on socket 0",
+    "raw_solver_aliases": {
+      "parac_physics": "parac"
+    },
+    "allocated_physical_cores": 192,
+    "maximum_selected_cores": 128,
+    "placement_128": "96 + 32 across two sockets",
+    "source_commit": "7dee3a3a6dabf6b29251c3c37996989b46e6eea6",
+    "rows": 40,
+    "repetitions": {
+      "cpp": {
+        "warmup": 1,
+        "retained": 3
+      },
+      "parac": {
+        "warmup": 0,
+        "retained": 3,
+        "per_repeat_spread": null
+      }
+    },
+    "source_annotations_sha256": "2843935c41b39a4e2b25a5f1781924e013685a748c6673842e0705fd7eeba17b",
+    "source_cell_audit_sha256": "11d3fd7868894a8d41dcd230b0b7b7efc7d3f99b090c2817edc5a64b6c5cc8ed",
+    "csv_sha256": "6a00ef0e0e14ca3426c2a1c755e1384263246b7633cc26342f676b5f02363bb0",
+    "review_storage": "Review and raw campaign records are retained in the maintainer-held private campaign archive. The public sidecar records their binding digests."
+  }
+}

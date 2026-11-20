@@ -1,0 +1,83 @@
+{
+  "kind": "scaling",
+  "campaign": "euler-21174263-cpp-scaling",
+  "date": "2026-11-17",
+  "files": [
+    "euler-21174263-cpp-scaling.csv"
+  ],
+  "tolerance": 1e-08,
+  "profile": "exclusive AMD EPYC 7742; 128 physical cores; clang19.1.3 x86-64-v3",
+  "host": "eu-g5-041-1",
+  "flags": [],
+  "cost_contract": "1800-second logical-cell ceiling within a fixed four-hour allocation. No per-repeat headline cap or unmatched speedup ratio.",
+  "columns": {
+    "setup_s": "Representative setup including adaptation and once-charged Hypre initialization",
+    "solve_s": "Solve from the same representative retained run",
+    "rel_res": "Maximum retained original-system residual",
+    "n": "Blank without a completed cell measurement",
+    "nnz": "Blank without a completed cell measurement",
+    "iters": "Representative iteration count when a measurement completed",
+    "status": "All 23 measurements in this CSV have status complete.",
+    "max_rss_mb": "Not projected. Process peak includes parsing, warmup and repetitions, not a matched setup-and-solve memory measurement."
+  },
+  "notes": [
+    "One exclusive allocation; do not pool with EPYC 9654 or 9554 profiles. At up to 64 threads work stays on socket 0; 128 uses 64+64 cores.",
+    "C++ uses one warmup and three retained runs. AMGCL and BoomerAMG include measured input adaptation, marked with an asterisk.",
+    "The complete scope is 40 slots: 23 completed C++ measurements, five ParAC preparation-stage timeouts, 11 budget-not-run slots and one allocation-interrupted BoomerAMG slot.",
+    "The five observed ParAC attempts launched zero native solves. These timeouts establish no native solver speed.",
+    "The 17 other outcomes are listed in euler-21174263-status-coverage.csv. Its companion JSON explains each disposition."
+  ],
+  "provenance": {
+    "job": 21174263,
+    "rows": 23,
+    "csv_sha256": "dde13ea4ce94feed85a61571169b079687a6a9eed89f7a3893ba5347f59f18ac",
+    "source_commit": "7dee3a3a6dabf6b29251c3c37996989b46e6eea6",
+    "source_annotations_sha256": "1114bfc3f182709967465af709d81e6a9117e70b935b2182028e8d0c34fe4d03",
+    "independent_review_sha256": "c5d2ccd0995f0824cd427d0b4c5d64e44b8a4c4c37284a4e9aa31abb5fc597dd",
+    "source_archive_sha256": "7520022788f0b2f086c3e74a99fa78eb44cc4cc7ff1f3fc03f044eaf1dc72a60",
+    "dependency_manifest_sha256": "ea0ccc8e1a36a15d2ccae9612dda0facd1f2870b57b35328b1ec08707c007d5c",
+    "binary_sha256": {
+      "benchmark": "2eae7fa4587502681a7f871802e4fc36ca818724c8e9e40a16c115f6b08650aa",
+      "portable-cpp": "1879840ad72e146a1060b2f9738667fc5fac28e8fc07a46576f9a9e90c19341c"
+    },
+    "address_space_caps_gib": {
+      "outer": 340,
+      "ParAC_inner": 180
+    },
+    "controller_outcomes_sha256": "196407c32e02aa25d4d576732f051af36f6428452b02865b604f3ed6687be8d1",
+    "inventory_sha256": "cc6db6b0cdbbf7ffc2636d740afb0270907c9c4e626aa5ae97fd58725c2c24ea",
+    "raw_cell_sha256": {
+      "files/runs/21174263-scaling-as-Skitter/t128/cells/as-Skitter__amgcl_none__t128.json": "591bc5e15187b7084d20992410b1157dfb9a07c969d58b88ff2e1192eaa41363",
+      "files/runs/21174263-scaling-as-Skitter/t128/cells/as-Skitter__apxchol_v1_bg_trace_cycle_vec_pool_aos__t128.json": "b05b4e021cc221f09fb92dcf1a5365773692a6aad26c69030db2457fe2b41a15",
+      "files/runs/21174263-scaling-as-Skitter/t128/cells/as-Skitter__apxchol_v1_bg_tree_vec_pool_aos__t128.json": "87767214115a6cc7fe551fc41500406b64455bf7fc3a5017c3366fce6410aa43",
+      "files/runs/21174263-scaling-as-Skitter/t128/cells/as-Skitter__hypre_boomeramg_none__t128.json": "9451f8fe5dc69cbab9f45ee31ed0aaf1f0f39766d39debea6cb535c32a5b74d5",
+      "files/runs/21174263-scaling-as-Skitter/t128/cells/as-Skitter__parac_none__t128.json": "a848fe88027851ff5f18e4831d3903079aacace4ca2bf4fd50816eefa442267f",
+      "files/runs/21174263-scaling-as-Skitter/t16/cells/as-Skitter__amgcl_none__t16.json": "307b8828a52a3248c513a7e6336d634a5a2a60ca3c4cbe34c6381a7af53716f7",
+      "files/runs/21174263-scaling-as-Skitter/t16/cells/as-Skitter__apxchol_v1_bg_trace_cycle_vec_pool_aos__t16.json": "e4d977feea0b476025a0f910bdf599eada02c7bb86601d6a4698776ad7e1f5b5",
+      "files/runs/21174263-scaling-as-Skitter/t16/cells/as-Skitter__apxchol_v1_bg_tree_vec_pool_aos__t16.json": "aac912c0a139a99e210f854a5c48d2df8a75dbde24cbbf43193b1d925a57ae97",
+      "files/runs/21174263-scaling-as-Skitter/t16/cells/as-Skitter__hypre_boomeramg_none__t16.json": "c061501dd4c7b5dd8ae88e765ce945acdd68f4b912af0ad1096677ff3a42e569",
+      "files/runs/21174263-scaling-as-Skitter/t16/cells/as-Skitter__parac_none__t16.json": "77403e720ad262c6373380e6b08e68eaf66a41bf3423260c1d4987b118eeaa1d",
+      "files/runs/21174263-scaling-as-Skitter/t32/cells/as-Skitter__amgcl_none__t32.json": "52c2e4099397bf89563cd21c75b1c9b2c9f684c00ee19e25a88e1eeb201540b5",
+      "files/runs/21174263-scaling-as-Skitter/t32/cells/as-Skitter__apxchol_v1_bg_trace_cycle_vec_pool_aos__t32.json": "2a67a99bf98af85e5dc3dc66ced495cd34dfe9d0340b2f191199d46f1ba901bd",
+      "files/runs/21174263-scaling-as-Skitter/t32/cells/as-Skitter__apxchol_v1_bg_tree_vec_pool_aos__t32.json": "235c92d1bdc2a2fbea49f6dde812117b56c0a7477f3c2c84d6427f644e297929",
+      "files/runs/21174263-scaling-as-Skitter/t32/cells/as-Skitter__hypre_boomeramg_none__t32.json": "08b31b525a21aeb8771293493ca461d0e46878781b5a2dbcf6639a17ca315f98",
+      "files/runs/21174263-scaling-as-Skitter/t32/cells/as-Skitter__parac_none__t32.json": "a63bfda82138ed6f8fea450be7e8827eae503fc39a6a639fcc24ea613e450d91",
+      "files/runs/21174263-scaling-as-Skitter/t4/cells/as-Skitter__amgcl_none__t4.json": "0a85763ec5b1e02641866ea8b55d391a956d04ed6bd92a59447b0601cee5aaf4",
+      "files/runs/21174263-scaling-as-Skitter/t4/cells/as-Skitter__apxchol_v1_bg_trace_cycle_vec_pool_aos__t4.json": "db212cb4e09d6ec538895eb3dfe2fae4162564515fc7885d2989eab4b12ebb39",
+      "files/runs/21174263-scaling-as-Skitter/t4/cells/as-Skitter__apxchol_v1_bg_tree_vec_pool_aos__t4.json": "6fe8f8f9ff0fe08ed0e1643586bfb53c0c09aab156ecc272511f06eb9cc57a27",
+      "files/runs/21174263-scaling-as-Skitter/t64/cells/as-Skitter__amgcl_none__t64.json": "f14e75e157f321b6725202b918d21f7a411ac0d128f12e72566aea58811c8c2f",
+      "files/runs/21174263-scaling-as-Skitter/t64/cells/as-Skitter__apxchol_v1_bg_trace_cycle_vec_pool_aos__t64.json": "12988c84116bef1d24765ca159e758ca3e202e1e7aad4bb7ecbf8b2afa084a61",
+      "files/runs/21174263-scaling-as-Skitter/t64/cells/as-Skitter__apxchol_v1_bg_tree_vec_pool_aos__t64.json": "5558ef058f634e998a5eb3bc17ee5c09d860b93438b50f973345f5e710c29bfe",
+      "files/runs/21174263-scaling-as-Skitter/t64/cells/as-Skitter__hypre_boomeramg_none__t64.json": "a64c819952318ac773e41e8614145a4b7a2c12094f8dd3efce28d64d4c93b247",
+      "files/runs/21174263-scaling-as-Skitter/t64/cells/as-Skitter__parac_none__t64.json": "be5396ffcbe0e274349d15cdf522ba1ee3ca814e421c4ad304083a91e209aa99",
+      "files/runs/21174263-scaling-as-Skitter/t8/cells/as-Skitter__amgcl_none__t8.json": "8557ad8daaf6121863634c53d80321ddb4b0b4d91aadc12417754677c8def3cb",
+      "files/runs/21174263-scaling-as-Skitter/t8/cells/as-Skitter__apxchol_v1_bg_trace_cycle_vec_pool_aos__t8.json": "18a0236b9ca5dd4efa677dc60cdbf514c5f5d6e67fc6e4ec605f499b9ef41e42",
+      "files/runs/21174263-scaling-as-Skitter/t8/cells/as-Skitter__apxchol_v1_bg_tree_vec_pool_aos__t8.json": "db14fe05b94974d1c6abf7c7b9a330a32aa694aa6f95c5c27caa7290ea79b748",
+      "files/runs/21174263-scaling-as-Skitter/t8/cells/as-Skitter__hypre_boomeramg_none__t8.json": "ec2a4e8d50a75e577a788cfc3145e05b8b3cf6f023507a296b07d21104831691",
+      "files/runs/21174263-scaling-as-Skitter/t8/cells/as-Skitter__parac_none__t8.json": "26c0284a66eff405d340cacc5f7631bd505c149bcbd1ad4981b3c1329a481286"
+    },
+    "profile_population": 40,
+    "collected_raw_cells": 28,
+    "controller_only_slots": 12
+  }
+}

@@ -1,0 +1,119 @@
+{
+  "kind": "records",
+  "campaign": "leomed-20261118-10030941",
+  "date": "2026-11-18",
+  "files": [
+    "leomed-20261118-10030941.csv"
+  ],
+  "tolerance": 1e-08,
+  "host": "compute-biomed-20",
+  "profile": "virtualized AMD EPYC Milan, 28 vCPUs, Julia 1.12.4",
+  "cost_contract": "Setup and solve come from the retained repeat with the median total time. Each of the three repeats must meet the original-system residual tolerance of 1e-8 and finish within the larger of 30 seconds and 20 times the recorded apxchol reference cost.",
+  "flags": [
+    {
+      "matrix": "G3_circuit",
+      "solver": "ac2",
+      "threads": 28,
+      "notes": [
+        "Also exceeded the original-system residual tolerance in all three repeats."
+      ]
+    },
+    {
+      "matrix": "G3_circuit",
+      "solver": "ac",
+      "threads": 28,
+      "notes": [
+        "Also exceeded the original-system residual tolerance in all three repeats."
+      ]
+    },
+    {
+      "matrix": "com-Orkut",
+      "solver": "ac2",
+      "threads": 28,
+      "notes": [
+        "One repeat took 1538.131 s and exceeded the cap. A later process timed out."
+      ]
+    }
+  ],
+  "notes": [
+    "AC and AC2 used the same exported operator and right-hand side for each matrix."
+  ],
+  "columns": {
+    "status": "Observed values are complete, exceeded_cap, n/a (unsupported input) and not_converged.",
+    "cap_s": "Maximum eligible setup plus solve time in seconds for each repeat.",
+    "rel_res": "Largest original-system relative residual among the three retained repeats."
+  },
+  "provenance": {
+    "job": 10030941,
+    "rows": 54,
+    "eligible": 30,
+    "dispositions": {
+      "complete": 30,
+      "exceeded_cap": 18,
+      "not_converged": 2,
+      "n/a": 4
+    },
+    "git_sha": "7dee3a3a6dabf6b29251c3c37996989b46e6eea6",
+    "source_id": "julia-shared-rhs-original-v2",
+    "compiler_version": "1.12.4 (libLLVM 18.1.7)",
+    "csv_sha256": "527fda1e99463d1ad8a6f2ac365bde40371f4159636f8f54865278c14a1225f5",
+    "source_receipts_sha256": "a3e6bbf9f31838f197a5e5c92f893cc7d47a31a2e6808ca00811856595723e86",
+    "independent_review_sha256": "8cf707dbff70c18f9cf1bd1853d4a1419465fa0ae29cb0059af291528133bc2c",
+    "source_cell_sha256": {
+      "runs/julia-shared-10030941/cells/grids/grid3d_100__ac2__none__t28__cpu.json": "b7baaa9c67fbba7c6f4268c3a1cb50d0467a78a4b2cf013ad1352a5662c14f51",
+      "runs/julia-shared-10030941/cells/grids/grid3d_100__ac__none__t28__cpu.json": "6df194fdccce814df96a67c12e80dd0397c528bf36f9da8013a21dd383ddfe85",
+      "runs/julia-shared-10030941/cells/grids/grid3d_150__ac2__none__t28__cpu.json": "561c8b13e64fabbb6e014d11aa2cb671dba63c53ae799fade47a6cb329c07457",
+      "runs/julia-shared-10030941/cells/grids/grid3d_150__ac__none__t28__cpu.json": "dd582d5325bf0aaa52aff57869780255620577cf545f4a9bae1494d73506b4ec",
+      "runs/julia-shared-10030941/cells/grids/grid3d_200__ac2__none__t28__cpu.json": "9e3897058cdaec04cdcbb229b5cc5bc0ff8d7da10d9ad82c22fae2c5b2e78f5f",
+      "runs/julia-shared-10030941/cells/grids/grid3d_200__ac__none__t28__cpu.json": "9679499b4d57fc3ac2661b5b58aaf905c080fcc647931ea52b5ab8f92ca59f6f",
+      "runs/julia-shared-10030941/cells/grids/grid3d_250__ac2__none__t28__cpu.json": "0a1cf25dd771dcdd6229154c6cea5a4e25dd0d7f5ae7e033fc59f0fc67cb2e23",
+      "runs/julia-shared-10030941/cells/grids/grid3d_250__ac__none__t28__cpu.json": "7f202228aeb8f8e1f89dc16b53ea97644a734983480d58df8054a176ac79fa08",
+      "runs/julia-shared-10030941/cells/grids/grid_1000__ac2__none__t28__cpu.json": "c7b0542eff98f52a6b72c8ac9c44d18ead6ecd2b6994e1e4f556b9e76c3c57aa",
+      "runs/julia-shared-10030941/cells/grids/grid_1000__ac__none__t28__cpu.json": "2df909a4319f54f04a5a639fcdb37a16222b00fa7376354ee2266237cc862317",
+      "runs/julia-shared-10030941/cells/grids/grid_2000__ac2__none__t28__cpu.json": "ca0d4f4b997fc58cca97e5e88688416c81bbac90ae99b921e011d78029c3e0fb",
+      "runs/julia-shared-10030941/cells/grids/grid_2000__ac__none__t28__cpu.json": "12b09625f6054df6b816e74e899641b1bea3ba108cfdd93c34c2389a697cceed",
+      "runs/julia-shared-10030941/cells/grids/grid_3000__ac2__none__t28__cpu.json": "3c6fb6c00c62b4cd0e1f417c5bc3ee62bbc1e3cdf5a649527a30c688d2ef07d6",
+      "runs/julia-shared-10030941/cells/grids/grid_3000__ac__none__t28__cpu.json": "3238b21314fc983a87006c2c8a1f82e6a51671cdad8340b3aa9301c9fade2205",
+      "runs/julia-shared-10030941/cells/grids/grid_4000__ac2__none__t28__cpu.json": "0b720251d325ce93fc2a4207fc5b5242d898d5d9851938c5c04b750be84d5a84",
+      "runs/julia-shared-10030941/cells/grids/grid_4000__ac__none__t28__cpu.json": "b7ae6e7d2db30f74a52d9a08af0c0278e4caef5d6a66ae44cb31cd685104b6b8",
+      "runs/julia-shared-10030941/cells/grids/grid_5000__ac2__none__t28__cpu.json": "ef34c4793ae67e574556eccc775fdf4622e91b59c3e9e70d065992cbe7b8ad69",
+      "runs/julia-shared-10030941/cells/grids/grid_5000__ac__none__t28__cpu.json": "cd8e27106ce7f94c9f30c44d2ad7de9b5e72953c3f051b2d1c89fb8a0c69b20a",
+      "runs/julia-shared-10030941/cells/grids/grid_500__ac2__none__t28__cpu.json": "1781e383484c4f93b94cc0e57e00a7eee067c922a33034e75fa2ceedb283200d",
+      "runs/julia-shared-10030941/cells/grids/grid_500__ac__none__t28__cpu.json": "052ed26a772b5cb2428515076e9445ddef87724fadf33ab962e00e9a6593123d",
+      "runs/julia-shared-10030941/cells/ipm/iter0010__ac2__none__t28__cpu.json": "a619e7e72707015291d271e0f6d08eaa2f623b638ce8c5906e9e3c58e7b5005e",
+      "runs/julia-shared-10030941/cells/ipm/iter0010__ac__none__t28__cpu.json": "e7dd14bbda325ec1bf106ec6a3fcaf6231eebd3774fb236eca7a3a91cd37d12e",
+      "runs/julia-shared-10030941/cells/ipm/iter0020__ac2__none__t28__cpu.json": "71f77e48e11a50c2c89cf64545dc4823ec29d2c096a31616f4050ef74885d67b",
+      "runs/julia-shared-10030941/cells/ipm/iter0020__ac__none__t28__cpu.json": "ac9be002f1be3f733a081a0ffcb5cd8e33940ef035d2351c2de0f7892e877447",
+      "runs/julia-shared-10030941/cells/ipm/iter0030__ac2__none__t28__cpu.json": "2db20ba3d78757ab540156466d4308fc1a0a2bee1da778df9be133528a099098",
+      "runs/julia-shared-10030941/cells/ipm/iter0030__ac__none__t28__cpu.json": "ee92b5a8472e6724f3b1ebfed04be7c59dfd461484586c1fd3a9c9cc7f00f31e",
+      "runs/julia-shared-10030941/cells/ipm/iter0040__ac2__none__t28__cpu.json": "e9fba50eaf72505bae35d4920e5fc3ab74f115b644db2b11d2214d5a2393883a",
+      "runs/julia-shared-10030941/cells/ipm/iter0040__ac__none__t28__cpu.json": "34079d5104c335fab2a1465ee7fa950c15dc8ff51da2734f7136f28e58d8fc28",
+      "runs/julia-shared-10030941/cells/suitesparse/G3_circuit__ac2__none__t28__cpu.json": "39581287fb04b6890c44607695e70cd03eab6b78a009ee8657e69152c5dc470e",
+      "runs/julia-shared-10030941/cells/suitesparse/G3_circuit__ac__none__t28__cpu.json": "26db4fa11da1cc5ce56cc0a25716d867dda3ebfaa4fef5d77ac51e12944a9b85",
+      "runs/julia-shared-10030941/cells/suitesparse/apache2__ac2__none__t28__cpu.json": "59998ae730afb639462087eceef0b53ed636c420f68d22d3e8df492ba6386427",
+      "runs/julia-shared-10030941/cells/suitesparse/apache2__ac__none__t28__cpu.json": "3d58d4efe55971b5a179f9c902757d31fec4bab4aff39bf3d1506793487b90fb",
+      "runs/julia-shared-10030941/cells/suitesparse/as-Skitter__ac2__none__t28__cpu.json": "3c8528a2245a12f9828e080ec1bcd51b557704693ed8a77c45a7eb2e66f29610",
+      "runs/julia-shared-10030941/cells/suitesparse/as-Skitter__ac__none__t28__cpu.json": "8a22e6ef02b1b240d2fb7019320a65eafaaa60d5dba7903302234b73fc072195",
+      "runs/julia-shared-10030941/cells/suitesparse/coAuthorsDBLP__ac2__none__t28__cpu.json": "fad2d7c8434d96fa6e0be7eab8d66f9b86011a40657e52253624d3409257e4fa",
+      "runs/julia-shared-10030941/cells/suitesparse/coAuthorsDBLP__ac__none__t28__cpu.json": "6bc363a9b076c4e3c726e9efa2b065e625d16815854d031a19f97ce68b0c0375",
+      "runs/julia-shared-10030941/cells/suitesparse/coPapersDBLP__ac2__none__t28__cpu.json": "8bd943a2ba23589351462be6e3b29b8f49fe45c99903b4a38beca3bfb8efbf56",
+      "runs/julia-shared-10030941/cells/suitesparse/coPapersDBLP__ac__none__t28__cpu.json": "1aa4713be719630092be68b0ef34f448274d4a10a5afe77537198cd1e4de0139",
+      "runs/julia-shared-10030941/cells/suitesparse/com-Amazon__ac2__none__t28__cpu.json": "7b0fb0b86d95f9f7889668681e28cde8c6c990068d0185b6254a24343ff75337",
+      "runs/julia-shared-10030941/cells/suitesparse/com-Amazon__ac__none__t28__cpu.json": "7c9ac73ba570957284783a8f36ca9f6398adbec0630bed9bca3401f34f3059bf",
+      "runs/julia-shared-10030941/cells/suitesparse/com-LiveJournal__ac2__none__t28__cpu.json": "5a50b49be3e5733a76339a68d287839a06a9aea3bc1491053168df637736e9a7",
+      "runs/julia-shared-10030941/cells/suitesparse/com-LiveJournal__ac__none__t28__cpu.json": "8721056fd25f2d326916b687bb681c7b0696242f89752fb3e4dd6deb280c616e",
+      "runs/julia-shared-10030941/cells/suitesparse/com-Orkut__ac2__none__t28__cpu.json": "34cbdb3a05b275cec23adffb2bde10bcfb994077942a88d2c2a109c3cc0fffe6",
+      "runs/julia-shared-10030941/cells/suitesparse/com-Orkut__ac__none__t28__cpu.json": "0c9218069180ac969a08fc3a935ddc1fd65b123ee4dc142f91f65eb4c53f4353",
+      "runs/julia-shared-10030941/cells/suitesparse/com-Youtube__ac2__none__t28__cpu.json": "bdc4db10926aa763bc0d798330adc631e2f69c0ea0bee6f27d77938e35e03784",
+      "runs/julia-shared-10030941/cells/suitesparse/com-Youtube__ac__none__t28__cpu.json": "87e95253328cccc85391d0518113e02f362625287849a777bbae4db88ff39f41",
+      "runs/julia-shared-10030941/cells/suitesparse/ecology1__ac2__none__t28__cpu.json": "2fe09f12d52c1009e598ecad40fbb0a4f8049bd387add7ffa14c3b18f46f5787",
+      "runs/julia-shared-10030941/cells/suitesparse/ecology1__ac__none__t28__cpu.json": "32f04e52ee966f7ade98008d06269f8698d220dd473449d08a5a46ebbfc8676c",
+      "runs/julia-shared-10030941/cells/suitesparse/kron_g500-logn16__ac2__none__t28__cpu.json": "7bad472eb369ab28053c262649f5c1eb801656cd6e21ee798eaa5906d4a7d4e1",
+      "runs/julia-shared-10030941/cells/suitesparse/kron_g500-logn16__ac__none__t28__cpu.json": "87c21a79a27526b9fa244af34fe0afde7dbf7e7e8895a78dba05796168e6e526",
+      "runs/julia-shared-10030941/cells/suitesparse/parabolic_fem__ac2__none__t28__cpu.json": "57c3258cee1b34f9e1400c368ad6e5de0c39a3da3637f92732d5638e0d655f98",
+      "runs/julia-shared-10030941/cells/suitesparse/parabolic_fem__ac__none__t28__cpu.json": "5c75ea3775c9d323df7559577068b5a275ce8a0dd568c42b32e3ee7089a24d5b",
+      "runs/julia-shared-10030941/cells/suitesparse/thermal2__ac2__none__t28__cpu.json": "511e61f9d7e5d0f2111e8a25d74e0067dda0bf058689d90fb44705c16b63866a",
+      "runs/julia-shared-10030941/cells/suitesparse/thermal2__ac__none__t28__cpu.json": "9e40e6e2e1feedae11c875ada8246a087b6b106c44db7386b2941406749337ba"
+    }
+  }
+}

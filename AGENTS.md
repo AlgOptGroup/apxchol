@@ -36,7 +36,7 @@ Run focused regressions first, then the relevant suite. CUDA and Metal correctne
 - Measurement contracts: `benchmarks/README.md`.
 - `docs/input-formats.md` includes the programs in `examples/input_formats`. Its C++ programs form a separate CMake project, so their Eigen and CHOLMOD dependencies never reach the library; `ci.yml` builds and runs them, the Octave job runs the `.m` file and `docs.yml` the SciPy one.
 - CLI archives: `.github/workflows/cli.yml` uses the `cli` install component, bundles OpenMP/notices, and runs `tests/check_cli_archive.py` after relocation.
-- Documentation: `python docs/build.py` reuses the guides, public C++ comments, Python docstrings and CLI help. Build instructions are in `CONTRIBUTING.md`; generated HTML goes to `build/docs`.
+- Documentation: `python docs/build.py` reuses the guides, public C++ comments, Python docstrings and CLI help; `docs/performance.py` and matplotlib generate the charts and tables used by the Performance pages from `docs/performance/*.json` and their CSV files. Build instructions are in `CONTRIBUTING.md`; generated HTML goes to `build/docs`.
 
 ## Route invariants
 
