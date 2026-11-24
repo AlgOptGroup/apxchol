@@ -1,0 +1,391 @@
+{
+  "kind": "records",
+  "campaign": "leomed-20261117-rchol-10019793",
+  "date": "2026-11-17",
+  "files": [
+    "leomed-20261117-rchol-10019793.csv"
+  ],
+  "tolerance": 1e-08,
+  "profile": "exclusive 28-vCPU allocation; virtualized AMD EPYC-Milan; clang22.1.8 -march=native",
+  "host": "compute-biomed-20",
+  "flags": [
+    {
+      "matrix": "grid3d_100",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation."
+      ]
+    },
+    {
+      "matrix": "grid3d_150",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation."
+      ]
+    },
+    {
+      "matrix": "grid3d_200",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation."
+      ]
+    },
+    {
+      "matrix": "grid3d_250",
+      "solver": "rchol",
+      "threads": 28,
+      "notes": [
+        "Capped before complete repetition receipts; no measured setup/solve cost is admitted."
+      ]
+    },
+    {
+      "matrix": "grid3d_250",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation."
+      ]
+    },
+    {
+      "matrix": "grid_1000",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation."
+      ]
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "rchol",
+      "threads": 28,
+      "notes": [
+        "Only the warmup exceeded the cap; the frozen rule includes warmups."
+      ]
+    },
+    {
+      "matrix": "grid_2000",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation."
+      ]
+    },
+    {
+      "matrix": "grid_3000",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation."
+      ]
+    },
+    {
+      "matrix": "grid_4000",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Effective worker count was not reported for this outcome.",
+        "Capped before complete repetition receipts; no measured setup/solve cost is admitted."
+      ]
+    },
+    {
+      "matrix": "grid_5000",
+      "solver": "rchol",
+      "threads": 28,
+      "notes": [
+        "Capped before complete repetition receipts; no measured setup/solve cost is admitted."
+      ]
+    },
+    {
+      "matrix": "grid_5000",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Effective worker count was not reported for this outcome.",
+        "Capped before complete repetition receipts; no measured setup/solve cost is admitted."
+      ]
+    },
+    {
+      "matrix": "grid_500",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation."
+      ]
+    },
+    {
+      "matrix": "iter0010",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation."
+      ]
+    },
+    {
+      "matrix": "iter0020",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation."
+      ]
+    },
+    {
+      "matrix": "iter0030",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation."
+      ]
+    },
+    {
+      "matrix": "iter0040",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation."
+      ]
+    },
+    {
+      "matrix": "G3_circuit",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation."
+      ]
+    },
+    {
+      "matrix": "apache2",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation."
+      ]
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "rchol",
+      "threads": 28,
+      "notes": [
+        "Capped before complete repetition receipts; no measured setup/solve cost is admitted."
+      ]
+    },
+    {
+      "matrix": "as-Skitter",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Effective worker count was not reported for this outcome.",
+        "Capped before complete repetition receipts; no measured setup/solve cost is admitted."
+      ]
+    },
+    {
+      "matrix": "coAuthorsDBLP",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation."
+      ]
+    },
+    {
+      "matrix": "coPapersDBLP",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation."
+      ]
+    },
+    {
+      "matrix": "com-Amazon",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation."
+      ]
+    },
+    {
+      "matrix": "com-LiveJournal",
+      "solver": "rchol",
+      "threads": 28,
+      "notes": [
+        "Capped before complete repetition receipts; no measured setup/solve cost is admitted."
+      ]
+    },
+    {
+      "matrix": "com-LiveJournal",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Effective worker count was not reported for this outcome.",
+        "Capped before complete repetition receipts; no measured setup/solve cost is admitted."
+      ]
+    },
+    {
+      "matrix": "com-Orkut",
+      "solver": "rchol",
+      "threads": 28,
+      "notes": [
+        "Process terminated by signal 11; native cause not established."
+      ]
+    },
+    {
+      "matrix": "com-Orkut",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Effective worker count was not reported for this outcome.",
+        "Capped before complete repetition receipts; no measured setup/solve cost is admitted."
+      ]
+    },
+    {
+      "matrix": "com-Youtube",
+      "solver": "rchol",
+      "threads": 28,
+      "notes": [
+        "Capped before complete repetition receipts; no measured setup/solve cost is admitted."
+      ]
+    },
+    {
+      "matrix": "com-Youtube",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation.",
+        "Exceeded cap and missed original-system 1e-8 at 500 iterations. Retained residuals are 1.35e-7 to 1.77e-7; warmup residual is 3.82e-7."
+      ]
+    },
+    {
+      "matrix": "ecology1",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation."
+      ]
+    },
+    {
+      "matrix": "kron_g500-logn16",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation."
+      ]
+    },
+    {
+      "matrix": "parabolic_fem",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Reports 16 effective workers inside the 28-vCPU allocation."
+      ]
+    },
+    {
+      "matrix": "thermal2",
+      "solver": "rchol",
+      "threads": 28,
+      "notes": [
+        "Invalid factor diagonal. No completed solver result."
+      ]
+    },
+    {
+      "matrix": "thermal2",
+      "solver": "rchol_par",
+      "threads": 28,
+      "notes": [
+        "Effective worker count was not reported for this outcome.",
+        "Invalid factor diagonal. No completed solver result."
+      ]
+    }
+  ],
+  "cost_contract": "Frozen 20x apxchol cap with a 30-second floor. Every repetition, including the warmup, must meet the cap. Process cutoff is cap plus 300 seconds. Over-cap costs are not projected.",
+  "columns": {
+    "setup_s": "Representative retained setup when cost-eligible",
+    "solve_s": "Solve from the same median-total retained run",
+    "rel_res": "Maximum retained original-system residual when all repetitions were recorded",
+    "iters": "Representative iteration count when recorded",
+    "status": "Raw complete, exceeded_cap or failed status; flags expose additional inaccuracy",
+    "cap_s": "Frozen per-repetition cap, also applied to warmup",
+    "max_rss_mb": "Not projected. Process peak covers parsing, warmup and repetitions; no matched setup-and-solve memory claim."
+  },
+  "notes": [
+    "All 54 outcomes are retained: 30 complete, 21 over cap and three failed. One over-cap result also misses tolerance, as flagged.",
+    "The host reports a virtualized EPYC-Milan topology. Physical-core and NUMA placement are not established.",
+    "Requested threads and affinity cover 28 vCPUs. pRCHOL reports 16 effective workers in its 21 outcomes with receipts; six outcomes do not report that count.",
+    "One warmup and three retained runs. A warmup-only cap exceedance remains over cap under the frozen contract.",
+    "Caps reproduce the same-node, same-commit apxchol reference job 10017196. No matched speedup ratios are published here.",
+    "Memory values are not projected as comparable setup-and-solve memory measurements."
+  ],
+  "provenance": {
+    "job": 10019793,
+    "rows": 54,
+    "csv_sha256": "d7fc9d9f92700f0657ecbc88a85b212e163866ce09df3ad132a45bfb86da526d",
+    "source_commit": "7dee3a3a6dabf6b29251c3c37996989b46e6eea6",
+    "source_annotations_sha256": "7741be97289f56a4c8d259bbb1a3ece8287bfe5fcfa5d309058849d1e0a9f271",
+    "independent_review_sha256": "5534d2881fbbf3940244b8e9215a02cd5e49b473832cba27d6f74e05a69c01ad",
+    "inventory_sha256": "294a83c180b78b183cd925ddf8f9525a3d73853ce07014644d602d6f4eb9f75f",
+    "benchmark_sha256": "b40430d1e72afaf8ef289f6939a2f788fbafbccf9ab67fb747e6169b9182f5f9",
+    "source_manifest_sha256": "b5fd9dc2a5b7abc5a2ff326ab2786a23a0b1a884f9f071f82304deb62a645616",
+    "cap_table_sha256": "d9c28cb048f6ca0d71693d8d8ed1f719ee4a9c1711193eea5432134215a41ebe",
+    "reference_job": 10017196,
+    "reference_cpu_caps_checked": 27,
+    "reference_gpu_caps": "Unused and not qualified",
+    "class_mapping_commit": "bd65224d784b73210f3314af6d519112af3085a7",
+    "class_mapping_sha256": "668afa9224fd97fc8ec8137b6cec4373132a47d77bf4abe779f2060f19025b09",
+    "raw_cells": {
+      "files/runs/rchol-node20-10019793/cells/grids/grid3d_100__rchol__none__t28__cpu.json": "5fc68100610e0fc046df90e67af5fd203ba592313f92988fbd521fe8598e91f4",
+      "files/runs/rchol-node20-10019793/cells/grids/grid3d_100__rchol_par__none__t28__cpu.json": "a6f31bef03e4db5daefcf091db6bb153aca72cb30b291586a13a2b0ae2dc105c",
+      "files/runs/rchol-node20-10019793/cells/grids/grid3d_150__rchol__none__t28__cpu.json": "eb95b05a69e19e95e3869a446ef6861b993001fbe1dae0f36be82927d9972514",
+      "files/runs/rchol-node20-10019793/cells/grids/grid3d_150__rchol_par__none__t28__cpu.json": "ab7592d38e41ebd87b22d56b407082acb4c7298acde7ba01860f3728f271fc48",
+      "files/runs/rchol-node20-10019793/cells/grids/grid3d_200__rchol__none__t28__cpu.json": "09880ab76771d1209f2fbb5441aca15dace7f827409d91cb472fe1c90436a2db",
+      "files/runs/rchol-node20-10019793/cells/grids/grid3d_200__rchol_par__none__t28__cpu.json": "e131c10f25d420850bce195328657f0556f243388b17bbfdfbe5d3eb51931caa",
+      "files/runs/rchol-node20-10019793/cells/grids/grid3d_250__rchol__none__t28__cpu.json": "d5376b54646f419a4de176c6f35a7d640fe984251ec050a947f35741a615ecff",
+      "files/runs/rchol-node20-10019793/cells/grids/grid3d_250__rchol_par__none__t28__cpu.json": "b33ea23e9ec078bceae66beaa56e0dd96dddcea664b41d5d78dc4c7abbfec992",
+      "files/runs/rchol-node20-10019793/cells/grids/grid_1000__rchol__none__t28__cpu.json": "a426885c4678a9acd4610cff71d4c4dd259f8f847514a4b9fe2bc89b11425cfe",
+      "files/runs/rchol-node20-10019793/cells/grids/grid_1000__rchol_par__none__t28__cpu.json": "d785ac2646abb99b87a79ea7e0eb27488281d5e58e11333c0ce7c85aa32dafef",
+      "files/runs/rchol-node20-10019793/cells/grids/grid_2000__rchol__none__t28__cpu.json": "5b79a9a08ec202d209c05c7426299a968723b4a5ad2757e36d8f00c8a40cfd95",
+      "files/runs/rchol-node20-10019793/cells/grids/grid_2000__rchol_par__none__t28__cpu.json": "011a71f5759f3466dab56f4a06a7bd6311d37357dd432e0992c31e7b4ac1f20a",
+      "files/runs/rchol-node20-10019793/cells/grids/grid_3000__rchol__none__t28__cpu.json": "c7ce8e247ca48fbe6b022371df2e9f54ab7cd1edb949acda6ac979bedb74c493",
+      "files/runs/rchol-node20-10019793/cells/grids/grid_3000__rchol_par__none__t28__cpu.json": "2cb4a6ac87c1ed4bb047bed8164820eb7f44196a6c055a710618479cbbb31413",
+      "files/runs/rchol-node20-10019793/cells/grids/grid_4000__rchol__none__t28__cpu.json": "3e678070e3ddf7bae4d382bd3a8f873e78ae27b500a5325c4129bf56b48314be",
+      "files/runs/rchol-node20-10019793/cells/grids/grid_4000__rchol_par__none__t28__cpu.json": "1ab2559004800e82b809a9de45c1a61dbdb49cdff9da7a23a544751ca631be51",
+      "files/runs/rchol-node20-10019793/cells/grids/grid_5000__rchol__none__t28__cpu.json": "a1f30a203f1886b14bb3da0cd99ba8a35c50cd2ba50f33d0b101b0a577f49bec",
+      "files/runs/rchol-node20-10019793/cells/grids/grid_5000__rchol_par__none__t28__cpu.json": "dcd8b4c6cc4774e90f5d37adb5361f303cebd34b688f18c38cf90dbf7710bcd3",
+      "files/runs/rchol-node20-10019793/cells/grids/grid_500__rchol__none__t28__cpu.json": "db9648a1dddc35bee23a43bc29df1723658690ac255aabfab9e1fa840aae473b",
+      "files/runs/rchol-node20-10019793/cells/grids/grid_500__rchol_par__none__t28__cpu.json": "c5cf67d54ff91df5017eb4a1e38cbcb53b42298bf0e0321af90645d6e2e6b674",
+      "files/runs/rchol-node20-10019793/cells/ipm/iter0010__rchol__none__t28__cpu.json": "950ff2e198fb4911c17c24dc3436f323cb68e43ac866c9f42a16a3029fe9d6f5",
+      "files/runs/rchol-node20-10019793/cells/ipm/iter0010__rchol_par__none__t28__cpu.json": "baec4f632d17b28741ced7de38b85f704b0be114039a64e20e74b3d1b6e3af07",
+      "files/runs/rchol-node20-10019793/cells/ipm/iter0020__rchol__none__t28__cpu.json": "789c7b48d855f902a4ac72a06c53447cd7d52f9fc086e58cd82a974f6a74c30c",
+      "files/runs/rchol-node20-10019793/cells/ipm/iter0020__rchol_par__none__t28__cpu.json": "110a9f6d1b2d1b0d538d84aa663a08d497526831cfa4dd707aeee82bbc3d6154",
+      "files/runs/rchol-node20-10019793/cells/ipm/iter0030__rchol__none__t28__cpu.json": "6dbbb90b3bfca6c83b5761343408cdf1d5908d19c6cef446d7cbc5f4a44bb5ee",
+      "files/runs/rchol-node20-10019793/cells/ipm/iter0030__rchol_par__none__t28__cpu.json": "4da5377b4f19f3aa646c239139435f9bdb3808b761dc16ff23587c0e361a4fd9",
+      "files/runs/rchol-node20-10019793/cells/ipm/iter0040__rchol__none__t28__cpu.json": "d1b8cba2751fc4ec93beb308371aff5303e98f49d06651f56eca67fe528b5f60",
+      "files/runs/rchol-node20-10019793/cells/ipm/iter0040__rchol_par__none__t28__cpu.json": "ef7847d3ef9c5547ac874a578ed04b32227d7242ca126c813d6b63489a842bd0",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/G3_circuit__rchol__none__t28__cpu.json": "522e7409df9e5499773f79af8b748a19d93b4dc9e2a9a4c9e552c22aafe46259",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/G3_circuit__rchol_par__none__t28__cpu.json": "7984a773e56e05630778979089329749046d2123283d931423c2b7db2712f790",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/apache2__rchol__none__t28__cpu.json": "c92a5358b308d9093eae48a4663d90e2cb003ca8d48ba3287a6fa9ec0c46090b",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/apache2__rchol_par__none__t28__cpu.json": "bfd7ec6abecf4b8d32fde86d15d8a853568e0114ed6bdc84689207bed65956b6",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/as-Skitter__rchol__none__t28__cpu.json": "78935c23eab983e901ecaa77b2f79acd343e8c3c6f26b6336b22cd9d8105f30c",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/as-Skitter__rchol_par__none__t28__cpu.json": "9f43267d5d5e45df26374329f8d19437af4872be72b878fcf0524f6b064d280f",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/coAuthorsDBLP__rchol__none__t28__cpu.json": "161e58f8d3a8b2df9dc91524d55ba11f478a4b79f404d133e6f9c5d242dadbe6",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/coAuthorsDBLP__rchol_par__none__t28__cpu.json": "34218b3f54b69caddfc4088b8e7588d08b08f4cf299093d8d4ed0a53ea3f20cf",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/coPapersDBLP__rchol__none__t28__cpu.json": "7da302ba6568ac11e22320a982dbe00857d15a8ea221217d5bf48e9079e24c7c",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/coPapersDBLP__rchol_par__none__t28__cpu.json": "3e1c7a9c73e170f4645acf70fdbc236a0128627371e7482a2daf117dd721ef9c",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/com-Amazon__rchol__none__t28__cpu.json": "5243ec81f80761cae77da8928ccc363a861a0b77f5b49ed82c94098c43a89875",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/com-Amazon__rchol_par__none__t28__cpu.json": "fa7ec4d2d780709360070a20acbec917921ff74032ab0a65df50f2aca3d0ac7b",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/com-LiveJournal__rchol__none__t28__cpu.json": "305fdabca9eceb457617bf3dadcc0e06b491d13acf1d3bb6d36e9dd4874891fa",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/com-LiveJournal__rchol_par__none__t28__cpu.json": "5b567c21dd361e7b789c32f0fcdc5b31d4b07a99bb83e40414278fd5a534bd6b",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/com-Orkut__rchol__none__t28__cpu.json": "08ee8e6bde8475b5f5f7357b364337e3aaf3bbe1605cfc89a1fbc173c2e2f3b7",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/com-Orkut__rchol_par__none__t28__cpu.json": "c595d03c4390b5657c93a72eed174f7a7aa57050653b79330ab4cd519db1f594",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/com-Youtube__rchol__none__t28__cpu.json": "e3242585b614e5d36fbe9c3a26307b055c0fa42200ac39494af02dc55b5f4efc",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/com-Youtube__rchol_par__none__t28__cpu.json": "144c3479ae3815a46b69808ae224cfa2fdd9075667d2bb8bd026041876925484",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/ecology1__rchol__none__t28__cpu.json": "80811ec8ee0215467d62f7dbd6f0c5e1c8ecda4fa52729925a61e821578e6ef7",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/ecology1__rchol_par__none__t28__cpu.json": "a40ec5d7affb118f1a80151cebe0dd67caaa2ddbf4029ff91063e561aaaabfa0",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/kron_g500-logn16__rchol__none__t28__cpu.json": "dd07ca87d3b2565bbdf393855243308268be3963bad9a22e96570263a306c0a7",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/kron_g500-logn16__rchol_par__none__t28__cpu.json": "b9ecc2ea81fa6e8758bc240cd895be1c648b51c8d6798707d052762581c173ec",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/parabolic_fem__rchol__none__t28__cpu.json": "ce83f004c7e2c33505cc440a451953f42247e3d88904e992a87143b7d0c19143",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/parabolic_fem__rchol_par__none__t28__cpu.json": "f4d8eef7a0e050520254c85e6677128f096a7745a477d68965bf030cdc330e0c",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/thermal2__rchol__none__t28__cpu.json": "18808c21c259af8d7d9297b4b7d883395b883d363a7d54b7dbcba2e79355bd47",
+      "files/runs/rchol-node20-10019793/cells/suitesparse/thermal2__rchol_par__none__t28__cpu.json": "f7de23f1fc8c28e16db3acf7ffdbda57e7fb0da850e66679bd466dd19b4ef187"
+    }
+  }
+}

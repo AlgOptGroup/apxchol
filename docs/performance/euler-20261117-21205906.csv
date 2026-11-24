@@ -1,0 +1,6 @@
+matrix,class,n,nnz,solver,config,variant,device,threads,status,setup_s,adapt_s,solve_s,iters,rel_res,cap_s,max_rss_mb
+as-Skitter,social,1696415,23887011,amgcl,,,cpu,2,complete,2.677091,0.113306,54.62177,270,9.830490852817853e-09,,
+as-Skitter,social,1696415,23887011,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,2,complete,3.231761,0.0,1.182206,15,8.301408059610584e-09,,
+as-Skitter,social,1696415,23887011,apxchol_v1,bg+tree[vec_pool_aos],,cpu,2,complete,2.907828,0.0,2.101399,28,7.631303249029539e-09,,
+as-Skitter,social,1696415,23887011,hypre_boomeramg,,,cpu,2,complete,362.1361,0.1139173,7.988229,22,7.369783106396173e-09,,
+as-Skitter,social,1696415,23887011,hypre_boomeramg,,,cpu,4,complete,338.7929,0.06906284,6.546223,23,7.534127407326298e-09,,

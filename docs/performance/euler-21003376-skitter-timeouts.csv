@@ -1,0 +1,8 @@
+matrix,class,n,nnz,solver,config,variant,device,threads,status,setup_s,adapt_s,solve_s,iters,rel_res,cap_s,max_rss_mb
+as-Skitter,social,,,parac,,"portable, shared RHS",cpu,1,timeout,,,,,,,
+as-Skitter,social,,,parac,,"portable, shared RHS",cpu,2,timeout,,,,,,,
+as-Skitter,social,,,parac,,"portable, shared RHS",cpu,4,timeout,,,,,,,
+as-Skitter,social,,,parac,,"portable, shared RHS",cpu,8,timeout,,,,,,,
+as-Skitter,social,,,parac,,"portable, shared RHS",cpu,16,timeout,,,,,,,
+as-Skitter,social,,,parac,,"portable, shared RHS",cpu,32,timeout,,,,,,,
+as-Skitter,social,,,parac,,"portable, shared RHS",cpu,64,timeout,,,,,,,
