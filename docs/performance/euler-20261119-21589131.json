@@ -1,0 +1,42 @@
+{
+  "kind": "records",
+  "campaign": "euler-20261119-21589131",
+  "date": "2026-11-19",
+  "files": [
+    "euler-20261119-21589131.csv"
+  ],
+  "tolerance": 1e-08,
+  "host": "eu-g5-007-4",
+  "profile": "AMD EPYC 7742, portable ParAC with the shared right-hand side",
+  "cost_contract": "The 1,800-second limit covers preparation and all planned repeats for each thread count. None yielded a complete setup or solve time.",
+  "flags": [],
+  "notes": [],
+  "columns": {
+    "setup_s": "Recorded representative setup, when cost-eligible",
+    "solve_s": "Same representative repeat, including original-system verification",
+    "rel_res": "Maximum retained original-system residual, when available",
+    "n": "Empty when not recorded in that outcome",
+    "nnz": "Empty when not recorded in that outcome",
+    "adapt_s": "Measured setup adaptation, when cost-eligible",
+    "cap_s": "Per-repeat cap only, when established; logical-cell deadlines are not copied here",
+    "iters": "Iteration count from the representative run, when recorded",
+    "status": "Raw CSV status. Observed value: timeout.",
+    "max_rss_mb": "Not projected. Retained process RSS is not a matched setup-and-solve memory measurement."
+  },
+  "provenance": {
+    "job": 21589131,
+    "rows": 3,
+    "eligible": 0,
+    "dispositions": {
+      "timeout": 3
+    },
+    "git_sha": "7dee3a3a6dabf6b29251c3c37996989b46e6eea6",
+    "csv_sha256": "a58dfae784e80f06b52ee24557bf7ed20483af42c49fa812572f77220517e847",
+    "source_receipts_sha256": "9d282a11c898ce762f87048ce48ac1e13e62eb0911d9793f784b495e016f5484",
+    "source_cell_sha256": {
+      "runs/21589131-missing-original-parac/t1/cells/as-Skitter__parac_none__t1.json": "4cff93a549edb415b1236dc00aae73b97439feb3144f129f0c30c6e87bc6ef17",
+      "runs/21589131-missing-original-parac/t2/cells/as-Skitter__parac_none__t2.json": "68105b5106e221c9c26ea834dbc208a93b384dc53c66b40c4d1d5277ee4c6f27",
+      "runs/21589131-missing-original-parac/t4/cells/as-Skitter__parac_none__t4.json": "62feccb879e793fe32e29019db5af6d2b1ab149216b4d663c60d529aa1e1f57a"
+    }
+  }
+}

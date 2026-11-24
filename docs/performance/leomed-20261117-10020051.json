@@ -1,0 +1,63 @@
+{
+  "kind": "records",
+  "campaign": "leomed-20261117-10020051",
+  "date": "2026-11-17",
+  "files": [
+    "leomed-20261117-10020051.csv"
+  ],
+  "tolerance": 1e-08,
+  "host": "compute-biomed-20",
+  "profile": "virtualized AMD EPYC Milan, clang 22.1.8",
+  "cost_contract": "One warmup and three retained runs per cell. Setup and solve come from the median-total retained run. Setup includes measured input adaptation and once-charged HYPRE initialization where applicable.",
+  "flags": [],
+  "notes": [
+    "The source receipts digest identifies the terminal file inventory for this allocation."
+  ],
+  "provenance": {
+    "job": 10020051,
+    "rows": 24,
+    "eligible": 24,
+    "dispositions": {
+      "complete": 24
+    },
+    "csv_sha256": "9fb60c1240f4f05ecbbd7283113329d15a2b296d1395822e213182106e3be011",
+    "independent_review_sha256": "c7008764269b69f08738a411c3147b9ee4b631bb471371e1bd16d93be4066a98",
+    "source_cell_sha256": {
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__amgcl_none__t1.json": "e3e3b9bb02aa37843e8f82e21ac38b8df5091c3d42bbb71f6709b5932a6ae691",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__amgcl_none__t16.json": "513e2727128933d283933a437c4152e1be159b03e46fc17d7d9867be8726ace3",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__amgcl_none__t2.json": "fc658e9fb1d491a552510e63fe6e8406cb34497dd17812652210e3b2d37f32f2",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__amgcl_none__t28.json": "406f92f30f2c577c9337c3ad89ca6e253caeb4e8e54e3e3b546569c8cbecba95",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__amgcl_none__t4.json": "20efac2cca124186df9d3a246f3c6b9965d3b063bd1cdcf456b771fbb47341ae",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__amgcl_none__t8.json": "8384a21484dccdfac31b03283003024652937b4799f6652f63528c4175cde514",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__apxchol_v1_bg_trace_cycle_vec_pool_aos__t1.json": "31fb2f43537d74e946ecc472a41cc62ca5868f1d21daa5abbc3f9a6247ab014f",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__apxchol_v1_bg_trace_cycle_vec_pool_aos__t16.json": "5cda30f4b9324612937d5223c62d0acb4e7a3828df335a790ee83cf955fddda2",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__apxchol_v1_bg_trace_cycle_vec_pool_aos__t2.json": "73270714fdd0a0c14d710b4f70e99cf001879aa2b45f6ab09ca5cdc78f1faf2a",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__apxchol_v1_bg_trace_cycle_vec_pool_aos__t28.json": "b3b7a94f197dc00d688d5f2b048d6a3079d1087f7d26bdc1e6e13a4bbd533385",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__apxchol_v1_bg_trace_cycle_vec_pool_aos__t4.json": "7763d0fa5b71da5aa7ba8c38d1a95c92121ca8d4898543e320421ea53a5d75e4",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__apxchol_v1_bg_trace_cycle_vec_pool_aos__t8.json": "f63b3bb3e4de49129a81c2fa8457643ff97c990a696b9deb5f3c8e2b4f8676d0",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__apxchol_v1_bg_tree_vec_pool_aos__t1.json": "8b5f80ed8bcd0ae088b5ff6e8a9a1d654a5bb1c9d4b7b7fed1d7f4fd2664c320",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__apxchol_v1_bg_tree_vec_pool_aos__t16.json": "b224ceb53015750afdf3f7093f6c442f905e7922454f51a961c4d00885f2b5a8",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__apxchol_v1_bg_tree_vec_pool_aos__t2.json": "9abc65f5c9adb2b58a07c3810d1764e9db5876fa64cdbfe83fd86aee5b22be23",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__apxchol_v1_bg_tree_vec_pool_aos__t28.json": "15d6c2835ba3a77d599affced57997fbf183a5b362603f5265cbdb76e9b4f9e4",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__apxchol_v1_bg_tree_vec_pool_aos__t4.json": "d44ca6ad8ac755b30475c6b6500d24aa59774897176f21b49b4eec810278770e",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__apxchol_v1_bg_tree_vec_pool_aos__t8.json": "9fdb11ea7a1827df875d3fa25088e44c0449f0eac60ae2f1ebdf54b1be131231",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__hypre_boomeramg_none__t1.json": "79c5ba9e4a6b8ce29805843c5c183e29eed21d3345c187bcff3f59bb3a54510f",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__hypre_boomeramg_none__t16.json": "d266adfe3c1d3ed81d431432cf1c50d144570c1ae4efbd8959dd5f9ef1dbdbb9",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__hypre_boomeramg_none__t2.json": "b48129ebda7bb1a0917e51efdbbd62378aa1b7bbe2f46d56d0a789d6e9baee4b",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__hypre_boomeramg_none__t28.json": "653490fba15493943e447d9d4a279af0b856b64503e38f933bb9beccf23e6e5c",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__hypre_boomeramg_none__t4.json": "e781a4ed71efdd2718aaf9437f6af6e830875123e4ac97b6b9ab549d1881bfbe",
+      "runs/scaling-leomed-l22-10020051/cells/as-Skitter__hypre_boomeramg_none__t8.json": "aabdaa94f3d2834d9020d16ab7e59f79f29754c81fe1fdf45828d213d7f6a37f"
+    },
+    "git_sha": "7dee3a3a6dabf6b29251c3c37996989b46e6eea6",
+    "arch_flags": "-march=native",
+    "compiler_version": "22.1.8",
+    "date_basis": "Reviewed on this date.",
+    "source_receipts_sha256": "c53f74c4bd59ee391c238efa28bb79af995278b10f1240d228b5b801a355cd57"
+  },
+  "columns": {
+    "status": "Recorded outcomes: complete.",
+    "setup_s": "Setup time in seconds for the median-total repeat.",
+    "solve_s": "Solve time in seconds from the same repeat.",
+    "rel_res": "Largest original-system relative residual among the three retained repeats."
+  }
+}

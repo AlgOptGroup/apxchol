@@ -1,0 +1,379 @@
+matrix,class,n,nnz,solver,config,variant,device,threads,status,setup_s,adapt_s,solve_s,iters,rel_res,cap_s,max_rss_mb
+grid_500,grids,250000,1248000,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,0.04302204,0.0,0.068713,44,9.4591789024536e-09,,200.6
+grid_1000,grids,1000000,4996000,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,0.1270542,0.0,0.1433772,44,8.597632739136822e-09,,564.8
+grid_2000,grids,4000000,19992000,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,0.4735898,0.0,0.4742237,48,6.918022999201031e-09,,2237.4
+grid_3000,grids,9000000,44988000,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,1.068305,0.0,1.056668,51,9.649860076274616e-09,,4769.4
+grid3d_100,grids,1000000,6940000,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,0.2183356,0.0,0.2031075,31,6.280180980778693e-09,,707.6
+grid3d_150,grids,3375000,23490000,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,0.6967359,0.0,0.493552,32,9.685360133756377e-09,,2533.6
+grid3d_200,grids,8000000,55760000,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,1.688626,0.0,1.030593,32,6.5813121486513976e-09,,5619.7
+grid_4000,grids,16000000,79984000,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,1.891725,0.0,1.761352,49,7.727583942791455e-09,,8500.7
+grid3d_250,grids,15625000,109000000,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,3.468309,0.0,1.929017,32,8.653459454153528e-09,,10533.2
+grid_5000,grids,25000000,124980000,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,2.987893,0.0,2.885375,52,8.913887095845973e-09,,10974.6
+parabolic_fem,meshes,525825,3674625,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,0.09144987,0.0,0.09430017,38,9.84246251035312e-09,,360.0
+apache2,meshes,715176,4817870,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,0.140792,0.0,0.1061331,25,7.250616133982024e-09,,404.3
+ecology1,meshes,1000000,4996000,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,0.1287081,0.0,0.1415358,43,9.842147727643745e-09,,449.1
+G3_circuit,meshes,1585478,7660826,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,0.20748,0.0,0.1661244,32,9.846394338580391e-09,,683.4
+thermal2,meshes,1228045,8580313,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,0.2315413,0.0,0.1968148,39,9.311950976751168e-09,,797.8
+com-Amazon,social,334863,2186607,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,0.1065213,0.0,0.134185,34,9.715455821936953e-09,,200.7
+coAuthorsDBLP,social,299067,2254419,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,0.1016708,0.0,0.1174154,27,9.505318676655964e-09,,272.7
+kron_g500-logn16,social,65536,4977678,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,0.2773864,0.0,0.08569779,11,3.6180150064456345e-09,,558.5
+com-Youtube,social,1134890,7110138,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,0.346729,0.0,0.2705289,24,9.516069250124936e-09,,691.0
+coPapersDBLP,social,540486,31031944,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,0.9382103,0.0,0.7483372,39,8.192389563779177e-09,,2877.3
+as-Skitter,social,1696415,23887011,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,0.6347497,0.0,0.5746128,26,9.989305112078383e-09,,2450.4
+com-LiveJournal,social,3997962,73360340,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,4.277758,0.0,3.787895,36,7.529467476023752e-09,,8154.5
+com-Orkut,social,3072441,237442607,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,22.28393,0.0,4.639851,12,4.110496618523947e-09,,20882.5
+iter0010,ipm,524288,7867398,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,0.2270135,0.0,0.1472818,31,9.086980815902626e-09,,569.5
+iter0020,ipm,524288,7867398,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,0.2389216,0.0,0.1510516,29,6.50746039372323e-09,,569.5
+iter0030,ipm,524288,7867398,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,0.2352151,0.0,0.2102701,44,9.020024288882167e-09,,571.2
+iter0040,ipm,524288,7867398,apxchol_v1,bg+tree[vec_pool_aos],,metal,8,complete,0.2303974,0.0,0.1966487,47,9.292043250670835e-09,,569.5
+grid_500,grids,250000,1248000,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,0.05482937,0.0,0.1159807,42,9.711213729292833e-09,,228.4
+grid_500,grids,250000,1248000,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,0.08042733,0.0,0.06716646,22,7.176486405961255e-09,,269.8
+grid_500,grids,250000,1248000,amgcl,,,cpu,8,complete,0.02140412,0.00300625,0.04792704,14,3.6511942492520126e-09,30.0,252.8
+grid_500,grids,250000,1248000,hypre_boomeramg,,,cpu,8,complete,0.07636067,0.003018916,0.06605075,8,3.843455235255899e-09,30.0,285.7
+grid_500,grids,250000,1248000,hypre_boomeramg,cut,,cpu,8,complete,0.07826363,0.002938791,0.06734408,8,3.843455235255899e-09,30.0,287.1
+grid_500,grids,250000,1248000,rchol,,,cpu,8,complete,0.246614,0.0,0.2621783,33,6.968560172028478e-09,30.0,584.1
+grid_500,grids,250000,1248000,rchol_par,,,cpu,8,complete,0.2492996,0.0,0.3580527,41,9.19298572287335e-09,30.0,773.5
+grid_500,grids,250000,1248000,accelerate,,,cpu,8,complete,0.07751054,0.003009875,0.01483017,1,1.473228091473346e-14,30.0,288.3
+grid_500,grids,250000,1248000,ac,,,cpu,8,complete,0.2074136,0.0,0.3198876,38,8.545837708147572e-09,30.0,
+grid_500,grids,250000,1248000,ac2,,,cpu,8,complete,0.4361019,0.0,0.202064,24,9.053353735568672e-09,30.0,
+grid_500,grids,250000,1248000,parac,,"portable, own RHS",cpu,8,complete,0.705975,0.001866,0.257681,54,1.9207257487128447e-09,30.0,419.4
+grid_500,grids,250000,1248000,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+grid_500,grids,250000,1248000,cmg_packed,original-operator,,cpu,1,complete,0.103631834,0.002150542,0.513223874,16,4.992290071977832e-09,30.0,233.7
+grid_1000,grids,1000000,4996000,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,0.1646593,0.0,0.2864127,44,7.687070100943175e-09,,650.1
+grid_1000,grids,1000000,4996000,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,0.2677315,0.0,0.2082529,24,5.421052400849991e-09,,861.5
+grid_1000,grids,1000000,4996000,amgcl,,,cpu,8,complete,0.06946854,0.01083946,0.1192166,12,7.727726257787758e-09,30.0,646.3
+grid_1000,grids,1000000,4996000,hypre_boomeramg,,,cpu,8,complete,0.2681515,0.01080946,0.1348096,7,6.966211841943474e-09,30.0,1083.3
+grid_1000,grids,1000000,4996000,hypre_boomeramg,cut,,cpu,8,complete,0.2719724,0.01056662,0.1369358,7,6.966211841943474e-09,30.0,1083.6
+grid_1000,grids,1000000,4996000,rchol,,,cpu,8,complete,1.008143,0.0,1.42625,42,9.913259488251725e-09,30.0,2231.8
+grid_1000,grids,1000000,4996000,rchol_par,,,cpu,8,complete,0.9462474,0.0,1.998573,55,8.70568676972094e-09,30.0,3778.0
+grid_1000,grids,1000000,4996000,accelerate,,,cpu,8,complete,0.3629702,0.01057375,0.06236633,1,1.1663811401111861e-14,30.0,1002.2
+grid_1000,grids,1000000,4996000,ac,,,cpu,8,complete,1.016659,0.0,1.126785,41,9.156691683839199e-09,30.0,
+grid_1000,grids,1000000,4996000,ac2,,,cpu,8,complete,1.735922,0.0,1.06175,25,7.345529522477585e-09,30.0,
+grid_1000,grids,1000000,4996000,parac,,"portable, own RHS",cpu,8,complete,2.472109,0.005018,1.15505,59,2.001942936766712e-09,30.0,1613.0
+grid_1000,grids,1000000,4996000,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+grid_1000,grids,1000000,4996000,cmg_packed,original-operator,,cpu,1,complete,0.421686333,0.008347083,1.7347391669999999,16,9.082728255239625e-09,30.0,941.8
+grid_2000,grids,4000000,19992000,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,0.6019981,0.0,0.9024935,46,9.769492555463371e-09,,2506.2
+grid_2000,grids,4000000,19992000,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,0.8664379,0.0,0.5900785,25,9.0380440871114e-09,,3076.6
+grid_2000,grids,4000000,19992000,amgcl,,,cpu,8,complete,0.246722,0.03879362,0.4910258,14,3.399709036575104e-09,30.0,2526.5
+grid_2000,grids,4000000,19992000,hypre_boomeramg,,,cpu,8,complete,1.122896,0.039085,0.4317007,7,3.881464383509948e-09,30.0,4378.9
+grid_2000,grids,4000000,19992000,hypre_boomeramg,cut,,cpu,8,complete,1.119513,0.03875733,0.4314082,7,3.881464383509948e-09,30.0,4374.9
+grid_2000,grids,4000000,19992000,rchol,,,cpu,8,complete,4.764402,0.0,8.471214,58,9.40483070485311e-09,30.0,8912.1
+grid_2000,grids,4000000,19992000,rchol_par,,,cpu,8,complete,3.915492,0.0,13.32231,90,9.920156869238868e-09,30.0,12539.9
+grid_2000,grids,4000000,19992000,accelerate,,,cpu,8,complete,1.994261,0.03897529,0.2768782,1,2.9154185195753876e-14,30.0,4367.5
+grid_2000,grids,4000000,19992000,ac,,,cpu,8,complete,3.827786,0.0,5.110144,45,9.337110685136095e-09,30.0,
+grid_2000,grids,4000000,19992000,ac2,,,cpu,8,complete,7.613455,0.0,3.947149,27,5.506376567019401e-09,30.0,
+grid_2000,grids,4000000,19992000,parac,,"portable, own RHS",cpu,8,complete,9.549698,0.018485,5.00845,64,2.5105891644268077e-09,30.0,6392.4
+grid_2000,grids,4000000,19992000,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+grid_2000,grids,4000000,19992000,cmg_packed,original-operator,,cpu,1,complete,1.714831291,0.034214666,9.430003917,14,3.6998910112583165e-09,30.0,3741.4
+grid_3000,grids,9000000,44988000,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,1.248916,0.0,2.064827,50,8.293384479640465e-09,,5407.0
+grid_3000,grids,9000000,44988000,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,1.955026,0.0,1.297887,26,7.68464266452996e-09,,7058.3
+grid_3000,grids,9000000,44988000,amgcl,,,cpu,8,complete,0.5450972,0.08520054,0.9974071,13,5.159929235779575e-09,65.05826,5603.6
+grid_3000,grids,9000000,44988000,hypre_boomeramg,,,cpu,8,complete,2.592125,0.08557729,0.9330772,7,5.003269153363628e-09,65.05826,9533.1
+grid_3000,grids,9000000,44988000,hypre_boomeramg,cut,,cpu,8,complete,2.651316,0.08594592,0.9153415,7,5.003269153363628e-09,65.05826,9538.3
+grid_3000,grids,9000000,44988000,rchol,,,cpu,8,n/a,,,,,,,
+grid_3000,grids,9000000,44988000,rchol_par,,,cpu,8,n/a,,,,,,,
+grid_3000,grids,9000000,44988000,accelerate,,,cpu,8,complete,6.432256,0.0852425,0.678693,1,1.7992000681743735e-13,65.05826,10380.8
+grid_3000,grids,9000000,44988000,ac,,,cpu,8,complete,9.515162,0.0,12.84776,46,9.67185412531309e-09,65.05826,
+grid_3000,grids,9000000,44988000,ac2,,,cpu,8,complete,17.90365,0.0,10.56439,27,5.760269726365501e-09,65.05826,
+grid_3000,grids,9000000,44988000,parac,,"portable, own RHS",cpu,8,complete,21.658795,0.042792,12.168,70,1.8133488517281304e-09,65.05826,14318.6
+grid_3000,grids,9000000,44988000,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+grid_3000,grids,9000000,44988000,cmg_packed,original-operator,,cpu,1,complete,3.983376957,0.0777945,15.557164125999998,15,9.907709139220759e-09,65.05826,8254.4
+grid3d_100,grids,1000000,6940000,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,0.4118779,0.0,0.3383527,31,8.718601398270561e-09,,942.5
+grid3d_100,grids,1000000,6940000,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,0.5590972,0.0,0.2802996,21,4.568890737775619e-09,,1110.0
+grid3d_100,grids,1000000,6940000,amgcl,,,cpu,8,complete,0.1505654,0.01730367,0.1632844,13,4.453605100931896e-09,30.0,949.7
+grid3d_100,grids,1000000,6940000,hypre_boomeramg,,,cpu,8,complete,0.5133101,0.01727862,0.1871956,8,5.293682113475352e-09,30.0,1375.8
+grid3d_100,grids,1000000,6940000,hypre_boomeramg,cut,,cpu,8,complete,0.5052719,0.01732921,0.1846707,8,5.293682113475352e-09,30.0,1271.0
+grid3d_100,grids,1000000,6940000,rchol,,,cpu,8,complete,2.268044,0.0,1.313021,22,8.483705855459928e-09,30.0,3153.8
+grid3d_100,grids,1000000,6940000,rchol_par,,,cpu,8,complete,1.846822,0.0,1.778863,24,9.310467601972361e-09,30.0,4793.5
+grid3d_100,grids,1000000,6940000,accelerate,,,cpu,8,oom,,,,,,30.0,741.7
+grid3d_100,grids,1000000,6940000,ac,,,cpu,8,complete,2.106716,0.0,1.118414,26,7.152562290868301e-09,30.0,
+grid3d_100,grids,1000000,6940000,ac2,,,cpu,8,complete,5.067792,0.0,1.288591,20,6.695807632153595e-09,30.0,
+grid3d_100,grids,1000000,6940000,parac,,"portable, own RHS",cpu,8,complete,3.667317,0.005667,1.15709,36,1.6385019385466836e-09,30.0,2200.6
+grid3d_100,grids,1000000,6940000,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+grid3d_100,grids,1000000,6940000,cmg_packed,original-operator,,cpu,1,complete,0.6345409590000001,0.0112075,4.372822791999999,15,4.988653087253636e-09,30.0,1222.9
+grid3d_150,grids,3375000,23490000,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,1.07133,0.0,0.7365347,30,9.675451932087007e-09,,3019.3
+grid3d_150,grids,3375000,23490000,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,1.5902,0.0,0.598901,20,8.353109370911637e-09,,3789.5
+grid3d_150,grids,3375000,23490000,amgcl,,,cpu,8,complete,0.5623104,0.06860492,0.5246699,13,4.526228334787085e-09,36.15728,3225.5
+grid3d_150,grids,3375000,23490000,hypre_boomeramg,,,cpu,8,complete,2.021989,0.06938483,0.5797102,9,2.5972015018224577e-09,36.15728,4198.6
+grid3d_150,grids,3375000,23490000,hypre_boomeramg,cut,,cpu,8,complete,2.039564,0.06972729,0.5800401,9,2.5972015018224577e-09,36.15728,4583.5
+grid3d_150,grids,3375000,23490000,rchol,,,cpu,8,complete,9.389838,0.0,5.848844,22,8.258738344879178e-09,36.15728,10995.4
+grid3d_150,grids,3375000,23490000,rchol_par,,,cpu,8,complete,6.452936,0.0,7.54686,26,9.741515574534219e-09,36.15728,17688.2
+grid3d_150,grids,3375000,23490000,accelerate,,,cpu,8,oom,,,,,,36.15728,2533.6
+grid3d_150,grids,3375000,23490000,ac,,,cpu,8,complete,7.942654,0.0,4.717736,28,7.881862014100608e-09,36.15728,
+grid3d_150,grids,3375000,23490000,ac2,,,cpu,8,complete,17.5153,0.0,4.737556,20,9.651590512914617e-09,36.15728,
+grid3d_150,grids,3375000,23490000,parac,,"portable, own RHS",cpu,8,complete,12.506338,0.018316,4.4149,39,1.2744223028992601e-09,36.15728,7303.0
+grid3d_150,grids,3375000,23490000,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+grid3d_150,grids,3375000,23490000,cmg_packed,original-operator,,cpu,1,complete,2.1795905,0.038153834,11.912777542,16,5.545627906782386e-09,36.15728,4112.9
+grid3d_200,grids,8000000,55760000,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,2.478645,0.0,1.866797,31,8.729580766566994e-09,,7075.7
+grid3d_200,grids,8000000,55760000,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,3.785754,0.0,1.53451,21,5.6726631769289475e-09,,8692.3
+grid3d_200,grids,8000000,55760000,amgcl,,,cpu,8,n/a,,,,,,,
+grid3d_200,grids,8000000,55760000,hypre_boomeramg,,,cpu,8,n/a,,,,,,,
+grid3d_200,grids,8000000,55760000,hypre_boomeramg,cut,,cpu,8,n/a,,,,,,,
+grid3d_200,grids,8000000,55760000,rchol,,,cpu,8,n/a,,,,,,,
+grid3d_200,grids,8000000,55760000,rchol_par,,,cpu,8,n/a,,,,,,,
+grid3d_200,grids,8000000,55760000,accelerate,,,cpu,8,n/a,,,,,,,
+grid3d_200,grids,8000000,55760000,ac,,,cpu,8,n/a,,,,,,,
+grid3d_200,grids,8000000,55760000,ac2,,,cpu,8,n/a,,,,,,,
+grid3d_200,grids,8000000,55760000,parac,,"portable, own RHS",cpu,8,n/a,,,,,,,
+grid3d_200,grids,8000000,55760000,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+grid3d_200,grids,8000000,55760000,cmg_packed,original-operator,,cpu,1,n/a,,,,,,,
+grid_4000,grids,16000000,79984000,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,2.248837,0.0,3.536529,50,9.173334344449089e-09,,9680.9
+grid_4000,grids,16000000,79984000,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,3.304545,0.0,2.356849,27,7.589561184774202e-09,,12139.9
+grid_4000,grids,16000000,79984000,amgcl,,,cpu,8,n/a,,,,,,,
+grid_4000,grids,16000000,79984000,hypre_boomeramg,,,cpu,8,n/a,,,,,,,
+grid_4000,grids,16000000,79984000,hypre_boomeramg,cut,,cpu,8,n/a,,,,,,,
+grid_4000,grids,16000000,79984000,rchol,,,cpu,8,n/a,,,,,,,
+grid_4000,grids,16000000,79984000,rchol_par,,,cpu,8,n/a,,,,,,,
+grid_4000,grids,16000000,79984000,accelerate,,,cpu,8,n/a,,,,,,,
+grid_4000,grids,16000000,79984000,ac,,,cpu,8,n/a,,,,,,,
+grid_4000,grids,16000000,79984000,ac2,,,cpu,8,n/a,,,,,,,
+grid_4000,grids,16000000,79984000,parac,,"portable, own RHS",cpu,8,n/a,,,,,,,
+grid_4000,grids,16000000,79984000,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+grid_4000,grids,16000000,79984000,cmg_packed,original-operator,,cpu,1,n/a,,,,,,,
+grid3d_250,grids,15625000,109000000,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,4.899887,0.0,4.204961,33,7.65815294271451e-09,,13544.1
+grid3d_250,grids,15625000,109000000,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,7.742072,0.0,3.271416,21,5.4748324005301456e-09,,16961.3
+grid3d_250,grids,15625000,109000000,amgcl,,,cpu,8,n/a,,,,,,,
+grid3d_250,grids,15625000,109000000,hypre_boomeramg,,,cpu,8,n/a,,,,,,,
+grid3d_250,grids,15625000,109000000,hypre_boomeramg,cut,,cpu,8,n/a,,,,,,,
+grid3d_250,grids,15625000,109000000,rchol,,,cpu,8,n/a,,,,,,,
+grid3d_250,grids,15625000,109000000,rchol_par,,,cpu,8,n/a,,,,,,,
+grid3d_250,grids,15625000,109000000,accelerate,,,cpu,8,n/a,,,,,,,
+grid3d_250,grids,15625000,109000000,ac,,,cpu,8,n/a,,,,,,,
+grid3d_250,grids,15625000,109000000,ac2,,,cpu,8,n/a,,,,,,,
+grid3d_250,grids,15625000,109000000,parac,,"portable, own RHS",cpu,8,n/a,,,,,,,
+grid3d_250,grids,15625000,109000000,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+grid3d_250,grids,15625000,109000000,cmg_packed,original-operator,,cpu,1,n/a,,,,,,,
+grid_5000,grids,25000000,124980000,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,3.657708,0.0,5.827519,53,8.704985299014523e-09,,14819.6
+grid_5000,grids,25000000,124980000,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,5.348493,0.0,3.608358,27,9.823569730887277e-09,,18774.3
+grid_5000,grids,25000000,124980000,amgcl,,,cpu,8,n/a,,,,,,,
+grid_5000,grids,25000000,124980000,hypre_boomeramg,,,cpu,8,n/a,,,,,,,
+grid_5000,grids,25000000,124980000,hypre_boomeramg,cut,,cpu,8,n/a,,,,,,,
+grid_5000,grids,25000000,124980000,rchol,,,cpu,8,n/a,,,,,,,
+grid_5000,grids,25000000,124980000,rchol_par,,,cpu,8,n/a,,,,,,,
+grid_5000,grids,25000000,124980000,accelerate,,,cpu,8,n/a,,,,,,,
+grid_5000,grids,25000000,124980000,ac,,,cpu,8,n/a,,,,,,,
+grid_5000,grids,25000000,124980000,ac2,,,cpu,8,n/a,,,,,,,
+grid_5000,grids,25000000,124980000,parac,,"portable, own RHS",cpu,8,n/a,,,,,,,
+grid_5000,grids,25000000,124980000,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+grid_5000,grids,25000000,124980000,cmg_packed,original-operator,,cpu,1,n/a,,,,,,,
+parabolic_fem,meshes,525825,3674625,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,0.1440885,0.0,0.1923127,40,7.442363395218015e-09,,499.7
+parabolic_fem,meshes,525825,3674625,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,0.2472389,0.0,0.1461827,22,8.245936669053298e-09,,574.4
+parabolic_fem,meshes,525825,3674625,amgcl,,,cpu,8,complete,0.04764213,0.0,0.1396045,20,6.34630178757155e-09,30.0,433.9
+parabolic_fem,meshes,525825,3674625,hypre_boomeramg,,,cpu,8,complete,0.2164024,0.0,0.1079069,8,1.974798726671479e-09,30.0,674.2
+parabolic_fem,meshes,525825,3674625,hypre_boomeramg,cut,,cpu,8,complete,0.221721,0.0,0.1075997,8,1.974798726671479e-09,30.0,675.3
+parabolic_fem,meshes,525825,3674625,rchol,,,cpu,8,complete,0.8392677,0.0,0.8522934,48,9.659755000439e-09,30.0,1287.0
+parabolic_fem,meshes,525825,3674625,rchol_par,,,cpu,8,complete,0.5879023,0.0,0.7895094,51,9.537790923752157e-09,30.0,1870.3
+parabolic_fem,meshes,525825,3674625,accelerate,,,cpu,8,complete,0.3015138,0.0,0.04790058,1,2.1414168002229403e-16,30.0,656.9
+parabolic_fem,meshes,525825,3674625,ac,,,cpu,8,n/a,,,,,,,
+parabolic_fem,meshes,525825,3674625,ac2,,,cpu,8,n/a,,,,,,,
+parabolic_fem,meshes,525825,3674625,parac,,"portable, own RHS",cpu,8,n/a,,,,,,,
+parabolic_fem,meshes,525825,3674625,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+parabolic_fem,meshes,525825,3674625,cmg_packed,original-operator,,cpu,1,failed,,,,,,30.0,
+apache2,meshes,715176,4817870,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,0.2174248,0.0,0.1718543,25,9.374551799692809e-09,,736.3
+apache2,meshes,715176,4817870,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,0.2840825,0.0,0.1493967,19,7.39621516414976e-09,,797.6
+apache2,meshes,715176,4817870,amgcl,,,cpu,8,complete,0.1252471,0.0,0.2774119,18,5.576253633979079e-09,30.0,763.1
+apache2,meshes,715176,4817870,hypre_boomeramg,,,cpu,8,complete,0.2577571,0.0,0.1317966,7,9.151749438853536e-09,30.0,905.8
+apache2,meshes,715176,4817870,hypre_boomeramg,cut,,cpu,8,complete,0.259689,0.0,0.1273988,7,9.151749438853536e-09,30.0,912.2
+apache2,meshes,715176,4817870,rchol,,,cpu,8,complete,1.203079,0.0,0.8306285,25,9.666058377969197e-09,30.0,2005.4
+apache2,meshes,715176,4817870,rchol_par,,,cpu,8,complete,1.008988,0.0,1.026603,25,9.532215626969274e-09,30.0,3377.7
+apache2,meshes,715176,4817870,accelerate,,,cpu,8,complete,1.401782,0.0,0.1789084,1,1.9488658779576895e-16,30.0,2016.2
+apache2,meshes,715176,4817870,ac,,,cpu,8,not_converged,1.191892,0.0,8.21294,309,6.500567218291766e-06,30.0,
+apache2,meshes,715176,4817870,ac2,,,cpu,8,not_converged,2.41976,0.0,6.62077,212,6.500567218288534e-06,30.0,
+apache2,meshes,715176,4817870,parac,,"portable, own RHS",cpu,8,n/a,,,,,,,
+apache2,meshes,715176,4817870,parac_physics,,"portable, own RHS",cpu,8,complete,2.910415,0.0,0.812597,41,4.297039704193907e-09,30.0,1876.5
+apache2,meshes,715176,4817870,cmg_packed,original-operator,,cpu,1,complete,0.670689334,0.007973417,2.746975999,17,4.561288864960426e-09,30.0,1018.9
+ecology1,meshes,1000000,4996000,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,0.1659651,0.0,0.2768888,44,8.720397603771711e-09,,715.5
+ecology1,meshes,1000000,4996000,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,0.2741181,0.0,0.2109033,24,6.2418869085433464e-09,,879.2
+ecology1,meshes,1000000,4996000,amgcl,,,cpu,8,complete,0.07291604,0.01047783,0.1193794,12,5.789564063364724e-09,30.0,689.3
+ecology1,meshes,1000000,4996000,hypre_boomeramg,,,cpu,8,complete,0.2755485,0.01048833,0.1357846,7,6.522104716626373e-09,30.0,1057.5
+ecology1,meshes,1000000,4996000,hypre_boomeramg,cut,,cpu,8,complete,0.2784247,0.01026654,0.1435086,7,6.522104716626373e-09,30.0,1051.8
+ecology1,meshes,1000000,4996000,rchol,,,cpu,8,complete,1.001065,0.0,1.196966,35,9.006548666408423e-09,30.0,2216.5
+ecology1,meshes,1000000,4996000,rchol_par,,,cpu,8,complete,0.9276477,0.0,1.830022,50,9.127335647058494e-09,30.0,3238.2
+ecology1,meshes,1000000,4996000,accelerate,,,cpu,8,complete,0.3617392,0.01047879,0.06246717,1,3.3478937983564728e-15,30.0,984.7
+ecology1,meshes,1000000,4996000,ac,,,cpu,8,complete,1.017481,0.0,1.124184,41,9.503985205055841e-09,30.0,
+ecology1,meshes,1000000,4996000,ac2,,,cpu,8,complete,1.863358,0.0,0.9246432,25,6.627865331743085e-09,30.0,
+ecology1,meshes,1000000,4996000,parac,,"portable, own RHS",cpu,8,complete,1.360566,0.005558,1.08926,56,2.8647451252836127e-09,30.0,1652.4
+ecology1,meshes,1000000,4996000,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+ecology1,meshes,1000000,4996000,cmg_packed,original-operator,,cpu,1,complete,0.42461604199999997,0.008354458,1.783428374,17,8.311843014977466e-09,30.0,942.5
+G3_circuit,meshes,1585478,7660826,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,0.3917091,0.0,0.4026907,33,6.7220067468846346e-09,,1120.8
+G3_circuit,meshes,1585478,7660826,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,0.5125606,0.0,0.2838328,19,8.115885951351834e-09,,1283.7
+G3_circuit,meshes,1585478,7660826,amgcl,,,cpu,8,complete,0.237596,0.0,0.3281878,17,6.092191766092002e-09,30.0,1269.5
+G3_circuit,meshes,1585478,7660826,hypre_boomeramg,,,cpu,8,complete,0.576914,0.0,0.2602745,8,8.246066365075977e-09,30.0,1657.2
+G3_circuit,meshes,1585478,7660826,hypre_boomeramg,cut,,cpu,8,complete,0.5741637,0.0,0.2632813,8,8.246066365075977e-09,30.0,1659.8
+G3_circuit,meshes,1585478,7660826,rchol,,,cpu,8,complete,2.07357,0.0,2.217796,36,9.148741177548245e-09,30.0,3501.4
+G3_circuit,meshes,1585478,7660826,rchol_par,,,cpu,8,complete,1.625121,0.0,2.805214,44,9.678502732680224e-09,30.0,5425.8
+G3_circuit,meshes,1585478,7660826,accelerate,,,cpu,8,complete,1.980446,0.0,0.208261,1,2.355018137263888e-16,30.0,2466.8
+G3_circuit,meshes,1585478,7660826,ac,,,cpu,8,not_converged,1.874998,0.0,21.59795,484,1.3960899908655955e-07,30.0,
+G3_circuit,meshes,1585478,7660826,ac2,,,cpu,8,not_converged,3.450233,0.0,17.28741,317,1.3960900721978632e-07,30.0,
+G3_circuit,meshes,1585478,7660826,parac,,"portable, own RHS",cpu,8,n/a,,,,,,,
+G3_circuit,meshes,1585478,7660826,parac_physics,,"portable, own RHS",cpu,8,complete,4.993912,0.0,2.29124,62,3.999065194952795e-09,30.0,2969.1
+G3_circuit,meshes,1585478,7660826,cmg_packed,original-operator,,cpu,1,complete,5.216072082999999,0.013421416,5.0873415,26,6.75440038444888e-09,30.0,1627.2
+thermal2,meshes,1228045,8580313,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,0.341938,0.0,0.3604529,38,9.384449286500326e-09,,1113.6
+thermal2,meshes,1228045,8580313,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,0.4622312,0.0,0.2815628,26,5.328633373003634e-09,,1101.4
+thermal2,meshes,1228045,8580313,amgcl,,,cpu,8,complete,0.1953533,0.0,0.3066587,20,8.064002541486545e-09,30.0,1000.8
+thermal2,meshes,1228045,8580313,hypre_boomeramg,,,cpu,8,complete,0.6399795,0.0,0.2108976,9,3.833004387259983e-09,30.0,1425.5
+thermal2,meshes,1228045,8580313,hypre_boomeramg,cut,,cpu,8,complete,0.6406655,0.0,0.2175724,9,3.833004387259983e-09,30.0,1437.8
+thermal2,meshes,1228045,8580313,rchol,,,cpu,8,failed,,,,,,30.0,2453.6
+thermal2,meshes,1228045,8580313,rchol_par,,,cpu,8,failed,,,,,,30.0,2867.6
+thermal2,meshes,1228045,8580313,accelerate,,,cpu,8,complete,1.11821,0.0,0.1058446,1,2.0813412347493795e-16,30.0,1337.7
+thermal2,meshes,1228045,8580313,ac,,,cpu,8,n/a,,,,,,,
+thermal2,meshes,1228045,8580313,ac2,,,cpu,8,n/a,,,,,,,
+thermal2,meshes,1228045,8580313,parac,,"portable, own RHS",cpu,8,n/a,,,,,,,
+thermal2,meshes,1228045,8580313,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+thermal2,meshes,1228045,8580313,cmg_packed,original-operator,,cpu,1,failed,,,,,,30.0,
+com-Amazon,social,334863,2186607,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,0.1453589,0.0,0.1583236,34,7.4047605418981635e-09,,253.2
+com-Amazon,social,334863,2186607,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,0.2040702,0.0,0.09425596,18,5.439032390601505e-09,,288.1
+com-Amazon,social,334863,2186607,amgcl,,,cpu,8,complete,0.4407058,0.006593292,0.9717579,75,8.735209379850908e-09,30.0,463.4
+com-Amazon,social,334863,2186607,hypre_boomeramg,,,cpu,8,complete,0.4667342,0.006639875,0.1593485,13,8.033026363123438e-09,30.0,481.1
+com-Amazon,social,334863,2186607,hypre_boomeramg,cut,,cpu,8,complete,0.4090542,0.006578625,0.6048251,49,5.666955713510853e-09,30.0,475.3
+com-Amazon,social,334863,2186607,rchol,,,cpu,8,complete,0.8871107,0.0,1.382105,97,9.526163413078772e-09,30.0,901.2
+com-Amazon,social,334863,2186607,rchol_par,,,cpu,8,complete,0.9173433,0.0,0.9953192,75,9.864280927467313e-09,30.0,1070.8
+com-Amazon,social,334863,2186607,accelerate,,,cpu,8,complete,16.19937,0.006718125,0.3338423,1,7.992191836020626e-13,30.0,3465.5
+com-Amazon,social,334863,2186607,ac,,,cpu,8,complete,0.545935,0.0,0.4158185,29,5.818022563746694e-09,30.0,
+com-Amazon,social,334863,2186607,ac2,,,cpu,8,complete,0.9837678,0.0,0.3609649,25,5.661206914519718e-09,30.0,
+com-Amazon,social,334863,2186607,parac,,"portable, own RHS",cpu,8,complete,1.066677,0.005927,0.340843,33,1.754984199662965e-09,30.0,679.7
+com-Amazon,social,334863,2186607,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+com-Amazon,social,334863,2186607,cmg_packed,original-operator,,cpu,1,complete,0.384985333,0.008548667,1.180243959,28,8.880790648302719e-09,30.0,386.5
+coAuthorsDBLP,social,299067,2254419,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,0.1968758,0.0,0.1327677,26,7.286550070153493e-09,,268.7
+coAuthorsDBLP,social,299067,2254419,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,0.2057036,0.0,0.07527325,15,8.835742378210059e-09,,270.1
+coAuthorsDBLP,social,299067,2254419,amgcl,,,cpu,8,complete,0.9838494,0.004360541,1.555349,102,9.110365823902442e-09,30.0,582.6
+coAuthorsDBLP,social,299067,2254419,hypre_boomeramg,,,cpu,8,complete,1.013653,0.00424325,0.3305812,15,6.675062445671184e-09,30.0,583.5
+coAuthorsDBLP,social,299067,2254419,hypre_boomeramg,cut,,cpu,8,complete,0.6318235,0.00426,0.6958393,32,8.251795488674944e-09,30.0,563.9
+coAuthorsDBLP,social,299067,2254419,rchol,,,cpu,8,complete,0.781893,0.0,1.51928,104,9.970734910530934e-09,30.0,915.3
+coAuthorsDBLP,social,299067,2254419,rchol_par,,,cpu,8,complete,0.978331,0.0,1.341057,99,9.4812234074865e-09,30.0,1063.3
+coAuthorsDBLP,social,299067,2254419,accelerate,,,cpu,8,complete,15.72979,0.004452209,0.2908912,1,2.1941652624232265e-14,30.0,2977.1
+coAuthorsDBLP,social,299067,2254419,ac,,,cpu,8,complete,0.5079111,0.0,0.2849097,20,6.6125138361123215e-09,30.0,
+coAuthorsDBLP,social,299067,2254419,ac2,,,cpu,8,complete,0.940469,0.0,0.2783735,17,7.2756230837481665e-09,30.0,
+coAuthorsDBLP,social,299067,2254419,parac,,"portable, own RHS",cpu,8,complete,1.011174,0.003507,0.291447,27,2.394641800228044e-09,30.0,693.2
+coAuthorsDBLP,social,299067,2254419,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+coAuthorsDBLP,social,299067,2254419,cmg_packed,original-operator,,cpu,1,complete,0.35365837499999997,0.006489625,1.477317958,38,9.122635704377127e-09,30.0,412.0
+kron_g500-logn16,social,65536,4977678,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,0.2810605,0.0,0.06257437,14,8.784884270814175e-09,,559.9
+kron_g500-logn16,social,65536,4977678,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,0.2774182,0.0,0.05649587,13,1.8030173091433176e-09,,558.5
+kron_g500-logn16,social,65536,4977678,amgcl,,,cpu,8,complete,0.03596146,0.00462575,0.08580412,16,6.113049049302385e-09,30.0,558.5
+kron_g500-logn16,social,65536,4977678,hypre_boomeramg,,,cpu,8,complete,0.927471,0.004641292,0.046094,6,6.241476612516251e-09,30.0,558.6
+kron_g500-logn16,social,65536,4977678,hypre_boomeramg,cut,,cpu,8,complete,0.5976222,0.004577209,0.1560799,15,1.3948272569091489e-09,30.0,590.7
+kron_g500-logn16,social,65536,4977678,rchol,,,cpu,8,complete,1.612079,0.0,0.7876765,40,7.87460498210539e-09,30.0,1344.1
+kron_g500-logn16,social,65536,4977678,rchol_par,,,cpu,8,complete,1.703404,0.0,0.3822705,25,9.477801722646197e-09,30.0,1564.2
+kron_g500-logn16,social,65536,4977678,accelerate,,,cpu,8,complete,5.71499,0.004659584,0.1335231,1,1.1418680110616599e-14,30.0,1684.0
+kron_g500-logn16,social,65536,4977678,ac,,,cpu,8,complete,1.866224,0.0,0.1486071,9,5.384465200770277e-09,30.0,
+kron_g500-logn16,social,65536,4977678,ac2,,,cpu,8,complete,2.654972,0.0,0.2253858,8,9.151098684479336e-09,30.0,
+kron_g500-logn16,social,65536,4977678,parac,,"portable, own RHS",cpu,8,complete,3.070838,0.723018,0.202804,13,2.2791427533922744e-09,30.0,1410.1
+kron_g500-logn16,social,65536,4977678,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+kron_g500-logn16,social,65536,4977678,cmg_packed,original-operator,,cpu,1,complete,2.054653333,0.120134208,1.0764209580000001,12,3.0334208175002097e-09,30.0,1213.7
+com-Youtube,social,1134890,7110138,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,0.3950173,0.0,0.2372478,22,5.995815374801929e-09,,792.5
+com-Youtube,social,1134890,7110138,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,0.4936294,0.0,0.1772128,14,4.60646875845323e-09,,835.7
+com-Youtube,social,1134890,7110138,amgcl,,,cpu,8,complete,6.757217,0.01084654,5.162745,71,7.78971345866779e-09,30.0,2440.0
+com-Youtube,social,1134890,7110138,hypre_boomeramg,,,cpu,8,exceeded_cap,,,,,,30.0,
+com-Youtube,social,1134890,7110138,hypre_boomeramg,cut,,cpu,8,complete,0.9758828,0.01215971,4.403735,108,9.784975945499703e-09,30.0,1371.7
+com-Youtube,social,1134890,7110138,rchol,,,cpu,8,exceeded_cap,,,,,,30.0,
+com-Youtube,social,1134890,7110138,rchol_par,,,cpu,8,not_converged,4.363886,0.0,23.99151,500,1.2226207091703914e-07,30.0,4182.9
+com-Youtube,social,1134890,7110138,accelerate,,,cpu,8,exceeded_cap,,,,,,30.0,
+com-Youtube,social,1134890,7110138,ac,,,cpu,8,complete,1.9818,0.0,0.7573193,16,6.326352259296492e-09,30.0,
+com-Youtube,social,1134890,7110138,ac2,,,cpu,8,complete,3.525513,0.0,0.7768359,13,4.703644181610016e-09,30.0,
+com-Youtube,social,1134890,7110138,parac,,"portable, own RHS",cpu,8,complete,8.002081,0.009008,0.901355,22,1.3862183804160013e-09,30.0,2188.7
+com-Youtube,social,1134890,7110138,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+com-Youtube,social,1134890,7110138,cmg_packed,original-operator,,cpu,1,complete,2.268006501,0.020123459,11.618341666,67,9.315437546921186e-09,30.0,1374.8
+coPapersDBLP,social,540486,31031944,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,1.740055,0.0,0.9544793,40,6.814931366570783e-09,,2881.4
+coPapersDBLP,social,540486,31031944,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,1.710807,0.0,0.529087,21,4.324779183850919e-09,,2881.4
+coPapersDBLP,social,540486,31031944,amgcl,,,cpu,8,complete,0.4245206,0.02292633,6.810262,174,9.261306615931902e-09,44.79788,2877.3
+coPapersDBLP,social,540486,31031944,hypre_boomeramg,,,cpu,8,complete,11.32253,0.02269913,1.028884,21,6.1319981302780465e-09,44.79788,3170.9
+coPapersDBLP,social,540486,31031944,hypre_boomeramg,cut,,cpu,8,complete,10.35496,0.02249033,1.649024,34,7.443582616989022e-09,44.79788,3167.1
+coPapersDBLP,social,540486,31031944,rchol,,,cpu,8,complete,6.531121,0.0,6.213464,50,9.624342252865114e-09,44.79788,7964.5
+coPapersDBLP,social,540486,31031944,rchol_par,,,cpu,8,complete,6.537508,0.0,6.52352,54,9.301533206657283e-09,44.79788,9544.9
+coPapersDBLP,social,540486,31031944,accelerate,,,cpu,8,oom,,,,,,44.79788,2877.4
+coPapersDBLP,social,540486,31031944,ac,,,cpu,8,complete,7.630557,0.0,2.06139,20,7.762274669542957e-09,44.79788,
+coPapersDBLP,social,540486,31031944,ac2,,,cpu,8,complete,16.84648,0.0,1.868067,16,4.436388721328626e-09,44.79788,
+coPapersDBLP,social,540486,31031944,parac,,"portable, own RHS",cpu,8,complete,8.705044,0.014976,2.46545,25,1.8982086001622843e-09,44.79788,8849.3
+coPapersDBLP,social,540486,31031944,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+coPapersDBLP,social,540486,31031944,cmg_packed,original-operator,,cpu,1,complete,7.776559958999999,0.057895709,26.608266,55,9.018254901637545e-09,44.79788,6610.1
+as-Skitter,social,1696415,23887011,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,0.9536611,0.0,0.5879339,25,6.209783630338671e-09,,2450.6
+as-Skitter,social,1696415,23887011,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,1.063376,0.0,0.3848433,15,5.497996081727139e-09,,2450.6
+as-Skitter,social,1696415,23887011,amgcl,,,cpu,8,complete,0.877597,0.02484988,16.12208,271,8.575026548720363e-09,30.0,2454.5
+as-Skitter,social,1696415,23887011,hypre_boomeramg,,,cpu,8,exceeded_cap,,,,,,30.0,
+as-Skitter,social,1696415,23887011,hypre_boomeramg,cut,,cpu,8,complete,2.973287,0.02392392,13.82091,212,9.844308184724538e-09,30.0,3239.4
+as-Skitter,social,1696415,23887011,rchol,,,cpu,8,exceeded_cap,,,,,,30.0,
+as-Skitter,social,1696415,23887011,rchol_par,,,cpu,8,failed,,,,,,30.0,5301.1
+as-Skitter,social,1696415,23887011,accelerate,,,cpu,8,exceeded_cap,,,,,,30.0,
+as-Skitter,social,1696415,23887011,ac,,,cpu,8,complete,6.271002,0.0,1.831921,18,7.771874132848733e-09,30.0,
+as-Skitter,social,1696415,23887011,ac2,,,cpu,8,complete,15.61076,0.0,1.555814,14,7.191539692678192e-09,30.0,
+as-Skitter,social,1696415,23887011,parac,,"portable, own RHS",cpu,8,exceeded_cap,,,,,,30.0,
+as-Skitter,social,1696415,23887011,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+as-Skitter,social,1696415,23887011,cmg_packed,original-operator,,cpu,1,exceeded_cap,,,,,,30.0,
+com-LiveJournal,social,3997962,73360340,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,6.071393,0.0,3.071106,30,9.026415165310018e-09,,9248.2
+com-LiveJournal,social,3997962,73360340,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,6.850382,0.0,2.363407,21,5.99690100287171e-09,,9284.3
+com-LiveJournal,social,3997962,73360340,amgcl,,,cpu,8,n/a,,,,,,,
+com-LiveJournal,social,3997962,73360340,hypre_boomeramg,,,cpu,8,n/a,,,,,,,
+com-LiveJournal,social,3997962,73360340,hypre_boomeramg,cut,,cpu,8,n/a,,,,,,,
+com-LiveJournal,social,3997962,73360340,rchol,,,cpu,8,n/a,,,,,,,
+com-LiveJournal,social,3997962,73360340,rchol_par,,,cpu,8,n/a,,,,,,,
+com-LiveJournal,social,3997962,73360340,accelerate,,,cpu,8,n/a,,,,,,,
+com-LiveJournal,social,3997962,73360340,ac,,,cpu,8,n/a,,,,,,,
+com-LiveJournal,social,3997962,73360340,ac2,,,cpu,8,n/a,,,,,,,
+com-LiveJournal,social,3997962,73360340,parac,,"portable, own RHS",cpu,8,n/a,,,,,,,
+com-LiveJournal,social,3997962,73360340,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+com-LiveJournal,social,3997962,73360340,cmg_packed,original-operator,,cpu,1,n/a,,,,,,,
+com-Orkut,social,3072441,237442607,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,24.18227,0.0,10.64004,28,9.474678530888902e-09,,26572.2
+com-Orkut,social,3072441,237442607,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,26.51813,0.0,5.979593,14,8.808198975887641e-09,,27418.7
+com-Orkut,social,3072441,237442607,amgcl,,,cpu,8,n/a,,,,,,,
+com-Orkut,social,3072441,237442607,hypre_boomeramg,,,cpu,8,n/a,,,,,,,
+com-Orkut,social,3072441,237442607,hypre_boomeramg,cut,,cpu,8,n/a,,,,,,,
+com-Orkut,social,3072441,237442607,rchol,,,cpu,8,n/a,,,,,,,
+com-Orkut,social,3072441,237442607,rchol_par,,,cpu,8,n/a,,,,,,,
+com-Orkut,social,3072441,237442607,accelerate,,,cpu,8,n/a,,,,,,,
+com-Orkut,social,3072441,237442607,ac,,,cpu,8,n/a,,,,,,,
+com-Orkut,social,3072441,237442607,ac2,,,cpu,8,n/a,,,,,,,
+com-Orkut,social,3072441,237442607,parac,,"portable, own RHS",cpu,8,n/a,,,,,,,
+com-Orkut,social,3072441,237442607,parac_physics,,"portable, own RHS",cpu,8,n/a,,,,,,,
+com-Orkut,social,3072441,237442607,cmg_packed,original-operator,,cpu,1,n/a,,,,,,,
+iter0010,ipm,524288,7867398,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,0.4444937,0.0,0.2607805,31,5.911081931412485e-09,,966.1
+iter0010,ipm,524288,7867398,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,0.5040731,0.0,0.1720198,19,8.023831560533602e-09,,992.5
+iter0010,ipm,524288,7867398,amgcl,,,cpu,8,complete,0.1087332,0.0,0.2570601,18,9.952100864916742e-09,30.0,887.5
+iter0010,ipm,524288,7867398,hypre_boomeramg,,,cpu,8,complete,0.4357542,0.0,0.4351059,10,6.965035645525997e-09,30.0,1385.0
+iter0010,ipm,524288,7867398,hypre_boomeramg,cut,,cpu,8,complete,0.2507706,0.0,0.5952597,22,3.308914693680055e-09,30.0,970.0
+iter0010,ipm,524288,7867398,rchol,,,cpu,8,complete,1.591498,0.0,1.245428,35,9.018027802200587e-09,30.0,2375.9
+iter0010,ipm,524288,7867398,rchol_par,,,cpu,8,complete,1.085288,0.0,1.394549,31,8.269336527942824e-09,30.0,3223.8
+iter0010,ipm,524288,7867398,accelerate,,,cpu,8,complete,0.8549927,0.0,0.1355838,1,2.774636999754191e-16,30.0,1656.1
+iter0010,ipm,524288,7867398,ac,,,cpu,8,complete,2.756149,0.0,1.125355,31,7.672454250009216e-09,30.0,
+iter0010,ipm,524288,7867398,ac2,,,cpu,8,complete,5.005436,0.0,0.7670169,18,9.657669491741057e-09,30.0,
+iter0010,ipm,524288,7867398,parac,,"portable, own RHS",cpu,8,n/a,,,,,,,
+iter0010,ipm,524288,7867398,parac_physics,,"portable, own RHS",cpu,8,complete,4.676855,0.0,1.12734,37,9.015848912515388e-09,30.0,2771.5
+iter0010,ipm,524288,7867398,cmg_packed,original-operator,,cpu,1,complete,1.6827667499999999,0.015252792,3.9295831249999997,58,9.863717725080914e-09,30.0,1621.8
+iter0020,ipm,524288,7867398,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,0.4467513,0.0,0.2418831,29,9.730158934217156e-09,,983.5
+iter0020,ipm,524288,7867398,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,0.5809639,0.0,0.1976556,20,8.076218808630939e-09,,1030.5
+iter0020,ipm,524288,7867398,amgcl,,,cpu,8,complete,7.069269,0.0,0.3603088,19,8.062504804051855e-09,30.0,867.9
+iter0020,ipm,524288,7867398,hypre_boomeramg,,,cpu,8,complete,0.4184885,0.0,0.2937097,10,2.537646702495799e-09,30.0,1058.3
+iter0020,ipm,524288,7867398,hypre_boomeramg,cut,,cpu,8,complete,0.3101976,0.0,0.7523165,38,5.9351559656958216e-09,30.0,949.2
+iter0020,ipm,524288,7867398,rchol,,,cpu,8,complete,1.659387,0.0,1.206307,33,9.382505840462057e-09,30.0,2405.1
+iter0020,ipm,524288,7867398,rchol_par,,,cpu,8,complete,1.155847,0.0,1.46564,33,9.299779558844803e-09,30.0,3200.4
+iter0020,ipm,524288,7867398,accelerate,,,cpu,8,complete,0.8542211,0.0,0.1357438,1,3.092851126130291e-16,30.0,1656.0
+iter0020,ipm,524288,7867398,ac,,,cpu,8,complete,2.917578,0.0,1.079086,29,6.0360195808683405e-09,30.0,
+iter0020,ipm,524288,7867398,ac2,,,cpu,8,complete,5.429095,0.0,0.8653553,19,8.48824007486535e-09,30.0,
+iter0020,ipm,524288,7867398,parac,,"portable, own RHS",cpu,8,n/a,,,,,,,
+iter0020,ipm,524288,7867398,parac_physics,,"portable, own RHS",cpu,8,complete,4.852269,0.0,1.18686,38,3.5815919980863078e-09,30.0,2777.0
+iter0020,ipm,524288,7867398,cmg_packed,original-operator,,cpu,1,complete,1.5664174590000002,0.015226792,3.1264069580000005,26,8.371406349250732e-09,30.0,1607.7
+iter0030,ipm,524288,7867398,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,0.4696396,0.0,0.3914234,42,9.792942732244808e-09,,973.6
+iter0030,ipm,524288,7867398,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,0.5022883,0.0,0.2356498,25,7.247002518179535e-09,,1041.0
+iter0030,ipm,524288,7867398,amgcl,,,cpu,8,complete,6.564373,0.0,0.3351176,19,5.664040003486493e-09,30.0,837.0
+iter0030,ipm,524288,7867398,hypre_boomeramg,,,cpu,8,complete,0.4217549,0.0,0.2937013,10,2.395965120660982e-09,30.0,1054.0
+iter0030,ipm,524288,7867398,hypre_boomeramg,cut,,cpu,8,complete,0.319049,0.0,0.6729465,32,5.565991331883916e-09,30.0,944.8
+iter0030,ipm,524288,7867398,rchol,,,cpu,8,complete,1.702157,0.0,1.767179,48,9.572767252475871e-09,30.0,2411.5
+iter0030,ipm,524288,7867398,rchol_par,,,cpu,8,complete,1.078094,0.0,1.928572,43,8.783388298287885e-09,30.0,3224.4
+iter0030,ipm,524288,7867398,accelerate,,,cpu,8,complete,0.8512418,0.0,0.1361881,1,3.125297181207857e-16,30.0,1656.1
+iter0030,ipm,524288,7867398,ac,,,cpu,8,complete,2.912814,0.0,1.551814,42,7.611162352183559e-09,30.0,
+iter0030,ipm,524288,7867398,ac2,,,cpu,8,complete,5.483646,0.0,1.013671,22,7.97293826625589e-09,30.0,
+iter0030,ipm,524288,7867398,parac,,"portable, own RHS",cpu,8,n/a,,,,,,,
+iter0030,ipm,524288,7867398,parac_physics,,"portable, own RHS",cpu,8,complete,4.742626,0.0,1.38842,45,4.638666553842774e-09,30.0,2777.7
+iter0030,ipm,524288,7867398,cmg_packed,original-operator,,cpu,1,complete,1.542479208,0.01523125,4.138002625,32,5.916906156078414e-09,30.0,1601.1
+iter0040,ipm,524288,7867398,apxchol_v1,bg+tree[vec_pool_aos],,cpu,8,complete,0.4460589,0.0,0.3749942,46,8.000165044786187e-09,,939.7
+iter0040,ipm,524288,7867398,apxchol_v1,bg+trace_cycle[vec_pool_aos],,cpu,8,complete,0.5214542,0.0,0.2169572,24,9.009734394091704e-09,,996.9
+iter0040,ipm,524288,7867398,amgcl,,,cpu,8,complete,6.86045,0.0,0.3389481,19,8.18647895726066e-09,30.0,846.0
+iter0040,ipm,524288,7867398,hypre_boomeramg,,,cpu,8,complete,0.4238896,0.0,0.2676283,9,6.752571315602854e-09,30.0,1055.0
+iter0040,ipm,524288,7867398,hypre_boomeramg,cut,,cpu,8,complete,0.3120717,0.0,0.7894064,40,4.603202641478096e-09,30.0,944.5
+iter0040,ipm,524288,7867398,rchol,,,cpu,8,complete,1.635408,0.0,1.900747,52,8.860639033444843e-09,30.0,2406.0
+iter0040,ipm,524288,7867398,rchol_par,,,cpu,8,complete,1.155842,0.0,2.364991,53,8.767851629467687e-09,30.0,3216.2
+iter0040,ipm,524288,7867398,accelerate,,,cpu,8,complete,0.8510975,0.0,0.1366624,1,3.097652144387207e-16,30.0,1656.2
+iter0040,ipm,524288,7867398,ac,,,cpu,8,complete,2.904184,0.0,1.609012,43,9.720033525024165e-09,30.0,
+iter0040,ipm,524288,7867398,ac2,,,cpu,8,complete,5.408715,0.0,1.044252,23,6.799783098721461e-09,30.0,
+iter0040,ipm,524288,7867398,parac,,"portable, own RHS",cpu,8,n/a,,,,,,,
+iter0040,ipm,524288,7867398,parac_physics,,"portable, own RHS",cpu,8,complete,4.724821,0.0,1.6252,54,4.092285603517105e-09,30.0,2776.2
+iter0040,ipm,524288,7867398,cmg_packed,original-operator,,cpu,1,complete,1.568200708,0.015246833,3.7745792910000002,30,9.729707555133137e-09,30.0,1605.8
