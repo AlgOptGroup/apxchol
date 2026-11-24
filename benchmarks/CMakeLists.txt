@@ -85,7 +85,6 @@ elseif (APXCHOL_BENCH_FETCH_METIS)
     FetchContent_Declare(gklib
         GIT_REPOSITORY https://github.com/KarypisLab/GKlib.git
         GIT_TAG        3b7d61b9f885063c89901f3901fb4426f9cfb58f
-        GIT_SHALLOW    TRUE
     )
     set(GKLIB_BUILD_APPS OFF CACHE BOOL "" FORCE)
     if (NOT (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i[3-6]86"))
@@ -95,7 +94,6 @@ elseif (APXCHOL_BENCH_FETCH_METIS)
     FetchContent_Declare(metis_source
         GIT_REPOSITORY https://github.com/KarypisLab/METIS.git
         GIT_TAG        272d4a91c5f66c92327493339a476c553ebf1f5d
-        GIT_SHALLOW    TRUE
     )
     FetchContent_GetProperties(metis_source)
     if (NOT metis_source_POPULATED)
