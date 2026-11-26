@@ -19,11 +19,6 @@ The `scipy` extra adds SciPy sparse-matrix input. Without SciPy, use
 without a GPU and include CUDA (Linux) or Metal (macOS); the
 [Python guide](../python/README.md#install-and-solve) lists supported platforms.
 
-The latest release on PyPI is 0.2.2, with wheels for CPython 3.10–3.14 on
-Linux x86-64. It predates the changes in the [changelog](../CHANGELOG.md),
-such as `as_operator` and the macOS and PyPy wheels. To use them before the
-next release, [build from source](../python/README.md#build-from-source).
-
 ## CLI archives
 
 New releases attach standalone CLI archives for Linux (CPU) and Apple silicon
