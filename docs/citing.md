@@ -16,8 +16,8 @@ method papers it implements.
 ```
 
 Replace `X.Y.Z` with the version you used (`apxchol --version` or
-`apxchol.__version__`). A Zenodo DOI for each release will be added here from
-1.0 onwards. GitHub's "Cite this repository" button reads the same metadata from
+`apxchol.__version__`). Until a Zenodo DOI is available for your version, cite its
+tagged GitHub release. GitHub's "Cite this repository" button reads the same metadata from
 [`CITATION.cff`](../CITATION.cff).
 
 ## Method
